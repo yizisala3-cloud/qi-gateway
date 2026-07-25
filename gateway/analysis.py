@@ -59,46 +59,92 @@ def analyze_and_update(user_text: str, bot_text: str):
         log.error(f"情绪分析失败: {e}")
 
 
-def _extract_json(text: str) -> dict | None:
-    """从模型返回的文本中健壮地提取 JSON。
+def _extract_text_from_response(data: dict) -> str:
+    """从各种格式的 API 响应中提取文本内容。
 
-    处理各种情况：
-    - 纯 JSON
-    - 被 ```json ... ``` 包裹
-    - 前后有多余文字
-    - thinking 块干扰
+    处理：
+    - 标准 content 字符串
+    - content 为 None + thinking 字段
+    - content 为 list（多模态内容块）
+    - Claude 格式的 content blocks
     """
+    choices = data.get("choices", [])
+    if not choices:
+        return ""
+
+    message = choices[0].get("message", {})
+
+    # 1. 标准：content 是字符串
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+
+    # 2. content 是 list（Claude/多模态格式）
+    if isinstance(content, list):
+        texts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    texts.append(block.get("text", ""))
+                elif block.get("type") == "thinking":
+                    # 跳过 thinking 块
+                    continue
+        if texts:
+            return "\n".join(texts).strip()
+
+    # 3. 某些中转站把 thinking 和 content 分开
+    # content 可能是 None，实际文本在别处
+    # 尝试从 raw response 的其他位置找
+    if content is None:
+        # 某些格式把文本放在 message.content 外面
+        # 或者整个回复只有 thinking 没有实际输出
+        pass
+
+    return ""
+
+
+def _extract_json(text: str) -> dict | None:
+    """从模型返回的文本中健壮地提取 JSON。"""
     if not text:
         return None
 
-    # 1. 尝试直接解析
     text = text.strip()
+
+    # 1. 直接解析
     try:
-        return json.loads(text)
+        result = json.loads(text)
+        if isinstance(result, dict):
+            return result
     except json.JSONDecodeError:
         pass
 
-    # 2. 尝试提取 ```json ... ``` 代码块
+    # 2. 提取 ```json ... ``` 代码块
     code_block = re.search(r'```(?:json)?\s*(\{[^`]*\})\s*```', text, re.DOTALL)
     if code_block:
         try:
-            return json.loads(code_block.group(1))
+            result = json.loads(code_block.group(1))
+            if isinstance(result, dict):
+                return result
         except json.JSONDecodeError:
             pass
 
-    # 3. 用正则找第一个 {...} 结构
+    # 3. 找包含 connection 的 {...}
     json_match = re.search(r'\{[^{}]*"connection"[^{}]*\}', text)
     if json_match:
         try:
-            return json.loads(json_match.group(0))
+            result = json.loads(json_match.group(0))
+            if isinstance(result, dict):
+                return result
         except json.JSONDecodeError:
             pass
 
-    # 4. 最后手段：找任何 {...}
+    # 4. 找任何 {...}
     brace_match = re.search(r'\{[^{}]+\}', text)
     if brace_match:
         try:
-            return json.loads(brace_match.group(0))
+            result = json.loads(brace_match.group(0))
+            if isinstance(result, dict):
+                return result
         except json.JSONDecodeError:
             pass
 
@@ -136,12 +182,22 @@ def _call_analysis_model(user_text: str, bot_text: str) -> dict | None:
                 return None
 
             data = resp.json()
-            content = data["choices"][0]["message"]["content"].strip()
 
-            # 健壮解析
+            # 健壮提取文本
+            content = _extract_text_from_response(data)
+            if not content:
+                log.warning(f"情绪分析模型返回空内容: {json.dumps(data.get('choices', [{}])[0].get('message', {}), ensure_ascii=False)[:300]}")
+                return None
+
+            # 健壮解析 JSON
             result = _extract_json(content)
             if not result:
                 log.warning(f"情绪分析返回无法解析: {content[:200]}")
+                return None
+
+            # 验证字段存在且类型正确
+            if not isinstance(result, dict):
+                log.warning(f"情绪分析解析结果非 dict: {type(result)}")
                 return None
 
             # 验证并限制范围
@@ -158,7 +214,11 @@ def _call_analysis_model(user_text: str, bot_text: str) -> dict | None:
                         val = max(-10, min(10, val))
                     valid_deltas[key] = val
 
-            return valid_deltas if valid_deltas else None
+            if valid_deltas:
+                return valid_deltas
+
+            log.warning(f"情绪分析无有效 delta: {result}")
+            return None
 
     except Exception as e:
         log.error(f"情绪分析调用失败: {e}")
