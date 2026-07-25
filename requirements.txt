@@ -1,5 +1,6 @@
 starlette==0.41.3
 uvicorn[standard]==0.32.1
-httpx==0.28.1
+httpx[http2]==0.28.1
 supabase==2.15.1
 python-dotenv==1.1.0
+eventide @ git+https://github.com/chuli1122/Eventide.git
