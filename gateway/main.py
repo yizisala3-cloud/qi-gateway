@@ -4,6 +4,7 @@ Phase 1: 透传请求到上游 LLM，真流式转发。
 Phase 2: 积温语气注入到 system prompt。
 Phase 3: Eventide 身体状态卡注入。
 Phase 5: 后台定时 tick + 主动消息端点。
+Phase 6: 对话后情绪分析。
 """
 import asyncio
 import json
@@ -21,6 +22,7 @@ from starlette.routing import Route
 from .config import cfg
 from .context import build_context, update_jiwen_on_user_message, update_jiwen_on_bot_reply
 from .proactive import check_and_generate, fetch_pending_message
+from .analysis import analyze_and_update
 
 # ── 日志 ──────────────────────────────────────────
 logging.basicConfig(
@@ -94,6 +96,23 @@ async def scheduler_loop():
     log.info("后台调度器停止")
 
 
+# ── 提取用户最后一条消息 ──────────────────────────
+def _extract_last_user_text(messages: list[dict]) -> str:
+    """从消息列表中提取最后一条 user 消息文本。"""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                return content
+            # 多模态消息，取第一个 text 块
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        return part.get("text", "")
+            return ""
+    return ""
+
+
 # ── 核心：/v1/chat/completions ────────────────────
 async def chat_completions(request: Request):
     """真流式透传到上游 LLM，注入积温语气 + Eventide 状态卡。"""
@@ -108,6 +127,9 @@ async def chat_completions(request: Request):
     # 标记用户发消息
     loop = asyncio.get_event_loop()
     loop.run_in_executor(bg_executor, update_jiwen_on_user_message)
+
+    # 提取用户消息用于后续分析
+    user_text = _extract_last_user_text(body.get("messages", []))
 
     # 构建上下文并注入
     tone_prompt = await loop.run_in_executor(bg_executor, build_context)
@@ -134,6 +156,14 @@ async def chat_completions(request: Request):
                 timeout=httpx.Timeout(cfg.UPSTREAM_READ_TIMEOUT, connect=10.0),
             )
             loop.run_in_executor(bg_executor, update_jiwen_on_bot_reply)
+            # Phase 6: 非流式回复后触发情绪分析
+            try:
+                resp_data = resp.json()
+                bot_text = resp_data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                if bot_text and user_text:
+                    loop.run_in_executor(bg_executor, analyze_and_update, user_text, bot_text)
+            except Exception:
+                pass
             return Response(
                 content=resp.content,
                 status_code=resp.status_code,
@@ -189,6 +219,11 @@ async def chat_completions(request: Request):
             if complete_text:
                 log.info(f"回复长度: {len(complete_text)} 字")
                 loop.run_in_executor(bg_executor, update_jiwen_on_bot_reply)
+                # Phase 6: 流式回复完成后触发情绪分析
+                if user_text:
+                    loop.run_in_executor(
+                        bg_executor, analyze_and_update, user_text, complete_text
+                    )
 
     return StreamingResponse(
         stream_generator(),
@@ -202,11 +237,7 @@ async def chat_completions(request: Request):
 
 # ── 主动消息端点 ──────────────────────────────────
 async def proactive_check(request: Request):
-    """橘瓣 workflow 轮询：有没有想说的话。
-
-    GET /v1/proactive
-    返回 {"has_message": true, "content": "..."} 或 {"has_message": false}
-    """
+    """橘瓣 workflow 轮询：有没有想说的话。"""
     if not verify_token(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
@@ -227,7 +258,7 @@ async def proactive_check(request: Request):
 async def health(request: Request):
     return JSONResponse({
         "status": "ok",
-        "phase": 5,
+        "phase": 6,
         "uptime": time.time() - _start_time,
         "scheduler_running": _scheduler_running,
     })
@@ -237,7 +268,7 @@ async def status(request: Request):
     if not verify_token(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return JSONResponse({
-        "phase": 5,
+        "phase": 6,
         "upstream_base_url": cfg.UPSTREAM_BASE_URL,
         "upstream_model": cfg.UPSTREAM_MODEL,
         "bg_tasks": len(_background_tasks),
@@ -269,7 +300,7 @@ async def lifespan(app):
         http2=True,
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
     )
-    log.info(f"网关启动 Phase 5 | upstream={cfg.UPSTREAM_BASE_URL}")
+    log.info(f"网关启动 Phase 6 | upstream={cfg.UPSTREAM_BASE_URL}")
 
     # 启动后台调度器
     scheduler_task = track_task(scheduler_loop())
