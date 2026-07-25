@@ -2,6 +2,8 @@
 
 Phase 1: 透传请求到上游 LLM，真流式转发。
 Phase 2: 积温语气注入到 system prompt。
+Phase 3: Eventide 身体状态卡注入。
+Phase 5: 后台定时 tick + 主动消息端点。
 """
 import asyncio
 import json
@@ -18,6 +20,7 @@ from starlette.routing import Route
 
 from .config import cfg
 from .context import build_context, update_jiwen_on_user_message, update_jiwen_on_bot_reply
+from .proactive import check_and_generate, fetch_pending_message
 
 # ── 日志 ──────────────────────────────────────────
 logging.basicConfig(
@@ -33,6 +36,7 @@ http_client: httpx.AsyncClient | None = None
 
 # ── 后台任务引用集合（防 GC）─────────────────────
 _background_tasks: set[asyncio.Task] = set()
+_scheduler_running = False
 
 
 def track_task(coro):
@@ -60,20 +64,39 @@ def inject_tone_to_messages(messages: list[dict], tone_prompt: str) -> list[dict
 
     tone_block = f"\n\n【当前情绪状态与语气指引】\n{tone_prompt}"
 
-    # 找到第一条 system message 并追加
     for msg in messages:
         if msg.get("role") == "system":
             msg["content"] = msg["content"] + tone_block
             return messages
 
-    # 没有 system message，创建一条
     messages.insert(0, {"role": "system", "content": tone_block.strip()})
     return messages
 
 
+# ── 后台定时任务 ──────────────────────────────────
+async def scheduler_loop():
+    """后台循环：每 5 分钟 tick 积温 + 检查主动消息。"""
+    global _scheduler_running
+    _scheduler_running = True
+    log.info("后台调度器启动")
+
+    while _scheduler_running:
+        try:
+            await asyncio.sleep(300)  # 5 分钟
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(bg_executor, check_and_generate)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log.error(f"调度器异常: {e}")
+            await asyncio.sleep(60)
+
+    log.info("后台调度器停止")
+
+
 # ── 核心：/v1/chat/completions ────────────────────
 async def chat_completions(request: Request):
-    """真流式透传到上游 LLM，注入积温语气。"""
+    """真流式透传到上游 LLM，注入积温语气 + Eventide 状态卡。"""
     if not verify_token(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
@@ -82,12 +105,11 @@ async def chat_completions(request: Request):
     except Exception:
         return JSONResponse({"error": "invalid json"}, status_code=400)
 
-    # ── Phase 2: 积温注入 ──
-    # 1. 标记用户发消息
+    # 标记用户发消息
     loop = asyncio.get_event_loop()
     loop.run_in_executor(bg_executor, update_jiwen_on_user_message)
 
-    # 2. 构建积温语气上下文并注入
+    # 构建上下文并注入
     tone_prompt = await loop.run_in_executor(bg_executor, build_context)
     if tone_prompt and "messages" in body:
         body["messages"] = inject_tone_to_messages(body["messages"], tone_prompt)
@@ -111,7 +133,6 @@ async def chat_completions(request: Request):
                 json=body,
                 timeout=httpx.Timeout(cfg.UPSTREAM_READ_TIMEOUT, connect=10.0),
             )
-            # 回复后更新积温
             loop.run_in_executor(bg_executor, update_jiwen_on_bot_reply)
             return Response(
                 content=resp.content,
@@ -124,7 +145,7 @@ async def chat_completions(request: Request):
             log.error(f"upstream error: {e}")
             return JSONResponse({"error": "upstream error"}, status_code=502)
 
-    # ── 流式：边收边转发 ──
+    # ── 流式 ──
     async def stream_generator():
         full_content = []
         try:
@@ -167,7 +188,6 @@ async def chat_completions(request: Request):
             complete_text = "".join(full_content)
             if complete_text:
                 log.info(f"回复长度: {len(complete_text)} 字")
-                # 回复完成后更新积温
                 loop.run_in_executor(bg_executor, update_jiwen_on_bot_reply)
 
     return StreamingResponse(
@@ -180,12 +200,36 @@ async def chat_completions(request: Request):
     )
 
 
+# ── 主动消息端点 ──────────────────────────────────
+async def proactive_check(request: Request):
+    """橘瓣 workflow 轮询：有没有想说的话。
+
+    GET /v1/proactive
+    返回 {"has_message": true, "content": "..."} 或 {"has_message": false}
+    """
+    if not verify_token(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    loop = asyncio.get_event_loop()
+    msg = await loop.run_in_executor(bg_executor, fetch_pending_message)
+
+    if msg:
+        return JSONResponse({
+            "has_message": True,
+            "content": msg["content"],
+            "tone_level": msg.get("tone_level"),
+            "created_at": msg.get("created_at"),
+        })
+    return JSONResponse({"has_message": False})
+
+
 # ── 管理端点 ──────────────────────────────────────
 async def health(request: Request):
     return JSONResponse({
         "status": "ok",
-        "phase": 2,
+        "phase": 5,
         "uptime": time.time() - _start_time,
+        "scheduler_running": _scheduler_running,
     })
 
 
@@ -193,10 +237,11 @@ async def status(request: Request):
     if not verify_token(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return JSONResponse({
-        "phase": 2,
+        "phase": 5,
         "upstream_base_url": cfg.UPSTREAM_BASE_URL,
         "upstream_model": cfg.UPSTREAM_MODEL,
         "bg_tasks": len(_background_tasks),
+        "scheduler_running": _scheduler_running,
     })
 
 
@@ -224,12 +269,17 @@ async def lifespan(app):
         http2=True,
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
     )
-    log.info(f"网关启动 Phase 2 | upstream={cfg.UPSTREAM_BASE_URL}")
+    log.info(f"网关启动 Phase 5 | upstream={cfg.UPSTREAM_BASE_URL}")
 
-    # TODO Phase 5: 后台定时 tick 积温
+    # 启动后台调度器
+    scheduler_task = track_task(scheduler_loop())
 
     yield
 
+    # 关闭
+    global _scheduler_running
+    _scheduler_running = False
+    scheduler_task.cancel()
     await http_client.aclose()
     bg_executor.shutdown(wait=False)
     log.info("网关关闭")
@@ -240,6 +290,7 @@ app = Starlette(
     routes=[
         Route("/v1/chat/completions", chat_completions, methods=["POST"]),
         Route("/v1/models", list_models, methods=["GET"]),
+        Route("/v1/proactive", proactive_check, methods=["GET"]),
         Route("/health", health, methods=["GET"]),
         Route("/status", status, methods=["GET"]),
     ],
