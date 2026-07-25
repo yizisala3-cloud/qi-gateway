@@ -1,9 +1,4 @@
-"""上下文拼装：并发获取积温 + Eventide 状态，注入到 system prompt。
-
-Phase 2: 积温语气注入
-Phase 3: Eventide 身体状态卡注入
-Phase 4+: 记忆注入
-"""
+"""上下文拼装：并发获取积温 + Eventide 状态，注入到 system prompt。"""
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -23,16 +18,7 @@ def _load_jiwen() -> JiwenState:
     raw = db.load_jiwen_state()
     if not raw:
         return JiwenState()
-    return JiwenState(
-        connection=float(raw.get("connection", 0)),
-        pride=float(raw.get("pride", 0)),
-        valence=float(raw.get("valence", 0)),
-        arousal=float(raw.get("arousal", 0)),
-        immersion=float(raw.get("immersion", 0)),
-        last_tick_at=raw.get("last_tick_at"),
-        last_chat_at=raw.get("last_chat_at"),
-        last_bot_at=raw.get("last_bot_at"),
-    )
+    return JiwenState.from_dict(raw)
 
 
 def build_jiwen_context() -> str:
@@ -53,21 +39,20 @@ def build_eventide_context() -> str:
     try:
         state_data = db.load_eventide_state()
 
-        # 首次运行：创建初始状态
         if not state_data:
             state_data = eventide_bridge.create_initial_state()
             if not state_data:
                 return ""
             db.save_eventide_state(state_data)
 
-        # 推进并渲染
-        # 从积温获取 last_chat_at 作为对方最后消息时间
         jiwen_raw = db.load_jiwen_state()
         last_msg_at = None
         if jiwen_raw and jiwen_raw.get("last_chat_at"):
             try:
-                ts = float(jiwen_raw["last_chat_at"])
-                last_msg_at = datetime.fromtimestamp(ts, tz=timezone.utc)
+                from .jiwen_engine import _iso_to_ts
+                ts = _iso_to_ts(jiwen_raw["last_chat_at"])
+                if ts:
+                    last_msg_at = datetime.fromtimestamp(ts, tz=timezone.utc)
             except (ValueError, TypeError):
                 pass
 
@@ -76,7 +61,6 @@ def build_eventide_context() -> str:
             last_counterpart_message_at=last_msg_at,
         )
 
-        # 保存更新后的状态
         if new_data:
             db.save_eventide_state(new_data)
 
@@ -88,14 +72,10 @@ def build_eventide_context() -> str:
 
 
 def build_context() -> str:
-    """并发拼装完整上下文注入内容。
-
-    积温 + Eventide 并发获取，任何数据源失败返回空，不影响整体。
-    """
+    """并发拼装完整上下文注入内容。"""
     futures = {
         "jiwen": _executor.submit(build_jiwen_context),
         "eventide": _executor.submit(build_eventide_context),
-        # Phase 4: "memory": _executor.submit(build_memory_context),
     }
 
     parts = []
