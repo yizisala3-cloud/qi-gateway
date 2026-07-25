@@ -1,17 +1,17 @@
 """对话后情绪分析。
 
 每轮对话结束后，用轻量模型分析这段对话对情绪的影响，
-提取 delta 更新积温和 Eventide。
+提取 delta 更新积温。
 """
 import json
 import logging
+import re
 
 import httpx
 
 from .config import cfg
 from .jiwen_engine import JiwenState, apply_delta
 from . import db
-from . import eventide_bridge
 
 log = logging.getLogger("gateway.analysis")
 
@@ -37,14 +37,9 @@ AI 的回复：
 
 
 def analyze_and_update(user_text: str, bot_text: str):
-    """分析对话情绪并更新积温状态。
-
-    在后台线程池中运行，不阻塞主流程。
-    """
+    """分析对话情绪并更新积温状态。"""
     if not user_text or not bot_text:
         return
-
-    # 太短的对话不分析
     if len(bot_text) < 20:
         return
 
@@ -53,19 +48,9 @@ def analyze_and_update(user_text: str, bot_text: str):
         if not deltas:
             return
 
-        # 更新积温
         raw = db.load_jiwen_state()
         if raw:
-            state = JiwenState(
-                connection=float(raw.get("connection", 0)),
-                pride=float(raw.get("pride", 0)),
-                valence=float(raw.get("valence", 0)),
-                arousal=float(raw.get("arousal", 0)),
-                immersion=float(raw.get("immersion", 0)),
-                last_tick_at=raw.get("last_tick_at"),
-                last_chat_at=raw.get("last_chat_at"),
-                last_bot_at=raw.get("last_bot_at"),
-            )
+            state = JiwenState.from_dict(raw)
             state = apply_delta(state, deltas)
             db.save_jiwen_state(state.to_dict())
             log.info(f"情绪分析完成 | deltas={deltas}")
@@ -74,8 +59,54 @@ def analyze_and_update(user_text: str, bot_text: str):
         log.error(f"情绪分析失败: {e}")
 
 
+def _extract_json(text: str) -> dict | None:
+    """从模型返回的文本中健壮地提取 JSON。
+
+    处理各种情况：
+    - 纯 JSON
+    - 被 ```json ... ``` 包裹
+    - 前后有多余文字
+    - thinking 块干扰
+    """
+    if not text:
+        return None
+
+    # 1. 尝试直接解析
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. 尝试提取 ```json ... ``` 代码块
+    code_block = re.search(r'```(?:json)?\s*(\{[^`]*\})\s*```', text, re.DOTALL)
+    if code_block:
+        try:
+            return json.loads(code_block.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # 3. 用正则找第一个 {...} 结构
+    json_match = re.search(r'\{[^{}]*"connection"[^{}]*\}', text)
+    if json_match:
+        try:
+            return json.loads(json_match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    # 4. 最后手段：找任何 {...}
+    brace_match = re.search(r'\{[^{}]+\}', text)
+    if brace_match:
+        try:
+            return json.loads(brace_match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
 def _call_analysis_model(user_text: str, bot_text: str) -> dict | None:
-    """调用轻量模型做情绪分析。"""
+    """调用分析模型做情绪分析。"""
     if not cfg.UPSTREAM_BASE_URL or not cfg.UPSTREAM_API_KEY:
         return None
 
@@ -86,7 +117,7 @@ def _call_analysis_model(user_text: str, bot_text: str) -> dict | None:
 
     try:
         url = f"{cfg.UPSTREAM_BASE_URL.rstrip('/')}/chat/completions"
-        with httpx.Client(timeout=20.0) as client:
+        with httpx.Client(timeout=30.0) as client:
             resp = client.post(
                 url,
                 headers={
@@ -94,9 +125,9 @@ def _call_analysis_model(user_text: str, bot_text: str) -> dict | None:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": cfg.UPSTREAM_MODEL,
+                    "model": cfg.ANALYSIS_MODEL,
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 100,
+                    "max_tokens": 150,
                     "temperature": 0.3,
                 },
             )
@@ -107,21 +138,20 @@ def _call_analysis_model(user_text: str, bot_text: str) -> dict | None:
             data = resp.json()
             content = data["choices"][0]["message"]["content"].strip()
 
-            # 尝试解析 JSON
-            # 可能被包在 ```json ... ``` 里
-            if "```" in content:
-                content = content.split("```")[1]
-                if content.startswith("json"):
-                    content = content[4:]
-
-            result = json.loads(content)
+            # 健壮解析
+            result = _extract_json(content)
+            if not result:
+                log.warning(f"情绪分析返回无法解析: {content[:200]}")
+                return None
 
             # 验证并限制范围
             valid_deltas = {}
             for key in ("connection", "pride", "valence", "arousal", "immersion"):
                 if key in result:
-                    val = float(result[key])
-                    # 限制范围
+                    try:
+                        val = float(result[key])
+                    except (ValueError, TypeError):
+                        continue
                     if key in ("pride", "immersion"):
                         val = max(-5, min(10, val))
                     else:
@@ -130,9 +160,6 @@ def _call_analysis_model(user_text: str, bot_text: str) -> dict | None:
 
             return valid_deltas if valid_deltas else None
 
-    except json.JSONDecodeError:
-        log.warning("情绪分析返回非 JSON")
-        return None
     except Exception as e:
         log.error(f"情绪分析调用失败: {e}")
         return None
