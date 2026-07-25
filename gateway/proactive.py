@@ -1,43 +1,28 @@
 """主动消息逻辑。
 
 后台定时检查积温状态，判断是否应该主动联系。
-触发时调用上游 LLM 生成主动消息，写入 proactive_messages 表。
-橘瓣通过 /v1/proactive 端点轮询获取。
 """
 import json
 import logging
 import time
-from datetime import datetime, timezone
 
 import httpx
 
 from .config import cfg
-from .jiwen_engine import JiwenState, tick, should_contact, render_tone_prompt, on_bot_reply
+from .jiwen_engine import JiwenState, tick, should_contact, render_tone_prompt, on_bot_reply, get_tone_level
 from . import db
 
 log = logging.getLogger("gateway.proactive")
 
 
 def check_and_generate() -> str | None:
-    """检查是否需要主动消息，需要则生成并写入数据库。
-
-    返回生成的消息内容，或 None。
-    """
+    """检查是否需要主动消息，需要则生成并写入数据库。"""
     try:
         raw = db.load_jiwen_state()
         if not raw:
             return None
 
-        state = JiwenState(
-            connection=float(raw.get("connection", 0)),
-            pride=float(raw.get("pride", 0)),
-            valence=float(raw.get("valence", 0)),
-            arousal=float(raw.get("arousal", 0)),
-            immersion=float(raw.get("immersion", 0)),
-            last_tick_at=raw.get("last_tick_at"),
-            last_chat_at=raw.get("last_chat_at"),
-            last_bot_at=raw.get("last_bot_at"),
-        )
+        state = JiwenState.from_dict(raw)
 
         # tick 推进
         state = tick(state)
@@ -60,11 +45,9 @@ def check_and_generate() -> str | None:
         content = _generate_proactive_message(tone, silence_minutes)
 
         if content:
-            # 写入数据库
             _save_proactive_message(content, state)
-            # 标记 bot 发了消息
             state = on_bot_reply(state)
-            # connection 部分缓解（主动开口不等于被回复）
+            # connection 部分缓解
             state.connection = max(0, state.connection - 15)
 
         db.save_jiwen_state(state.to_dict())
@@ -94,7 +77,6 @@ def _generate_proactive_message(tone: str, silence_minutes: float) -> str | None
 
     try:
         url = f"{cfg.UPSTREAM_BASE_URL.rstrip('/')}/chat/completions"
-        # 用同步 httpx 请求（在线程池里跑）
         with httpx.Client(timeout=30.0) as client:
             resp = client.post(
                 url,
@@ -111,7 +93,7 @@ def _generate_proactive_message(tone: str, silence_minutes: float) -> str | None
             )
             if resp.status_code == 200:
                 data = resp.json()
-                return data["choices"][0]["message"]["content"].strip()
+                return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
             else:
                 log.error(f"主动消息生成失败: {resp.status_code}")
                 return None
@@ -126,7 +108,6 @@ def _save_proactive_message(content: str, state: JiwenState):
     if not client:
         return
     try:
-        from .jiwen_engine import get_tone_level
         client.table("proactive_messages").insert({
             "content": content,
             "tone_level": get_tone_level(state),
@@ -154,7 +135,6 @@ def fetch_pending_message() -> dict | None:
             return None
 
         msg = resp.data[0]
-        # 标记已投递
         client.table("proactive_messages").update(
             {"delivered": True}
         ).eq("id", msg["id"]).execute()
