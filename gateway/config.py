@@ -14,8 +14,10 @@ class Config:
     SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "")
     PORT: int = int(os.getenv("PORT", "8000"))
     UPSTREAM_READ_TIMEOUT: float = float(os.getenv("UPSTREAM_READ_TIMEOUT", "180"))
-    # 情绪分析用的模型（不带 thinking，更快更便宜）
-    ANALYSIS_MODEL: str = os.getenv("ANALYSIS_MODEL", "[kiro量高缓]claude-opus-4-6")
+    # 情绪分析：独立的模型配置（走硅基流动，便宜快速无 thinking）
+    ANALYSIS_BASE_URL: str = os.getenv("ANALYSIS_BASE_URL", "https://api.siliconflow.cn/v1")
+    ANALYSIS_API_KEY: str = os.getenv("ANALYSIS_API_KEY", "")
+    ANALYSIS_MODEL: str = os.getenv("ANALYSIS_MODEL", "Qwen/Qwen2.5-7B-Instruct")
 
 
 cfg = Config()
