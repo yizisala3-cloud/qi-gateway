@@ -1,9 +1,5 @@
-"""Supabase 读写封装。
-
-积温状态读写 + 后续 Eventide 状态读写。
-"""
+"""Supabase 读写封装。"""
 import logging
-import time
 from typing import Any
 
 from .config import cfg
@@ -71,15 +67,15 @@ def save_jiwen_state(state_dict: dict[str, Any]) -> bool:
         "arousal": state_dict.get("arousal", 0),
         "immersion": state_dict.get("immersion", 0),
         "last_tick_at": state_dict.get("last_tick_at"),
-        "last_chat_message_id": state_dict.get("last_chat_message_id"),
-        "last_bot_message_id": state_dict.get("last_bot_message_id"),
+        "last_chat_at": state_dict.get("last_chat_at"),
+        "last_bot_at": state_dict.get("last_bot_at"),
         "user_status": state_dict.get("user_status", "active"),
     }
     client.table("jiwen_state").update(data).eq("id", 1).execute()
     return True
 
 
-# ── Eventide 状态（Phase 3 填充）──────────────────────────────────
+# ── Eventide 状态 ─────────────────────────────────────────────────
 
 @safe_query
 def load_eventide_state() -> dict[str, Any] | None:
