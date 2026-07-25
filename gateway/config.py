@@ -13,8 +13,9 @@ class Config:
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
     SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "")
     PORT: int = int(os.getenv("PORT", "8000"))
-    # 上游请求超时（秒）：两次 chunk 之间的最大间隔
     UPSTREAM_READ_TIMEOUT: float = float(os.getenv("UPSTREAM_READ_TIMEOUT", "180"))
+    # 情绪分析用的模型（不带 thinking，更快更便宜）
+    ANALYSIS_MODEL: str = os.getenv("ANALYSIS_MODEL", "[kiro量高缓]claude-opus-4-6")
 
 
 cfg = Config()
