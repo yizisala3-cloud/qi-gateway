@@ -9,6 +9,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone, timedelta
 
 import httpx
 from starlette.applications import Starlette
@@ -21,6 +22,8 @@ from .context import build_context, update_jiwen_on_user_message, update_jiwen_o
 from .persona import load_persona
 from .proactive import check_and_generate, fetch_pending_message
 from .analysis import analyze_and_update
+from .memory_extract import run_daily_digest
+from .memory_heat import run_heat_decay
 from . import db
 from .timer import (
     parse_and_strip_tags, register_tags, cancel_delay_on_user_message,
@@ -44,6 +47,8 @@ http_client: httpx.AsyncClient | None = None
 _background_tasks: set[asyncio.Task] = set()
 _scheduler_running = False
 _timer_running = False
+_daily_running = False
+_last_digest_date: str = ""  # 记录上次总结的日期，防止重复
 
 
 def track_task(coro):
@@ -64,20 +69,12 @@ def verify_token(request: Request) -> bool:
 
 # ── 上下文注入辅助 ────────────────────────────────
 def inject_context_to_messages(messages: list[dict], context: str) -> list[dict]:
-    """将构建好的完整上下文注入到消息列表的 system prompt 中。
-
-    如果已有 system message → 在其 content 后追加
-    如果没有 → 插入一条新的 system message
-    """
     if not context:
         return messages
-
     for msg in messages:
         if msg.get("role") == "system":
             msg["content"] = msg["content"] + "\n\n" + context
             return messages
-
-    # 没有 system message，插入一条
     messages.insert(0, {"role": "system", "content": context})
     return messages
 
@@ -136,6 +133,60 @@ async def timer_check_loop():
             await asyncio.sleep(30)
 
 
+# ── 后台定时任务：每日总结 + 热度衰减 ────────────
+async def daily_task_loop():
+    """每 30 分钟检查一次：是否到了凌晨 3 点，或者沉默超过 6 小时。"""
+    global _daily_running, _last_digest_date
+    _daily_running = True
+    log.info("每日任务调度器启动（30min 间隔）")
+
+    while _daily_running:
+        try:
+            await asyncio.sleep(1800)  # 30 分钟检查一次
+            loop = asyncio.get_event_loop()
+
+            cst = timezone(timedelta(hours=8))
+            now_cst = datetime.now(cst)
+            today_str = now_cst.strftime("%Y-%m-%d")
+
+            should_run = False
+
+            # 条件 1：凌晨 3:00-3:30 且今天还没跑过
+            if 3 <= now_cst.hour < 4 and today_str != _last_digest_date:
+                should_run = True
+                log.info("每日总结触发：凌晨定时")
+
+            # 条件 2：沉默超过 6 小时且今天还没跑过
+            if not should_run and today_str != _last_digest_date:
+                try:
+                    jiwen_raw = db.load_jiwen_state()
+                    if jiwen_raw and jiwen_raw.get("last_chat_at"):
+                        from .jiwen_engine import _iso_to_ts
+                        last_chat_ts = _iso_to_ts(jiwen_raw["last_chat_at"])
+                        if last_chat_ts:
+                            silence_hours = (time.time() - last_chat_ts) / 3600.0
+                            if silence_hours >= 6:
+                                should_run = True
+                                log.info(f"每日总结触发：沉默 {silence_hours:.1f} 小时")
+                except Exception:
+                    pass
+
+            if should_run:
+                _last_digest_date = today_str
+                # 跑每日总结
+                await loop.run_in_executor(bg_executor, run_daily_digest)
+                # 跑热度衰减
+                await loop.run_in_executor(bg_executor, run_heat_decay)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log.error(f"每日任务异常: {e}")
+            await asyncio.sleep(1800)
+
+    log.info("每日任务调度器停止")
+
+
 def _process_pending_timers():
     """处理所有到期的 timer。"""
     pending = get_pending_timers()
@@ -153,7 +204,6 @@ def _process_pending_timers():
                     trigger_context += f"\n\n叶子在你忙碌期间发了 {len(inbox)} 条消息：\n"
                     trigger_context += "\n".join(f"- {m}" for m in inbox[:10])
 
-            # 调模型生成主动消息（带人设+短期上下文）
             content = _generate_timer_message(trigger_context)
             if content:
                 content = _strip_thinking(content)
@@ -173,10 +223,8 @@ def _generate_timer_message(trigger_context: str) -> str | None:
     if not cfg.UPSTREAM_BASE_URL or not cfg.UPSTREAM_API_KEY:
         return None
 
-    # 读人设
     persona = load_persona()
 
-    # 读最近 5 条对话
     recent_messages = []
     try:
         client = db.get_client()
@@ -197,7 +245,6 @@ def _generate_timer_message(trigger_context: str) -> str | None:
     except Exception as e:
         log.warning(f"定时器消息获取上下文失败: {e}")
 
-    # 拼装 messages
     messages = []
     if persona:
         messages.append({"role": "system", "content": persona})
@@ -233,7 +280,6 @@ def _generate_timer_message(trigger_context: str) -> str | None:
 
 
 def _save_timer_message(content: str, timer_type: str):
-    """将定时触发的消息写入 proactive_messages。"""
     client = db.get_client()
     if not client:
         return
@@ -259,14 +305,11 @@ async def chat_completions(request: Request):
 
     loop = asyncio.get_event_loop()
 
-    # 用户发消息：取消 delay + 标记积温
     loop.run_in_executor(bg_executor, cancel_delay_on_user_message)
     loop.run_in_executor(bg_executor, update_jiwen_on_user_message)
 
-    # 提取用户消息
     user_text = _extract_last_user_text(body.get("messages", []))
 
-    # 检查 busy 状态
     busy = await loop.run_in_executor(bg_executor, get_active_busy)
     if busy:
         if user_text:
@@ -279,7 +322,6 @@ async def chat_completions(request: Request):
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         })
 
-    # 构建上下文（人设 + 积温 + Eventide + 记忆 + 短期对话 + 标签说明）
     full_context = await loop.run_in_executor(bg_executor, build_context, user_text)
     timer_status = await loop.run_in_executor(bg_executor, get_timer_status_for_context)
     if timer_status:
@@ -403,6 +445,7 @@ async def health(request: Request):
         "uptime": time.time() - _start_time,
         "scheduler_running": _scheduler_running,
         "timer_running": _timer_running,
+        "daily_running": _daily_running,
     })
 
 
@@ -416,6 +459,8 @@ async def status(request: Request):
         "bg_tasks": len(_background_tasks),
         "scheduler_running": _scheduler_running,
         "timer_running": _timer_running,
+        "daily_running": _daily_running,
+        "last_digest_date": _last_digest_date,
     })
 
 
@@ -443,14 +488,17 @@ async def lifespan(app):
 
     scheduler_task = track_task(scheduler_loop())
     timer_task = track_task(timer_check_loop())
+    daily_task = track_task(daily_task_loop())
 
     yield
 
-    global _scheduler_running, _timer_running
+    global _scheduler_running, _timer_running, _daily_running
     _scheduler_running = False
     _timer_running = False
+    _daily_running = False
     scheduler_task.cancel()
     timer_task.cancel()
+    daily_task.cancel()
     await http_client.aclose()
     bg_executor.shutdown(wait=False)
     log.info("网关关闭")
