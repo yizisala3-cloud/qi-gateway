@@ -30,12 +30,13 @@ log = logging.getLogger("gateway.context")
 
 _executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="ctx")
 
-# ── 主动消息检测关键词 ────────────────────────────
+# ── 主动消息检测关键词（检查 system message 或 user message）────
 _PROACTIVE_KEYWORDS = [
     "主动消息上下文",
     "距离上次聊天",
     "请根据以上上下文决定是否发消息",
     "请根据以上用户动向决定是否发消息",
+    "主动消息触发",
     "[PASS]",
 ]
 
@@ -62,11 +63,20 @@ TIMER_INSTRUCTIONS = """【主动消息标签】
 4. 标签只在回复的最后几行出现，不要混在正文中间。"""
 
 
-def _is_proactive_message(user_message: str) -> bool:
-    """检测是否为橘瓣内置主动消息触发的请求。"""
-    if not user_message:
-        return False
-    return any(kw in user_message for kw in _PROACTIVE_KEYWORDS)
+def is_proactive_request(messages: list[dict]) -> bool:
+    """检测请求是否为橘瓣内置主动消息触发。
+
+    检查 system message 和 user message 中的特征词。
+    """
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if not isinstance(content, str):
+            continue
+        if role in ("system", "user"):
+            if any(kw in content for kw in _PROACTIVE_KEYWORDS):
+                return True
+    return False
 
 
 # ── 数据源构建函数 ────────────────────────────────
@@ -166,7 +176,6 @@ def build_proactive_chat_summary() -> str:
         if not client:
             return ""
 
-        # 拉最近 8 条消息（包含主动消息和被动消息）
         resp = (
             client.table("chat_messages")
             .select("role, content, created_at")
@@ -192,7 +201,6 @@ def build_proactive_chat_summary() -> str:
             if not content:
                 continue
 
-            # 解析时间
             try:
                 if isinstance(created_at, str):
                     dt = datetime.fromisoformat(created_at.replace("Z", "+00:00")).astimezone(cst)
@@ -208,7 +216,6 @@ def build_proactive_chat_summary() -> str:
             if role == "user":
                 last_user_time = dt
 
-        # 计算叶子最后一次说话距今多久
         if last_user_time:
             silence = now - last_user_time
             silence_minutes = int(silence.total_seconds() / 60)
@@ -223,15 +230,15 @@ def build_proactive_chat_summary() -> str:
         return ""
 
 
-# ── 主入口：完整上下文构建 ────────────────────────
+# ── 主入口 ────────────────────────────────────────
 
-def build_context(user_message: str = "") -> str:
+def build_context(user_message: str = "", is_proactive: bool = False) -> str:
     """并发拼装完整上下文注入内容。
 
-    检测到是主动消息请求时，切换为瘦身注入模式。
+    Args:
+        user_message: 用户最新一条消息（用于记忆搜索 query）。
+        is_proactive: 是否为主动消息触发（由 main.py 检测后传入）。
     """
-    is_proactive = _is_proactive_message(user_message)
-
     if is_proactive:
         return _build_proactive_context()
     else:
@@ -256,15 +263,12 @@ def _build_proactive_context() -> str:
 
     parts = []
 
-    # 人设
     if results["persona"]:
         parts.append(results["persona"])
 
-    # 积温语气（简短）
     if results["jiwen"]:
         parts.append(f"【当前情绪状态】\n{results['jiwen']}")
 
-    # 带时间戳的对话摘要
     if results["summary"]:
         parts.append(results["summary"])
 
@@ -289,7 +293,6 @@ def _build_normal_context(user_message: str) -> str:
             log.warning(f"context 数据源 {name} 超时或失败: {e}")
             results[name] = ""
 
-    # 记忆搜索
     memories_text = ""
     if user_message.strip():
         try:
