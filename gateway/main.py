@@ -1,6 +1,6 @@
 """网关入口 - Starlette ASGI 应用。
 
-Phase 1-7 + Phase 4 记忆系统内化。
+Phase 4 记忆系统内化（主动消息生成暂停）。
 """
 import asyncio
 import json
@@ -10,7 +10,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
-from functools import partial
 
 import httpx
 from starlette.applications import Starlette
@@ -19,7 +18,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from .config import cfg
-from .context import build_context, update_jiwen_on_user_message, update_jiwen_on_bot_reply, is_proactive_request
+from .context import build_context, update_jiwen_on_user_message, update_jiwen_on_bot_reply
 from .persona import load_persona
 from .proactive import check_and_generate, fetch_pending_message
 from .analysis import analyze_and_update
@@ -93,50 +92,7 @@ def _strip_thinking(text: str) -> str:
     return re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL).strip()
 
 
-def _patch_missing_assistant_reply(messages: list[dict]) -> list[dict]:
-    """主动消息场景：如果 messages 数组最后一条非 system 的是 user，
-    从 chat_messages 表补上最新的 assistant 回复，让模型知道自己已经回过了。
-    """
-    non_system = [m for m in messages if m.get("role") != "system"]
-    if not non_system:
-        return messages
-
-    last_non_system = non_system[-1]
-    if last_non_system.get("role") != "user":
-        return messages
-
-    try:
-        client = db.get_client()
-        if not client:
-            return messages
-        resp = (
-            client.table("chat_messages")
-            .select("role, content")
-            .eq("role", "assistant")
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-        if resp.data:
-            latest_reply = resp.data[0].get("content", "")
-            if latest_reply:
-                last_user_idx = None
-                for i in range(len(messages) - 1, -1, -1):
-                    if messages[i].get("role") == "user" and messages[i] is last_non_system:
-                        last_user_idx = i
-                        break
-                if last_user_idx is not None:
-                    messages.insert(last_user_idx + 1, {
-                        "role": "assistant",
-                        "content": latest_reply[:500]
-                    })
-                    log.info("主动消息补丁：插入最新 assistant 回复")
-    except Exception as e:
-        log.warning(f"补丁 assistant 回复失败: {e}")
-
-    return messages
-
-
+# ── 后台定时任务：积温 tick + 主动消息 ────────────
 async def scheduler_loop():
     global _scheduler_running
     _scheduler_running = True
@@ -153,6 +109,7 @@ async def scheduler_loop():
             await asyncio.sleep(60)
 
 
+# ── 后台定时任务：标签定时器检查 ──────────────────
 async def timer_check_loop():
     global _timer_running
     _timer_running = True
@@ -169,6 +126,7 @@ async def timer_check_loop():
             await asyncio.sleep(30)
 
 
+# ── 后台定时任务：每日总结 + 热度衰减 ────────────
 async def daily_task_loop():
     global _daily_running, _last_digest_date
     _daily_running = True
@@ -209,99 +167,20 @@ async def daily_task_loop():
 
 
 def _process_pending_timers():
+    """检查到期 timer，标记执行（暂不生成消息）。"""
     pending = get_pending_timers()
     if not pending:
         return
     for timer in pending:
         try:
-            timer_type = timer["type"]
-            trigger_context = timer.get("trigger_context", "")
-            if timer_type == "busy":
-                inbox = flush_busy_inbox()
-                if inbox:
-                    trigger_context += f"\n\n叶子在你忙碌期间发了 {len(inbox)} 条消息：\n"
-                    trigger_context += "\n".join(f"- {m}" for m in inbox[:10])
-            content = _generate_timer_message(trigger_context)
-            if content:
-                content = _strip_thinking(content)
-                if content:
-                    _save_timer_message(content, timer_type)
             mark_executed(timer["id"])
-            log.info(f"定时器触发: type={timer_type} id={timer['id']}")
+            log.info(f"定时器到期标记: type={timer['type']} id={timer['id']}")
         except Exception as e:
             log.error(f"处理定时器失败 id={timer.get('id')}: {e}")
             mark_executed(timer["id"])
 
 
-def _generate_timer_message(trigger_context: str) -> str | None:
-    if not cfg.UPSTREAM_BASE_URL or not cfg.UPSTREAM_API_KEY:
-        return None
-    persona = load_persona()
-    recent_messages = []
-    try:
-        client = db.get_client()
-        if client:
-            resp = (
-                client.table("chat_messages")
-                .select("role, content")
-                .order("created_at", desc=True)
-                .limit(5)
-                .execute()
-            )
-            if resp.data:
-                for msg in reversed(resp.data):
-                    role = msg.get("role", "user")
-                    content = msg.get("content", "")
-                    if content:
-                        recent_messages.append({"role": role, "content": content[:300]})
-    except Exception as e:
-        log.warning(f"定时器消息获取上下文失败: {e}")
-    messages = []
-    if persona:
-        messages.append({"role": "system", "content": persona})
-    messages.extend(recent_messages)
-    messages.append({"role": "user", "content": f"【系统触发】{trigger_context}\n\n请根据触发原因，用你自己的语气写一条消息发给叶子。自然、简短，像微信消息。"})
-    try:
-        url = f"{cfg.UPSTREAM_BASE_URL.rstrip('/')}/chat/completions"
-        with httpx.Client(timeout=120.0) as client:
-            resp = client.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {cfg.UPSTREAM_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": cfg.UPSTREAM_MODEL,
-                    "messages": messages,
-                    "max_tokens": 300,
-                    "temperature": 0.8,
-                },
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-            else:
-                log.error(f"定时器消息生成失败: {resp.status_code}")
-                return None
-    except Exception as e:
-        log.error(f"定时器 LLM 调用失败: {e}")
-        return None
-
-
-def _save_timer_message(content: str, timer_type: str):
-    client = db.get_client()
-    if not client:
-        return
-    try:
-        client.table("proactive_messages").insert({
-            "content": content,
-            "tone_level": f"timer_{timer_type}",
-            "urgency": 0.8,
-        }).execute()
-    except Exception as e:
-        log.error(f"定时器消息写入失败: {e}")
-
-
+# ── 核心：/v1/chat/completions ────────────────────
 async def chat_completions(request: Request):
     if not verify_token(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -313,41 +192,28 @@ async def chat_completions(request: Request):
     loop = asyncio.get_event_loop()
     messages = body.get("messages", [])
 
-    proactive = is_proactive_request(messages)
-    if proactive:
-        log.info("检测到主动消息请求，走瘦身注入")
-        # 补丁：确保 messages 里有 AI 最新的回复，防止重复回复用户最后一条消息
-        messages = _patch_missing_assistant_reply(messages)
-        body["messages"] = messages
-
-    if not proactive:
-        loop.run_in_executor(bg_executor, cancel_delay_on_user_message)
-        loop.run_in_executor(bg_executor, update_jiwen_on_user_message)
+    loop.run_in_executor(bg_executor, cancel_delay_on_user_message)
+    loop.run_in_executor(bg_executor, update_jiwen_on_user_message)
 
     user_text = _extract_last_user_text(messages)
 
-    if not proactive:
-        busy = await loop.run_in_executor(bg_executor, get_active_busy)
-        if busy:
-            if user_text:
-                loop.run_in_executor(bg_executor, save_to_busy_inbox, user_text)
-            return JSONResponse({
-                "choices": [{
-                    "message": {"role": "assistant", "content": ""},
-                    "finish_reason": "stop",
-                }],
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-            })
+    busy = await loop.run_in_executor(bg_executor, get_active_busy)
+    if busy:
+        if user_text:
+            loop.run_in_executor(bg_executor, save_to_busy_inbox, user_text)
+        return JSONResponse({
+            "choices": [{
+                "message": {"role": "assistant", "content": ""},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        })
 
-    full_context = await loop.run_in_executor(
-        bg_executor,
-        partial(build_context, user_text, is_proactive=proactive)
-    )
-
-    if not proactive:
-        timer_status = await loop.run_in_executor(bg_executor, get_timer_status_for_context)
-        if timer_status:
-            full_context = full_context + "\n\n" + timer_status if full_context else timer_status
+    # 构建上下文（人设 + 积温 + Eventide + 记忆 + 短期对话 + 标签说明）
+    full_context = await loop.run_in_executor(bg_executor, build_context, user_text)
+    timer_status = await loop.run_in_executor(bg_executor, get_timer_status_for_context)
+    if timer_status:
+        full_context = full_context + "\n\n" + timer_status if full_context else timer_status
 
     if full_context and "messages" in body:
         body["messages"] = inject_context_to_messages(body["messages"], full_context)
@@ -378,12 +244,12 @@ async def chat_completions(request: Request):
                         loop.run_in_executor(bg_executor, register_tags, tags)
                         resp_data["choices"][0]["message"]["content"] = clean_text
                         loop.run_in_executor(bg_executor, update_jiwen_on_bot_reply)
-                        if user_text and not proactive:
+                        if user_text:
                             loop.run_in_executor(bg_executor, analyze_and_update, user_text, clean_text)
                         return JSONResponse(resp_data, status_code=resp.status_code)
                     else:
                         loop.run_in_executor(bg_executor, update_jiwen_on_bot_reply)
-                        if user_text and bot_text and not proactive:
+                        if user_text and bot_text:
                             loop.run_in_executor(bg_executor, analyze_and_update, user_text, bot_text)
             except Exception:
                 pass
@@ -394,6 +260,7 @@ async def chat_completions(request: Request):
             log.error(f"upstream error: {e}")
             return JSONResponse({"error": "upstream error"}, status_code=502)
 
+    # ── 流式 ──
     async def stream_generator():
         full_content = []
         try:
@@ -430,7 +297,7 @@ async def chat_completions(request: Request):
                 if tags:
                     loop.run_in_executor(bg_executor, register_tags, tags)
                 loop.run_in_executor(bg_executor, update_jiwen_on_bot_reply)
-                if user_text and not proactive:
+                if user_text:
                     loop.run_in_executor(bg_executor, analyze_and_update, user_text, clean_text or complete_text)
 
     return StreamingResponse(
@@ -440,6 +307,7 @@ async def chat_completions(request: Request):
     )
 
 
+# ── 主动消息端点（保留，供积温使用）──────────────
 async def proactive_check(request: Request):
     if not verify_token(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -455,6 +323,7 @@ async def proactive_check(request: Request):
     return JSONResponse({"has_message": False})
 
 
+# ── 管理端点 ──────────────────────────────────────
 async def health(request: Request):
     return JSONResponse({
         "status": "ok",
