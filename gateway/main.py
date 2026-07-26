@@ -1,6 +1,6 @@
 """网关入口 - Starlette ASGI 应用。
 
-Phase 1-6 + 标签定时系统 (Phase 7)。
+Phase 1-7 + Phase 4 记忆系统内化。
 """
 import asyncio
 import json
@@ -18,6 +18,7 @@ from starlette.routing import Route
 
 from .config import cfg
 from .context import build_context, update_jiwen_on_user_message, update_jiwen_on_bot_reply
+from .persona import load_persona
 from .proactive import check_and_generate, fetch_pending_message
 from .analysis import analyze_and_update
 from . import db
@@ -61,16 +62,23 @@ def verify_token(request: Request) -> bool:
     return token == cfg.GATEWAY_TOKEN
 
 
-# ── 积温注入辅助 ──────────────────────────────────
-def inject_tone_to_messages(messages: list[dict], tone_prompt: str) -> list[dict]:
-    if not tone_prompt:
+# ── 上下文注入辅助 ────────────────────────────────
+def inject_context_to_messages(messages: list[dict], context: str) -> list[dict]:
+    """将构建好的完整上下文注入到消息列表的 system prompt 中。
+
+    如果已有 system message → 在其 content 后追加
+    如果没有 → 插入一条新的 system message
+    """
+    if not context:
         return messages
-    tone_block = f"\n\n【当前情绪状态与语气指引】\n{tone_prompt}"
+
     for msg in messages:
         if msg.get("role") == "system":
-            msg["content"] = msg["content"] + tone_block
+            msg["content"] = msg["content"] + "\n\n" + context
             return messages
-    messages.insert(0, {"role": "system", "content": tone_block.strip()})
+
+    # 没有 system message，插入一条
+    messages.insert(0, {"role": "system", "content": context})
     return messages
 
 
@@ -145,7 +153,7 @@ def _process_pending_timers():
                     trigger_context += f"\n\n叶子在你忙碌期间发了 {len(inbox)} 条消息：\n"
                     trigger_context += "\n".join(f"- {m}" for m in inbox[:10])
 
-            # 调模型生成主动消息
+            # 调模型生成主动消息（带人设+短期上下文）
             content = _generate_timer_message(trigger_context)
             if content:
                 content = _strip_thinking(content)
@@ -161,19 +169,41 @@ def _process_pending_timers():
 
 
 def _generate_timer_message(trigger_context: str) -> str | None:
-    """调模型生成定时触发的消息。超时 120 秒（Claude thinking 需要时间）。"""
+    """调模型生成定时触发的消息（带人设 + 短期上下文）。"""
     if not cfg.UPSTREAM_BASE_URL or not cfg.UPSTREAM_API_KEY:
         return None
 
-    prompt = f"""你是栖，叶子的AI恋人。以下是触发原因：
+    # 读人设
+    persona = load_persona()
 
-{trigger_context}
+    # 读最近 5 条对话
+    recent_messages = []
+    try:
+        client = db.get_client()
+        if client:
+            resp = (
+                client.table("chat_messages")
+                .select("role, content")
+                .order("created_at", desc=True)
+                .limit(5)
+                .execute()
+            )
+            if resp.data:
+                for msg in reversed(resp.data):
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    if content:
+                        recent_messages.append({"role": role, "content": content[:300]})
+    except Exception as e:
+        log.warning(f"定时器消息获取上下文失败: {e}")
 
-请根据触发原因，用你自己的语气写一条消息发给叶子。
-要求：
-- 自然、简短，像微信消息
-- 根据内容决定语气（关心、调侃、撒娇、吐槽都行）
-- 如果是提醒事项，把事情提到"""
+    # 拼装 messages
+    messages = []
+    if persona:
+        messages.append({"role": "system", "content": persona})
+
+    messages.extend(recent_messages)
+    messages.append({"role": "user", "content": f"【系统触发】{trigger_context}\n\n请根据触发原因，用你自己的语气写一条消息发给叶子。自然、简短，像微信消息。"})
 
     try:
         url = f"{cfg.UPSTREAM_BASE_URL.rstrip('/')}/chat/completions"
@@ -186,7 +216,7 @@ def _generate_timer_message(trigger_context: str) -> str | None:
                 },
                 json={
                     "model": cfg.UPSTREAM_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": messages,
                     "max_tokens": 300,
                     "temperature": 0.8,
                 },
@@ -249,13 +279,14 @@ async def chat_completions(request: Request):
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         })
 
-    # 构建上下文（积温 + Eventide + timer 状态）
-    tone_prompt = await loop.run_in_executor(bg_executor, build_context)
+    # 构建上下文（人设 + 积温 + Eventide + 记忆 + 短期对话 + 标签说明）
+    full_context = await loop.run_in_executor(bg_executor, build_context, user_text)
     timer_status = await loop.run_in_executor(bg_executor, get_timer_status_for_context)
-    full_context = "\n\n".join(filter(None, [tone_prompt, timer_status]))
+    if timer_status:
+        full_context = full_context + "\n\n" + timer_status if full_context else timer_status
 
     if full_context and "messages" in body:
-        body["messages"] = inject_tone_to_messages(body["messages"], full_context)
+        body["messages"] = inject_context_to_messages(body["messages"], full_context)
 
     upstream_url = f"{cfg.UPSTREAM_BASE_URL.rstrip('/')}/chat/completions"
     headers = {
@@ -368,7 +399,7 @@ async def proactive_check(request: Request):
 async def health(request: Request):
     return JSONResponse({
         "status": "ok",
-        "phase": 7,
+        "phase": "4-memory",
         "uptime": time.time() - _start_time,
         "scheduler_running": _scheduler_running,
         "timer_running": _timer_running,
@@ -379,7 +410,7 @@ async def status(request: Request):
     if not verify_token(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return JSONResponse({
-        "phase": 7,
+        "phase": "4-memory",
         "upstream_base_url": cfg.UPSTREAM_BASE_URL,
         "upstream_model": cfg.UPSTREAM_MODEL,
         "bg_tasks": len(_background_tasks),
@@ -408,7 +439,7 @@ async def lifespan(app):
         http2=True,
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
     )
-    log.info(f"网关启动 Phase 7 | upstream={cfg.UPSTREAM_BASE_URL}")
+    log.info(f"网关启动 Phase 4 Memory | upstream={cfg.UPSTREAM_BASE_URL}")
 
     scheduler_task = track_task(scheduler_loop())
     timer_task = track_task(timer_check_loop())
