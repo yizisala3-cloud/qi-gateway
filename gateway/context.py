@@ -1,18 +1,31 @@
-"""上下文拼装：并发获取积温 + Eventide 状态，注入到 system prompt。"""
+"""上下文拼装：并发获取所有注入源，按固定顺序拼装。
+
+注入结构（静态 → 动态）：
+[1] 人设 persona（静态）
+[2] 积温语气指引
+[3] Eventide 身体状态卡
+[4] 标签定时器状态
+[5] 长期记忆搜索结果
+[6] 短期上下文 chat_messages 最近10条
+[7] 标签使用说明
+"""
+import asyncio
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from .jiwen_engine import JiwenState, tick, render_tone_prompt, on_user_message, on_bot_reply
+from .persona import load_persona
+from .memory_search import search_memories, format_memories_for_injection
 from . import db
 from . import eventide_bridge
 
 log = logging.getLogger("gateway.context")
 
-_executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="ctx")
+_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="ctx")
 
-# ── 标签使用说明（注入到模型上下文）──────────────
+# ── 标签使用说明（静态）──────────────────────────
 TIMER_INSTRUCTIONS = """【主动消息标签】
 你可以在回复正文结束后，追加以下标签来安排后续动作（每个标签单独占一行）：
 
@@ -35,6 +48,8 @@ TIMER_INSTRUCTIONS = """【主动消息标签】
 4. 标签只在回复的最后几行出现，不要混在正文中间。"""
 
 
+# ── 数据源构建函数 ────────────────────────────────
+
 def _load_jiwen() -> JiwenState:
     raw = db.load_jiwen_state()
     if not raw:
@@ -43,6 +58,7 @@ def _load_jiwen() -> JiwenState:
 
 
 def build_jiwen_context() -> str:
+    """[2] 积温语气指引。"""
     try:
         state = _load_jiwen()
         state = tick(state)
@@ -55,6 +71,7 @@ def build_jiwen_context() -> str:
 
 
 def build_eventide_context() -> str:
+    """[3] Eventide 身体状态卡。"""
     try:
         state_data = db.load_eventide_state()
 
@@ -90,27 +107,109 @@ def build_eventide_context() -> str:
         return ""
 
 
-def build_context() -> str:
-    """并发拼装完整上下文注入内容（积温 + Eventide + 标签说明）。"""
+def build_recent_chat_context(limit: int = 10) -> str:
+    """[6] 从 chat_messages 拉最近 N 条对话作为短期上下文。"""
+    try:
+        client = db.get_client()
+        if not client:
+            return ""
+        resp = (
+            client.table("chat_messages")
+            .select("role, content, created_at")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        if not resp.data:
+            return ""
+
+        # 倒序恢复时间正序
+        messages = list(reversed(resp.data))
+        lines = ["[最近对话]"]
+        for msg in messages:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if content:
+                prefix = "叶子" if role == "user" else "栖"
+                lines.append(f"{prefix}: {content[:200]}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        log.error(f"短期上下文构建失败: {e}")
+        return ""
+
+
+# ── 主入口：完整上下文构建 ────────────────────────
+
+def build_context(user_message: str = "") -> str:
+    """并发拼装完整上下文注入内容。
+
+    Args:
+        user_message: 用户最新一条消息（用于记忆搜索 query）。
+                      为空时跳过记忆搜索。
+
+    Returns:
+        拼装好的完整注入文本。
+    """
     futures = {
-        "jiwen": _executor.submit(build_jiwen_context),
-        "eventide": _executor.submit(build_eventide_context),
+        "persona": _executor.submit(load_persona),               # [1]
+        "jiwen": _executor.submit(build_jiwen_context),          # [2]
+        "eventide": _executor.submit(build_eventide_context),    # [3]
+        "recent_chat": _executor.submit(build_recent_chat_context, 10),  # [6]
     }
 
-    parts = []
+    results = {}
     for name, future in futures.items():
         try:
-            result = future.result(timeout=8.0)
-            if result:
-                parts.append(result)
+            results[name] = future.result(timeout=8.0) or ""
         except Exception as e:
             log.warning(f"context 数据源 {name} 超时或失败: {e}")
+            results[name] = ""
 
-    # 始终附加标签说明
+    # [5] 记忆搜索（需要 user_message，异步调用）
+    memories_text = ""
+    if user_message.strip():
+        try:
+            loop = asyncio.new_event_loop()
+            memories = loop.run_until_complete(search_memories(user_message, top_k=8))
+            loop.close()
+            memories_text = format_memories_for_injection(memories)
+        except Exception as e:
+            log.warning(f"记忆搜索失败: {e}")
+
+    # 按固定顺序拼装
+    parts = []
+
+    # [1] 人设（静态，最前面）
+    if results["persona"]:
+        parts.append(results["persona"])
+
+    # [2] 积温语气
+    if results["jiwen"]:
+        parts.append(f"【当前情绪状态】\n{results['jiwen']}")
+
+    # [3] Eventide
+    if results["eventide"]:
+        parts.append(results["eventide"])
+
+    # [4] 标签定时器状态（从 timer.py 获取，这里直接在 main.py 里追加）
+    # 由 main.py 在调用后追加 timer_status，此处不重复
+
+    # [5] 长期记忆
+    if memories_text:
+        parts.append(memories_text)
+
+    # [6] 短期上下文
+    if results["recent_chat"]:
+        parts.append(results["recent_chat"])
+
+    # [7] 标签使用说明（静态，最后面）
     parts.append(TIMER_INSTRUCTIONS)
 
     return "\n\n".join(parts)
 
+
+# ── 积温更新（保留原接口）────────────────────────
 
 def update_jiwen_on_user_message():
     try:
