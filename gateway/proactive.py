@@ -4,6 +4,7 @@
 """
 import json
 import logging
+import re
 import time
 
 import httpx
@@ -58,8 +59,14 @@ def check_and_generate() -> str | None:
         return None
 
 
+def _strip_thinking(text: str) -> str:
+    """移除 <think>...</think> 标签及内容。"""
+    result = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL)
+    return result.strip()
+
+
 def _generate_proactive_message(tone: str, silence_minutes: float) -> str | None:
-    """调用上游 LLM 生成主动消息。"""
+    """调用 Claude 生成主动消息。"""
     if not cfg.UPSTREAM_BASE_URL or not cfg.UPSTREAM_API_KEY:
         return None
 
@@ -93,7 +100,11 @@ def _generate_proactive_message(tone: str, silence_minutes: float) -> str | None
             )
             if resp.status_code == 200:
                 data = resp.json()
-                return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                if content:
+                    # 过滤 thinking 标签
+                    content = _strip_thinking(content)
+                return content if content else None
             else:
                 log.error(f"主动消息生成失败: {resp.status_code}")
                 return None
