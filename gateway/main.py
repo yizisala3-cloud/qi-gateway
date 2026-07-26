@@ -10,6 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
+from functools import partial
 
 import httpx
 from starlette.applications import Starlette
@@ -18,7 +19,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from .config import cfg
-from .context import build_context, update_jiwen_on_user_message, update_jiwen_on_bot_reply
+from .context import build_context, update_jiwen_on_user_message, update_jiwen_on_bot_reply, is_proactive_request
 from .persona import load_persona
 from .proactive import check_and_generate, fetch_pending_message
 from .analysis import analyze_and_update
@@ -48,7 +49,7 @@ _background_tasks: set[asyncio.Task] = set()
 _scheduler_running = False
 _timer_running = False
 _daily_running = False
-_last_digest_date: str = ""  # 记录上次总结的日期，防止重复
+_last_digest_date: str = ""
 
 
 def track_task(coro):
@@ -135,14 +136,13 @@ async def timer_check_loop():
 
 # ── 后台定时任务：每日总结 + 热度衰减 ────────────
 async def daily_task_loop():
-    """每 30 分钟检查一次：是否到了凌晨 3 点，或者沉默超过 6 小时。"""
     global _daily_running, _last_digest_date
     _daily_running = True
     log.info("每日任务调度器启动（30min 间隔）")
 
     while _daily_running:
         try:
-            await asyncio.sleep(1800)  # 30 分钟检查一次
+            await asyncio.sleep(1800)
             loop = asyncio.get_event_loop()
 
             cst = timezone(timedelta(hours=8))
@@ -151,12 +151,10 @@ async def daily_task_loop():
 
             should_run = False
 
-            # 条件 1：凌晨 3:00-3:30 且今天还没跑过
             if 3 <= now_cst.hour < 4 and today_str != _last_digest_date:
                 should_run = True
                 log.info("每日总结触发：凌晨定时")
 
-            # 条件 2：沉默超过 6 小时且今天还没跑过
             if not should_run and today_str != _last_digest_date:
                 try:
                     jiwen_raw = db.load_jiwen_state()
@@ -173,9 +171,7 @@ async def daily_task_loop():
 
             if should_run:
                 _last_digest_date = today_str
-                # 跑每日总结
                 await loop.run_in_executor(bg_executor, run_daily_digest)
-                # 跑热度衰减
                 await loop.run_in_executor(bg_executor, run_heat_decay)
 
         except asyncio.CancelledError:
@@ -184,11 +180,8 @@ async def daily_task_loop():
             log.error(f"每日任务异常: {e}")
             await asyncio.sleep(1800)
 
-    log.info("每日任务调度器停止")
-
 
 def _process_pending_timers():
-    """处理所有到期的 timer。"""
     pending = get_pending_timers()
     if not pending:
         return
@@ -219,12 +212,10 @@ def _process_pending_timers():
 
 
 def _generate_timer_message(trigger_context: str) -> str | None:
-    """调模型生成定时触发的消息（带人设 + 短期上下文）。"""
     if not cfg.UPSTREAM_BASE_URL or not cfg.UPSTREAM_API_KEY:
         return None
 
     persona = load_persona()
-
     recent_messages = []
     try:
         client = db.get_client()
@@ -248,7 +239,6 @@ def _generate_timer_message(trigger_context: str) -> str | None:
     messages = []
     if persona:
         messages.append({"role": "system", "content": persona})
-
     messages.extend(recent_messages)
     messages.append({"role": "user", "content": f"【系统触发】{trigger_context}\n\n请根据触发原因，用你自己的语气写一条消息发给叶子。自然、简短，像微信消息。"})
 
@@ -304,28 +294,45 @@ async def chat_completions(request: Request):
         return JSONResponse({"error": "invalid json"}, status_code=400)
 
     loop = asyncio.get_event_loop()
+    messages = body.get("messages", [])
 
-    loop.run_in_executor(bg_executor, cancel_delay_on_user_message)
-    loop.run_in_executor(bg_executor, update_jiwen_on_user_message)
+    # 检测是否为橘瓣主动消息请求
+    proactive = is_proactive_request(messages)
+    if proactive:
+        log.info("检测到主动消息请求，走瘦身注入")
 
-    user_text = _extract_last_user_text(body.get("messages", []))
+    # 用户发消息：取消 delay + 标记积温（主动消息请求不执行这些）
+    if not proactive:
+        loop.run_in_executor(bg_executor, cancel_delay_on_user_message)
+        loop.run_in_executor(bg_executor, update_jiwen_on_user_message)
 
-    busy = await loop.run_in_executor(bg_executor, get_active_busy)
-    if busy:
-        if user_text:
-            loop.run_in_executor(bg_executor, save_to_busy_inbox, user_text)
-        return JSONResponse({
-            "choices": [{
-                "message": {"role": "assistant", "content": ""},
-                "finish_reason": "stop",
-            }],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        })
+    user_text = _extract_last_user_text(messages)
 
-    full_context = await loop.run_in_executor(bg_executor, build_context, user_text)
-    timer_status = await loop.run_in_executor(bg_executor, get_timer_status_for_context)
-    if timer_status:
-        full_context = full_context + "\n\n" + timer_status if full_context else timer_status
+    # 检查 busy 状态（主动消息不受 busy 限制）
+    if not proactive:
+        busy = await loop.run_in_executor(bg_executor, get_active_busy)
+        if busy:
+            if user_text:
+                loop.run_in_executor(bg_executor, save_to_busy_inbox, user_text)
+            return JSONResponse({
+                "choices": [{
+                    "message": {"role": "assistant", "content": ""},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            })
+
+    # 构建上下文
+    full_context = await loop.run_in_executor(
+        bg_executor,
+        partial(build_context, user_text, is_proactive=proactive)
+    )
+
+    # 正常对话追加 timer 状态
+    if not proactive:
+        timer_status = await loop.run_in_executor(bg_executor, get_timer_status_for_context)
+        if timer_status:
+            full_context = full_context + "\n\n" + timer_status if full_context else timer_status
 
     if full_context and "messages" in body:
         body["messages"] = inject_context_to_messages(body["messages"], full_context)
@@ -356,12 +363,12 @@ async def chat_completions(request: Request):
                         loop.run_in_executor(bg_executor, register_tags, tags)
                         resp_data["choices"][0]["message"]["content"] = clean_text
                         loop.run_in_executor(bg_executor, update_jiwen_on_bot_reply)
-                        if user_text:
+                        if user_text and not proactive:
                             loop.run_in_executor(bg_executor, analyze_and_update, user_text, clean_text)
                         return JSONResponse(resp_data, status_code=resp.status_code)
                     else:
                         loop.run_in_executor(bg_executor, update_jiwen_on_bot_reply)
-                        if user_text and bot_text:
+                        if user_text and bot_text and not proactive:
                             loop.run_in_executor(bg_executor, analyze_and_update, user_text, bot_text)
             except Exception:
                 pass
@@ -411,7 +418,7 @@ async def chat_completions(request: Request):
                 if tags:
                     loop.run_in_executor(bg_executor, register_tags, tags)
                 loop.run_in_executor(bg_executor, update_jiwen_on_bot_reply)
-                if user_text:
+                if user_text and not proactive:
                     loop.run_in_executor(bg_executor, analyze_and_update, user_text, clean_text or complete_text)
 
     return StreamingResponse(
