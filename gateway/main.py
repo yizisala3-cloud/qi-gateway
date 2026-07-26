@@ -1,6 +1,6 @@
 """网关入口 - Starlette ASGI 应用。
 
-Phase 1-6 + 标签定时系统。
+Phase 1-6 + 标签定时系统 (Phase 7)。
 """
 import asyncio
 import json
@@ -20,6 +20,7 @@ from .config import cfg
 from .context import build_context, update_jiwen_on_user_message, update_jiwen_on_bot_reply
 from .proactive import check_and_generate, fetch_pending_message
 from .analysis import analyze_and_update
+from . import db
 from .timer import (
     parse_and_strip_tags, register_tags, cancel_delay_on_user_message,
     get_active_busy, save_to_busy_inbox, get_pending_timers, mark_executed,
@@ -139,7 +140,6 @@ def _process_pending_timers():
             trigger_context = timer.get("trigger_context", "")
 
             if timer_type == "busy":
-                # busy 到期：收集 inbox 消息，一起发给模型
                 inbox = flush_busy_inbox()
                 if inbox:
                     trigger_context += f"\n\n叶子在你忙碌期间发了 {len(inbox)} 条消息：\n"
@@ -157,11 +157,11 @@ def _process_pending_timers():
 
         except Exception as e:
             log.error(f"处理定时器失败 id={timer.get('id')}: {e}")
-            mark_executed(timer["id"])  # 避免无限重试
+            mark_executed(timer["id"])
 
 
 def _generate_timer_message(trigger_context: str) -> str | None:
-    """调模型生成定时触发的消息。"""
+    """调模型生成定时触发的消息。超时 120 秒（Claude thinking 需要时间）。"""
     if not cfg.UPSTREAM_BASE_URL or not cfg.UPSTREAM_API_KEY:
         return None
 
@@ -177,7 +177,7 @@ def _generate_timer_message(trigger_context: str) -> str | None:
 
     try:
         url = f"{cfg.UPSTREAM_BASE_URL.rstrip('/')}/chat/completions"
-        with httpx.Client(timeout=30.0) as client:
+        with httpx.Client(timeout=120.0) as client:
             resp = client.post(
                 url,
                 headers={
@@ -204,8 +204,7 @@ def _generate_timer_message(trigger_context: str) -> str | None:
 
 def _save_timer_message(content: str, timer_type: str):
     """将定时触发的消息写入 proactive_messages。"""
-    client_db = __import__('.db', fromlist=['db'], package='gateway')
-    client = client_db.get_client()
+    client = db.get_client()
     if not client:
         return
     try:
@@ -240,7 +239,6 @@ async def chat_completions(request: Request):
     # 检查 busy 状态
     busy = await loop.run_in_executor(bg_executor, get_active_busy)
     if busy:
-        # busy 模式下缓存消息，不回复
         if user_text:
             loop.run_in_executor(bg_executor, save_to_busy_inbox, user_text)
         return JSONResponse({
@@ -276,7 +274,6 @@ async def chat_completions(request: Request):
                 upstream_url, headers=headers, json=body,
                 timeout=httpx.Timeout(cfg.UPSTREAM_READ_TIMEOUT, connect=10.0),
             )
-            # 解析回复、提取标签
             try:
                 resp_data = resp.json()
                 bot_text = resp_data.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -284,7 +281,6 @@ async def chat_completions(request: Request):
                     clean_text, tags = parse_and_strip_tags(bot_text)
                     if tags:
                         loop.run_in_executor(bg_executor, register_tags, tags)
-                        # 修改返回内容为剥离标签后的版本
                         resp_data["choices"][0]["message"]["content"] = clean_text
                         loop.run_in_executor(bg_executor, update_jiwen_on_bot_reply)
                         if user_text:
@@ -338,7 +334,6 @@ async def chat_completions(request: Request):
             complete_text = "".join(full_content)
             if complete_text:
                 log.info(f"回复长度: {len(complete_text)} 字")
-                # 解析标签
                 clean_text, tags = parse_and_strip_tags(complete_text)
                 if tags:
                     loop.run_in_executor(bg_executor, register_tags, tags)
