@@ -18,18 +18,20 @@ AXIS_MIN = -100.0
 AXIS_MAX = 100.0
 
 DECAY_RATES = {
-    "connection": 0.03,
+    "connection": 0.01,   # 降低衰减，让 connection 不要太快归零
     "pride": 0.02,
     "valence": 0.05,
-    "arousal": 0.08,
+    "arousal": 0.04,      # 降低 arousal 衰减
     "immersion": 0.06,
 }
 
-SILENCE_THRESHOLDS = [
-    (30, -0.5),
-    (60, -1.2),
-    (120, -2.0),
-    (240, -3.5),
+# 沉默时 connection 每小时的额外变化（正值 = 上升，想念累积）
+SILENCE_EFFECTS = [
+    # (分钟阈值, connection 每小时变化)
+    (10, 1.0),     # 10分钟后开始累积想念
+    (30, 2.0),     # 30分钟后加速
+    (60, 3.0),     # 1小时后更快
+    (120, 4.0),    # 2小时后很想找她
 ]
 
 
@@ -38,7 +40,7 @@ def clamp(value: float, lo: float = AXIS_MIN, hi: float = AXIS_MAX) -> float:
 
 
 def _ts_to_iso(ts: float | None) -> str | None:
-    """Unix timestamp 转 ISO 字符串（供 Supabase TIMESTAMPTZ 存储）。"""
+    """Unix timestamp 转 ISO 字符串。"""
     if ts is None:
         return None
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
@@ -49,7 +51,6 @@ def _iso_to_ts(iso: str | None) -> float | None:
     if not iso:
         return None
     try:
-        # 尝试直接转 float（兼容旧数据）
         return float(iso)
     except (ValueError, TypeError):
         pass
@@ -73,7 +74,6 @@ class JiwenState:
     last_bot_at: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """转为 dict，时间戳转 ISO 格式供 Supabase 存储。"""
         return {
             "connection": round(self.connection, 2),
             "pride": round(self.pride, 2),
@@ -100,7 +100,7 @@ class JiwenState:
 
 
 def tick(state: JiwenState, now: float | None = None) -> JiwenState:
-    """时间推进：自然衰减 + 沉默惩罚。"""
+    """时间推进：自然衰减 + 沉默时想念累积。"""
     now = now or time.time()
     if state.last_tick_at is None:
         state.last_tick_at = now
@@ -111,19 +111,22 @@ def tick(state: JiwenState, now: float | None = None) -> JiwenState:
         return state
     elapsed_hours = min(elapsed_hours, 24.0)
 
-    for axis in AXES:
+    # 自然衰减：pride/valence/arousal/immersion 向 0 靠近
+    # connection 不做自然衰减，只靠沉默累积和对话消减
+    for axis in ("pride", "valence", "arousal", "immersion"):
         current = getattr(state, axis)
         rate = DECAY_RATES[axis]
         decay = current * rate * elapsed_hours
         new_val = current - decay
         setattr(state, axis, clamp(new_val))
 
+    # 沉默时 connection 累积（想念越来越强）
     if state.last_chat_at:
         silence_minutes = (now - state.last_chat_at) / 60.0
-        for threshold, delta_per_hour in reversed(SILENCE_THRESHOLDS):
+        for threshold, growth_per_hour in reversed(SILENCE_EFFECTS):
             if silence_minutes >= threshold:
                 state.connection = clamp(
-                    state.connection + delta_per_hour * elapsed_hours
+                    state.connection + growth_per_hour * elapsed_hours
                 )
                 break
 
@@ -141,17 +144,14 @@ def apply_delta(state: JiwenState, deltas: dict[str, float]) -> JiwenState:
 
 
 def on_user_message(state: JiwenState, now: float | None = None) -> JiwenState:
-    """用户发消息时的基础 connection 回升。"""
+    """用户发消息时：connection 部分消减（被回应了，想念缓解）。"""
     now = now or time.time()
     state.last_chat_at = now
 
-    silence = 0
-    if state.last_bot_at:
-        silence = (now - state.last_bot_at) / 60.0
-
-    boost = min(3.0 + silence * 0.02, 8.0)
-    state.connection = clamp(state.connection + boost)
-    state.arousal = clamp(state.arousal + 2.0)
+    # 用户回来了，connection 消减一部分（不是归零）
+    state.connection = clamp(state.connection * 0.6)
+    # arousal 小幅提升
+    state.arousal = clamp(state.arousal + 3.0)
 
     return state
 
@@ -229,16 +229,16 @@ def render_tone_prompt(state: JiwenState) -> str:
 
 
 def should_contact(state: JiwenState, silence_minutes: float) -> bool:
-    """判断是否应该主动发消息。"""
-    if silence_minutes < 30:
+    """判断是否应该主动发消息。
+
+    核心逻辑：connection 越高（越想她），触发越快。
+    """
+    if silence_minutes < 20:
         return False
 
-    threshold = 120 - state.connection * 0.8
-    threshold = max(30, threshold)
+    # connection 高 → 阈值低（更快想联系）
+    # conn=0 → 90分钟触发, conn=30 → 66分钟, conn=50 → 50分钟, conn=80 → 26分钟
+    threshold = 90 - state.connection * 0.8
+    threshold = max(20, min(90, threshold))
 
-    if silence_minutes >= threshold:
-        if state.arousal > 40:
-            return True
-        return silence_minutes >= threshold * 1.3
-
-    return False
+    return silence_minutes >= threshold
