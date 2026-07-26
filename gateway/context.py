@@ -1,6 +1,6 @@
 """上下文拼装：并发获取所有注入源，按固定顺序拼装。
 
-正常对话注入结构（静态 → 动态）：
+注入结构（静态 → 动态）：
 [1] 人设 persona（静态）
 [2] 积温语气指引
 [3] Eventide 身体状态卡
@@ -8,17 +8,12 @@
 [5] 长期记忆搜索结果
 [6] 短期上下文 chat_messages 最近10条
 [7] 标签使用说明
-
-主动消息注入结构（瘦身版）：
-[1] 人设 persona
-[2] 积温语气指引（简短）
-[3] 最近对话摘要（带时间戳，含AI自己发的）
 """
 import asyncio
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 from .jiwen_engine import JiwenState, tick, render_tone_prompt, on_user_message, on_bot_reply
 from .persona import load_persona
@@ -29,16 +24,6 @@ from . import eventide_bridge
 log = logging.getLogger("gateway.context")
 
 _executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="ctx")
-
-# ── 主动消息检测关键词（检查 system message 或 user message）────
-_PROACTIVE_KEYWORDS = [
-    "主动消息上下文",
-    "距离上次聊天",
-    "请根据以上上下文决定是否发消息",
-    "请根据以上用户动向决定是否发消息",
-    "主动消息触发",
-    "[PASS]",
-]
 
 # ── 标签使用说明（静态）──────────────────────────
 TIMER_INSTRUCTIONS = """【主动消息标签】
@@ -61,22 +46,6 @@ TIMER_INSTRUCTIONS = """【主动消息标签】
 2. delay 可搭配 0~1 个 schedule。
 3. 不需要主动动作时不写任何标签。
 4. 标签只在回复的最后几行出现，不要混在正文中间。"""
-
-
-def is_proactive_request(messages: list[dict]) -> bool:
-    """检测请求是否为橘瓣内置主动消息触发。
-
-    检查 system message 和 user message 中的特征词。
-    """
-    for msg in messages:
-        role = msg.get("role", "")
-        content = msg.get("content", "")
-        if not isinstance(content, str):
-            continue
-        if role in ("system", "user"):
-            if any(kw in content for kw in _PROACTIVE_KEYWORDS):
-                return True
-    return False
 
 
 # ── 数据源构建函数 ────────────────────────────────
@@ -139,7 +108,7 @@ def build_eventide_context() -> str:
 
 
 def build_recent_chat_context(limit: int = 10) -> str:
-    """[6] 从 chat_messages 拉最近 N 条对话作为短期上下文（正常对话用）。"""
+    """[6] 从 chat_messages 拉最近 N 条对话作为短期上下文。"""
     try:
         client = db.get_client()
         if not client:
@@ -169,115 +138,15 @@ def build_recent_chat_context(limit: int = 10) -> str:
         return ""
 
 
-def build_proactive_chat_summary() -> str:
-    """主动消息专用：带时间戳的最近对话摘要（含 AI 自己发的主动消息）。"""
-    try:
-        client = db.get_client()
-        if not client:
-            return ""
+# ── 主入口：完整上下文构建 ────────────────────────
 
-        resp = (
-            client.table("chat_messages")
-            .select("role, content, created_at")
-            .order("created_at", desc=True)
-            .limit(8)
-            .execute()
-        )
-        if not resp.data:
-            return ""
-
-        messages = list(reversed(resp.data))
-        cst = timezone(timedelta(hours=8))
-        now = datetime.now(cst)
-
-        lines = ["【最近对话记录（含你之前主动发的消息）】"]
-        last_user_time = None
-
-        for msg in messages:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            created_at = msg.get("created_at", "")
-
-            if not content:
-                continue
-
-            try:
-                if isinstance(created_at, str):
-                    dt = datetime.fromisoformat(created_at.replace("Z", "+00:00")).astimezone(cst)
-                else:
-                    dt = created_at.astimezone(cst)
-                time_str = dt.strftime("%H:%M")
-            except Exception:
-                time_str = "??:??"
-
-            prefix = "叶子" if role == "user" else "栖"
-            lines.append(f"- {time_str} {prefix}: {content[:150]}")
-
-            if role == "user":
-                last_user_time = dt
-
-        if last_user_time:
-            silence = now - last_user_time
-            silence_minutes = int(silence.total_seconds() / 60)
-            if silence_minutes > 0:
-                lines.append(f"\n（叶子最后一次说话距现在已过去 {silence_minutes} 分钟）")
-
-        lines.append("\n注意：不要重复你上面已经说过的内容。如果已经发了多条叶子都没回，考虑是否还要继续打扰，或者换个完全不同的角度。")
-
-        return "\n".join(lines)
-    except Exception as e:
-        log.error(f"主动消息对话摘要构建失败: {e}")
-        return ""
-
-
-# ── 主入口 ────────────────────────────────────────
-
-def build_context(user_message: str = "", is_proactive: bool = False) -> str:
+def build_context(user_message: str = "") -> str:
     """并发拼装完整上下文注入内容。
 
     Args:
         user_message: 用户最新一条消息（用于记忆搜索 query）。
-        is_proactive: 是否为主动消息触发（由 main.py 检测后传入）。
+                      为空时跳过记忆搜索。
     """
-    if is_proactive:
-        return _build_proactive_context()
-    else:
-        return _build_normal_context(user_message)
-
-
-def _build_proactive_context() -> str:
-    """主动消息瘦身注入：人设 + 积温语气 + 带时间戳对话摘要。"""
-    futures = {
-        "persona": _executor.submit(load_persona),
-        "jiwen": _executor.submit(build_jiwen_context),
-        "summary": _executor.submit(build_proactive_chat_summary),
-    }
-
-    results = {}
-    for name, future in futures.items():
-        try:
-            results[name] = future.result(timeout=8.0) or ""
-        except Exception as e:
-            log.warning(f"proactive context {name} 失败: {e}")
-            results[name] = ""
-
-    parts = []
-
-    if results["persona"]:
-        parts.append(results["persona"])
-
-    if results["jiwen"]:
-        parts.append(f"【当前情绪状态】\n{results['jiwen']}")
-
-    if results["summary"]:
-        parts.append(results["summary"])
-
-    log.info("主动消息瘦身注入 | 组件数=%d", len(parts))
-    return "\n\n".join(parts)
-
-
-def _build_normal_context(user_message: str) -> str:
-    """正常对话完整注入。"""
     futures = {
         "persona": _executor.submit(load_persona),
         "jiwen": _executor.submit(build_jiwen_context),
@@ -293,6 +162,7 @@ def _build_normal_context(user_message: str) -> str:
             log.warning(f"context 数据源 {name} 超时或失败: {e}")
             results[name] = ""
 
+    # 记忆搜索
     memories_text = ""
     if user_message.strip():
         try:
@@ -303,6 +173,7 @@ def _build_normal_context(user_message: str) -> str:
         except Exception as e:
             log.warning(f"记忆搜索失败: {e}")
 
+    # 按固定顺序拼装
     parts = []
 
     if results["persona"]:
