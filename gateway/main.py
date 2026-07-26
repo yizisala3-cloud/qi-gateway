@@ -32,7 +32,6 @@ from .timer import (
     get_timer_status_for_context, flush_busy_inbox,
 )
 
-# ── 日志 ──────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -40,11 +39,9 @@ logging.basicConfig(
 )
 log = logging.getLogger("gateway")
 
-# ── 共享资源 ──────────────────────────────────────
 bg_executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="gw-bg")
 http_client: httpx.AsyncClient | None = None
 
-# ── 后台任务引用集合（防 GC）─────────────────────
 _background_tasks: set[asyncio.Task] = set()
 _scheduler_running = False
 _timer_running = False
@@ -59,7 +56,6 @@ def track_task(coro):
     return task
 
 
-# ── 鉴权 ──────────────────────────────────────────
 def verify_token(request: Request) -> bool:
     if not cfg.GATEWAY_TOKEN:
         return True
@@ -68,7 +64,6 @@ def verify_token(request: Request) -> bool:
     return token == cfg.GATEWAY_TOKEN
 
 
-# ── 上下文注入辅助 ────────────────────────────────
 def inject_context_to_messages(messages: list[dict], context: str) -> list[dict]:
     if not context:
         return messages
@@ -80,7 +75,6 @@ def inject_context_to_messages(messages: list[dict], context: str) -> list[dict]
     return messages
 
 
-# ── 提取用户最后一条消息 ──────────────────────────
 def _extract_last_user_text(messages: list[dict]) -> str:
     for msg in reversed(messages):
         if msg.get("role") == "user":
@@ -95,12 +89,54 @@ def _extract_last_user_text(messages: list[dict]) -> str:
     return ""
 
 
-# ── 标签剥离辅助 ──────────────────────────────────
 def _strip_thinking(text: str) -> str:
     return re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL).strip()
 
 
-# ── 后台定时任务：积温 tick + 主动消息 ────────────
+def _patch_missing_assistant_reply(messages: list[dict]) -> list[dict]:
+    """主动消息场景：如果 messages 数组最后一条非 system 的是 user，
+    从 chat_messages 表补上最新的 assistant 回复，让模型知道自己已经回过了。
+    """
+    non_system = [m for m in messages if m.get("role") != "system"]
+    if not non_system:
+        return messages
+
+    last_non_system = non_system[-1]
+    if last_non_system.get("role") != "user":
+        return messages
+
+    try:
+        client = db.get_client()
+        if not client:
+            return messages
+        resp = (
+            client.table("chat_messages")
+            .select("role, content")
+            .eq("role", "assistant")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if resp.data:
+            latest_reply = resp.data[0].get("content", "")
+            if latest_reply:
+                last_user_idx = None
+                for i in range(len(messages) - 1, -1, -1):
+                    if messages[i].get("role") == "user" and messages[i] is last_non_system:
+                        last_user_idx = i
+                        break
+                if last_user_idx is not None:
+                    messages.insert(last_user_idx + 1, {
+                        "role": "assistant",
+                        "content": latest_reply[:500]
+                    })
+                    log.info("主动消息补丁：插入最新 assistant 回复")
+    except Exception as e:
+        log.warning(f"补丁 assistant 回复失败: {e}")
+
+    return messages
+
+
 async def scheduler_loop():
     global _scheduler_running
     _scheduler_running = True
@@ -117,7 +153,6 @@ async def scheduler_loop():
             await asyncio.sleep(60)
 
 
-# ── 后台定时任务：标签定时器检查 ──────────────────
 async def timer_check_loop():
     global _timer_running
     _timer_running = True
@@ -134,27 +169,21 @@ async def timer_check_loop():
             await asyncio.sleep(30)
 
 
-# ── 后台定时任务：每日总结 + 热度衰减 ────────────
 async def daily_task_loop():
     global _daily_running, _last_digest_date
     _daily_running = True
     log.info("每日任务调度器启动（30min 间隔）")
-
     while _daily_running:
         try:
             await asyncio.sleep(1800)
             loop = asyncio.get_event_loop()
-
             cst = timezone(timedelta(hours=8))
             now_cst = datetime.now(cst)
             today_str = now_cst.strftime("%Y-%m-%d")
-
             should_run = False
-
             if 3 <= now_cst.hour < 4 and today_str != _last_digest_date:
                 should_run = True
                 log.info("每日总结触发：凌晨定时")
-
             if not should_run and today_str != _last_digest_date:
                 try:
                     jiwen_raw = db.load_jiwen_state()
@@ -168,12 +197,10 @@ async def daily_task_loop():
                                 log.info(f"每日总结触发：沉默 {silence_hours:.1f} 小时")
                 except Exception:
                     pass
-
             if should_run:
                 _last_digest_date = today_str
                 await loop.run_in_executor(bg_executor, run_daily_digest)
                 await loop.run_in_executor(bg_executor, run_heat_decay)
-
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -185,27 +212,22 @@ def _process_pending_timers():
     pending = get_pending_timers()
     if not pending:
         return
-
     for timer in pending:
         try:
             timer_type = timer["type"]
             trigger_context = timer.get("trigger_context", "")
-
             if timer_type == "busy":
                 inbox = flush_busy_inbox()
                 if inbox:
                     trigger_context += f"\n\n叶子在你忙碌期间发了 {len(inbox)} 条消息：\n"
                     trigger_context += "\n".join(f"- {m}" for m in inbox[:10])
-
             content = _generate_timer_message(trigger_context)
             if content:
                 content = _strip_thinking(content)
                 if content:
                     _save_timer_message(content, timer_type)
-
             mark_executed(timer["id"])
             log.info(f"定时器触发: type={timer_type} id={timer['id']}")
-
         except Exception as e:
             log.error(f"处理定时器失败 id={timer.get('id')}: {e}")
             mark_executed(timer["id"])
@@ -214,7 +236,6 @@ def _process_pending_timers():
 def _generate_timer_message(trigger_context: str) -> str | None:
     if not cfg.UPSTREAM_BASE_URL or not cfg.UPSTREAM_API_KEY:
         return None
-
     persona = load_persona()
     recent_messages = []
     try:
@@ -235,13 +256,11 @@ def _generate_timer_message(trigger_context: str) -> str | None:
                         recent_messages.append({"role": role, "content": content[:300]})
     except Exception as e:
         log.warning(f"定时器消息获取上下文失败: {e}")
-
     messages = []
     if persona:
         messages.append({"role": "system", "content": persona})
     messages.extend(recent_messages)
     messages.append({"role": "user", "content": f"【系统触发】{trigger_context}\n\n请根据触发原因，用你自己的语气写一条消息发给叶子。自然、简短，像微信消息。"})
-
     try:
         url = f"{cfg.UPSTREAM_BASE_URL.rstrip('/')}/chat/completions"
         with httpx.Client(timeout=120.0) as client:
@@ -283,11 +302,9 @@ def _save_timer_message(content: str, timer_type: str):
         log.error(f"定时器消息写入失败: {e}")
 
 
-# ── 核心：/v1/chat/completions ────────────────────
 async def chat_completions(request: Request):
     if not verify_token(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-
     try:
         body = await request.json()
     except Exception:
@@ -296,19 +313,19 @@ async def chat_completions(request: Request):
     loop = asyncio.get_event_loop()
     messages = body.get("messages", [])
 
-    # 检测是否为橘瓣主动消息请求
     proactive = is_proactive_request(messages)
     if proactive:
         log.info("检测到主动消息请求，走瘦身注入")
+        # 补丁：确保 messages 里有 AI 最新的回复，防止重复回复用户最后一条消息
+        messages = _patch_missing_assistant_reply(messages)
+        body["messages"] = messages
 
-    # 用户发消息：取消 delay + 标记积温（主动消息请求不执行这些）
     if not proactive:
         loop.run_in_executor(bg_executor, cancel_delay_on_user_message)
         loop.run_in_executor(bg_executor, update_jiwen_on_user_message)
 
     user_text = _extract_last_user_text(messages)
 
-    # 检查 busy 状态（主动消息不受 busy 限制）
     if not proactive:
         busy = await loop.run_in_executor(bg_executor, get_active_busy)
         if busy:
@@ -322,13 +339,11 @@ async def chat_completions(request: Request):
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             })
 
-    # 构建上下文
     full_context = await loop.run_in_executor(
         bg_executor,
         partial(build_context, user_text, is_proactive=proactive)
     )
 
-    # 正常对话追加 timer 状态
     if not proactive:
         timer_status = await loop.run_in_executor(bg_executor, get_timer_status_for_context)
         if timer_status:
@@ -379,7 +394,6 @@ async def chat_completions(request: Request):
             log.error(f"upstream error: {e}")
             return JSONResponse({"error": "upstream error"}, status_code=502)
 
-    # ── 流式 ──
     async def stream_generator():
         full_content = []
         try:
@@ -391,7 +405,6 @@ async def chat_completions(request: Request):
                     error_body = await resp.aread()
                     yield f"data: {json.dumps({'error': error_body.decode()[:500]})}\n\n"
                     return
-
                 async for line in resp.aiter_lines():
                     if not line:
                         continue
@@ -404,7 +417,6 @@ async def chat_completions(request: Request):
                                 full_content.append(delta)
                         except (json.JSONDecodeError, IndexError, KeyError):
                             pass
-
         except httpx.TimeoutException:
             yield f"data: {json.dumps({'error': 'upstream read timeout'})}\n\n"
         except Exception as e:
@@ -428,7 +440,6 @@ async def chat_completions(request: Request):
     )
 
 
-# ── 主动消息端点 ──────────────────────────────────
 async def proactive_check(request: Request):
     if not verify_token(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -444,7 +455,6 @@ async def proactive_check(request: Request):
     return JSONResponse({"has_message": False})
 
 
-# ── 管理端点 ──────────────────────────────────────
 async def health(request: Request):
     return JSONResponse({
         "status": "ok",
@@ -480,7 +490,6 @@ async def list_models(request: Request):
     return JSONResponse({"object": "list", "data": models})
 
 
-# ── 应用生命周期 ──────────────────────────────────
 _start_time = time.time()
 
 
@@ -492,13 +501,10 @@ async def lifespan(app):
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
     )
     log.info(f"网关启动 Phase 4 Memory | upstream={cfg.UPSTREAM_BASE_URL}")
-
     scheduler_task = track_task(scheduler_loop())
     timer_task = track_task(timer_check_loop())
     daily_task = track_task(daily_task_loop())
-
     yield
-
     global _scheduler_running, _timer_running, _daily_running
     _scheduler_running = False
     _timer_running = False
@@ -511,7 +517,6 @@ async def lifespan(app):
     log.info("网关关闭")
 
 
-# ── 路由 ──────────────────────────────────────────
 app = Starlette(
     routes=[
         Route("/v1/chat/completions", chat_completions, methods=["POST"]),
