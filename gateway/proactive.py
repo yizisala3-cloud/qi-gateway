@@ -48,8 +48,8 @@ def check_and_generate() -> str | None:
         if content:
             _save_proactive_message(content, state)
             state = on_bot_reply(state)
-            # connection 部分缓解
-            state.connection = max(0, state.connection - 15)
+            # 主动开口后 connection 只小幅缓解（开口不等于被回应）
+            state.connection = clamp(state.connection * 0.85)
 
         db.save_jiwen_state(state.to_dict())
         return content
@@ -57,6 +57,10 @@ def check_and_generate() -> str | None:
     except Exception as e:
         log.error(f"主动消息检查失败: {e}")
         return None
+
+
+def clamp(value: float, lo: float = -100.0, hi: float = 100.0) -> float:
+    return max(lo, min(hi, value))
 
 
 def _strip_thinking(text: str) -> str:
@@ -102,7 +106,6 @@ def _generate_proactive_message(tone: str, silence_minutes: float) -> str | None
                 data = resp.json()
                 content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                 if content:
-                    # 过滤 thinking 标签
                     content = _strip_thinking(content)
                 return content if content else None
             else:
