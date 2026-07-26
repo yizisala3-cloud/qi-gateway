@@ -12,9 +12,30 @@ log = logging.getLogger("gateway.context")
 
 _executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="ctx")
 
+# ── 标签使用说明（注入到模型上下文）──────────────
+TIMER_INSTRUCTIONS = """【主动消息标签】
+你可以在回复正文结束后，追加以下标签来安排后续动作（每个标签单独占一行）：
+
+- 延时：<<delay:分钟数>>（1~360）
+  含义：N 分钟后你会主动发一条消息找叶子。适用于"等会儿来看你"场景。
+  注意：如果叶子在到期前主动发消息，delay 会自动取消。
+
+- 定时：<<schedule:HH:MM:简介>>
+  含义：到指定时刻主动发起对话。适用于"22:00 提醒睡觉"场景。
+  设置后不会被取消，到点必定触发。
+
+- 忙碌：<<busy:分钟数>>（30~480）
+  含义：接下来这段时间不看消息，到期后一次性处理积攒的消息。
+  与 delay 互斥（不能同时设置，delay 优先）。
+
+规则：
+1. 每次回复最多设 1 个 delay 或 1 个 busy。
+2. delay 可搭配 0~1 个 schedule。
+3. 不需要主动动作时不写任何标签。
+4. 标签只在回复的最后几行出现，不要混在正文中间。"""
+
 
 def _load_jiwen() -> JiwenState:
-    """从数据库加载积温状态。"""
     raw = db.load_jiwen_state()
     if not raw:
         return JiwenState()
@@ -22,7 +43,6 @@ def _load_jiwen() -> JiwenState:
 
 
 def build_jiwen_context() -> str:
-    """读取积温状态 -> tick -> 生成语气提示词。"""
     try:
         state = _load_jiwen()
         state = tick(state)
@@ -35,7 +55,6 @@ def build_jiwen_context() -> str:
 
 
 def build_eventide_context() -> str:
-    """读取 Eventide 状态 -> advance -> 渲染状态卡。"""
     try:
         state_data = db.load_eventide_state()
 
@@ -72,7 +91,7 @@ def build_eventide_context() -> str:
 
 
 def build_context() -> str:
-    """并发拼装完整上下文注入内容。"""
+    """并发拼装完整上下文注入内容（积温 + Eventide + 标签说明）。"""
     futures = {
         "jiwen": _executor.submit(build_jiwen_context),
         "eventide": _executor.submit(build_eventide_context),
@@ -87,14 +106,13 @@ def build_context() -> str:
         except Exception as e:
             log.warning(f"context 数据源 {name} 超时或失败: {e}")
 
-    if not parts:
-        return ""
+    # 始终附加标签说明
+    parts.append(TIMER_INSTRUCTIONS)
 
     return "\n\n".join(parts)
 
 
 def update_jiwen_on_user_message():
-    """用户发消息时更新积温状态。"""
     try:
         state = _load_jiwen()
         state = on_user_message(state)
@@ -104,7 +122,6 @@ def update_jiwen_on_user_message():
 
 
 def update_jiwen_on_bot_reply():
-    """bot 回复后更新积温状态。"""
     try:
         state = _load_jiwen()
         state = on_bot_reply(state)
