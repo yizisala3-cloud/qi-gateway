@@ -6,10 +6,10 @@
 <title>qi-dashboard</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x2728;</text></svg>">
 <link rel="stylesheet" href="/admin/css/style.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 </head>
 <body>
 <div class="app" id="app">
-  <!-- Login -->
   <div class="login-page" id="login-page" style="display:none">
     <div class="login-card">
       <div class="login-logo">&#x2728;</div>
@@ -17,11 +17,9 @@
       <p class="muted">Enter gateway token to continue</p>
       <input type="password" id="login-input" placeholder="Token" autocomplete="off">
       <button class="btn btn-primary" id="login-btn" style="width:100%;margin-top:12px">Enter</button>
-      <p class="login-error muted" id="login-error"></p>
+      <p class="login-error" id="login-error"></p>
     </div>
   </div>
-
-  <!-- Main layout -->
   <div class="layout" id="layout" style="display:none">
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-head">
@@ -34,7 +32,6 @@
         <button class="btn btn-xs btn-ghost" id="theme-btn" title="Toggle theme">&#x1F319;</button>
       </div>
     </aside>
-
     <div class="main">
       <header class="topbar">
         <div class="flex center gap8">
@@ -49,7 +46,6 @@
     </div>
   </div>
 </div>
-
 <script type="module" src="/admin/js/app.js"></script>
 </body>
 </html>
