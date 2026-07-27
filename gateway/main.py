@@ -5,6 +5,7 @@ Phase 4 记忆系统内化（主动消息生成暂停）。
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -15,7 +16,8 @@ import httpx
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
-from starlette.routing import Route
+from starlette.routing import Route, Mount
+from starlette.staticfiles import StaticFiles
 
 from .config import cfg
 from .context import build_context, update_jiwen_on_user_message, update_jiwen_on_bot_reply
@@ -92,7 +94,6 @@ def _strip_thinking(text: str) -> str:
     return re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL).strip()
 
 
-# ── 后台定时任务：积温 tick + 主动消息 ────────────
 async def scheduler_loop():
     global _scheduler_running
     _scheduler_running = True
@@ -109,7 +110,6 @@ async def scheduler_loop():
             await asyncio.sleep(60)
 
 
-# ── 后台定时任务：标签定时器检查 ──────────────────
 async def timer_check_loop():
     global _timer_running
     _timer_running = True
@@ -126,7 +126,6 @@ async def timer_check_loop():
             await asyncio.sleep(30)
 
 
-# ── 后台定时任务：每日总结 + 热度衰减 ────────────
 async def daily_task_loop():
     global _daily_running, _last_digest_date
     _daily_running = True
@@ -167,7 +166,6 @@ async def daily_task_loop():
 
 
 def _process_pending_timers():
-    """检查到期 timer，标记执行（暂不生成消息）。"""
     pending = get_pending_timers()
     if not pending:
         return
@@ -180,7 +178,6 @@ def _process_pending_timers():
             mark_executed(timer["id"])
 
 
-# ── 核心：/v1/chat/completions ────────────────────
 async def chat_completions(request: Request):
     if not verify_token(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -209,7 +206,6 @@ async def chat_completions(request: Request):
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         })
 
-    # 构建上下文（人设 + 积温 + Eventide + 记忆 + 短期对话 + 标签说明）
     full_context = await loop.run_in_executor(bg_executor, build_context, user_text)
     timer_status = await loop.run_in_executor(bg_executor, get_timer_status_for_context)
     if timer_status:
@@ -260,7 +256,6 @@ async def chat_completions(request: Request):
             log.error(f"upstream error: {e}")
             return JSONResponse({"error": "upstream error"}, status_code=502)
 
-    # ── 流式 ──
     async def stream_generator():
         full_content = []
         try:
@@ -307,7 +302,6 @@ async def chat_completions(request: Request):
     )
 
 
-# ── 主动消息端点（保留，供积温使用）──────────────
 async def proactive_check(request: Request):
     if not verify_token(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -323,7 +317,6 @@ async def proactive_check(request: Request):
     return JSONResponse({"has_message": False})
 
 
-# ── 管理端点 ──────────────────────────────────────
 async def health(request: Request):
     return JSONResponse({
         "status": "ok",
@@ -361,6 +354,9 @@ async def list_models(request: Request):
 
 _start_time = time.time()
 
+# admin 静态文件目录
+_admin_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "admin")
+
 
 @asynccontextmanager
 async def lifespan(app):
@@ -386,13 +382,18 @@ async def lifespan(app):
     log.info("网关关闭")
 
 
-app = Starlette(
-    routes=[
-        Route("/v1/chat/completions", chat_completions, methods=["POST"]),
-        Route("/v1/models", list_models, methods=["GET"]),
-        Route("/v1/proactive", proactive_check, methods=["GET"]),
-        Route("/health", health, methods=["GET"]),
-        Route("/status", status, methods=["GET"]),
-    ],
-    lifespan=lifespan,
-)
+# 路由
+_routes = [
+    Route("/v1/chat/completions", chat_completions, methods=["POST"]),
+    Route("/v1/models", list_models, methods=["GET"]),
+    Route("/v1/proactive", proactive_check, methods=["GET"]),
+    Route("/health", health, methods=["GET"]),
+    Route("/status", status, methods=["GET"]),
+]
+
+# 挂载 admin 静态文件（如果目录存在）
+if os.path.isdir(_admin_dir):
+    _routes.append(Mount("/admin", app=StaticFiles(directory=_admin_dir, html=True), name="admin"))
+    log.info(f"Admin panel mounted at /admin (dir={_admin_dir})")
+
+app = Starlette(routes=_routes, lifespan=lifespan)
