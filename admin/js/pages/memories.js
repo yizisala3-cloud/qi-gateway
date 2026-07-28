@@ -1,6 +1,6 @@
 // pages/memories.js
-import { query, update, insert, remove, esc, count } from '../api.js';
-import { loading, empty, heatDot, badge, toast, modal, confirm, delegate } from '../ui.js';
+import { query, update, insert, esc, count } from '../api.js?v=20260728-rls1';
+import { loading, empty, heatDot, badge, toast, modal, confirm, delegate } from '../ui.js?v=20260728-rls1';
 
 const PAGE_SIZE = 20;
 
@@ -17,11 +17,29 @@ export default {
       verify: (el) => this.setVerified(el.dataset.id, 'verified'),
       reject: (el) => this.setVerified(el.dataset.id, 'rejected'),
       page: (el) => { this.state.page = Number(el.dataset.p); this.loadList(); },
-      search: () => { this.state.search = root.querySelector('#mem-search').value.trim(); this.state.page = 0; this.loadList(); },
+      search: () => {
+        this.state.search = root.querySelector('#mem-search').value.trim();
+        this.state.page = 0;
+        this.loadList();
+      },
     });
-    root.querySelector('#mem-search')?.addEventListener('keydown', e => { if (e.key === 'Enter') { this.state.search = e.target.value.trim(); this.state.page = 0; this.loadList(); }});
-    root.querySelector('#flt-verified')?.addEventListener('change', e => { this.state.filter = e.target.value; this.state.page = 0; this.loadList(); });
-    root.querySelector('#flt-sort')?.addEventListener('change', e => { this.state.sort = e.target.value; this.state.page = 0; this.loadList(); });
+    root.querySelector('#mem-search')?.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        this.state.search = e.target.value.trim();
+        this.state.page = 0;
+        this.loadList();
+      }
+    });
+    root.querySelector('#flt-verified')?.addEventListener('change', e => {
+      this.state.filter = e.target.value;
+      this.state.page = 0;
+      this.loadList();
+    });
+    root.querySelector('#flt-sort')?.addEventListener('change', e => {
+      this.state.sort = e.target.value;
+      this.state.page = 0;
+      this.loadList();
+    });
     await this.loadList();
   },
 
@@ -51,21 +69,30 @@ export default {
 
   async loadList() {
     const listEl = this.root.querySelector('#mem-list');
+    const pagerEl = this.root.querySelector('#mem-pager');
     listEl.innerHTML = loading();
+    pagerEl.innerHTML = '';
+
     try {
-      const filters = [];
-      if (this.state.filter) filters.push(q => q.eq('verified', this.state.filter));
-      if (this.state.search) filters.push(q => q.or(`title.ilike.%${this.state.search}%,content.ilike.%${this.state.search}%`));
-      filters.push(q => q.eq('is_active', true));
+      const eq = { is_active: true };
+      if (this.state.filter) eq.verified = this.state.filter;
 
-      const data = await query('memories', {
-        select: 'id,title,content,heat,importance,tags,verified,source,layer,created_at',
-        order: { col: this.state.sort, asc: false },
-        limit: PAGE_SIZE,
-        filters: [q => { let r = q; for (const f of filters) r = f(r); return r.range(this.state.page * PAGE_SIZE, (this.state.page + 1) * PAGE_SIZE - 1); }],
-      });
+      const [data, total] = await Promise.all([
+        query('memories', {
+          select: 'id,title,content,heat,importance,tags,verified,source,layer,created_at',
+          order: { col: this.state.sort, asc: false },
+          limit: PAGE_SIZE,
+          offset: this.state.page * PAGE_SIZE,
+          eq,
+          search: this.state.search,
+        }),
+        count('memories', { eq, search: this.state.search }),
+      ]);
 
-      if (!data.length) { listEl.innerHTML = empty('No memories found'); return; }
+      if (!data.length) {
+        listEl.innerHTML = empty('No memories found');
+        return;
+      }
 
       listEl.innerHTML = data.map(m => `
         <div class="item">
@@ -89,6 +116,14 @@ export default {
           </div>
         </div>`).join('');
 
+      const pages = Math.ceil(total / PAGE_SIZE);
+      if (pages > 1) {
+        pagerEl.innerHTML = `
+          ${this.state.page > 0 ? `<button class="btn btn-sm btn-secondary" data-act="page" data-p="${this.state.page - 1}">Previous</button>` : ''}
+          <span class="text-sm muted">${this.state.page + 1} / ${pages} · ${total}</span>
+          ${this.state.page < pages - 1 ? `<button class="btn btn-sm btn-secondary" data-act="page" data-p="${this.state.page + 1}">Next</button>` : ''}
+        `;
+      }
     } catch (e) {
       listEl.innerHTML = `<div class="banner banner-danger">${esc(e.message)}</div>`;
     }
@@ -97,7 +132,7 @@ export default {
   async openEditor(id) {
     let mem = {};
     if (id) {
-      const rows = await query('memories', { eq: { id }, limit: 1 });
+      const rows = await query('memories', { eq: { id: Number(id) }, limit: 1 });
       mem = rows[0] || {};
     }
     const isNew = !id;
@@ -117,13 +152,14 @@ export default {
     if (mem.layer) root.querySelector('#ed-layer').value = mem.layer;
     root.querySelector('[data-cancel]').onclick = close;
     root.querySelector('[data-save]').onclick = async () => {
+      const emotionWeight = Number(root.querySelector('#ed-emo').value);
       const row = {
         title: root.querySelector('#ed-title').value.trim(),
         content: root.querySelector('#ed-content').value.trim(),
         tags: root.querySelector('#ed-tags').value.split(',').map(s => s.trim()).filter(Boolean),
         importance: Number(root.querySelector('#ed-imp').value) || 5,
         layer: root.querySelector('#ed-layer').value,
-        emotion_weight: Number(root.querySelector('#ed-emo').value) || 0.5,
+        emotion_weight: Number.isFinite(emotionWeight) ? emotionWeight : 0.5,
       };
       if (!row.content) { toast('Content required', 'err'); return; }
       try {
