@@ -20,9 +20,10 @@ function initTheme() {
 // --- Auth ---
 function isAuthed() { return !!getToken(); }
 
-function showLogin() {
+function showLogin(message = '') {
   document.getElementById('login-page').style.display = 'flex';
   document.getElementById('layout').style.display = 'none';
+  document.getElementById('login-error').textContent = message;
 }
 
 function showApp() {
@@ -33,14 +34,16 @@ function showApp() {
 async function tryLogin(token) {
   setToken(token);
   try {
-    await gw('/health');
+    // /health is public; /status is protected and actually validates GATEWAY_TOKEN.
+    await gw('/status');
     showApp();
     renderSidebar();
-    route();
+    if (!location.hash) location.hash = '#/' + DEFAULT_ROUTE;
+    await route();
     refreshStatus();
-  } catch {
+  } catch (e) {
     clearToken();
-    document.getElementById('login-error').textContent = 'Invalid token or gateway offline';
+    showLogin(`Login failed: ${e.message}`);
   }
 }
 
@@ -102,23 +105,25 @@ async function route() {
 async function refreshStatus() {
   const dot = document.getElementById('status-dot');
   try {
-    const s = await gw('/health');
+    await gw('/status');
     if (dot) { dot.textContent = 'online'; dot.className = 'badge badge-accent'; }
-  } catch {
-    if (dot) { dot.textContent = 'offline'; dot.className = 'badge badge-danger'; }
+  } catch (e) {
+    if (dot) { dot.textContent = 'unauthorized'; dot.className = 'badge badge-danger'; }
+    if (e.message.startsWith('401')) {
+      clearToken();
+      showLogin('Session expired. Please enter the gateway token again.');
+    }
   }
 }
 
 // --- Boot ---
-function boot() {
+async function boot() {
   initTheme();
 
-  // Theme toggle
   document.getElementById('theme-btn')?.addEventListener('click', () => {
     applyTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
   });
 
-  // Login
   document.getElementById('login-btn')?.addEventListener('click', () => {
     const val = document.getElementById('login-input').value.trim();
     if (val) tryLogin(val);
@@ -130,21 +135,24 @@ function boot() {
     }
   });
 
-  // Mobile menu
   document.getElementById('menu-btn')?.addEventListener('click', () => {
     document.getElementById('sidebar')?.classList.toggle('open');
   });
 
-  // Route change
   window.addEventListener('hashchange', route);
 
-  // Check auth
   if (isAuthed()) {
-    showApp();
-    renderSidebar();
-    if (!location.hash) location.hash = '#/' + DEFAULT_ROUTE;
-    route();
-    refreshStatus();
+    try {
+      await gw('/status');
+      showApp();
+      renderSidebar();
+      if (!location.hash) location.hash = '#/' + DEFAULT_ROUTE;
+      await route();
+      refreshStatus();
+    } catch (e) {
+      clearToken();
+      showLogin(`Saved token rejected: ${e.message}`);
+    }
   } else {
     showLogin();
   }
