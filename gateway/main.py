@@ -335,6 +335,8 @@ async def status(request: Request):
         "phase": "4-memory",
         "upstream_base_url": cfg.UPSTREAM_BASE_URL,
         "upstream_model": cfg.UPSTREAM_MODEL,
+        "supabase_elevated_key_configured": cfg.supabase_elevated_key_configured,
+        "rls_ready": cfg.supabase_elevated_key_configured,
         "bg_tasks": len(_background_tasks),
         "scheduler_running": _scheduler_running,
         "timer_running": _timer_running,
