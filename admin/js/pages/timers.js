@@ -1,6 +1,6 @@
 // pages/timers.js
-import { query, update, esc } from '../api.js';
-import { loading, empty, badge, toast, delegate } from '../ui.js';
+import { query, update, esc } from '../api.js?v=20260728-rls1';
+import { loading, empty, badge, toast, delegate } from '../ui.js?v=20260728-rls1';
 
 export default {
   async mount(root) {
