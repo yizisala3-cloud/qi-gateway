@@ -21,11 +21,11 @@ from starlette.staticfiles import StaticFiles
 
 from .config import cfg
 from .context import build_context, update_jiwen_on_user_message, update_jiwen_on_bot_reply
-from .persona import load_persona
 from .proactive import check_and_generate, fetch_pending_message
 from .analysis import analyze_and_update
 from .memory_extract import run_daily_digest
 from .memory_heat import run_heat_decay
+from .admin_api import admin_api_routes
 from . import db
 from .timer import (
     parse_and_strip_tags, register_tags, cancel_delay_on_user_message,
@@ -353,8 +353,6 @@ async def list_models(request: Request):
 
 
 _start_time = time.time()
-
-# admin 静态文件目录
 _admin_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "admin")
 
 
@@ -382,7 +380,6 @@ async def lifespan(app):
     log.info("网关关闭")
 
 
-# 路由
 _routes = [
     Route("/v1/chat/completions", chat_completions, methods=["POST"]),
     Route("/v1/models", list_models, methods=["GET"]),
@@ -390,8 +387,8 @@ _routes = [
     Route("/health", health, methods=["GET"]),
     Route("/status", status, methods=["GET"]),
 ]
+_routes.extend(admin_api_routes)
 
-# 挂载 admin 静态文件（如果目录存在）
 if os.path.isdir(_admin_dir):
     _routes.append(Mount("/admin", app=StaticFiles(directory=_admin_dir, html=True), name="admin"))
     log.info(f"Admin panel mounted at /admin (dir={_admin_dir})")
