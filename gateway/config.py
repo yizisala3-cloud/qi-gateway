@@ -11,6 +11,11 @@ class Config:
     UPSTREAM_API_KEY: str = os.getenv("UPSTREAM_API_KEY", "")
     UPSTREAM_MODEL: str = os.getenv("UPSTREAM_MODEL", "")
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
+    # Preferred backend-only key. Modern sb_secret_* keys and legacy service_role
+    # keys bypass RLS and must never be exposed to the browser or source control.
+    SUPABASE_SECRET_KEY: str = os.getenv("SUPABASE_SECRET_KEY", "")
+    SUPABASE_SERVICE_ROLE_KEY: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    # Transitional fallback for existing deployments. This may be a publishable key.
     SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "")
     PORT: int = int(os.getenv("PORT", "8000"))
     UPSTREAM_READ_TIMEOUT: float = float(os.getenv("UPSTREAM_READ_TIMEOUT", "180"))
@@ -18,6 +23,18 @@ class Config:
     ANALYSIS_BASE_URL: str = os.getenv("ANALYSIS_BASE_URL", "https://api.siliconflow.cn/v1")
     ANALYSIS_API_KEY: str = os.getenv("ANALYSIS_API_KEY", "")
     ANALYSIS_MODEL: str = os.getenv("ANALYSIS_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+
+    @property
+    def supabase_server_key(self) -> str:
+        return (
+            self.SUPABASE_SECRET_KEY
+            or self.SUPABASE_SERVICE_ROLE_KEY
+            or self.SUPABASE_KEY
+        )
+
+    @property
+    def supabase_elevated_key_configured(self) -> bool:
+        return bool(self.SUPABASE_SECRET_KEY or self.SUPABASE_SERVICE_ROLE_KEY)
 
 
 cfg = Config()
