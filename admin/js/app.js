@@ -1,23 +1,22 @@
 // app.js - router shell, theme, sidebar, auth
-import { NAV, ROUTE_INDEX } from './routes.js';
-import { loading, errorBlock } from './ui.js';
-import { gw, getToken, setToken, clearToken } from './api.js';
+import { NAV, ROUTE_INDEX } from './routes.js?v=20260728-rls2';
+import { loading, errorBlock } from './ui.js?v=20260728-rls2';
+import { gw, getToken, setToken, clearToken } from './api.js?v=20260728-rls2';
 
 const DEFAULT_ROUTE = 'dashboard';
+const ASSET_VERSION = '20260728-rls2';
 
-// --- Theme ---
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);
   localStorage.setItem('qi-theme', t);
   const btn = document.getElementById('theme-btn');
   if (btn) btn.textContent = t === 'dark' ? '\u2600\uFE0F' : '\uD83C\uDF19';
 }
+
 function initTheme() {
-  const saved = localStorage.getItem('qi-theme') || 'dark';
-  applyTheme(saved);
+  applyTheme(localStorage.getItem('qi-theme') || 'dark');
 }
 
-// --- Auth ---
 function isAuthed() { return !!getToken(); }
 
 function showLogin(message = '') {
@@ -34,7 +33,6 @@ function showApp() {
 async function tryLogin(token) {
   setToken(token);
   try {
-    // /health is public; /status is protected and actually validates GATEWAY_TOKEN.
     await gw('/status');
     showApp();
     renderSidebar();
@@ -47,7 +45,6 @@ async function tryLogin(token) {
   }
 }
 
-// --- Sidebar ---
 function renderSidebar() {
   const nav = document.getElementById('sidebar-nav');
   nav.innerHTML = NAV.map(grp => `
@@ -65,7 +62,6 @@ function highlight(key) {
     a.classList.toggle('active', a.dataset.key === key));
 }
 
-// --- Router ---
 let currentMod = null;
 
 async function route() {
@@ -88,7 +84,7 @@ async function route() {
   currentMod = null;
 
   try {
-    const mod = (await import(`./pages/${key}.js`)).default;
+    const mod = (await import(`./pages/${key}.js?v=${ASSET_VERSION}`)).default;
     currentMod = mod;
     content.innerHTML = '';
     const wrap = document.createElement('div');
@@ -101,7 +97,6 @@ async function route() {
   }
 }
 
-// --- Status dot ---
 async function refreshStatus() {
   const dot = document.getElementById('status-dot');
   try {
@@ -116,7 +111,6 @@ async function refreshStatus() {
   }
 }
 
-// --- Boot ---
 async function boot() {
   initTheme();
 
