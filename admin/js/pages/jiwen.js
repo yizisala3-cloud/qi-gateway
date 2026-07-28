@@ -1,6 +1,6 @@
 // pages/jiwen.js
-import { query, update, esc } from '../api.js';
-import { loading, toast, confirm, delegate } from '../ui.js';
+import { query, update, esc } from '../api.js?v=20260728-rls1';
+import { loading, toast, confirm, delegate } from '../ui.js?v=20260728-rls1';
 
 export default {
   async mount(root) {
@@ -14,11 +14,11 @@ export default {
     const data = await query('jiwen_state', { limit: 1 });
     const j = data[0] || {};
     const axes = [
-      { name: 'Connection', val: j.connection || 0, desc: 'How connected we feel' },
-      { name: 'Pride', val: j.pride || 0, desc: 'Pride / self-esteem' },
-      { name: 'Valence', val: j.valence || 0, desc: 'Positive vs negative mood' },
-      { name: 'Arousal', val: j.arousal || 0, desc: 'Energy level' },
-      { name: 'Immersion', val: j.immersion || 0, desc: 'Engagement depth' },
+      { name: 'Connection', val: Number(j.connection ?? 0) },
+      { name: 'Pride', val: Number(j.pride ?? 0) },
+      { name: 'Valence', val: Number(j.valence ?? 0) },
+      { name: 'Arousal', val: Number(j.arousal ?? 0) },
+      { name: 'Immersion', val: Number(j.immersion ?? 0) },
     ];
     this.root.innerHTML = `
       <div class="card">
