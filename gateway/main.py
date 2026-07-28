@@ -331,12 +331,13 @@ async def health(request: Request):
 async def status(request: Request):
     if not verify_token(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    supabase_status = await asyncio.to_thread(db.get_client_status)
     return JSONResponse({
         "phase": "4-memory",
         "upstream_base_url": cfg.UPSTREAM_BASE_URL,
         "upstream_model": cfg.UPSTREAM_MODEL,
-        "supabase_elevated_key_configured": cfg.supabase_elevated_key_configured,
-        "rls_ready": cfg.supabase_elevated_key_configured,
+        "supabase": supabase_status,
+        "rls_ready": supabase_status["elevated_active"],
         "bg_tasks": len(_background_tasks),
         "scheduler_running": _scheduler_running,
         "timer_running": _timer_running,
