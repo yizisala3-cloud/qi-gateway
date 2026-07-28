@@ -1,6 +1,6 @@
 // pages/dashboard.js
-import { query, count, esc } from '../api.js';
-import { stat, loading, heatDot, errorBlock } from '../ui.js';
+import { query, count, esc } from '../api.js?v=20260728-rls1';
+import { stat, loading, heatDot, errorBlock } from '../ui.js?v=20260728-rls1';
 
 export default {
   async mount(root) {
