@@ -10,16 +10,18 @@ _client = None
 
 
 def get_client():
-    """延迟初始化 Supabase 客户端。"""
+    """延迟初始化服务端 Supabase 客户端。"""
     global _client
     if _client is None:
-        if not cfg.SUPABASE_URL or not cfg.SUPABASE_KEY:
+        server_key = cfg.supabase_server_key
+        if not cfg.SUPABASE_URL or not server_key:
             log.warning("Supabase 未配置，跳过数据库功能")
             return None
         try:
             from supabase import create_client
-            _client = create_client(cfg.SUPABASE_URL, cfg.SUPABASE_KEY)
-            log.info("Supabase 客户端初始化成功")
+            _client = create_client(cfg.SUPABASE_URL, server_key)
+            key_mode = "elevated" if cfg.supabase_elevated_key_configured else "fallback"
+            log.info("Supabase 服务端客户端初始化成功（key_mode=%s）", key_mode)
         except Exception as e:
             log.error(f"Supabase 初始化失败: {e}")
     return _client
