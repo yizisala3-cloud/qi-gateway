@@ -1,6 +1,6 @@
 // pages/persona.js
-import { query, update, insert, esc } from '../api.js';
-import { loading, empty, badge, toast, modal, delegate } from '../ui.js';
+import { query, update, insert, esc } from '../api.js?v=20260728-rls1';
+import { loading, empty, badge, toast, modal, delegate } from '../ui.js?v=20260728-rls1';
 
 export default {
   async mount(root) {
@@ -38,7 +38,7 @@ export default {
   async openEditor(id) {
     let p = {};
     if (id) {
-      const rows = await query('persona', { eq: { id }, limit: 1 });
+      const rows = await query('persona', { eq: { id: Number(id) }, limit: 1 });
       p = rows[0] || {};
     }
     const isNew = !id;
