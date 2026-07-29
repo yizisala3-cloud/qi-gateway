@@ -1,6 +1,6 @@
 """网关入口 - Starlette ASGI 应用。
 
-Phase 4 记忆系统内化（主动消息生成暂停）。
+Phase 4.5：可靠、可观测的记忆总结管线（主动消息生成暂停）。
 """
 import asyncio
 import json
@@ -23,14 +23,15 @@ from .config import cfg
 from .context import build_context, update_jiwen_on_user_message, update_jiwen_on_bot_reply
 from .proactive import check_and_generate, fetch_pending_message
 from .analysis import analyze_and_update
-from .memory_extract import run_daily_digest
+from .memory_extract import run_scheduled_digest_if_due
 from .memory_heat import run_heat_decay
 from .admin_api import admin_api_routes
+from .memory_digest_api import memory_digest_routes
 from . import db
 from .timer import (
     parse_and_strip_tags, register_tags, cancel_delay_on_user_message,
     get_active_busy, save_to_busy_inbox, get_pending_timers, mark_executed,
-    get_timer_status_for_context, flush_busy_inbox,
+    get_timer_status_for_context,
 )
 
 logging.basicConfig(
@@ -47,7 +48,8 @@ _background_tasks: set[asyncio.Task] = set()
 _scheduler_running = False
 _timer_running = False
 _daily_running = False
-_last_digest_date: str = ""
+_last_digest_run: dict | None = None
+_last_heat_decay_date = ""
 
 
 def track_task(coro):
@@ -127,42 +129,39 @@ async def timer_check_loop():
 
 
 async def daily_task_loop():
-    global _daily_running, _last_digest_date
+    """检查持久化记忆任务；失败不会推进游标，成功提交具有幂等保护。"""
+    global _daily_running, _last_digest_run, _last_heat_decay_date
     _daily_running = True
-    log.info("每日任务调度器启动（30min 间隔）")
+    log.info("记忆任务调度器启动（30min 间隔）")
     while _daily_running:
         try:
             await asyncio.sleep(1800)
             loop = asyncio.get_event_loop()
-            cst = timezone(timedelta(hours=8))
-            now_cst = datetime.now(cst)
-            today_str = now_cst.strftime("%Y-%m-%d")
-            should_run = False
-            if 3 <= now_cst.hour < 4 and today_str != _last_digest_date:
-                should_run = True
-                log.info("每日总结触发：凌晨定时")
-            if not should_run and today_str != _last_digest_date:
-                try:
-                    jiwen_raw = db.load_jiwen_state()
-                    if jiwen_raw and jiwen_raw.get("last_chat_at"):
-                        from .jiwen_engine import _iso_to_ts
-                        last_chat_ts = _iso_to_ts(jiwen_raw["last_chat_at"])
-                        if last_chat_ts:
-                            silence_hours = (time.time() - last_chat_ts) / 3600.0
-                            if silence_hours >= 6:
-                                should_run = True
-                                log.info(f"每日总结触发：沉默 {silence_hours:.1f} 小时")
-                except Exception:
-                    pass
-            if should_run:
-                _last_digest_date = today_str
-                await loop.run_in_executor(bg_executor, run_daily_digest)
+            result = await loop.run_in_executor(bg_executor, run_scheduled_digest_if_due)
+            if result:
+                _last_digest_run = {
+                    key: result.get(key)
+                    for key in (
+                        "id", "trigger", "status", "message_count", "extracted_count",
+                        "inserted_count", "error_code", "completed_at",
+                    )
+                }
+                log.info(
+                    "记忆任务完成: id=%s trigger=%s status=%s extracted=%s inserted=%s",
+                    result.get("id"), result.get("trigger"), result.get("status"),
+                    result.get("extracted_count"), result.get("inserted_count"),
+                )
+
+            now_cst = datetime.now(timezone(timedelta(hours=8)))
+            today = now_cst.strftime("%Y-%m-%d")
+            if 3 <= now_cst.hour < 4 and _last_heat_decay_date != today:
                 await loop.run_in_executor(bg_executor, run_heat_decay)
+                _last_heat_decay_date = today
         except asyncio.CancelledError:
             break
         except Exception as e:
-            log.error(f"每日任务异常: {e}")
-            await asyncio.sleep(1800)
+            log.exception("记忆任务调度器异常: %s", e)
+            await asyncio.sleep(300)
 
 
 def _process_pending_timers():
@@ -188,10 +187,8 @@ async def chat_completions(request: Request):
 
     loop = asyncio.get_event_loop()
     messages = body.get("messages", [])
-
     loop.run_in_executor(bg_executor, cancel_delay_on_user_message)
     loop.run_in_executor(bg_executor, update_jiwen_on_user_message)
-
     user_text = _extract_last_user_text(messages)
 
     busy = await loop.run_in_executor(bg_executor, get_active_busy)
@@ -210,7 +207,6 @@ async def chat_completions(request: Request):
     timer_status = await loop.run_in_executor(bg_executor, get_timer_status_for_context)
     if timer_status:
         full_context = full_context + "\n\n" + timer_status if full_context else timer_status
-
     if full_context and "messages" in body:
         body["messages"] = inject_context_to_messages(body["messages"], full_context)
 
@@ -219,10 +215,8 @@ async def chat_completions(request: Request):
         "Authorization": f"Bearer {cfg.UPSTREAM_API_KEY}",
         "Content-Type": "application/json",
     }
-
     if not body.get("model") and cfg.UPSTREAM_MODEL:
         body["model"] = cfg.UPSTREAM_MODEL
-
     is_stream = body.get("stream", False)
 
     if not is_stream:
@@ -243,10 +237,9 @@ async def chat_completions(request: Request):
                         if user_text:
                             loop.run_in_executor(bg_executor, analyze_and_update, user_text, clean_text)
                         return JSONResponse(resp_data, status_code=resp.status_code)
-                    else:
-                        loop.run_in_executor(bg_executor, update_jiwen_on_bot_reply)
-                        if user_text and bot_text:
-                            loop.run_in_executor(bg_executor, analyze_and_update, user_text, bot_text)
+                    loop.run_in_executor(bg_executor, update_jiwen_on_bot_reply)
+                    if user_text:
+                        loop.run_in_executor(bg_executor, analyze_and_update, user_text, bot_text)
             except Exception:
                 pass
             return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
@@ -320,7 +313,7 @@ async def proactive_check(request: Request):
 async def health(request: Request):
     return JSONResponse({
         "status": "ok",
-        "phase": "4-memory",
+        "phase": "4.5-memory-digest",
         "uptime": time.time() - _start_time,
         "scheduler_running": _scheduler_running,
         "timer_running": _timer_running,
@@ -333,7 +326,7 @@ async def status(request: Request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     supabase_status = await asyncio.to_thread(db.get_client_status)
     return JSONResponse({
-        "phase": "4-memory",
+        "phase": "4.5-memory-digest",
         "upstream_base_url": cfg.UPSTREAM_BASE_URL,
         "upstream_model": cfg.UPSTREAM_MODEL,
         "supabase": supabase_status,
@@ -342,7 +335,8 @@ async def status(request: Request):
         "scheduler_running": _scheduler_running,
         "timer_running": _timer_running,
         "daily_running": _daily_running,
-        "last_digest_date": _last_digest_date,
+        "last_digest_run": _last_digest_run,
+        "last_heat_decay_date": _last_heat_decay_date,
     })
 
 
@@ -366,7 +360,7 @@ async def lifespan(app):
         http2=True,
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
     )
-    log.info(f"网关启动 Phase 4 Memory | upstream={cfg.UPSTREAM_BASE_URL}")
+    log.info(f"网关启动 Phase 4.5 Memory Digest | upstream={cfg.UPSTREAM_BASE_URL}")
     scheduler_task = track_task(scheduler_loop())
     timer_task = track_task(timer_check_loop())
     daily_task = track_task(daily_task_loop())
@@ -391,6 +385,7 @@ _routes = [
     Route("/status", status, methods=["GET"]),
 ]
 _routes.extend(admin_api_routes)
+_routes.extend(memory_digest_routes)
 
 if os.path.isdir(_admin_dir):
     _routes.append(Mount("/admin", app=StaticFiles(directory=_admin_dir, html=True), name="admin"))
