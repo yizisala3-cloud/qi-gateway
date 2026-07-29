@@ -1,6 +1,6 @@
 // pages/digest.js - observable memory extraction operations
-import { gw, esc } from '../api.js?v=20260729-digest1';
-import { loading, empty, badge, toast, modal, confirm, delegate } from '../ui.js?v=20260729-digest1';
+import { gw, esc } from '../api.js?v=20260729-digest2';
+import { loading, empty, badge, toast, modal, confirm, delegate } from '../ui.js?v=20260729-digest2';
 
 function fmt(value) {
   if (!value) return '-';
@@ -29,6 +29,7 @@ function memoryCards(memories) {
 
 export default {
   busy: false,
+  modelReady: false,
 
   async mount(root) {
     this.root = root;
@@ -48,6 +49,7 @@ export default {
         <span>ℹ️</span>
         <div><strong>chat_messages is read-only.</strong> Preview calls the extraction model but does not write memories or advance the cursor. Execute writes pending memories and advances the cursor only after an atomic successful commit.</div>
       </div>
+      <div id="digest-config-warning"></div>
       <div class="toolbar">
         <div style="width:180px">
           <label for="digest-limit">Batch messages (1-100)</label>
@@ -55,8 +57,8 @@ export default {
         </div>
         <span style="flex:1"></span>
         <button class="btn btn-secondary" data-act="refresh">Refresh</button>
-        <button class="btn btn-soft" data-act="preview">Dry-run Preview</button>
-        <button class="btn btn-primary" data-act="execute">Execute & Save Pending</button>
+        <button class="btn btn-soft" data-act="preview" disabled>Dry-run Preview</button>
+        <button class="btn btn-primary" data-act="execute" disabled>Execute & Save Pending</button>
       </div>
       <div id="digest-summary">${loading()}</div>
       <div class="card mt16">
@@ -66,21 +68,33 @@ export default {
     `;
   },
 
+  syncControls() {
+    this.root.querySelectorAll('[data-act="preview"],[data-act="execute"]').forEach(button => {
+      button.disabled = this.busy || !this.modelReady;
+    });
+  },
+
   setBusy(value) {
     this.busy = value;
-    this.root.querySelectorAll('[data-act="preview"],[data-act="execute"]').forEach(button => {
-      button.disabled = value;
-    });
+    this.syncControls();
   },
 
   async load() {
     const summary = this.root.querySelector('#digest-summary');
     const runs = this.root.querySelector('#digest-runs');
+    const warning = this.root.querySelector('#digest-config-warning');
     summary.innerHTML = loading();
     runs.innerHTML = loading();
     try {
       const data = await gw('/admin/api/memory-digest/status');
       this.data = data;
+      this.modelReady = Boolean(data.analysis_configured);
+      this.syncControls();
+      warning.innerHTML = this.modelReady ? '' : `
+        <div class="banner banner-danger">
+          <span>⚠️</span>
+          <div><strong>Extraction model is not configured.</strong> Add ANALYSIS_API_KEY to the qi-gateway service environment and redeploy. Preview and Execute stay disabled until the server confirms readiness.</div>
+        </div>`;
       const cursor = data.cursor || {};
       summary.innerHTML = `
         <div class="grid grid-4">
@@ -98,6 +112,9 @@ export default {
       `;
       this.renderRuns(data.recent_runs || []);
     } catch (error) {
+      this.modelReady = false;
+      this.syncControls();
+      warning.innerHTML = '';
       summary.innerHTML = `<div class="banner banner-danger">${esc(error.message)}</div>`;
       runs.innerHTML = empty('Unable to read digest history');
     }
@@ -129,6 +146,10 @@ export default {
 
   async run(mode) {
     if (this.busy) return;
+    if (!this.modelReady) {
+      toast('ANALYSIS_API_KEY is not configured on qi-gateway', 'err');
+      return;
+    }
     const limit = Math.max(1, Math.min(100, Number(this.root.querySelector('#digest-limit').value) || 60));
     if (mode === 'execute') {
       const ok = await confirm(`Execute memory extraction for up to ${limit} unprocessed source messages? Extracted memories will be stored as pending.`);
