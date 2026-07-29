@@ -4,6 +4,7 @@ export const NAV = [
   ]},
   { title: '\u8BB0\u5FC6\u7CFB\u7EDF', items: [
     { key: 'memories', icon: '\u{1F9E9}', label: '\u8BB0\u5FC6\u7BA1\u7406' },
+    { key: 'digest', icon: '\u{1F9EA}', label: '\u603B\u7ED3\u4EFB\u52A1' },
     { key: 'persona', icon: '\u{1F4DD}', label: '\u4EBA\u8BBE' },
   ]},
   { title: '\u60C5\u7EEA\u5F15\u64CE', items: [
