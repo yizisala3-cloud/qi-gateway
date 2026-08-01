@@ -30,6 +30,10 @@ class Config:
     MEMORY_DIGEST_MAX_MESSAGES: int = int(os.getenv("MEMORY_DIGEST_MAX_MESSAGES", "60"))
     MEMORY_DIGEST_MAX_CHARS: int = int(os.getenv("MEMORY_DIGEST_MAX_CHARS", "12000"))
     MEMORY_DIGEST_IDLE_HOURS: float = float(os.getenv("MEMORY_DIGEST_IDLE_HOURS", "6"))
+    # OrangeChat request_memory tool. Keep this token separate from gateway and
+    # Supabase credentials so plugin access can be revoked independently.
+    MEMORY_PLUGIN_TOKEN: str = os.getenv("MEMORY_PLUGIN_TOKEN", "")
+    MEMORY_REQUEST_RATE_LIMIT: int = int(os.getenv("MEMORY_REQUEST_RATE_LIMIT", "6"))
 
     @property
     def supabase_server_key(self) -> str:

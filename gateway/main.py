@@ -27,6 +27,7 @@ from .memory_extract import run_scheduled_digest_if_due
 from .memory_heat import run_heat_decay
 from .admin_api import admin_api_routes
 from .memory_digest_api import memory_digest_routes
+from .memory_request_api import memory_request_routes
 from .model_routing import normalize_upstream_model
 from . import db
 from .timer import (
@@ -341,6 +342,7 @@ async def status(request: Request):
         "daily_running": _daily_running,
         "last_digest_run": _last_digest_run,
         "last_heat_decay_date": _last_heat_decay_date,
+        "memory_plugin_configured": bool(cfg.MEMORY_PLUGIN_TOKEN),
     })
 
 
@@ -390,6 +392,7 @@ _routes = [
 ]
 _routes.extend(admin_api_routes)
 _routes.extend(memory_digest_routes)
+_routes.extend(memory_request_routes)
 
 if os.path.isdir(_admin_dir):
     _routes.append(Mount("/admin", app=StaticFiles(directory=_admin_dir, html=True), name="admin"))

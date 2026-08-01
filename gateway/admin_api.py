@@ -76,6 +76,19 @@ _TABLES: dict[str, dict[str, Any]] = {
         "delete": False,
         "default_order": "created_at",
     },
+    "memory_requests": {
+        "read": {
+            "id", "assistant_id", "conversation_id", "source_message_id",
+            "content", "title", "tags", "importance", "reason", "status",
+            "source", "memory_id", "created_at", "reviewed_at", "reviewed_by",
+            "review_note",
+        },
+        "write": set(),
+        "insert": False,
+        "update": False,
+        "delete": False,
+        "default_order": "created_at",
+    },
 }
 
 

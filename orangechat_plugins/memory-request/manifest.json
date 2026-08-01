@@ -1,0 +1,85 @@
+{
+  "id": "com.orangechat.plugin.memory-request",
+  "name": "记忆申请",
+  "description": "让 AI 在确有长期价值时提交待用户审核的记忆申请。只能创建 pending 申请，不能自行批准或记录密码、密钥、支付信息和短暂无关内容。",
+  "version": "1.0.0",
+  "author": "qi-gateway",
+  "icon": "🧠",
+  "entry": "main.js",
+  "config": [
+    {
+      "name": "gateway_url",
+      "type": "string",
+      "label": "网关地址",
+      "description": "qi-gateway 的 HTTPS 地址，例如 https://example.com",
+      "required": true,
+      "placeholder": "https://example.com"
+    },
+    {
+      "name": "plugin_token",
+      "type": "string",
+      "label": "插件专用 Token",
+      "description": "与网关 MEMORY_PLUGIN_TOKEN 相同；不要填写 Supabase 密钥或聊天网关 Token",
+      "required": true,
+      "placeholder": "单独生成的长随机字符串"
+    },
+    {
+      "name": "assistant_id",
+      "type": "string",
+      "label": "Assistant ID",
+      "description": "当前橘瓣角色对应的 assistant_id",
+      "required": true,
+      "placeholder": "assistant UUID"
+    }
+  ],
+  "tools": [
+    {
+      "name": "request_memory",
+      "description": "申请长期记住一条信息。仅当信息对未来多次对话有明确长期价值时调用；不要记录密码、Token、支付信息、完整敏感原文、短暂情绪、一次性指令、普通寒暄或模型自行推测的事实。调用后只进入 pending，必须由用户审核才会生效。",
+      "parameters": [
+        {
+          "name": "content",
+          "type": "string",
+          "required": true,
+          "description": "希望长期记住的客观内容，使用简洁、中性、可独立理解的一到两句话"
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": true,
+          "description": "该信息为何对未来对话具有长期价值"
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "required": false,
+          "description": "简短标题"
+        },
+        {
+          "name": "tags",
+          "type": "string",
+          "required": false,
+          "description": "1-5 个逗号分隔的关键词"
+        },
+        {
+          "name": "importance",
+          "type": "integer",
+          "required": false,
+          "description": "长期重要度 1-10，默认 5"
+        },
+        {
+          "name": "conversation_id",
+          "type": "string",
+          "required": false,
+          "description": "当前会话 ID；不知道时不要编造"
+        },
+        {
+          "name": "source_message_id",
+          "type": "integer",
+          "required": false,
+          "description": "Supabase chat_messages 中的来源消息 ID；不知道时不要编造"
+        }
+      ]
+    }
+  ]
+}

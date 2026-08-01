@@ -62,6 +62,15 @@ class DigestPipelineError(RuntimeError):
         self.model_output = model_output
 
 
+def _analysis_configured() -> bool:
+    """Return whether the extraction and embedding provider is usable."""
+    return bool(
+        cfg.ANALYSIS_BASE_URL.strip()
+        and cfg.ANALYSIS_API_KEY.strip()
+        and cfg.ANALYSIS_MODEL.strip()
+    )
+
+
 def _client():
     client = get_client()
     if not client:
@@ -270,8 +279,11 @@ def _parse_model_output(text: str) -> list[dict[str, Any]]:
 def _extract_memories(conversation: str) -> tuple[list[dict[str, Any]], str]:
     if not conversation.strip():
         return [], '{"memories":[]}'
-    if not cfg.ANALYSIS_API_KEY:
-        raise DigestPipelineError("analysis_not_configured", "ANALYSIS_API_KEY is not configured")
+    if not _analysis_configured():
+        raise DigestPipelineError(
+            "analysis_not_configured",
+            "The analysis model provider is not fully configured",
+        )
 
     url = f"{cfg.ANALYSIS_BASE_URL.rstrip('/')}/chat/completions"
     try:
@@ -301,15 +313,25 @@ def _extract_memories(conversation: str) -> tuple[list[dict[str, Any]], str]:
         raise DigestPipelineError("model_http_error", f"Memory extraction model returned HTTP {response.status_code}", excerpt)
 
     try:
-        output = response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+        payload = response.json()
+        output = payload["choices"][0]["message"]["content"]
+        if not isinstance(output, str) or not output.strip():
+            raise ValueError("model content is empty")
     except Exception as exc:
-        raise DigestPipelineError("model_response_error", "Memory extraction response shape is invalid", response.text[:1500]) from exc
+        raise DigestPipelineError(
+            "model_response_error",
+            "Memory extraction response is not valid OpenAI-compatible JSON",
+            response.text[:1500],
+        ) from exc
     return _parse_model_output(output), output
 
 
-def _get_embedding_sync(text: str) -> list[float] | None:
-    if not cfg.ANALYSIS_API_KEY:
-        return None
+def _get_embedding_sync(text: str) -> list[float]:
+    if not _analysis_configured():
+        raise DigestPipelineError(
+            "analysis_not_configured",
+            "The analysis model provider is not fully configured",
+        )
     url = f"{cfg.ANALYSIS_BASE_URL.rstrip('/')}/embeddings"
     try:
         with httpx.Client(timeout=20.0) as client:
@@ -318,12 +340,30 @@ def _get_embedding_sync(text: str) -> list[float] | None:
                 headers={"Authorization": f"Bearer {cfg.ANALYSIS_API_KEY}"},
                 json={"model": EMBEDDING_MODEL, "input": text[:2000]},
             )
-        if response.status_code == 200:
-            return response.json()["data"][0]["embedding"]
-        log.warning("Embedding returned HTTP %s", response.status_code)
     except Exception as exc:
-        log.warning("Embedding request failed: %s", type(exc).__name__)
-    return None
+        raise DigestPipelineError(
+            "embedding_request_failed",
+            f"Embedding request failed: {type(exc).__name__}",
+        ) from exc
+
+    if response.status_code != 200:
+        raise DigestPipelineError(
+            "embedding_http_error",
+            f"Embedding model returned HTTP {response.status_code}",
+            response.text[:1500],
+        )
+
+    try:
+        embedding = response.json()["data"][0]["embedding"]
+        if not isinstance(embedding, list) or not embedding:
+            raise ValueError("embedding is empty")
+        return [float(value) for value in embedding]
+    except Exception as exc:
+        raise DigestPipelineError(
+            "embedding_response_error",
+            "Embedding response shape is invalid",
+            response.text[:1500],
+        ) from exc
 
 
 def _mark_stale_runs() -> None:
@@ -389,6 +429,13 @@ def run_memory_digest(trigger: str, mode: str, max_messages: int | None = None) 
         raise ValueError("unsupported digest trigger")
     if mode not in {"preview", "execute"}:
         raise ValueError("unsupported digest mode")
+    if not _analysis_configured():
+        # This check deliberately happens before any database access. Missing
+        # provider configuration is an operational state, not a failed run.
+        raise DigestPipelineError(
+            "analysis_not_configured",
+            "The analysis model provider is not fully configured",
+        )
 
     batch_size = max_messages or cfg.MEMORY_DIGEST_MAX_MESSAGES or DEFAULT_BATCH_SIZE
     batch_size = max(1, min(MAX_BATCH_SIZE, int(batch_size)))
@@ -444,8 +491,7 @@ def run_memory_digest(trigger: str, mode: str, max_messages: int | None = None) 
             for memory in memories:
                 item = dict(memory)
                 embedding = _get_embedding_sync(item["content"])
-                if embedding:
-                    item["embedding"] = embedding
+                item["embedding"] = embedding
                 enriched.append(item)
 
             commit_response = _client().rpc(
@@ -542,7 +588,7 @@ def get_digest_status() -> dict[str, Any]:
         "latest_message_at": latest.get("created_at") if latest else None,
         "backlog_count": int(count_response.count or 0),
         "analysis_model": cfg.ANALYSIS_MODEL,
-        "analysis_configured": bool(cfg.ANALYSIS_API_KEY),
+        "analysis_configured": _analysis_configured(),
         "recent_runs": list_digest_runs(20),
     }
 
@@ -584,6 +630,10 @@ def _daily_run_exists(assistant_id: str, now_cst: datetime) -> bool:
 
 
 def run_scheduled_digest_if_due() -> dict[str, Any] | None:
+    # Do not query the database or create audit rows every scheduler tick when
+    # the provider is intentionally not configured.
+    if not _analysis_configured():
+        return None
     try:
         _mark_stale_runs()
         status = get_digest_status()

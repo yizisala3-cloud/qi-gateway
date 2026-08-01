@@ -10,7 +10,12 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .config import cfg
-from .memory_extract import get_digest_status, list_digest_runs, run_memory_digest
+from .memory_extract import (
+    DigestPipelineError,
+    get_digest_status,
+    list_digest_runs,
+    run_memory_digest,
+)
 
 log = logging.getLogger("gateway.memory_digest_api")
 
@@ -65,6 +70,12 @@ async def _run_digest(request: Request, trigger: str, mode: str):
         return JSONResponse(result)
     except ValueError as exc:
         return _error(str(exc), 400)
+    except DigestPipelineError as exc:
+        status = 503 if exc.code == "analysis_not_configured" else 422
+        return JSONResponse(
+            {"error": str(exc), "error_code": exc.code},
+            status_code=status,
+        )
     except Exception as exc:
         log.exception("Memory digest request failed")
         return _error(f"{type(exc).__name__}: {str(exc)[:500]}", 500)
