@@ -28,6 +28,7 @@ from .memory_heat import run_heat_decay
 from .admin_api import admin_api_routes
 from .memory_digest_api import memory_digest_routes
 from .memory_request_api import memory_request_routes
+from .memory_review_api import memory_review_routes
 from .model_routing import normalize_upstream_model
 from . import db
 from .timer import (
@@ -393,9 +394,11 @@ _routes = [
 _routes.extend(admin_api_routes)
 _routes.extend(memory_digest_routes)
 _routes.extend(memory_request_routes)
+_routes.extend(memory_review_routes)
 
 if os.path.isdir(_admin_dir):
     _routes.append(Mount("/admin", app=StaticFiles(directory=_admin_dir, html=True), name="admin"))
     log.info(f"Admin panel mounted at /admin (dir={_admin_dir})")
 
 app = Starlette(routes=_routes, lifespan=lifespan)
+

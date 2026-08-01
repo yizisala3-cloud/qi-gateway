@@ -56,12 +56,13 @@
 | `/v1/chat/completions` | POST | 核心聊天接口，OpenAI 兼容 |
 | `/v1/models` | GET | 模型列表 |
 | `/v1/memory-requests` | POST | 橘瓣插件提交 pending 记忆申请（插件专用 Token） |
+| `/admin/api/memory-requests/{id}/review` | POST | Dashboard 通过或拒绝记忆申请（网关 Token） |
 | `/health` | GET | 健康检查（无需鉴权） |
 | `/status` | GET | 网关状态（需鉴权） |
 
 ## 橘瓣记忆申请插件
 
-插件源码位于 `orangechat_plugins/memory-request/`。AI 调用 `request_memory` 后，插件只通过 HTTP 调用网关；Supabase 服务端密钥始终留在网关环境变量中。重复申请由数据库原子去重，所有新申请均为 `pending`，不会进入正常记忆召回。
+插件源码位于 `orangechat_plugins/memory-request/`。AI 调用 `request_memory` 后，插件只通过 HTTP 调用网关；Supabase 服务端密钥始终留在网关环境变量中。重复申请由数据库原子去重，所有新申请均为 `pending`，不会进入正常记忆召回。管理员可以在 Dashboard 的“记忆申请”页面编辑后通过或拒绝；通过操作会在数据库事务内写入一条 `verified` 正式记忆，拒绝记录则留存审计。
 
 ## 开发
 
@@ -71,3 +72,4 @@ cp .env.example .env
 # 编辑 .env 填入实际值
 uvicorn gateway.main:app --reload --port 8000
 ```
+
