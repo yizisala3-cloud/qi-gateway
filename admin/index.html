@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>qi-dashboard</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x2728;</text></svg>">
+<link rel="stylesheet" href="/admin/css/style.css?v=20260729-digest2">
+</head>
+<body>
+<div class="app" id="app">
+  <div class="login-page" id="login-page" style="display:none">
+    <div class="login-card">
+      <div class="login-logo">&#x2728;</div><h2>qi-dashboard</h2>
+      <p class="muted">Enter gateway token to continue</p>
+      <input type="password" id="login-input" placeholder="Token" autocomplete="off">
+      <button class="btn btn-primary" id="login-btn" style="width:100%;margin-top:12px">Enter</button>
+      <p class="login-error" id="login-error"></p>
+    </div>
+  </div>
+  <div class="layout" id="layout" style="display:none">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-head"><span class="logo">&#x2728;</span><div><h1>qi-dashboard</h1><div class="sub">memory admin</div></div></div>
+      <nav class="sidebar-nav" id="sidebar-nav"></nav>
+      <div class="sidebar-foot"><span id="status-dot" class="badge badge-muted">offline</span><button class="btn btn-xs btn-ghost" id="theme-btn" title="Toggle theme">&#x1F319;</button></div>
+    </aside>
+    <div class="main">
+      <header class="topbar"><div class="flex center gap8"><button class="btn btn-icon btn-ghost menu-btn" id="menu-btn">&#x2630;</button><div><div class="crumb" id="page-crumb">qi-dashboard</div><div class="title" id="page-title">Dashboard</div></div></div></header>
+      <main class="content" id="content"></main>
+    </div>
+  </div>
+</div>
+<script type="module" src="/admin/js/app.js?v=20260729-digest2"></script>
+</body>
+</html>
+
