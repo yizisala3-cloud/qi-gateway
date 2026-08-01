@@ -2,6 +2,23 @@
 -- Approval creates or verifies a durable memory; rejection retains the request
 -- for audit. chat_messages is never modified.
 
+-- The original memories table limits source to a fixed allowlist. Extend it
+-- explicitly so an approved tool request can be persisted without weakening
+-- the other source values.
+alter table public.memories
+    drop constraint if exists memories_source_check;
+
+alter table public.memories
+    add constraint memories_source_check
+    check (source in (
+        'auto_extract',
+        'daily_digest',
+        'manual',
+        'dream',
+        'import',
+        'ai_tool_request'
+    ));
+
 -- A reviewed duplicate is retained as `merged` and may share a content hash
 -- with the original application. Pending/approved applications remain unique.
 drop index if exists public.memory_requests_active_content_idx;

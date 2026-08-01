@@ -56,6 +56,8 @@ class MemoryReviewMigrationContractTests(unittest.TestCase):
     def test_review_is_atomic_private_and_audited(self):
         self.assertIn("for update", self.sql)
         self.assertIn("insert into public.memories", self.sql)
+        self.assertIn("drop constraint if exists memories_source_check", self.sql)
+        self.assertIn("'ai_tool_request'", self.sql)
         self.assertIn("verified", self.sql)
         self.assertIn("reviewed_at = now()", self.sql)
         self.assertIn("reviewed_by", self.sql)
