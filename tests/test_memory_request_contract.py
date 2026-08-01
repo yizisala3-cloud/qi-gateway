@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "supabase" / "migrations" / "20260802020000_create_memory_requests.sql"
 REVIEW_MIGRATION = ROOT / "supabase" / "migrations" / "20260802030000_review_memory_requests.sql"
+INDEX_MIGRATION = ROOT / "supabase" / "migrations" / "20260802040000_index_memory_request_memory.sql"
 MANIFEST = ROOT / "orangechat_plugins" / "memory-request" / "manifest.json"
 MAIN_JS = ROOT / "orangechat_plugins" / "memory-request" / "main.js"
 REVIEW_PAGE = ROOT / "admin" / "js" / "pages" / "memory_requests.js"
@@ -70,6 +71,15 @@ class MemoryReviewMigrationContractTests(unittest.TestCase):
         self.assertIn("v_status := 'merged'", self.sql)
         self.assertIn("status in ('approved', 'merged')", self.sql)
         self.assertIn("where status in ('pending', 'approved')", self.sql)
+
+
+class MemoryRequestIndexMigrationContractTests(unittest.TestCase):
+    def test_memory_foreign_key_has_a_covering_partial_index(self):
+        sql = INDEX_MIGRATION.read_text(encoding="utf-8").casefold()
+        self.assertIn("memory_requests_memory_id_idx", sql)
+        self.assertIn("on public.memory_requests (memory_id)", sql)
+        self.assertIn("where memory_id is not null", sql)
+        self.assertNotIn("chat_messages", sql)
 
 
 class OrangeChatPluginContractTests(unittest.TestCase):
