@@ -27,6 +27,7 @@ from .memory_extract import run_scheduled_digest_if_due
 from .memory_heat import run_heat_decay
 from .admin_api import admin_api_routes
 from .memory_digest_api import memory_digest_routes
+from .model_routing import normalize_upstream_model
 from . import db
 from .timer import (
     parse_and_strip_tags, register_tags, cancel_delay_on_user_message,
@@ -215,7 +216,10 @@ async def chat_completions(request: Request):
         "Authorization": f"Bearer {cfg.UPSTREAM_API_KEY}",
         "Content-Type": "application/json",
     }
-    if not body.get("model") and cfg.UPSTREAM_MODEL:
+    requested_model = body.get("model")
+    if isinstance(requested_model, str) and requested_model:
+        body["model"] = normalize_upstream_model(requested_model)
+    elif cfg.UPSTREAM_MODEL:
         body["model"] = cfg.UPSTREAM_MODEL
     is_stream = body.get("stream", False)
 
