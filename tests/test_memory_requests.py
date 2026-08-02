@@ -97,6 +97,8 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(first["content"], "用户希望以后尽量安排安静的清晨活动。")
         self.assertEqual(first["tags"], ["偏好", "清晨", "安静"])
         self.assertEqual(first["importance"], 7)
+        self.assertEqual(first["update_mode"], "append")
+        self.assertIsNone(first["memory_key"])
         self.assertEqual(len(first["content_hash"]), 64)
         self.assertEqual(first["content_hash"], second["content_hash"])
         self.assertEqual(first["idempotency_key"], second["idempotency_key"])
@@ -118,6 +120,26 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises(MemoryRequestError) as raised:
             validate_memory_request(_payload(), "bad key")
         self.assertEqual(raised.exception.code, "invalid_idempotency_key")
+
+    def test_replace_mode_requires_and_normalizes_a_stable_memory_key(self):
+        result = validate_memory_request(_payload(
+            content="qi-gateway 当前代码进度为 60%。",
+            update_mode="REPLACE",
+            memory_key=" Project.QI-Gateway.Progress ",
+        ))
+
+        self.assertEqual(result["update_mode"], "replace")
+        self.assertEqual(result["memory_key"], "project.qi-gateway.progress")
+
+        with self.assertRaises(MemoryRequestError):
+            validate_memory_request(_payload(update_mode="replace"))
+        with self.assertRaises(MemoryRequestError):
+            validate_memory_request(_payload(memory_key="project.progress"))
+        with self.assertRaises(MemoryRequestError):
+            validate_memory_request(_payload(
+                update_mode="replace",
+                memory_key="包含中文的键",
+            ))
 
 
 class PersistenceTests(unittest.TestCase):
@@ -141,8 +163,10 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(result["status"], "pending")
         self.assertTrue(result["created"])
         self.assertFalse(result["deduplicated"])
-        self.assertEqual(client.rpc_name, "create_memory_request")
+        self.assertEqual(client.rpc_name, "create_memory_request_v2")
         self.assertEqual(client.rpc_payload["p_rate_limit"], 6)
+        self.assertEqual(client.rpc_payload["p_update_mode"], "append")
+        self.assertIsNone(client.rpc_payload["p_memory_key"])
         self.assertNotIn("plugin_token", client.rpc_payload)
         self.assertNotIn("service_role", " ".join(client.rpc_payload))
         self.assertEqual(client.table_names, [])
@@ -229,3 +253,4 @@ class PersistenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -2,7 +2,7 @@
   "id": "com.orangechat.plugin.memory-request",
   "name": "记忆申请",
   "description": "让 AI 在确有长期价值时提交待用户审核的记忆申请。只能创建 pending 申请，不能自行批准或记录密码、密钥、支付信息和短暂无关内容。",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "qi-gateway",
   "icon": "🧠",
   "entry": "main.js",
@@ -35,7 +35,7 @@
   "tools": [
     {
       "name": "request_memory",
-      "description": "申请长期记住一条信息。仅当信息对未来多次对话有明确长期价值时调用；不要记录密码、Token、支付信息、完整敏感原文、短暂情绪、一次性指令、普通寒暄或模型自行推测的事实。调用后只进入 pending，必须由用户审核才会生效。",
+      "description": "申请长期记住一条信息。仅当信息对未来多次对话有明确长期价值时调用；不要记录密码、Token、支付信息、完整敏感原文、短暂情绪、一次性指令、普通寒暄或模型自行推测的事实。进度、状态、位置等会变化的信息应使用 replace 和稳定 memory_key；普通相似内容不要擅自覆盖。调用后只进入 pending，必须由用户审核才会生效。",
       "parameters": [
         {
           "name": "content",
@@ -68,6 +68,18 @@
           "description": "长期重要度 1-10，默认 5"
         },
         {
+          "name": "update_mode",
+          "type": "string",
+          "required": false,
+          "description": "默认 append；仅当这是进度、状态、位置等同一可变事实的新版本时填写 replace"
+        },
+        {
+          "name": "memory_key",
+          "type": "string",
+          "required": false,
+          "description": "replace 时必填的稳定主题键，3-120 位小写 ASCII，例如 project.qi-gateway.progress；同一事实后续更新必须沿用完全相同的键"
+        },
+        {
           "name": "conversation_id",
           "type": "string",
           "required": false,
@@ -83,3 +95,4 @@
     }
   ]
 }
+

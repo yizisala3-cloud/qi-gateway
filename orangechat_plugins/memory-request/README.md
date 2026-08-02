@@ -4,7 +4,7 @@
 
 ## 安装前准备
 
-1. 按文件名顺序应用 `supabase/migrations/20260802010000` 至 `20260802040000` 的 4 个记忆迁移（生产库已完成）。
+1. 按文件名顺序应用 `supabase/migrations/` 中的记忆迁移；版本替代功能需要 `20260802070000_memory_supersession.sql`。
 2. 在 qi-gateway 服务端生成并配置独立的 `MEMORY_PLUGIN_TOKEN`。
 3. 部署包含 `/v1/memory-requests` 端点的新版本网关。
 4. 将本目录作为橘瓣插件导入，填写：
@@ -26,4 +26,11 @@ Authorization: Bearer {plugin_token}
 ```
 
 重复内容会被幂等去重。成功响应只表示申请进入审核队列，不表示记忆已经生效。
+
+对于进度、状态、位置等会变化的事实，使用：
+
+- `update_mode=replace`
+- 稳定且可复用的 `memory_key`，例如 `project.qi-gateway.progress`
+
+同一事实后续更新必须沿用相同的 `memory_key`。用户审核通过后，新版本生效，旧版本软失效但仍保留审计与恢复关系。普通相似内容不要使用 `replace`；它们应作为独立申请或由用户决定是否合并。
 

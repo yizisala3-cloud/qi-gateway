@@ -20,6 +20,7 @@ MAX_CONTENT_LENGTH = 600
 MAX_REASON_LENGTH = 500
 MAX_TITLE_LENGTH = 100
 MAX_IDENTIFIER_LENGTH = 160
+MAX_MEMORY_KEY_LENGTH = 120
 MAX_TAGS = 5
 MAX_TAG_LENGTH = 24
 
@@ -116,6 +117,37 @@ def _clean_source_message_id(value: Any) -> int | None:
     return source_message_id
 
 
+def _clean_memory_key(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str):
+        raise MemoryRequestError("invalid_payload", "memory_key must be a string")
+    memory_key = re.sub(r"\s+", "-", value.strip().casefold())
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._:/-]{2,119}", memory_key):
+        raise MemoryRequestError(
+            "invalid_payload",
+            "memory_key must be 3-120 lowercase ASCII letters, numbers, or ._:/-",
+        )
+    return memory_key
+
+
+def _clean_update_mode(value: Any, memory_key: str | None) -> str:
+    update_mode = str(value or "append").strip().casefold()
+    if update_mode not in {"append", "replace"}:
+        raise MemoryRequestError("invalid_payload", "update_mode must be append or replace")
+    if update_mode == "replace" and not memory_key:
+        raise MemoryRequestError(
+            "invalid_payload",
+            "memory_key is required when update_mode is replace",
+        )
+    if update_mode == "append" and memory_key:
+        raise MemoryRequestError(
+            "invalid_payload",
+            "memory_key is only allowed when update_mode is replace",
+        )
+    return update_mode
+
+
 def validate_memory_request(payload: Any, idempotency_key: str = "") -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise MemoryRequestError("invalid_payload", "JSON body must be an object")
@@ -129,6 +161,8 @@ def validate_memory_request(payload: Any, idempotency_key: str = "") -> dict[str
         "title",
         "tags",
         "importance",
+        "memory_key",
+        "update_mode",
     }
     unknown = set(payload) - allowed
     if unknown:
@@ -171,6 +205,8 @@ def validate_memory_request(payload: Any, idempotency_key: str = "") -> dict[str
         maximum=MAX_TITLE_LENGTH,
     )
     content_hash = hashlib.sha256(content.casefold().encode("utf-8")).hexdigest()
+    memory_key = _clean_memory_key(payload.get("memory_key"))
+    update_mode = _clean_update_mode(payload.get("update_mode"), memory_key)
 
     supplied_key = str(idempotency_key or "").strip()
     if supplied_key:
@@ -194,6 +230,8 @@ def validate_memory_request(payload: Any, idempotency_key: str = "") -> dict[str
         "title": title or None,
         "tags": _clean_tags(payload.get("tags")),
         "importance": _clean_importance(payload.get("importance")),
+        "memory_key": memory_key,
+        "update_mode": update_mode,
         "content_hash": content_hash,
         "idempotency_key": normalized_key,
     }
@@ -275,9 +313,11 @@ def create_memory_request(payload: Any, idempotency_key: str = "") -> dict[str, 
         "p_content_hash": request_data["content_hash"],
         "p_idempotency_key": request_data["idempotency_key"],
         "p_rate_limit": max(1, min(60, int(cfg.MEMORY_REQUEST_RATE_LIMIT))),
+        "p_memory_key": request_data["memory_key"],
+        "p_update_mode": request_data["update_mode"],
     }
     try:
-        response = client.rpc("create_memory_request", rpc_payload).execute()
+        response = client.rpc("create_memory_request_v2", rpc_payload).execute()
     except Exception as exc:
         if "memory_request_rate_limited" in str(exc).casefold():
             raise MemoryRequestError(
@@ -299,4 +339,7 @@ def create_memory_request(payload: Any, idempotency_key: str = "") -> dict[str, 
         "created_at": request_row.get("created_at"),
         "created": bool(result.get("created")),
         "deduplicated": not bool(result.get("created")),
+        "memory_key": request_row.get("memory_key"),
+        "update_mode": request_row.get("update_mode") or "append",
     }
+

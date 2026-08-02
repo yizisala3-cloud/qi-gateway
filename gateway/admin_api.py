@@ -22,7 +22,8 @@ _TABLES: dict[str, dict[str, Any]] = {
         "read": {
             "id", "content", "title", "tags", "heat", "importance", "layer",
             "source", "verified", "is_active", "last_recalled_at", "recall_count",
-            "emotion_weight", "created_at",
+            "emotion_weight", "created_at", "memory_key", "supersedes_memory_id",
+            "superseded_by_memory_id", "superseded_at",
         },
         "write": {
             "content", "title", "tags", "heat", "importance", "layer", "source",
@@ -81,7 +82,7 @@ _TABLES: dict[str, dict[str, Any]] = {
             "id", "assistant_id", "conversation_id", "source_message_id",
             "content", "title", "tags", "importance", "reason", "status",
             "source", "memory_id", "created_at", "reviewed_at", "reviewed_by",
-            "review_note",
+            "review_note", "memory_key", "update_mode",
         },
         "write": set(),
         "insert": False,
@@ -312,3 +313,4 @@ admin_api_routes = [
     Route("/admin/api/data/{table:str}", admin_collection, methods=["GET", "POST"]),
     Route("/admin/api/data/{table:str}/{row_id:int}", admin_item, methods=["GET", "PATCH", "DELETE"]),
 ]
+

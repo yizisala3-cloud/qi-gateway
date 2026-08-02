@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "supabase" / "migrations" / "20260802020000_create_memory_requests.sql"
 REVIEW_MIGRATION = ROOT / "supabase" / "migrations" / "20260802030000_review_memory_requests.sql"
 INDEX_MIGRATION = ROOT / "supabase" / "migrations" / "20260802040000_index_memory_request_memory.sql"
+SUPERSESSION_MIGRATION = ROOT / "supabase" / "migrations" / "20260802070000_memory_supersession.sql"
 MANIFEST = ROOT / "orangechat_plugins" / "memory-request" / "manifest.json"
 MAIN_JS = ROOT / "orangechat_plugins" / "memory-request" / "main.js"
 REVIEW_PAGE = ROOT / "admin" / "js" / "pages" / "memory_requests.js"
@@ -82,6 +83,37 @@ class MemoryRequestIndexMigrationContractTests(unittest.TestCase):
         self.assertNotIn("chat_messages", sql)
 
 
+class MemorySupersessionMigrationContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = SUPERSESSION_MIGRATION.read_text(encoding="utf-8").casefold()
+
+    def test_mutable_fact_has_one_active_version_and_soft_links(self):
+        self.assertIn("memories_active_memory_key_idx", self.sql)
+        self.assertIn("where memory_key is not null", self.sql)
+        self.assertIn("supersedes_memory_id", self.sql)
+        self.assertIn("superseded_by_memory_id", self.sql)
+        self.assertIn("superseded_at", self.sql)
+        self.assertIn("is_active = false", self.sql)
+        self.assertNotIn("delete from public.memories", self.sql)
+
+    def test_review_is_atomic_locked_and_rejects_stale_updates(self):
+        self.assertIn("review_memory_request_v2", self.sql)
+        self.assertIn("pg_advisory_xact_lock", self.sql)
+        self.assertIn("for update", self.sql)
+        self.assertIn("memory_request_stale_update", self.sql)
+
+    def test_new_rpcs_are_server_only_and_history_is_read_only(self):
+        self.assertIn("create_memory_request_v2", self.sql)
+        self.assertIn("to service_role", self.sql)
+        self.assertNotIn("to authenticated;", self.sql)
+        executable_sql = "\n".join(
+            line for line in self.sql.splitlines()
+            if not line.lstrip().startswith("--")
+        )
+        self.assertNotIn("chat_messages", executable_sql)
+
+
 class OrangeChatPluginContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -106,6 +138,17 @@ class OrangeChatPluginContractTests(unittest.TestCase):
         self.assertIn("pending", description)
         self.assertIn("用户审核", description)
 
+    def test_tool_supports_explicit_mutable_fact_replacement(self):
+        parameters = {
+            item["name"]: item
+            for item in self.manifest["tools"][0]["parameters"]
+        }
+        self.assertIn("update_mode", parameters)
+        self.assertIn("memory_key", parameters)
+        self.assertIn("payload.update_mode", self.main_js)
+        self.assertIn("payload.memory_key", self.main_js)
+        self.assertIn("replace", self.manifest["tools"][0]["description"])
+
 
 class MemoryReviewDashboardContractTests(unittest.TestCase):
     @classmethod
@@ -118,6 +161,8 @@ class MemoryReviewDashboardContractTests(unittest.TestCase):
         self.assertIn("/admin/api/memory-requests/", self.page)
         self.assertIn("action: 'approve'", self.page)
         self.assertIn("action: 'reject'", self.page)
+        self.assertIn("review-update-mode", self.page)
+        self.assertIn("review-memory-key", self.page)
 
     def test_dashboard_never_directly_mutates_request_rows(self):
         self.assertNotIn("update('memory_requests'", self.page)

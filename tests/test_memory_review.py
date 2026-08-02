@@ -59,6 +59,26 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(review["importance"], 8)
         self.assertEqual(len(review["content_hash"]), 64)
         self.assertEqual(review["review_note"], "已核对")
+        self.assertIsNone(review["update_mode"])
+        self.assertIsNone(review["memory_key"])
+
+    def test_replace_review_requires_a_stable_key(self):
+        review = validate_review(12, {
+            "action": "approve",
+            "content": "qi-gateway 当前代码进度为 60%。",
+            "importance": 7,
+            "update_mode": "replace",
+            "memory_key": "Project.QI-Gateway.Progress",
+        })
+        self.assertEqual(review["update_mode"], "replace")
+        self.assertEqual(review["memory_key"], "project.qi-gateway.progress")
+
+        with self.assertRaises(MemoryRequestError):
+            validate_review(12, {
+                "action": "approve",
+                "content": "有效记忆内容",
+                "update_mode": "replace",
+            })
 
     def test_reject_does_not_accept_memory_edits(self):
         review = validate_review("9", {"action": "reject", "review_note": "不够稳定"})
@@ -102,10 +122,12 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(result["memory_id"], 77)
         self.assertEqual(result["status"], "approved")
         self.assertTrue(result["changed"])
-        self.assertEqual(client.rpc_name, "review_memory_request")
+        self.assertEqual(client.rpc_name, "review_memory_request_v2")
         self.assertEqual(client.rpc_payload["p_request_id"], 42)
         self.assertEqual(client.rpc_payload["p_action"], "approve")
         self.assertEqual(client.rpc_payload["p_reviewed_by"], "gateway_admin")
+        self.assertIsNone(client.rpc_payload["p_update_mode"])
+        self.assertIsNone(client.rpc_payload["p_memory_key"])
 
     def test_reject_calls_same_atomic_rpc_without_memory_fields(self):
         client = _Client({
@@ -148,6 +170,24 @@ class PersistenceTests(unittest.TestCase):
                         review_memory_request(8, {"action": "reject"})
                 self.assertEqual(raised.exception.code, code)
                 self.assertEqual(raised.exception.status_code, status)
+
+    def test_maps_stale_mutable_fact_update_to_conflict(self):
+        client = _Client(error=RuntimeError("memory_request_stale_update"))
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+        ):
+            with self.assertRaises(MemoryRequestError) as raised:
+                review_memory_request(8, {
+                    "action": "approve",
+                    "content": "qi-gateway 当前代码进度为 50%。",
+                    "importance": 7,
+                    "update_mode": "replace",
+                    "memory_key": "project.qi-gateway.progress",
+                })
+
+        self.assertEqual(raised.exception.code, "stale_update")
+        self.assertEqual(raised.exception.status_code, 409)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from typing import Any
 from .config import cfg
 from .db import get_client
 from .memory_requests import MemoryRequestError
+from .memory_requests import _clean_memory_key
 
 
 def _server_writes_allowed() -> bool:
@@ -67,7 +68,10 @@ def validate_review(request_id: Any, payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise MemoryRequestError("invalid_review", "JSON body must be an object")
 
-    allowed = {"action", "content", "title", "tags", "importance", "review_note"}
+    allowed = {
+        "action", "content", "title", "tags", "importance", "review_note",
+        "memory_key", "update_mode",
+    }
     unknown = set(payload) - allowed
     if unknown:
         raise MemoryRequestError(
@@ -80,7 +84,9 @@ def validate_review(request_id: Any, payload: Any) -> dict[str, Any]:
 
     review_note = _text(payload.get("review_note"), "review_note", 500)
     if action == "reject":
-        if any(key in payload for key in ("content", "title", "tags", "importance")):
+        if any(key in payload for key in (
+            "content", "title", "tags", "importance", "memory_key", "update_mode",
+        )):
             raise MemoryRequestError(
                 "invalid_review",
                 "rejected applications cannot include memory edits",
@@ -94,11 +100,37 @@ def validate_review(request_id: Any, payload: Any) -> dict[str, Any]:
             "importance": None,
             "content_hash": None,
             "review_note": review_note or None,
+            "memory_key": None,
+            "update_mode": None,
         }
 
     content = _text(payload.get("content"), "content", 600, required=True)
     title = _text(payload.get("title"), "title", 100)
     importance = _importance(payload.get("importance", 5))
+    memory_key = None
+    if "memory_key" in payload:
+        try:
+            memory_key = _clean_memory_key(payload.get("memory_key"))
+        except MemoryRequestError as exc:
+            raise MemoryRequestError("invalid_review", str(exc)) from exc
+    update_mode = None
+    if "update_mode" in payload:
+        update_mode = str(payload.get("update_mode") or "").strip().casefold()
+        if update_mode not in {"append", "replace"}:
+            raise MemoryRequestError(
+                "invalid_review",
+                "update_mode must be append or replace",
+            )
+        if update_mode == "replace" and not memory_key:
+            raise MemoryRequestError(
+                "invalid_review",
+                "memory_key is required when update_mode is replace",
+            )
+        if update_mode == "append" and memory_key:
+            raise MemoryRequestError(
+                "invalid_review",
+                "memory_key is only allowed when update_mode is replace",
+            )
     return {
         "request_id": normalized_id,
         "action": action,
@@ -108,6 +140,8 @@ def validate_review(request_id: Any, payload: Any) -> dict[str, Any]:
         "importance": importance,
         "content_hash": hashlib.sha256(content.casefold().encode("utf-8")).hexdigest(),
         "review_note": review_note or None,
+        "memory_key": memory_key,
+        "update_mode": update_mode,
     }
 
 
@@ -146,9 +180,11 @@ def review_memory_request(request_id: Any, payload: Any) -> dict[str, Any]:
         "p_content_hash": review["content_hash"],
         "p_reviewed_by": "gateway_admin",
         "p_review_note": review["review_note"],
+        "p_memory_key": review["memory_key"],
+        "p_update_mode": review["update_mode"],
     }
     try:
-        response = client.rpc("review_memory_request", rpc_payload).execute()
+        response = client.rpc("review_memory_request_v2", rpc_payload).execute()
     except Exception as exc:
         message = str(exc).casefold()
         if "memory_request_not_found" in message:
@@ -157,6 +193,12 @@ def review_memory_request(request_id: Any, payload: Any) -> dict[str, Any]:
             raise MemoryRequestError(
                 "request_not_pending",
                 "memory application has already been reviewed",
+                409,
+            ) from exc
+        if "memory_request_stale_update" in message:
+            raise MemoryRequestError(
+                "stale_update",
+                "a newer version of this memory key is already active",
                 409,
             ) from exc
         if "memory_request_invalid_" in message:
@@ -175,5 +217,6 @@ def review_memory_request(request_id: Any, payload: Any) -> dict[str, Any]:
         "memory_id": row.get("memory_id"),
         "reviewed_at": row.get("reviewed_at"),
         "changed": bool(result.get("changed")),
+        "superseded_memory_id": result.get("superseded_memory_id"),
     }
 

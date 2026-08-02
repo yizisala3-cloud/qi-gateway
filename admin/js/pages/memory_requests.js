@@ -1,5 +1,5 @@
-import { gw, query, esc } from '../api.js?v=20260802-memory-review1';
-import { loading, empty, badge, toast, modal, delegate } from '../ui.js?v=20260802-memory-review1';
+import { gw, query, esc } from '../api.js?v=20260802-memory-review2';
+import { loading, empty, badge, toast, modal, delegate } from '../ui.js?v=20260802-memory-review2';
 
 function fmtDate(value) {
   if (!value) return '-';
@@ -68,7 +68,7 @@ export default {
     try {
       const eq = this.state.status ? { status: this.state.status } : {};
       const rows = await query('memory_requests', {
-        select: 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,created_at,reviewed_at,reviewed_by,review_note',
+        select: 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,memory_key,update_mode,created_at,reviewed_at,reviewed_by,review_note',
         order: { col: 'created_at', asc: false },
         limit: 100,
         eq,
@@ -88,6 +88,8 @@ export default {
               <div class="btn-row mt8">
                 ${statusBadge(row.status)}
                 ${badge(`重要性 ${Number(row.importance) || 5}`, Number(row.importance) >= 8 ? 'purple' : 'muted')}
+                ${row.update_mode === 'replace' ? badge('替换更新', 'purple') : badge('新增记忆', 'muted')}
+                ${row.memory_key ? badge(`key: ${esc(row.memory_key)}`, 'info') : ''}
                 ${(row.tags || []).map((tag) => badge(esc(tag), 'info')).join('')}
                 ${badge(esc(row.source || 'unknown'), 'muted')}
               </div>
@@ -142,6 +144,8 @@ export default {
         <div class="field"><label>记忆内容</label><textarea id="review-content" rows="7" maxlength="600">${esc(request.content || '')}</textarea></div>
         <div class="field"><label>标签（逗号分隔，最多 5 个）</label><input type="text" id="review-tags" value="${esc((request.tags || []).join(', '))}"></div>
         <div class="field"><label>重要性（1-10）</label><input type="number" id="review-importance" min="1" max="10" value="${Number(request.importance) || 5}"></div>
+        <div class="field"><label>写入方式</label><select id="review-update-mode"><option value="append" ${request.update_mode !== 'replace' ? 'selected' : ''}>新增独立记忆</option><option value="replace" ${request.update_mode === 'replace' ? 'selected' : ''}>替换同一可变事实的旧版本</option></select></div>
+        <div class="field"><label>稳定主题键（替换时必填）</label><input type="text" id="review-memory-key" maxlength="120" value="${esc(request.memory_key || '')}" placeholder="例如 project.qi-gateway.progress"><div class="text-sm muted mt8">同一个进度、状态或位置后续更新必须使用完全相同的键。普通相似内容不要使用替换。</div></div>
         <div class="field"><label>审核备注（可选）</label><textarea id="review-note" rows="3" maxlength="500"></textarea></div>
       `,
       footer: '<button class="btn btn-secondary" data-cancel>取消</button><button class="btn btn-primary" data-save>通过并写入记忆</button>',
@@ -150,12 +154,22 @@ export default {
     root.querySelector('[data-save]').onclick = async (event) => {
       const content = root.querySelector('#review-content').value.trim();
       const importance = Number(root.querySelector('#review-importance').value);
+      const updateMode = root.querySelector('#review-update-mode').value;
+      const memoryKey = root.querySelector('#review-memory-key').value.trim().toLowerCase().replace(/\s+/g, '-');
       if (content.length < 5) {
         toast('记忆内容至少需要 5 个字符', 'err');
         return;
       }
       if (!Number.isInteger(importance) || importance < 1 || importance > 10) {
         toast('重要性必须是 1 到 10 的整数', 'err');
+        return;
+      }
+      if (updateMode === 'replace' && !/^[a-z0-9][a-z0-9._:/-]{2,119}$/.test(memoryKey)) {
+        toast('替换模式必须填写 3-120 位有效稳定主题键', 'err');
+        return;
+      }
+      if (updateMode === 'append' && memoryKey) {
+        toast('新增独立记忆时请清空稳定主题键', 'err');
         return;
       }
       const button = event.currentTarget;
@@ -167,6 +181,8 @@ export default {
           content,
           tags: root.querySelector('#review-tags').value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean),
           importance,
+          update_mode: updateMode,
+          memory_key: memoryKey || null,
           review_note: root.querySelector('#review-note').value.trim(),
         });
         toast('申请已通过，正式记忆已写入');

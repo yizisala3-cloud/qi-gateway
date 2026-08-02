@@ -58,6 +58,25 @@ async function request_memory(params) {
     }
     payload.importance = importance;
   }
+  const updateMode = typeof input.update_mode === 'string'
+    ? input.update_mode.trim().toLowerCase()
+    : 'append';
+  const memoryKey = typeof input.memory_key === 'string'
+    ? input.memory_key.trim().toLowerCase().replace(/\s+/g, '-')
+    : '';
+  if (updateMode !== 'append' && updateMode !== 'replace') {
+    return failure('update_mode 必须是 append 或 replace', 'invalid_update_mode');
+  }
+  if (updateMode === 'replace' && !/^[a-z0-9][a-z0-9._:/-]{2,119}$/.test(memoryKey)) {
+    return failure('replace 模式必须提供有效的稳定 memory_key', 'invalid_memory_key');
+  }
+  if (updateMode === 'append' && memoryKey) {
+    return failure('memory_key 只能与 replace 模式一起使用', 'invalid_memory_key');
+  }
+  payload.update_mode = updateMode;
+  if (memoryKey) {
+    payload.memory_key = memoryKey;
+  }
   if (typeof input.conversation_id === 'string' && input.conversation_id.trim()) {
     payload.conversation_id = input.conversation_id.trim();
   }
@@ -112,3 +131,4 @@ async function request_memory(params) {
 }
 
 exports.request_memory = request_memory;
+
