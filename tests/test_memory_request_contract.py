@@ -8,6 +8,8 @@ MIGRATION = ROOT / "supabase" / "migrations" / "20260802020000_create_memory_req
 REVIEW_MIGRATION = ROOT / "supabase" / "migrations" / "20260802030000_review_memory_requests.sql"
 INDEX_MIGRATION = ROOT / "supabase" / "migrations" / "20260802040000_index_memory_request_memory.sql"
 SUPERSESSION_MIGRATION = ROOT / "supabase" / "migrations" / "20260802070000_memory_supersession.sql"
+SIMILARITY_REVIEW_MIGRATION = ROOT / "supabase" / "migrations" / "20260802080000_memory_similarity_review.sql"
+IDEMPOTENT_SIMILARITY_REVIEW_MIGRATION = ROOT / "supabase" / "migrations" / "20260802081000_idempotent_memory_similarity_review.sql"
 MANIFEST = ROOT / "orangechat_plugins" / "memory-request" / "manifest.json"
 MAIN_JS = ROOT / "orangechat_plugins" / "memory-request" / "main.js"
 REVIEW_PAGE = ROOT / "admin" / "js" / "pages" / "memory_requests.js"
@@ -114,6 +116,61 @@ class MemorySupersessionMigrationContractTests(unittest.TestCase):
         self.assertNotIn("chat_messages", executable_sql)
 
 
+class MemorySimilarityReviewMigrationContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = SIMILARITY_REVIEW_MIGRATION.read_text(encoding="utf-8").casefold()
+
+    def test_relational_review_is_atomic_audited_and_soft_only(self):
+        self.assertIn("review_memory_request_v3", self.sql)
+        self.assertIn("memory_request_review_events", self.sql)
+        self.assertIn("pg_advisory_xact_lock", self.sql)
+        self.assertIn("for update", self.sql)
+        self.assertIn("related_memory_id", self.sql)
+        self.assertIn("superseded_by_memory_id", self.sql)
+        self.assertIn("is_active = false", self.sql)
+        self.assertNotIn("delete from public.memories", self.sql)
+
+    def test_conflict_and_duplicate_do_not_write_a_new_memory(self):
+        self.assertIn("v_action in ('duplicate', 'conflict')", self.sql)
+        self.assertIn("memory_request_relation_disallows_edits", self.sql)
+        self.assertIn("status = v_action", self.sql)
+
+    def test_rpc_and_event_table_are_server_only(self):
+        self.assertIn("grant execute on function public.review_memory_request_v3", self.sql)
+        self.assertIn("grant select, insert on table public.memory_request_review_events to service_role", self.sql)
+        self.assertNotIn("to authenticated;", self.sql)
+        executable_sql = "\n".join(
+            line for line in self.sql.splitlines()
+            if not line.lstrip().startswith("--")
+        )
+        self.assertNotIn("chat_messages", executable_sql)
+
+
+class IdempotentMemorySimilarityReviewMigrationContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = IDEMPOTENT_SIMILARITY_REVIEW_MIGRATION.read_text(encoding="utf-8").casefold()
+
+    def test_repeated_relational_decisions_return_unchanged(self):
+        self.assertIn("review_memory_request_v4", self.sql)
+        self.assertIn("v_request.status = 'merged'", self.sql)
+        self.assertIn("v_request.status = 'duplicate'", self.sql)
+        self.assertIn("v_request.status = 'conflict'", self.sql)
+        self.assertIn("'changed', false", self.sql)
+        self.assertIn("review_memory_request_v3", self.sql)
+
+    def test_wrapper_is_locked_private_and_never_touches_chat_history(self):
+        self.assertIn("for update", self.sql)
+        self.assertIn("to service_role", self.sql)
+        self.assertNotIn("to authenticated;", self.sql)
+        executable_sql = "\n".join(
+            line for line in self.sql.splitlines()
+            if not line.lstrip().startswith("--")
+        )
+        self.assertNotIn("chat_messages", executable_sql)
+
+
 class OrangeChatPluginContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -163,6 +220,9 @@ class MemoryReviewDashboardContractTests(unittest.TestCase):
         self.assertIn("action: 'reject'", self.page)
         self.assertIn("review-update-mode", self.page)
         self.assertIn("review-memory-key", self.page)
+        self.assertIn("openRelation(el.dataset.id, 'merge')", self.page)
+        self.assertIn("openRelation(el.dataset.id, 'duplicate')", self.page)
+        self.assertIn("openRelation(el.dataset.id, 'conflict')", self.page)
 
     def test_dashboard_never_directly_mutates_request_rows(self):
         self.assertNotIn("update('memory_requests'", self.page)

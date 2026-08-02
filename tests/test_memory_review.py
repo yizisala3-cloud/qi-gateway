@@ -61,6 +61,7 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(review["review_note"], "已核对")
         self.assertIsNone(review["update_mode"])
         self.assertIsNone(review["memory_key"])
+        self.assertIsNone(review["related_memory_id"])
 
     def test_replace_review_requires_a_stable_key(self):
         review = validate_review(12, {
@@ -91,9 +92,50 @@ class ValidationTests(unittest.TestCase):
 
     def test_rejects_invalid_action_and_importance(self):
         with self.assertRaises(MemoryRequestError):
-            validate_review(1, {"action": "merge"})
+            validate_review(1, {"action": "archive"})
         with self.assertRaises(MemoryRequestError):
             validate_review(1, {"action": "approve", "content": "有效记忆内容", "importance": 11})
+
+    def test_duplicate_and_conflict_require_target_without_edits(self):
+        for action in ("duplicate", "conflict"):
+            with self.subTest(action=action):
+                review = validate_review(3, {
+                    "action": action,
+                    "related_memory_id": "27",
+                    "review_note": "人工核对",
+                })
+                self.assertEqual(review["related_memory_id"], 27)
+                self.assertIsNone(review["content"])
+
+        with self.assertRaises(MemoryRequestError):
+            validate_review(3, {"action": "duplicate"})
+        with self.assertRaises(MemoryRequestError):
+            validate_review(3, {
+                "action": "conflict",
+                "related_memory_id": 27,
+                "content": "不允许修改",
+            })
+
+    def test_merge_requires_target_and_edited_result(self):
+        review = validate_review(4, {
+            "action": "merge",
+            "related_memory_id": 18,
+            "content": "用户喜欢清晨在公园散步。",
+            "title": "清晨散步偏好",
+            "tags": ["清晨", "散步"],
+            "importance": 8,
+        })
+        self.assertEqual(review["related_memory_id"], 18)
+        self.assertEqual(review["action"], "merge")
+        self.assertEqual(len(review["content_hash"]), 64)
+
+        with self.assertRaises(MemoryRequestError):
+            validate_review(4, {
+                "action": "merge",
+                "related_memory_id": 18,
+                "content": "有效合并内容",
+                "update_mode": "append",
+            })
 
 
 class PersistenceTests(unittest.TestCase):
@@ -122,12 +164,13 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(result["memory_id"], 77)
         self.assertEqual(result["status"], "approved")
         self.assertTrue(result["changed"])
-        self.assertEqual(client.rpc_name, "review_memory_request_v2")
+        self.assertEqual(client.rpc_name, "review_memory_request_v4")
         self.assertEqual(client.rpc_payload["p_request_id"], 42)
         self.assertEqual(client.rpc_payload["p_action"], "approve")
         self.assertEqual(client.rpc_payload["p_reviewed_by"], "gateway_admin")
         self.assertIsNone(client.rpc_payload["p_update_mode"])
         self.assertIsNone(client.rpc_payload["p_memory_key"])
+        self.assertIsNone(client.rpc_payload["p_related_memory_id"])
 
     def test_reject_calls_same_atomic_rpc_without_memory_fields(self):
         client = _Client({
@@ -143,6 +186,25 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(result["status"], "rejected")
         self.assertIsNone(client.rpc_payload["p_content"])
         self.assertIsNone(client.rpc_payload["p_content_hash"])
+
+    def test_duplicate_calls_v4_with_selected_memory(self):
+        client = _Client({
+            "changed": True,
+            "related_memory_id": 91,
+            "request": {"id": 8, "status": "duplicate", "memory_id": 91, "reviewed_at": "now"},
+        })
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+        ):
+            result = review_memory_request(8, {
+                "action": "duplicate",
+                "related_memory_id": 91,
+            })
+
+        self.assertEqual(result["status"], "duplicate")
+        self.assertEqual(result["related_memory_id"], 91)
+        self.assertEqual(client.rpc_payload["p_related_memory_id"], 91)
 
     def test_requires_elevated_key_before_database_access(self):
         with (

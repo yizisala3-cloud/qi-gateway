@@ -58,6 +58,18 @@ def _importance(value: Any) -> int:
     return result
 
 
+def _related_memory_id(value: Any) -> int:
+    if isinstance(value, bool):
+        raise MemoryRequestError("invalid_review", "related_memory_id must be an integer")
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as exc:
+        raise MemoryRequestError("invalid_review", "related_memory_id must be an integer") from exc
+    if result <= 0:
+        raise MemoryRequestError("invalid_review", "related_memory_id must be positive")
+    return result
+
+
 def validate_review(request_id: Any, payload: Any) -> dict[str, Any]:
     try:
         normalized_id = int(request_id)
@@ -70,7 +82,7 @@ def validate_review(request_id: Any, payload: Any) -> dict[str, Any]:
 
     allowed = {
         "action", "content", "title", "tags", "importance", "review_note",
-        "memory_key", "update_mode",
+        "memory_key", "update_mode", "related_memory_id",
     }
     unknown = set(payload) - allowed
     if unknown:
@@ -79,8 +91,11 @@ def validate_review(request_id: Any, payload: Any) -> dict[str, Any]:
             f"unsupported fields: {', '.join(sorted(unknown))}",
         )
     action = str(payload.get("action") or "").strip().lower()
-    if action not in {"approve", "reject"}:
-        raise MemoryRequestError("invalid_review", "action must be approve or reject")
+    if action not in {"approve", "reject", "merge", "duplicate", "conflict"}:
+        raise MemoryRequestError(
+            "invalid_review",
+            "action must be approve, reject, merge, duplicate, or conflict",
+        )
 
     review_note = _text(payload.get("review_note"), "review_note", 500)
     if action == "reject":
@@ -102,7 +117,50 @@ def validate_review(request_id: Any, payload: Any) -> dict[str, Any]:
             "review_note": review_note or None,
             "memory_key": None,
             "update_mode": None,
+            "related_memory_id": None,
         }
+
+    if action in {"duplicate", "conflict"}:
+        disallowed = {
+            "content", "title", "tags", "importance", "memory_key", "update_mode",
+        }
+        if disallowed.intersection(payload):
+            raise MemoryRequestError(
+                "invalid_review",
+                f"{action} reviews cannot include memory edits",
+            )
+        if "related_memory_id" not in payload:
+            raise MemoryRequestError(
+                "invalid_review",
+                "related_memory_id is required for relational reviews",
+            )
+        return {
+            "request_id": normalized_id,
+            "action": action,
+            "content": None,
+            "title": None,
+            "tags": None,
+            "importance": None,
+            "content_hash": None,
+            "review_note": review_note or None,
+            "memory_key": None,
+            "update_mode": None,
+            "related_memory_id": _related_memory_id(payload.get("related_memory_id")),
+        }
+
+    related_memory_id = None
+    if action == "merge":
+        if "related_memory_id" not in payload:
+            raise MemoryRequestError(
+                "invalid_review",
+                "related_memory_id is required for merge reviews",
+            )
+        if "memory_key" in payload or "update_mode" in payload:
+            raise MemoryRequestError(
+                "invalid_review",
+                "merge reviews cannot include memory_key or update_mode",
+            )
+        related_memory_id = _related_memory_id(payload.get("related_memory_id"))
 
     content = _text(payload.get("content"), "content", 600, required=True)
     title = _text(payload.get("title"), "title", 100)
@@ -142,6 +200,7 @@ def validate_review(request_id: Any, payload: Any) -> dict[str, Any]:
         "review_note": review_note or None,
         "memory_key": memory_key,
         "update_mode": update_mode,
+        "related_memory_id": related_memory_id,
     }
 
 
@@ -182,9 +241,10 @@ def review_memory_request(request_id: Any, payload: Any) -> dict[str, Any]:
         "p_review_note": review["review_note"],
         "p_memory_key": review["memory_key"],
         "p_update_mode": review["update_mode"],
+        "p_related_memory_id": review["related_memory_id"],
     }
     try:
-        response = client.rpc("review_memory_request_v2", rpc_payload).execute()
+        response = client.rpc("review_memory_request_v4", rpc_payload).execute()
     except Exception as exc:
         message = str(exc).casefold()
         if "memory_request_not_found" in message:
@@ -199,6 +259,40 @@ def review_memory_request(request_id: Any, payload: Any) -> dict[str, Any]:
             raise MemoryRequestError(
                 "stale_update",
                 "a newer version of this memory key is already active",
+                409,
+            ) from exc
+        if "memory_request_related_memory_not_found" in message:
+            raise MemoryRequestError(
+                "related_memory_not_found",
+                "the selected memory was not found",
+                404,
+            ) from exc
+        if "memory_request_related_memory_inactive" in message:
+            raise MemoryRequestError(
+                "related_memory_inactive",
+                "the selected memory is no longer active and verified",
+                409,
+            ) from exc
+        if (
+            "memory_request_related_memory_required" in message
+            or "memory_request_relation_disallows_edits" in message
+            or "memory_request_merge_disallows_update_mode" in message
+        ):
+            raise MemoryRequestError(
+                "invalid_review",
+                "database rejected relational review values",
+                400,
+            ) from exc
+        if "memory_request_merge_unchanged" in message:
+            raise MemoryRequestError(
+                "merge_unchanged",
+                "the merged content is unchanged; mark it as duplicate instead",
+                409,
+            ) from exc
+        if "memory_request_merge_content_exists" in message:
+            raise MemoryRequestError(
+                "merge_content_exists",
+                "the merged content already exists as another memory",
                 409,
             ) from exc
         if "memory_request_invalid_" in message:
@@ -218,5 +312,6 @@ def review_memory_request(request_id: Any, payload: Any) -> dict[str, Any]:
         "reviewed_at": row.get("reviewed_at"),
         "changed": bool(result.get("changed")),
         "superseded_memory_id": result.get("superseded_memory_id"),
+        "related_memory_id": result.get("related_memory_id"),
     }
 
