@@ -31,6 +31,11 @@ from .memory_request_api import memory_request_routes
 from .memory_review_api import memory_review_routes
 from .todo_api import todo_routes
 from .model_routing import normalize_upstream_model
+from .request_context import (
+    append_gateway_context,
+    extract_last_user_text,
+    is_orangechat_proactive_request,
+)
 from . import db
 from .timer import (
     parse_and_strip_tags, register_tags, cancel_delay_on_user_message,
@@ -69,31 +74,6 @@ def verify_token(request: Request) -> bool:
     auth = request.headers.get("authorization", "")
     token = auth.removeprefix("Bearer ").strip()
     return token == cfg.GATEWAY_TOKEN
-
-
-def inject_context_to_messages(messages: list[dict], context: str) -> list[dict]:
-    if not context:
-        return messages
-    for msg in messages:
-        if msg.get("role") == "system":
-            msg["content"] = msg["content"] + "\n\n" + context
-            return messages
-    messages.insert(0, {"role": "system", "content": context})
-    return messages
-
-
-def _extract_last_user_text(messages: list[dict]) -> str:
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "text":
-                        return part.get("text", "")
-            return ""
-    return ""
 
 
 def _strip_thinking(text: str) -> str:
@@ -198,9 +178,17 @@ async def chat_completions(request: Request):
 
     loop = asyncio.get_event_loop()
     messages = body.get("messages", [])
-    loop.run_in_executor(bg_executor, cancel_delay_on_user_message)
-    loop.run_in_executor(bg_executor, update_jiwen_on_user_message)
-    user_text = _extract_last_user_text(messages)
+    proactive_request = is_orangechat_proactive_request(messages)
+    if proactive_request:
+        # OrangeChat already supplies its complete persona, history, proactive
+        # rules and synthetic trigger. Preserve that request byte-for-byte and
+        # do not count the trigger as a new message from the human user.
+        user_text = ""
+        log.info("OrangeChat proactive request detected; preserving client system prompt")
+    else:
+        user_text = extract_last_user_text(messages)
+        loop.run_in_executor(bg_executor, cancel_delay_on_user_message)
+        loop.run_in_executor(bg_executor, update_jiwen_on_user_message)
 
     busy = await loop.run_in_executor(bg_executor, get_active_busy)
     if busy:
@@ -214,12 +202,13 @@ async def chat_completions(request: Request):
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         })
 
-    full_context = await loop.run_in_executor(bg_executor, build_context, user_text)
-    timer_status = await loop.run_in_executor(bg_executor, get_timer_status_for_context)
-    if timer_status:
-        full_context = full_context + "\n\n" + timer_status if full_context else timer_status
-    if full_context and "messages" in body:
-        body["messages"] = inject_context_to_messages(body["messages"], full_context)
+    if not proactive_request:
+        full_context = await loop.run_in_executor(bg_executor, build_context, user_text)
+        timer_status = await loop.run_in_executor(bg_executor, get_timer_status_for_context)
+        if timer_status:
+            full_context = full_context + "\n\n" + timer_status if full_context else timer_status
+        if full_context and "messages" in body:
+            body["messages"] = append_gateway_context(body["messages"], full_context)
 
     upstream_url = f"{cfg.UPSTREAM_BASE_URL.rstrip('/')}/chat/completions"
     headers = {
@@ -411,5 +400,4 @@ if os.path.isdir(_admin_dir):
     log.info(f"Admin panel mounted at /admin (dir={_admin_dir})")
 
 app = Starlette(routes=_routes, lifespan=lifespan)
-
 
