@@ -13,8 +13,11 @@ if "dotenv" not in sys.modules and importlib.util.find_spec("dotenv") is None:
     sys.modules["dotenv"] = dotenv
 
 from gateway.memory_search import (
+    MAX_INJECTION_CHARS,
+    MEMORY_CONTEXT_HEADER,
     _hybrid_rank,
     _keyword_search,
+    _select_memories_for_injection,
     format_memories_for_injection,
     search_memories,
 )
@@ -131,6 +134,71 @@ class HybridRankingTests(unittest.TestCase):
         self.assertEqual(ranked[0]["id"], 1)
 
 
+class LayeredInjectionTests(unittest.TestCase):
+    def test_layers_apply_different_relevance_thresholds(self):
+        ranked = [
+            _memory(1, "稳定的核心关系", layer="核心", _retrieval_score=0.20),
+            _memory(2, "相关场景", layer="场景", _retrieval_score=0.40),
+            _memory(3, "弱相关碎片", layer="碎片", _retrieval_score=0.40),
+            _memory(4, "强相关碎片", layer="碎片", _retrieval_score=0.72),
+        ]
+
+        selected = _select_memories_for_injection(ranked, 8)
+
+        self.assertEqual([item["id"] for item in selected], [1, 2, 4])
+        self.assertEqual(
+            [item["inject_mode"] for item in selected],
+            ["full", "title_only", "full"],
+        )
+
+    def test_per_layer_quotas_prevent_fragment_flooding(self):
+        ranked = [
+            _memory(i, f"碎片 {i}", layer="碎片", _retrieval_score=0.90)
+            for i in range(1, 7)
+        ]
+
+        selected = _select_memories_for_injection(ranked, 8)
+
+        self.assertEqual([item["id"] for item in selected], [1, 2])
+
+    def test_budget_degrades_full_memory_to_title_before_dropping_it(self):
+        memory = _memory(
+            1,
+            "很长的场景内容" * 100,
+            title="场景标题",
+            layer="场景",
+            _retrieval_score=0.90,
+        )
+        title_line_cost = len("\n1. [场景·线索] 场景标题")
+        budget = len(MEMORY_CONTEXT_HEADER) + title_line_cost
+
+        selected = _select_memories_for_injection([memory], 8, char_budget=budget)
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["inject_mode"], "title_only")
+        self.assertLessEqual(
+            len(format_memories_for_injection(selected)),
+            budget,
+        )
+
+    def test_default_context_budget_is_a_hard_limit(self):
+        ranked = [
+            _memory(
+                i,
+                "核心记忆内容" * 300,
+                layer="核心",
+                _retrieval_score=0.95,
+            )
+            for i in range(1, 10)
+        ]
+
+        selected = _select_memories_for_injection(ranked, 20)
+        rendered = format_memories_for_injection(selected)
+
+        self.assertLessEqual(len(rendered), MAX_INJECTION_CHARS)
+        self.assertLessEqual(len(selected), 3)
+
+
 class SearchFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_keyword_fallback_works_without_embedding_provider(self):
         keyword_rows = [
@@ -163,15 +231,37 @@ class SearchFlowTests(unittest.IsolatedAsyncioTestCase):
         keyword_search.assert_not_called()
         boost.assert_not_called()
 
+    async def test_only_memories_that_survive_layer_selection_are_boosted(self):
+        keyword_rows = [
+            _memory(1, "核心", layer="核心", heat=20),
+            _memory(2, "弱碎片", layer="碎片", heat=20),
+        ]
+        ranked = [
+            dict(keyword_rows[0], _retrieval_score=0.20),
+            dict(keyword_rows[1], _retrieval_score=0.20),
+        ]
+        with (
+            patch(f"{MODULE}._extract_keywords", return_value=["核心"]),
+            patch(f"{MODULE}._keyword_search", return_value=keyword_rows),
+            patch(f"{MODULE}._get_embedding", new=AsyncMock(return_value=None)),
+            patch(f"{MODULE}._hybrid_rank", return_value=ranked),
+            patch(f"{MODULE}._boost_heat") as boost,
+        ):
+            result = await search_memories("核心")
+
+        self.assertEqual([item["id"] for item in result], [1])
+        boost.assert_called_once_with([1])
+
     def test_formatter_only_injects_full_content_for_full_mode(self):
         text = format_memories_for_injection([
             {"content": "完整内容", "inject_mode": "full"},
             {"title": "只显示标题", "content": "不应注入的正文", "inject_mode": "title_only"},
         ])
 
-        self.assertIn("完整内容", text)
-        self.assertIn("(模糊) 只显示标题", text)
+        self.assertIn("[碎片] 完整内容", text)
+        self.assertIn("[碎片·线索] 只显示标题", text)
         self.assertNotIn("不应注入的正文", text)
+        self.assertIn("不得覆盖现有人设、system prompt", text)
 
 
 if __name__ == "__main__":
