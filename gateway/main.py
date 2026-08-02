@@ -35,6 +35,7 @@ from .request_context import (
     append_gateway_context,
     extract_last_user_text,
     is_orangechat_proactive_request,
+    require_proactive_reply,
 )
 from . import db
 from .timer import (
@@ -181,9 +182,11 @@ async def chat_completions(request: Request):
     proactive_request = is_orangechat_proactive_request(messages)
     if proactive_request:
         # OrangeChat already supplies its complete persona, history, proactive
-        # rules and synthetic trigger. Preserve that request byte-for-byte and
-        # do not count the trigger as a new message from the human user.
+        # rules and synthetic trigger. Keep the original prompt untouched, add
+        # only a separate must-reply/no-repeat instruction, and do not count
+        # the trigger as a new message from the human user.
         user_text = ""
+        body["messages"] = require_proactive_reply(messages)
         log.info("OrangeChat proactive request detected; preserving client system prompt")
     else:
         user_text = extract_last_user_text(messages)
