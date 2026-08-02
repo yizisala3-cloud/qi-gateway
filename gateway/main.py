@@ -29,6 +29,7 @@ from .admin_api import admin_api_routes
 from .memory_digest_api import memory_digest_routes
 from .memory_request_api import memory_request_routes
 from .memory_review_api import memory_review_routes
+from .todo_api import todo_routes
 from .model_routing import normalize_upstream_model
 from . import db
 from .timer import (
@@ -351,6 +352,7 @@ async def status(request: Request):
         "last_digest_run": _last_digest_run,
         "last_heat_decay_date": _last_heat_decay_date,
         "memory_plugin_configured": bool(cfg.MEMORY_PLUGIN_TOKEN),
+        "todo_plugin_configured": bool(cfg.TODO_PLUGIN_TOKEN),
     })
 
 
@@ -402,12 +404,12 @@ _routes.extend(admin_api_routes)
 _routes.extend(memory_digest_routes)
 _routes.extend(memory_request_routes)
 _routes.extend(memory_review_routes)
+_routes.extend(todo_routes)
 
 if os.path.isdir(_admin_dir):
     _routes.append(Mount("/admin", app=StaticFiles(directory=_admin_dir, html=True), name="admin"))
     log.info(f"Admin panel mounted at /admin (dir={_admin_dir})")
 
 app = Starlette(routes=_routes, lifespan=lifespan)
-
 
 

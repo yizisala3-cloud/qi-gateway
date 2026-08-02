@@ -1,0 +1,96 @@
+{
+  "id": "com.orangechat.plugin.qi-todo",
+  "name": "AI 待办助手",
+  "description": "让 AI 通过 qi-gateway 创建、查看、完成、延后或取消当前用户与角色的待办。所有操作使用普通 HTTP，不直接连接 Supabase。",
+  "version": "1.0.0",
+  "author": "qi-gateway",
+  "icon": "✅",
+  "entry": "main.js",
+  "config": [
+    {
+      "name": "gateway_url",
+      "type": "string",
+      "label": "网关地址",
+      "description": "qi-gateway 的 HTTP(S) 地址，例如 https://example.com",
+      "required": true,
+      "placeholder": "https://example.com"
+    },
+    {
+      "name": "plugin_token",
+      "type": "string",
+      "label": "待办插件 Token",
+      "description": "与网关 TODO_PLUGIN_TOKEN 相同；不要填写 Supabase 密钥或聊天网关 Token",
+      "required": true,
+      "placeholder": "单独生成的长随机字符串"
+    },
+    {
+      "name": "user_name",
+      "type": "string",
+      "label": "用户名",
+      "description": "必须与 Supabase todos 表中的 user_name 完全一致",
+      "required": true,
+      "placeholder": "例如：叶子"
+    },
+    {
+      "name": "ai_name",
+      "type": "string",
+      "label": "AI 名称",
+      "description": "当前橘瓣角色在 todos 表中使用的 ai_name",
+      "required": true,
+      "placeholder": "例如：苏02"
+    },
+    {
+      "name": "timezone_offset_minutes",
+      "type": "string",
+      "label": "时区偏移分钟",
+      "description": "中国标准时间填写 480",
+      "required": false,
+      "placeholder": "480"
+    }
+  ],
+  "tools": [
+    {
+      "name": "create_todo",
+      "description": "为当前用户或 AI 新建待办。用户明确交代事项、每日计划或需要未来提醒的事情时可主动调用；时间必须带时区，例如 2026-08-03T09:00:00+08:00。不要重复创建已经存在的同一事项。",
+      "parameters": [
+        {"name": "content", "type": "string", "required": true, "description": "简洁、可执行的待办内容"},
+        {"name": "scheduled_start", "type": "string", "required": false, "description": "开始或提醒时间，ISO 8601 且必须带时区"},
+        {"name": "scheduled_end", "type": "string", "required": false, "description": "结束时间，ISO 8601 且必须带时区"},
+        {"name": "todo_type", "type": "string", "required": false, "description": "user 表示用户待办，ai 表示 AI 自己的待办；默认 ai"},
+        {"name": "status", "type": "string", "required": false, "description": "regular 或 long_term；默认 regular"},
+        {"name": "estimated_time", "type": "string", "required": false, "description": "预计耗时，例如 30分钟"},
+        {"name": "is_private", "type": "boolean", "required": false, "description": "是否为私密待办，默认 false"},
+        {"name": "note", "type": "string", "required": false, "description": "必要的简短备注"}
+      ]
+    },
+    {
+      "name": "list_today_todos",
+      "description": "读取当前用户与当前 AI 今天应处理的待办，包括已逾期和未设置时间的开放待办；不会返回已完成、已取消、空心占位或时间标记。需要规划今天、检查进度或决定是否提醒时主动调用。",
+      "parameters": []
+    },
+    {
+      "name": "complete_todo",
+      "description": "将指定待办标记为已完成。只有用户确认完成，或 AI 确认自己的待办已完成时调用。",
+      "parameters": [
+        {"name": "todo_id", "type": "string", "required": true, "description": "list_today_todos 返回的待办 UUID"}
+      ]
+    },
+    {
+      "name": "snooze_todo",
+      "description": "将指定待办延后到新的时间，并重新设为开放状态。用户说稍后、改天或给出新时间时调用；新时间必须带时区。",
+      "parameters": [
+        {"name": "todo_id", "type": "string", "required": true, "description": "待办 UUID"},
+        {"name": "scheduled_start", "type": "string", "required": true, "description": "新的开始或提醒时间，ISO 8601 且必须带时区"},
+        {"name": "scheduled_end", "type": "string", "required": false, "description": "可选的新结束时间，ISO 8601 且必须带时区"}
+      ]
+    },
+    {
+      "name": "cancel_todo",
+      "description": "取消指定待办。该操作只会软隐藏记录，不会永久删除，用户明确取消事项时调用。",
+      "parameters": [
+        {"name": "todo_id", "type": "string", "required": true, "description": "待办 UUID"}
+      ]
+    }
+  ]
+}
+

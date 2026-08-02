@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-**当前阶段：P2**：记忆申请、混合检索、热度衰减、分层注入和可变事实版本替代已完成，正在增加相似记忆的人工合并与冲突审核。
+**当前阶段：P3**：记忆系统已完成；正在接入主动待办。首版待办读写闭环与橘瓣工具已实现，主动唤醒时的待办上下文注入尚未接入。
 
 ## 架构
 
@@ -34,6 +34,8 @@
 | `SUPABASE_KEY` | 兼容用 publishable/anon key，不用于主动记忆写入 |
 | `MEMORY_PLUGIN_TOKEN` | 橘瓣记忆申请插件的独立鉴权 Token |
 | `MEMORY_REQUEST_RATE_LIMIT` | 每个 assistant 每分钟最多提交的记忆申请数，默认 6 |
+| `TODO_PLUGIN_TOKEN` | 橘瓣待办插件的独立鉴权 Token |
+| `TODO_REQUEST_RATE_LIMIT` | 单实例每分钟最多处理的待办插件请求数，默认 60 |
 | `PORT` | 端口（默认 8000） |
 
 ### Zeabur 部署
@@ -56,6 +58,11 @@
 | `/v1/chat/completions` | POST | 核心聊天接口，OpenAI 兼容 |
 | `/v1/models` | GET | 模型列表 |
 | `/v1/memory-requests` | POST | 橘瓣插件提交 pending 记忆申请（插件专用 Token） |
+| `/v1/todos` | POST | 创建当前用户与角色范围内的待办（待办插件 Token） |
+| `/v1/todos/query` | POST | 查询今日、逾期或全部开放待办（待办插件 Token） |
+| `/v1/todos/{id}/complete` | POST | 标记待办完成（待办插件 Token） |
+| `/v1/todos/{id}/snooze` | POST | 延后待办（待办插件 Token） |
+| `/v1/todos/{id}/cancel` | POST | 软隐藏取消待办（待办插件 Token） |
 | `/admin/api/memory-requests/{id}/review` | POST | Dashboard 通过或拒绝记忆申请（网关 Token） |
 | `/health` | GET | 健康检查（无需鉴权） |
 | `/status` | GET | 网关状态（需鉴权） |
@@ -67,6 +74,14 @@
 进度、状态、位置等可变事实可以使用 `update_mode=replace` 和稳定的 ASCII `memory_key`。审核通过后，新版本会原子启用，旧版本仅软失效，并通过 `supersedes_memory_id` / `superseded_by_memory_id` 保留双向替代关系；过期申请不得反向覆盖较新的已审核版本。普通相似内容默认仍是独立候选，不会仅凭相似度自动覆盖。
 
 普通相似内容由 Dashboard 人工选择现有记忆后处理：`duplicate` 只把申请关联到已有记忆，不写入新内容；`conflict` 将申请保留在冲突待处理队列且不参与召回；`merge` 要求用户编辑最终合并内容，再原子创建新版本并软失效旧版本。每次操作都会写入私有的追加式审核事件，保留目标、结果、操作者和备注。
+
+## 橘瓣待办插件
+
+插件源码位于 `orangechat_plugins/todo/`，提供创建、查看今日待办、完成、延后和取消五个工具。插件只通过普通 HTTP 调用网关，不使用 WebSocket，也不持有 Supabase 密钥。网关对每次读写同时约束 `user_name` 与 `ai_name`；取消操作只会设置 `is_hidden=true`，不会永久删除记录。
+
+“今日待办”包含今天已排期、已逾期和未排期的开放事项，并排除已完成、已取消、空心占位和开始/结束标记。时间参数必须是带时区的 ISO 8601 字符串。当前版本尚未把待办注入橘瓣原生主动消息请求，因此它先完成 AI 可调用的读写闭环，不代表后台主动提醒已经启用。
+
+现有 `todos` 表没有幂等键，创建接口会对同角色、同内容、同时间的常规重试做尽力去重，但不能保证并发下的数据库级原子幂等。若后续需要强化，将单独提交 migration 并在应用前取得明确授权。
 
 ## 记忆检索
 

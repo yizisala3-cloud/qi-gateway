@@ -34,6 +34,9 @@ class Config:
     # Supabase credentials so plugin access can be revoked independently.
     MEMORY_PLUGIN_TOKEN: str = os.getenv("MEMORY_PLUGIN_TOKEN", "")
     MEMORY_REQUEST_RATE_LIMIT: int = int(os.getenv("MEMORY_REQUEST_RATE_LIMIT", "6"))
+    # OrangeChat todo tools. This token is independent from every other token.
+    TODO_PLUGIN_TOKEN: str = os.getenv("TODO_PLUGIN_TOKEN", "")
+    TODO_REQUEST_RATE_LIMIT: int = int(os.getenv("TODO_REQUEST_RATE_LIMIT", "60"))
 
     @property
     def supabase_server_key(self) -> str:
@@ -49,3 +52,4 @@ class Config:
 
 
 cfg = Config()
+
