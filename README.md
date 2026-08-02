@@ -67,9 +67,11 @@
 | `/health` | GET | 健康检查（无需鉴权） |
 | `/status` | GET | 网关状态（需鉴权） |
 
-## 橘瓣记忆申请插件
+## 橘瓣记忆与待办整合插件
 
-插件源码位于 `orangechat_plugins/memory-request/`。AI 调用 `request_memory` 后，插件只通过 HTTP 调用网关；Supabase 服务端密钥始终留在网关环境变量中。重复申请由数据库原子去重，所有新申请均为 `pending`，不会进入正常记忆召回。管理员可以在 Dashboard 的“记忆申请”页面编辑后通过或拒绝；通过操作会在数据库事务内写入一条 `verified` 正式记忆，拒绝记录则留存审计。
+插件源码位于 `orangechat_plugins/memory-request/`。同一个插件同时暴露记忆申请和待办管理工具；保留原插件 ID，可作为旧“记忆申请”插件的升级版导入。记忆与待办共用网关地址，但分别使用 `MEMORY_PLUGIN_TOKEN` 和 `TODO_PLUGIN_TOKEN`。Supabase 服务端密钥始终留在网关环境变量中。
+
+AI 调用 `request_memory` 后，重复申请由数据库原子去重，所有新申请均为 `pending`，不会进入正常记忆召回。管理员可以在 Dashboard 的“记忆申请”页面编辑后通过或拒绝；通过操作会在数据库事务内写入一条 `verified` 正式记忆，拒绝记录则留存审计。
 
 进度、状态、位置等可变事实可以使用 `update_mode=replace` 和稳定的 ASCII `memory_key`。审核通过后，新版本会原子启用，旧版本仅软失效，并通过 `supersedes_memory_id` / `superseded_by_memory_id` 保留双向替代关系；过期申请不得反向覆盖较新的已审核版本。普通相似内容默认仍是独立候选，不会仅凭相似度自动覆盖。
 
@@ -77,7 +79,7 @@
 
 ## 橘瓣待办插件
 
-插件源码位于 `orangechat_plugins/todo/`，提供创建、查看今日待办、完成、延后和取消五个工具。插件只通过普通 HTTP 调用网关，不使用 WebSocket，也不持有 Supabase 密钥。网关对每次读写同时约束 `user_name` 与 `ai_name`；取消操作只会设置 `is_hidden=true`，不会永久删除记录。
+整合插件已包含创建、查看今日待办、完成、延后和取消五个工具；`orangechat_plugins/todo/` 仍保留为只需要待办功能时使用的独立版本。插件只通过普通 HTTP 调用网关，不使用 WebSocket，也不持有 Supabase 密钥。网关对每次读写同时约束 `user_name` 与 `ai_name`；取消操作只会设置 `is_hidden=true`，不会永久删除记录。
 
 “今日待办”包含今天已排期、已逾期和未排期的开放事项，并排除已完成、已取消、空心占位和开始/结束标记。时间参数必须是带时区的 ISO 8601 字符串。当前版本尚未把待办注入橘瓣原生主动消息请求，因此它先完成 AI 可调用的读写闭环，不代表后台主动提醒已经启用。
 

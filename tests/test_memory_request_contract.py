@@ -176,35 +176,59 @@ class OrangeChatPluginContractTests(unittest.TestCase):
     def setUpClass(cls):
         cls.manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
         cls.main_js = MAIN_JS.read_text(encoding="utf-8")
+        cls.tools = {tool["name"]: tool for tool in cls.manifest["tools"]}
 
     def test_manifest_tool_matches_export(self):
-        tool_names = {tool["name"] for tool in self.manifest["tools"]}
-        self.assertEqual(tool_names, {"request_memory"})
-        self.assertIn("exports.request_memory = request_memory", self.main_js)
+        expected = {
+            "request_memory",
+            "create_todo",
+            "list_today_todos",
+            "complete_todo",
+            "snooze_todo",
+            "cancel_todo",
+        }
+        self.assertEqual(set(self.tools), expected)
+        for name in expected:
+            self.assertIn(f"exports.{name} = {name}", self.main_js)
 
     def test_plugin_uses_http_gateway_without_supabase_credentials(self):
         config_names = {item["name"] for item in self.manifest["config"]}
-        self.assertEqual(config_names, {"gateway_url", "plugin_token", "assistant_id"})
+        self.assertEqual(config_names, {
+            "gateway_url",
+            "plugin_token",
+            "assistant_id",
+            "todo_plugin_token",
+            "user_name",
+            "ai_name",
+            "timezone_offset_minutes",
+        })
         self.assertIn("/v1/memory-requests", self.main_js)
+        self.assertIn("/v1/todos/query", self.main_js)
         self.assertIn("fetch(", self.main_js)
         self.assertNotIn("supabase", self.main_js.casefold())
         self.assertNotIn("websocket", self.main_js.casefold())
 
     def test_tool_description_requires_user_review(self):
-        description = self.manifest["tools"][0]["description"]
+        description = self.tools["request_memory"]["description"]
         self.assertIn("pending", description)
         self.assertIn("用户审核", description)
 
     def test_tool_supports_explicit_mutable_fact_replacement(self):
         parameters = {
             item["name"]: item
-            for item in self.manifest["tools"][0]["parameters"]
+            for item in self.tools["request_memory"]["parameters"]
         }
         self.assertIn("update_mode", parameters)
         self.assertIn("memory_key", parameters)
         self.assertIn("payload.update_mode", self.main_js)
         self.assertIn("payload.memory_key", self.main_js)
-        self.assertIn("replace", self.manifest["tools"][0]["description"])
+        self.assertIn("replace", self.tools["request_memory"]["description"])
+
+    def test_integrated_todo_tools_use_separate_token_and_soft_cancel(self):
+        self.assertIn("cfg.todoPluginToken", self.main_js)
+        self.assertIn("user_name: cfg.userName", self.main_js)
+        self.assertIn("ai_name: cfg.aiName", self.main_js)
+        self.assertIn("软隐藏", self.tools["cancel_todo"]["description"])
 
 
 class MemoryReviewDashboardContractTests(unittest.TestCase):
