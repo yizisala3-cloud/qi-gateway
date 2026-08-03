@@ -3,7 +3,9 @@ import unittest
 from gateway.request_context import (
     GATEWAY_CONTEXT_HEADING,
     PROACTIVE_REPLY_HEADING,
+    TODO_FEEDBACK_HEADING,
     append_gateway_context,
+    build_todo_feedback_guidance,
     extract_last_user_text,
     is_orangechat_proactive_request,
     require_proactive_reply,
@@ -133,6 +135,42 @@ class ContextInjectionTests(unittest.TestCase):
         self.assertIn("只读查询工具", result[1]["content"])
         self.assertIn("不要猜测或编造用户的信息", result[1]["content"])
         self.assertEqual(result[2:], history)
+
+
+class TodoFeedbackGuidanceTests(unittest.TestCase):
+    def test_detects_completion_postponement_and_cancellation_feedback(self):
+        examples = (
+            "报告已经交了",
+            "这个待办晚点再做",
+            "三个小时后再提醒我",
+            "把它推迟到明天下午",
+            "刚才那个提醒取消",
+            "不用提醒我了",
+        )
+        for text in examples:
+            with self.subTest(text=text):
+                guidance = build_todo_feedback_guidance(text)
+                self.assertIn(TODO_FEEDBACK_HEADING, guidance)
+                self.assertIn("list_today_todos", guidance)
+                self.assertIn("不得调用 create_todo", guidance)
+
+    def test_does_not_treat_new_plans_or_progress_numbers_as_todo_feedback(self):
+        examples = (
+            "明天有个新任务",
+            "代码完成度现在是 60%",
+            "我们聊聊待办功能",
+            "取消按钮怎么设计",
+            "今天心情不错",
+        )
+        for text in examples:
+            with self.subTest(text=text):
+                self.assertEqual(build_todo_feedback_guidance(text), "")
+
+    def test_ambiguous_feedback_requires_confirmation(self):
+        guidance = build_todo_feedback_guidance("晚点再做")
+        self.assertIn("匹配到多条", guidance)
+        self.assertIn("先向用户确认", guidance)
+
 
 
 if __name__ == "__main__":

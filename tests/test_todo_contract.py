@@ -86,6 +86,7 @@ class TodoGatewayContractTests(unittest.TestCase):
         self.assertIn("get_proactive_todo_context", main)
         self.assertIn("append_gateway_context", main)
         self.assertIn("asyncio.wait_for", main)
+        self.assertIn("build_todo_feedback_guidance", main)
         self.assertNotIn("PROACTIVE_TODO_USER_NAME", todos + main)
         self.assertNotIn("PROACTIVE_TODO_AI_NAME", todos + main)
 

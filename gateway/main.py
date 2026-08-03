@@ -34,6 +34,7 @@ from .todos import get_proactive_todo_context
 from .model_routing import normalize_upstream_model
 from .request_context import (
     append_gateway_context,
+    build_todo_feedback_guidance,
     extract_last_user_text,
     is_orangechat_proactive_request,
     require_proactive_reply,
@@ -227,6 +228,9 @@ async def chat_completions(request: Request):
         timer_status = await loop.run_in_executor(bg_executor, get_timer_status_for_context)
         if timer_status:
             full_context = full_context + "\n\n" + timer_status if full_context else timer_status
+        todo_feedback = build_todo_feedback_guidance(user_text)
+        if todo_feedback:
+            full_context = full_context + "\n\n" + todo_feedback if full_context else todo_feedback
         if full_context and "messages" in body:
             body["messages"] = append_gateway_context(body["messages"], full_context)
 
