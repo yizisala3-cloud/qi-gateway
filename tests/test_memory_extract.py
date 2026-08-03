@@ -129,6 +129,60 @@ class ModelBoundaryTests(unittest.TestCase):
 
         self.assertEqual(len(memories), 1)
         self.assertEqual(len(memories[0]["content_hash"]), 64)
+        self.assertEqual(memories[0]["memory_type"], "other")
+        self.assertEqual(memories[0]["update_mode"], "append")
+        self.assertIsNone(memories[0]["memory_key"])
+
+    def test_parser_keeps_semantic_type_separate_from_replace_strategy(self):
+        payload = {
+            "memories": [{
+                "content": "User and friend A are currently on tense terms",
+                "title": "Relationship with A is tense",
+                "memory_type": "RELATIONSHIP",
+                "update_mode": "REPLACE",
+                "memory_key": " Relationship.A.State ",
+                "reason": "This is the latest state of an existing relationship.",
+            }],
+        }
+
+        memory = _parse_model_output(json.dumps(payload))[0]
+
+        self.assertEqual(memory["memory_type"], "relationship")
+        self.assertEqual(memory["update_mode"], "replace")
+        self.assertEqual(memory["memory_key"], "relationship.a.state")
+        self.assertIn("latest state", memory["reason"])
+
+    def test_invalid_replace_key_is_safely_downgraded_to_append(self):
+        payload = {
+            "memories": [{
+                "content": "User's current project progress is sixty percent",
+                "memory_type": "goal",
+                "update_mode": "replace",
+                "memory_key": "项目进度",
+            }],
+        }
+
+        memory = _parse_model_output(json.dumps(payload))[0]
+
+        self.assertEqual(memory["memory_type"], "goal")
+        self.assertEqual(memory["update_mode"], "append")
+        self.assertIsNone(memory["memory_key"])
+
+    def test_append_candidates_never_keep_a_model_supplied_memory_key(self):
+        payload = {
+            "memories": [{
+                "content": "User argued with friend A today",
+                "memory_type": "event",
+                "update_mode": "append",
+                "memory_key": "relationship.a.state",
+            }],
+        }
+
+        memory = _parse_model_output(json.dumps(payload))[0]
+
+        self.assertEqual(memory["memory_type"], "event")
+        self.assertEqual(memory["update_mode"], "append")
+        self.assertIsNone(memory["memory_key"])
 
 
 class _FailingRpc:
@@ -224,7 +278,12 @@ class AtomicCommitTests(unittest.TestCase):
             "message_count": 2,
         }
         self.memory = _parse_model_output(json.dumps({
-            "memories": [{"content": "User prefers quiet mornings", "title": "Preference"}],
+            "memories": [{
+                "content": "User prefers quiet mornings",
+                "title": "Preference",
+                "memory_type": "preference",
+                "update_mode": "append",
+            }],
         }))[0]
 
     @contextmanager
@@ -266,6 +325,8 @@ class AtomicCommitTests(unittest.TestCase):
         self.assertEqual(result["cursor_after"], 10)
         self.assertEqual(client.rpc_calls, [])
         self.assertNotIn("content_hash", result["preview_memories"][0])
+        self.assertEqual(result["preview_memories"][0]["memory_type"], "preference")
+        self.assertEqual(result["preview_memories"][0]["update_mode"], "append")
 
     def test_embedding_failure_records_specific_error_without_committing(self):
         client = _DigestClient(self.run)
@@ -320,3 +381,4 @@ class AtomicCommitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

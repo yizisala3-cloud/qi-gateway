@@ -12,13 +12,31 @@ function statusBadge(status) {
   return badge(status || 'unknown', kind);
 }
 
+const MEMORY_TYPE_LABELS = {
+  profile: '用户资料',
+  preference: '偏好与边界',
+  relationship: '人物关系与约定',
+  habit: '长期习惯',
+  event: '重要经历',
+  goal: '长期目标与项目',
+  other: '其他长期事实',
+};
+
+function memoryTypeLabel(value) {
+  return MEMORY_TYPE_LABELS[value] || MEMORY_TYPE_LABELS.other;
+}
+
 function memoryCards(memories) {
   if (!memories?.length) return '<p class="muted">No durable memories extracted from this batch.</p>';
   return memories.map(memory => `
     <div class="item">
       <div class="item-title">${esc(memory.title || '(untitled)')}</div>
       <div class="text-sm muted mt8">${esc(memory.content || '')}</div>
+      ${memory.reason ? `<div class="text-sm muted mt8">入选理由：${esc(memory.reason)}</div>` : ''}
       <div class="btn-row mt8">
+        ${badge(memoryTypeLabel(memory.memory_type), 'accent')}
+        ${memory.update_mode === 'replace' ? badge('替换当前状态', 'purple') : badge('新增长期记忆', 'muted')}
+        ${memory.memory_key ? badge('主题键: ' + esc(memory.memory_key), 'info') : ''}
         ${badge('imp:' + (memory.importance ?? '-'), 'purple')}
         ${badge('confidence:' + Number(memory.confidence ?? 0).toFixed(2), 'info')}
         ${(memory.tags || []).map(tag => badge(esc(tag), 'muted')).join('')}
@@ -197,3 +215,4 @@ export default {
     if (run) this.showResult(run);
   },
 };
+

@@ -37,13 +37,31 @@ EXTRACT_SYSTEM_PROMPT = """你是长期记忆提取器。请从提供的聊天�
 2. 优先提取用户明确表达的偏好、边界、长期习惯、重要事件、承诺和关系变化。
 3. 角色扮演或成人内容只可抽象成明确的长期偏好、边界或约定；必须使用中性、不露骨的语言，不能复述过程。
 4. 模型拒绝、系统报错、时间戳、控制标签和同一轮的重复回复都不是记忆。
-5. 日常寒暄、短暂情绪、一次性指令和没有长期价值的信息不要提取。
+5. 日常寒暄、短暂情绪、待办事项、一次性指令和没有长期价值的信息不要提取。
 6. 没有合格记忆时返回空数组。
 7. 每条记忆必须能独立理解，content 一到两句话，title 是一句短摘要。
 8. importance 为 1-10；emotion_weight 和 confidence 为 0-1；tags 为 1-5 个简短关键词。
+9. memory_type 只允许：profile（用户资料）、preference（偏好与边界）、relationship（人物关系与约定）、habit（长期习惯）、event（重要经历）、goal（长期目标与项目）、other（其他长期事实）。
+10. memory_type 表示内容讲的是什么；不要把“动态”当作一种 memory_type。
+11. update_mode 只允许 append 或 replace。独立事实和历史事件使用 append；明确描述同一主题当前状态的新版本时才使用 replace。
+12. replace 必须提供稳定的 memory_key，只能使用 3-120 位小写 ASCII 字母、数字或 ._:/-，并准确指向一个可变侧面，例如 relationship.a.state 或 project.qi-gateway.progress。append 的 memory_key 必须是 null。
+13. 不要因为一次事件擅自覆盖长期关系。例如“今天和 A 吵架了”应提取为 append 的 event；只有明确说“最近和 A 关系紧张”时，才可另提取 relationship.a.state 的 replace 记忆。“A 是好朋友”和“当前关系紧张”是不同侧面。
+14. reason 用一句短话说明为什么值得长期记住或为什么应替换同一主题旧状态。
 
 只返回严格 JSON，不要 Markdown，不要解释：
-{"memories":[{"content":"...","title":"...","importance":5,"emotion_weight":0.5,"confidence":0.8,"tags":["...","..."]}]}"""
+{"memories":[{"content":"...","title":"...","memory_type":"preference","update_mode":"append","memory_key":null,"reason":"...","importance":5,"emotion_weight":0.5,"confidence":0.8,"tags":["...","..."]}]}"""
+
+MEMORY_TYPES = frozenset({
+    "profile",
+    "preference",
+    "relationship",
+    "habit",
+    "event",
+    "goal",
+    "other",
+})
+UPDATE_MODES = frozenset({"append", "replace"})
+MEMORY_KEY_PATTERN = re.compile(r"[a-z0-9][a-z0-9._:/-]{2,119}")
 
 _REFUSAL_MARKERS = (
     "i cannot fulfill this request",
@@ -245,6 +263,31 @@ def _parse_model_output(text: str) -> list[dict[str, Any]]:
         if len(content) < 5:
             continue
         title = re.sub(r"\s+", " ", str(raw.get("title") or content[:40])).strip()[:100]
+        memory_type = str(raw.get("memory_type") or "other").strip().casefold()
+        if memory_type not in MEMORY_TYPES:
+            memory_type = "other"
+
+        update_mode = str(raw.get("update_mode") or "append").strip().casefold()
+        if update_mode not in UPDATE_MODES:
+            update_mode = "append"
+
+        raw_memory_key = raw.get("memory_key")
+        memory_key = str(raw_memory_key or "").strip().casefold() or None
+        if update_mode == "replace":
+            # A malformed or missing key must never turn a model suggestion into
+            # an unsafe replacement. Keep the candidate, but downgrade it to an
+            # independent append-only memory for human review.
+            if not memory_key or not MEMORY_KEY_PATTERN.fullmatch(memory_key):
+                update_mode = "append"
+                memory_key = None
+        else:
+            memory_key = None
+
+        reason = re.sub(
+            r"\s+",
+            " ",
+            str(raw.get("reason") or "自动总结发现的长期信息"),
+        ).strip()[:240]
 
         raw_tags = raw.get("tags")
         if isinstance(raw_tags, str):
@@ -267,6 +310,10 @@ def _parse_model_output(text: str) -> list[dict[str, Any]]:
         validated.append({
             "content": content,
             "title": title,
+            "memory_type": memory_type,
+            "update_mode": update_mode,
+            "memory_key": memory_key,
+            "reason": reason,
             "importance": int(round(_clamp(raw.get("importance"), 1, 10, 5))),
             "emotion_weight": round(_clamp(raw.get("emotion_weight"), 0, 1, 0.5), 3),
             "confidence": round(_clamp(raw.get("confidence"), 0, 1, 0.6), 3),
@@ -659,3 +706,4 @@ def run_scheduled_digest_if_due() -> dict[str, Any] | None:
 # Backward-compatible entry point used by older callers.
 def run_daily_digest() -> dict[str, Any]:
     return run_memory_digest("scheduled_daily", "execute")
+
