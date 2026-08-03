@@ -26,6 +26,7 @@ MAX_CONTENT_LENGTH = 1_000
 MAX_NOTE_LENGTH = 1_000
 MAX_ESTIMATED_TIME_LENGTH = 100
 MAX_QUERY_ROWS = 200
+PROACTIVE_TODO_COOLDOWN_MINUTES = 180
 TODO_FIELDS = (
     "id,user_name,ai_name,content,todo_type,status,estimated_time,"
     "scheduled_start,scheduled_end,sort_order,is_completed,completed_at,"
@@ -352,17 +353,6 @@ def get_proactive_todo_context(
     """
     try:
         client = _client()
-        response = (
-            client.table("todos")
-            .select(TODO_FIELDS)
-            .eq("is_completed", False)
-            .eq("is_hidden", False)
-            .eq("is_start_marker", False)
-            .eq("is_end_marker", False)
-            .limit(MAX_QUERY_ROWS)
-            .execute()
-        )
-
         now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         local_tz = timezone(timedelta(minutes=timezone_offset_minutes))
         local_now = now_utc.astimezone(local_tz)
@@ -374,8 +364,37 @@ def get_proactive_todo_context(
         )
         tomorrow_utc = tomorrow_local.astimezone(timezone.utc)
 
+        try:
+            # The RPC atomically records when each todo entered a proactive
+            # prompt. It has no daily/count cap; only a three-hour cooldown.
+            response = client.rpc("claim_proactive_todos", {
+                "p_now": _iso(now_utc),
+                "p_tomorrow_utc": _iso(tomorrow_utc),
+                "p_limit": max(1, min(limit, 20)),
+                "p_cooldown_minutes": PROACTIVE_TODO_COOLDOWN_MINUTES,
+            }).execute()
+            rows = response.data or []
+        except Exception as exc:
+            # Deploying the application before its migration is safe. Until
+            # the RPC exists, preserve the already-working direct read path.
+            log.info(
+                "主动待办 claim 不可用，退回直接读取（error=%s）",
+                type(exc).__name__,
+            )
+            response = (
+                client.table("todos")
+                .select(TODO_FIELDS)
+                .eq("is_completed", False)
+                .eq("is_hidden", False)
+                .eq("is_start_marker", False)
+                .eq("is_end_marker", False)
+                .limit(MAX_QUERY_ROWS)
+                .execute()
+            )
+            rows = response.data or []
+
         selected: list[tuple[dict[str, Any], datetime | None]] = []
-        for row in response.data or []:
+        for row in rows:
             if row.get("status") == "hollow":
                 continue
             scheduled = _stored_datetime(row.get("scheduled_start"))
@@ -396,7 +415,7 @@ def get_proactive_todo_context(
         lines = [
             "【当前开放待办】",
             f"当前时间：{local_now.strftime('%Y-%m-%d %H:%M')}（UTC{local_now.strftime('%z')[:3]}:{local_now.strftime('%z')[3:]}）",
-            "以下是待办表中的真实记录。可以自然提醒其中合适的一项；不要虚构新待办或声称用户已经完成。",
+            "以下是本次适合提醒的真实待办。可以自然提醒其中合适的一项；不要虚构新待办或声称用户已经完成。",
         ]
         for row, scheduled in visible:
             content = re.sub(r"\s+", " ", str(row.get("content") or "")).strip()[:160]

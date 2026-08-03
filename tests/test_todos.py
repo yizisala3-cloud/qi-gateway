@@ -88,19 +88,30 @@ class _Query:
 
 
 class _Client:
-    def __init__(self, rows=None):
+    def __init__(self, rows=None, *, rpc_rows=None, rpc_error=None):
         self.rows = list(rows or [])
         self.table_names = []
         self.selected_fields = []
         self.inserted = None
         self.updated = None
         self.executed_filters = []
+        self.rpc_rows = rpc_rows
+        self.rpc_error = rpc_error
+        self.rpc_calls = []
 
     def table(self, name):
         self.table_names.append(name)
         if name != "todos":
             raise AssertionError(f"unexpected table access: {name}")
         return _Query(self)
+
+    def rpc(self, name, payload):
+        self.rpc_calls.append((name, dict(payload)))
+        if self.rpc_error:
+            raise self.rpc_error
+        if self.rpc_rows is None:
+            raise RuntimeError("rpc unavailable")
+        return SimpleNamespace(execute=lambda: SimpleNamespace(data=self.rpc_rows))
 
 
 def _row(**overrides):
@@ -288,6 +299,41 @@ class ProactiveContextTests(unittest.TestCase):
         }
         self.assertNotIn("user_name", filter_fields)
         self.assertNotIn("ai_name", filter_fields)
+
+    def test_atomic_claim_uses_three_hour_cooldown_without_count_limit(self):
+        client = _Client(rpc_rows=[{
+            "todo_id": TODO_ID,
+            "content": "三小时后才能再次进入上下文",
+            "scheduled_start": "2026-08-02T09:00:00+08:00",
+        }])
+        with (
+            patch(f"{MODULE}._server_access_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+        ):
+            context = get_proactive_todo_context(
+                now=datetime(2026, 8, 2, 4, 0, tzinfo=timezone.utc),
+            )
+
+        self.assertIn("三小时后才能再次进入上下文", context)
+        self.assertEqual(client.table_names, [])
+        rpc_name, payload = client.rpc_calls[0]
+        self.assertEqual(rpc_name, "claim_proactive_todos")
+        self.assertEqual(payload["p_cooldown_minutes"], 180)
+        self.assertNotIn("p_daily_limit", payload)
+        self.assertNotIn("p_reminder_count", payload)
+
+    def test_empty_successful_claim_does_not_fall_back_or_repeat_todos(self):
+        client = _Client([_row()], rpc_rows=[])
+        with (
+            patch(f"{MODULE}._server_access_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+        ):
+            context = get_proactive_todo_context(
+                now=datetime(2026, 8, 2, 4, 0, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(context, "")
+        self.assertEqual(client.table_names, [])
 
     def test_database_failure_does_not_block_proactive_reply(self):
         with patch(f"{MODULE}._client", side_effect=RuntimeError("offline")):

@@ -9,6 +9,10 @@ MAIN_JS = ROOT / "orangechat_plugins" / "todo" / "main.js"
 TODO_PY = ROOT / "gateway" / "todos.py"
 API_PY = ROOT / "gateway" / "todo_api.py"
 GATEWAY_MAIN = ROOT / "gateway" / "main.py"
+REMINDER_MIGRATION = (
+    ROOT / "supabase" / "migrations"
+    / "20260804010000_atomic_proactive_todo_claim.sql"
+)
 
 
 class TodoPluginContractTests(unittest.TestCase):
@@ -84,6 +88,18 @@ class TodoGatewayContractTests(unittest.TestCase):
         self.assertIn("asyncio.wait_for", main)
         self.assertNotIn("PROACTIVE_TODO_USER_NAME", todos + main)
         self.assertNotIn("PROACTIVE_TODO_AI_NAME", todos + main)
+
+    def test_proactive_claim_is_atomic_and_only_has_a_three_hour_cooldown(self):
+        sql = REMINDER_MIGRATION.read_text(encoding="utf-8").casefold()
+        self.assertIn("create table if not exists public.todo_reminder_state", sql)
+        self.assertIn("create or replace function public.claim_proactive_todos", sql)
+        self.assertIn("for update of t skip locked", sql)
+        self.assertIn("limit v_limit\n        for update of t skip locked", sql)
+        self.assertIn("p_cooldown_minutes integer default 180", sql)
+        self.assertIn("last_offered_at", sql)
+        self.assertNotIn("daily_limit", sql)
+        self.assertNotIn("offer_count", sql)
+        self.assertNotIn("reminder_count", sql)
 
 if __name__ == "__main__":
     unittest.main()
