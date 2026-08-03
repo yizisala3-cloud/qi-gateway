@@ -45,6 +45,9 @@ EXTRACT_SYSTEM_PROMPT = """从带 id、北京时间 t 和 role 的聊天原文�
 
 只返回严格 JSON：
 {"memories":[{"content":"...","memory_type":"relationship","update_mode":"append","memory_key":null,"importance":6,"confidence":0.9,"evidence_message_ids":[12,13],"memory_time":"2026-08-03","time_precision":"day"}]}"""
+EXTRACT_SYSTEM_PROMPT += """
+9. 如果原文明确显示该内容已通过记忆工具提交，或已通过待办工具创建，不要再提取。不能确定时仍可输出，由数据库保守去重和用户审核。
+"""
 
 MEMORY_TYPES = frozenset({
     "profile",
@@ -157,7 +160,10 @@ def _parse_embedded_timestamp(content: Any) -> datetime | None:
 def _resolve_message_time(created_at: Any, content: Any) -> str | None:
     """Return one canonical Beijing source time, preferring a sane display time."""
     embedded = _parse_embedded_timestamp(content)
-    database_time = _parse_time(created_at, timezone.utc)
+    # OrangeChat's chat_messages.created_at is a timestamp without time zone
+    # whose stored wall clock is Asia/Shanghai. Explicitly zoned values retain
+    # their own offset because _parse_time only applies CST to naive values.
+    database_time = _parse_time(created_at, CST)
     if database_time:
         database_time = database_time.astimezone(CST)
 
@@ -825,4 +831,3 @@ def run_scheduled_digest_if_due() -> dict[str, Any] | None:
 # Backward-compatible entry point used by older callers.
 def run_daily_digest() -> dict[str, Any]:
     return run_memory_digest("scheduled_daily", "execute")
-

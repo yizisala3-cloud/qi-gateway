@@ -3,6 +3,15 @@ import { query, update, insert, esc, count } from '../api.js?v=20260728-rls1';
 import { loading, empty, heatDot, badge, toast, modal, confirm, delegate } from '../ui.js?v=20260728-rls1';
 
 const PAGE_SIZE = 20;
+const MEMORY_TYPE_LABELS = {
+  profile: '用户资料',
+  preference: '偏好与边界',
+  relationship: '人物关系与约定',
+  habit: '长期习惯',
+  event: '重要经历',
+  goal: '长期目标与项目',
+  other: '其他长期事实',
+};
 
 export default {
   state: { page: 0, sort: 'created_at', filter: '', search: '' },
@@ -79,7 +88,7 @@ export default {
 
       const [data, total] = await Promise.all([
         query('memories', {
-          select: 'id,title,content,heat,importance,tags,verified,source,layer,created_at',
+          select: 'id,title,content,heat,importance,tags,verified,source,layer,memory_type,evidence_message_ids,source_time,memory_time,time_precision,created_at',
           order: { col: this.state.sort, asc: false },
           limit: PAGE_SIZE,
           offset: this.state.page * PAGE_SIZE,
@@ -104,6 +113,7 @@ export default {
                 ${heatDot(m.heat)}
                 ${badge('imp:' + m.importance, m.importance >= 8 ? 'purple' : m.importance >= 5 ? 'accent' : 'muted')}
                 ${badge(m.verified || 'pending', m.verified === 'verified' ? 'accent' : m.verified === 'rejected' ? 'danger' : 'warn')}
+                ${badge(MEMORY_TYPE_LABELS[m.memory_type] || MEMORY_TYPE_LABELS.other, 'accent')}
                 ${badge(m.layer || '-', 'muted')}
                 ${(m.tags || []).slice(0, 3).map(t => badge(t, 'info')).join('')}
               </div>

@@ -10,10 +10,12 @@ INDEX_MIGRATION = ROOT / "supabase" / "migrations" / "20260802040000_index_memor
 SUPERSESSION_MIGRATION = ROOT / "supabase" / "migrations" / "20260802070000_memory_supersession.sql"
 SIMILARITY_REVIEW_MIGRATION = ROOT / "supabase" / "migrations" / "20260802080000_memory_similarity_review.sql"
 IDEMPOTENT_SIMILARITY_REVIEW_MIGRATION = ROOT / "supabase" / "migrations" / "20260802081000_idempotent_memory_similarity_review.sql"
+AUTO_DIGEST_REQUEST_MIGRATION = ROOT / "supabase" / "migrations" / "20260804020000_auto_digest_memory_requests.sql"
 MANIFEST = ROOT / "orangechat_plugins" / "memory-request" / "manifest.json"
 MAIN_JS = ROOT / "orangechat_plugins" / "memory-request" / "main.js"
 REVIEW_PAGE = ROOT / "admin" / "js" / "pages" / "memory_requests.js"
 ROUTES_JS = ROOT / "admin" / "js" / "routes.js"
+MEMORY_EXTRACT = ROOT / "gateway" / "memory_extract.py"
 
 
 class MemoryRequestMigrationContractTests(unittest.TestCase):
@@ -171,6 +173,90 @@ class IdempotentMemorySimilarityReviewMigrationContractTests(unittest.TestCase):
         self.assertNotIn("chat_messages", executable_sql)
 
 
+class AutomaticDigestMemoryRequestMigrationContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = AUTO_DIGEST_REQUEST_MIGRATION.read_text(encoding="utf-8").casefold()
+
+    def test_chat_history_is_evidence_only(self):
+        for forbidden in (
+            "alter table public.chat_messages",
+            "insert into public.chat_messages",
+            "update public.chat_messages",
+            "delete from public.chat_messages",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.sql)
+        self.assertIn("from public.chat_messages", self.sql)
+
+    def test_digest_commit_creates_pending_applications_not_memories(self):
+        commit_sql = self.sql.split(
+            "create or replace function public.commit_memory_digest_run",
+            1,
+        )[1]
+        self.assertIn("insert into public.memory_requests", commit_sql)
+        self.assertNotIn("insert into public.memories", commit_sql)
+        self.assertIn("'pending'", commit_sql)
+        self.assertIn("'daily_digest'", commit_sql)
+        self.assertIn("on conflict do nothing", commit_sql)
+        self.assertIn("memory digest item has no valid source evidence", commit_sql)
+        self.assertIn("last_processed_message_id = greatest", commit_sql)
+
+    def test_type_evidence_time_and_provenance_are_persisted(self):
+        for required in (
+            "memory_type",
+            "confidence",
+            "evidence_message_ids",
+            "source_time",
+            "memory_time",
+            "time_precision",
+            "digest_run_id",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, self.sql)
+        self.assertIn("sync_reviewed_memory_request_metadata", self.sql)
+        self.assertIn("embedding = coalesce(new.embedding, memory.embedding)", self.sql)
+
+    def test_digest_deduplicates_tool_receipts_without_silently_merging_similarity(self):
+        for required in (
+            "create extension if not exists pg_trgm",
+            "memory_dedupe_text_similarity",
+            "pg_advisory_xact_lock",
+            "request.source_message_id = any(v_evidence_ids)",
+            "request.memory_key = v_memory_key",
+            "skipped_existing_request",
+            "possible_duplicate",
+            "related_request_id",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, self.sql)
+        self.assertIn("v_dedupe_state := 'possible_duplicate'", self.sql)
+        self.assertNotIn("status = 'duplicate'", self.sql)
+
+    def test_existing_open_todo_is_read_only_and_suppresses_goal_application(self):
+        self.assertIn("from public.todos", self.sql)
+        self.assertIn("v_memory_type = 'goal'", self.sql)
+        self.assertIn("skipped_existing_todo", self.sql)
+        for forbidden in (
+            "insert into public.todos",
+            "update public.todos",
+            "delete from public.todos",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.sql)
+
+    def test_extractor_prompt_avoids_items_already_written_by_tools(self):
+        source = MEMORY_EXTRACT.read_text(encoding="utf-8")
+        self.assertIn("已通过记忆工具提交", source)
+        self.assertIn("已通过待办工具创建", source)
+
+    def test_rpc_and_new_metadata_remain_server_only(self):
+        self.assertIn("revoke all on function public.commit_memory_digest_run", self.sql)
+        self.assertIn("to service_role", self.sql)
+        self.assertNotIn("to authenticated;", self.sql)
+        self.assertNotIn("delete from", self.sql)
+
+
 class OrangeChatPluginContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -247,6 +333,11 @@ class MemoryReviewDashboardContractTests(unittest.TestCase):
         self.assertIn("openRelation(el.dataset.id, 'merge')", self.page)
         self.assertIn("openRelation(el.dataset.id, 'duplicate')", self.page)
         self.assertIn("openRelation(el.dataset.id, 'conflict')", self.page)
+        self.assertIn("request-memory-type", self.page)
+        self.assertIn("evidence_message_ids", self.page)
+        self.assertIn("time_precision", self.page)
+        self.assertIn("dedupe_state", self.page)
+        self.assertIn("related_request_id", self.page)
 
     def test_dashboard_never_directly_mutates_request_rows(self):
         self.assertNotIn("update('memory_requests'", self.page)
@@ -255,4 +346,3 @@ class MemoryReviewDashboardContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

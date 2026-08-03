@@ -26,6 +26,27 @@ function relationLabel(action) {
   }[action] || action;
 }
 
+const MEMORY_TYPE_LABELS = {
+  profile: '用户资料',
+  preference: '偏好与边界',
+  relationship: '人物关系与约定',
+  habit: '长期习惯',
+  event: '重要经历',
+  goal: '长期目标与项目',
+  other: '其他长期事实',
+};
+
+const TIME_PRECISION_LABELS = {
+  minute: '精确到分钟',
+  day: '精确到日期',
+  approximate: '大概时间',
+  unknown: '时间未知',
+};
+
+function memoryTypeLabel(value) {
+  return MEMORY_TYPE_LABELS[value] || MEMORY_TYPE_LABELS.other;
+}
+
 async function submitReview(id, payload) {
   return gw(`/admin/api/memory-requests/${encodeURIComponent(id)}/review`, {
     method: 'POST',
@@ -35,7 +56,7 @@ async function submitReview(id, payload) {
 }
 
 export default {
-  state: { status: 'pending' },
+  state: { status: 'pending', memoryType: '' },
 
   async mount(root) {
     this.root = root;
@@ -51,6 +72,10 @@ export default {
     });
     root.querySelector('#request-status')?.addEventListener('change', (event) => {
       this.state.status = event.target.value;
+      this.loadList();
+    });
+    root.querySelector('#request-memory-type')?.addEventListener('change', (event) => {
+      this.state.memoryType = event.target.value;
       this.loadList();
     });
     await this.loadList();
@@ -72,6 +97,16 @@ export default {
           <option value="conflict">冲突待处理</option>
           <option value="">全部状态</option>
         </select>
+        <select id="request-memory-type" style="width:180px">
+          <option value="">全部记忆类型</option>
+          <option value="profile">用户资料</option>
+          <option value="preference">偏好与边界</option>
+          <option value="relationship">人物关系与约定</option>
+          <option value="habit">长期习惯</option>
+          <option value="event">重要经历</option>
+          <option value="goal">长期目标与项目</option>
+          <option value="other">其他长期事实</option>
+        </select>
         <button class="btn btn-secondary" data-act="refresh">刷新</button>
       </div>
       <div id="request-list">${loading()}</div>
@@ -82,9 +117,11 @@ export default {
     const list = this.root.querySelector('#request-list');
     list.innerHTML = loading();
     try {
-      const eq = this.state.status ? { status: this.state.status } : {};
+      const eq = {};
+      if (this.state.status) eq.status = this.state.status;
+      if (this.state.memoryType) eq.memory_type = this.state.memoryType;
       const rows = await query('memory_requests', {
-        select: 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,memory_key,update_mode,related_memory_id,created_at,reviewed_at,reviewed_by,review_note',
+        select: 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,memory_key,update_mode,related_memory_id,related_request_id,memory_type,confidence,evidence_message_ids,source_time,memory_time,time_precision,digest_run_id,dedupe_state,dedupe_reason,created_at,reviewed_at,reviewed_by,review_note',
         order: { col: 'created_at', asc: false },
         limit: 100,
         eq,
@@ -103,9 +140,13 @@ export default {
               ${row.review_note ? `<div class="text-sm muted mt8">审核备注：${esc(row.review_note)}</div>` : ''}
               <div class="btn-row mt8">
                 ${statusBadge(row.status)}
+                ${badge(memoryTypeLabel(row.memory_type), 'accent')}
                 ${badge(`重要性 ${Number(row.importance) || 5}`, Number(row.importance) >= 8 ? 'purple' : 'muted')}
+                ${row.confidence != null ? badge(`可信度 ${Number(row.confidence).toFixed(2)}`, 'info') : ''}
                 ${row.update_mode === 'replace' ? badge('替换更新', 'purple') : badge('新增记忆', 'muted')}
                 ${row.memory_key ? badge(`key: ${esc(row.memory_key)}`, 'info') : ''}
+                ${row.dedupe_state === 'possible_duplicate' ? badge('疑似重复，请人工判断', 'warn') : ''}
+                ${row.related_request_id ? badge(`相似申请 #${esc(row.related_request_id)}`, 'warn') : ''}
                 ${row.related_memory_id ? badge(`关联 memory #${esc(row.related_memory_id)}`, row.status === 'conflict' ? 'warn' : 'info') : ''}
                 ${(row.tags || []).map((tag) => badge(esc(tag), 'info')).join('')}
                 ${badge(esc(row.source || 'unknown'), 'muted')}
@@ -113,6 +154,10 @@ export default {
               <div class="text-sm muted mt8">
                 assistant: <span class="mono">${esc(row.assistant_id || '-')}</span>
                 · source message: ${esc(row.source_message_id ?? '-')}
+                · 原文证据: ${(row.evidence_message_ids || []).map(id => `#${esc(id)}`).join('、') || '-'}
+                · 证据时间: ${esc(fmtDate(row.source_time))}
+                · 记忆时间: ${esc(row.memory_time ? fmtDate(row.memory_time) : '-')}（${TIME_PRECISION_LABELS[row.time_precision] || TIME_PRECISION_LABELS.unknown}）
+                ${row.digest_run_id ? ` · digest #${esc(row.digest_run_id)}` : ''}
                 · 申请于 ${esc(fmtDate(row.created_at))}
                 ${row.reviewed_at ? ` · 审核于 ${esc(fmtDate(row.reviewed_at))}` : ''}
                 ${row.memory_id ? ` · memory #${esc(row.memory_id)}` : ''}
@@ -408,4 +453,3 @@ export default {
     }
   },
 };
-

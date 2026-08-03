@@ -4,7 +4,7 @@ import { loading, errorBlock } from './ui.js?v=20260802-memory-review3';
 import { gw, getToken, setToken, clearToken } from './api.js?v=20260802-memory-review3';
 
 const DEFAULT_ROUTE = 'dashboard';
-const ASSET_VERSION = '20260804-digest-time1';
+const ASSET_VERSION = '20260804-memory-dedupe1';
 
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);
@@ -109,4 +109,3 @@ async function boot() {
   } else showLogin();
 }
 boot();
-

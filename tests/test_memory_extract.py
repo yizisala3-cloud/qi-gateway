@@ -225,6 +225,10 @@ class ModelBoundaryTests(unittest.TestCase):
             _resolve_message_time("2026-08-04T13:35:00Z", "没有内嵌时间"),
             "2026-08-04T21:35+08:00",
         )
+        self.assertEqual(
+            _resolve_message_time("2026-08-04 21:35:00", "没有内嵌时间"),
+            "2026-08-04T21:35+08:00",
+        )
 
     def test_user_turn_without_time_uses_following_assistant_timestamp(self):
         conversation, source_times = _conversation_context([
@@ -459,4 +463,3 @@ class AtomicCommitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

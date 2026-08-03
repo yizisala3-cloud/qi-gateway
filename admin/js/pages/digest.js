@@ -33,6 +33,20 @@ const TIME_PRECISION_LABELS = {
   unknown: '时间未知',
 };
 
+const COMMIT_STATUS_LABELS = {
+  inserted_pending: '已进入记忆申请',
+  skipped_existing_request: '已由记忆工具处理，已跳过',
+  skipped_existing_todo: '已由待办工具处理，已跳过',
+  skipped_active_memory: '正式记忆已存在，已跳过',
+  skipped_active_content: '相同申请已存在，已跳过',
+};
+
+function commitBadge(memory) {
+  if (!memory.commit_status) return '';
+  const skipped = memory.commit_status.startsWith('skipped_');
+  return badge(COMMIT_STATUS_LABELS[memory.commit_status] || memory.commit_status, skipped ? 'muted' : 'accent');
+}
+
 function memoryCards(memories) {
   if (!memories?.length) return '<p class="muted">No durable memories extracted from this batch.</p>';
   return memories.map(memory => `
@@ -45,6 +59,8 @@ function memoryCards(memories) {
         · 记忆时间：${esc(memory.memory_time || '-')}（${TIME_PRECISION_LABELS[memory.time_precision] || TIME_PRECISION_LABELS.unknown}）
       </div>
       <div class="btn-row mt8">
+        ${commitBadge(memory)}
+        ${memory.dedupe_state === 'possible_duplicate' ? badge('疑似重复，保留审核', 'warn') : ''}
         ${badge(memoryTypeLabel(memory.memory_type), 'accent')}
         ${memory.update_mode === 'replace' ? badge('替换当前状态', 'purple') : badge('新增长期记忆', 'muted')}
         ${memory.memory_key ? badge('主题键: ' + esc(memory.memory_key), 'info') : ''}
@@ -76,7 +92,7 @@ export default {
     this.root.innerHTML = `
       <div class="banner">
         <span>ℹ️</span>
-        <div><strong>chat_messages is read-only.</strong> Preview calls the extraction model but does not write memories or advance the cursor. Execute writes pending memories and advances the cursor only after an atomic successful commit.</div>
+        <div><strong>chat_messages is read-only.</strong> Preview calls the extraction model without writing or advancing the cursor. Execute creates pending memory applications and advances the cursor only after an atomic successful commit.</div>
       </div>
       <div id="digest-config-warning"></div>
       <div class="toolbar">
@@ -181,7 +197,7 @@ export default {
     }
     const limit = Math.max(1, Math.min(100, Number(this.root.querySelector('#digest-limit').value) || 60));
     if (mode === 'execute') {
-      const ok = await confirm(`Execute memory extraction for up to ${limit} unprocessed source messages? Extracted memories will be stored as pending.`);
+      const ok = await confirm(`Execute memory extraction for up to ${limit} unprocessed source messages? Candidates will enter the memory application review queue.`);
       if (!ok) return;
     }
 
@@ -197,7 +213,7 @@ export default {
       await this.load();
       if (result.status === 'failed') toast(`Failed: ${result.error_code}`, 'err');
       else if (result.status === 'skipped') toast('No unprocessed messages');
-      else toast(mode === 'preview' ? `Preview extracted ${result.extracted_count || 0}` : `Saved ${result.inserted_count || 0} pending memories`);
+      else toast(mode === 'preview' ? `Preview extracted ${result.extracted_count || 0}` : `Created ${result.inserted_count || 0} pending applications`);
     } catch (error) {
       toast('Digest request failed: ' + error.message, 'err');
     } finally {
@@ -226,4 +242,3 @@ export default {
     if (run) this.showResult(run);
   },
 };
-
