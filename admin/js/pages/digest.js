@@ -26,13 +26,24 @@ function memoryTypeLabel(value) {
   return MEMORY_TYPE_LABELS[value] || MEMORY_TYPE_LABELS.other;
 }
 
+const TIME_PRECISION_LABELS = {
+  minute: '精确到分钟',
+  day: '精确到日期',
+  approximate: '大概时间',
+  unknown: '时间未知',
+};
+
 function memoryCards(memories) {
   if (!memories?.length) return '<p class="muted">No durable memories extracted from this batch.</p>';
   return memories.map(memory => `
     <div class="item">
       <div class="item-title">${esc(memory.title || '(untitled)')}</div>
       <div class="text-sm muted mt8">${esc(memory.content || '')}</div>
-      ${memory.reason ? `<div class="text-sm muted mt8">入选理由：${esc(memory.reason)}</div>` : ''}
+      <div class="text-sm muted mt8">
+        原文证据：${(memory.evidence_message_ids || []).map(id => `#${esc(id)}`).join('、') || '-'}
+        · 证据时间：${esc(memory.source_time || '-')}
+        · 记忆时间：${esc(memory.memory_time || '-')}（${TIME_PRECISION_LABELS[memory.time_precision] || TIME_PRECISION_LABELS.unknown}）
+      </div>
       <div class="btn-row mt8">
         ${badge(memoryTypeLabel(memory.memory_type), 'accent')}
         ${memory.update_mode === 'replace' ? badge('替换当前状态', 'purple') : badge('新增长期记忆', 'muted')}

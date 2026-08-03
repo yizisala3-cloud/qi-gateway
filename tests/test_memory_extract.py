@@ -23,9 +23,13 @@ if importlib.util.find_spec("httpx") is None:
 from gateway.config import cfg
 from gateway.memory_extract import (
     DigestPipelineError,
+    _clean_message_content,
+    _conversation_context,
     _extract_memories,
     _get_embedding_sync,
+    _parse_embedded_timestamp,
     _parse_model_output,
+    _resolve_message_time,
     run_memory_digest,
     run_scheduled_digest_if_due,
 )
@@ -132,6 +136,8 @@ class ModelBoundaryTests(unittest.TestCase):
         self.assertEqual(memories[0]["memory_type"], "other")
         self.assertEqual(memories[0]["update_mode"], "append")
         self.assertIsNone(memories[0]["memory_key"])
+        self.assertEqual(memories[0]["tags"], ["长期记忆"])
+        self.assertNotIn("reason", memories[0])
 
     def test_parser_keeps_semantic_type_separate_from_replace_strategy(self):
         payload = {
@@ -141,7 +147,6 @@ class ModelBoundaryTests(unittest.TestCase):
                 "memory_type": "RELATIONSHIP",
                 "update_mode": "REPLACE",
                 "memory_key": " Relationship.A.State ",
-                "reason": "This is the latest state of an existing relationship.",
             }],
         }
 
@@ -150,7 +155,7 @@ class ModelBoundaryTests(unittest.TestCase):
         self.assertEqual(memory["memory_type"], "relationship")
         self.assertEqual(memory["update_mode"], "replace")
         self.assertEqual(memory["memory_key"], "relationship.a.state")
-        self.assertIn("latest state", memory["reason"])
+        self.assertEqual(memory["tags"], ["人物关系"])
 
     def test_invalid_replace_key_is_safely_downgraded_to_append(self):
         payload = {
@@ -167,6 +172,79 @@ class ModelBoundaryTests(unittest.TestCase):
         self.assertEqual(memory["memory_type"], "goal")
         self.assertEqual(memory["update_mode"], "append")
         self.assertIsNone(memory["memory_key"])
+
+    def test_evidence_ids_are_checked_and_times_are_normalized(self):
+        payload = {
+            "memories": [{
+                "content": "User argued with friend A yesterday",
+                "memory_type": "event",
+                "update_mode": "append",
+                "evidence_message_ids": [11, 11, 999],
+                "memory_time": "2026-08-03",
+                "time_precision": "day",
+            }],
+        }
+
+        memory = _parse_model_output(
+            json.dumps(payload),
+            {11: "2026-08-04T21:35+08:00", 12: "2026-08-04T21:36+08:00"},
+        )[0]
+
+        self.assertEqual(memory["evidence_message_ids"], [11])
+        self.assertEqual(memory["source_time"], "2026-08-04T21:35+08:00")
+        self.assertEqual(memory["memory_time"], "2026-08-03")
+        self.assertEqual(memory["time_precision"], "day")
+
+    def test_candidate_without_valid_evidence_is_dropped_when_context_is_known(self):
+        payload = {
+            "memories": [{
+                "content": "Unsupported model invention",
+                "evidence_message_ids": [999],
+            }],
+        }
+
+        self.assertEqual(
+            _parse_model_output(
+                json.dumps(payload),
+                {11: "2026-08-04T21:35+08:00"},
+            ),
+            [],
+        )
+
+    def test_embedded_timestamp_is_extracted_before_being_removed_from_text(self):
+        content = "26.08.04 21:35\n这是实际回复内容"
+
+        parsed = _parse_embedded_timestamp(content)
+
+        self.assertEqual(parsed.isoformat(timespec="minutes"), "2026-08-04T21:35+08:00")
+        self.assertEqual(_resolve_message_time(None, content), "2026-08-04T21:35+08:00")
+        self.assertEqual(_clean_message_content("assistant", content), "这是实际回复内容")
+
+    def test_database_timestamp_is_normalized_to_beijing_time(self):
+        self.assertEqual(
+            _resolve_message_time("2026-08-04T13:35:00Z", "没有内嵌时间"),
+            "2026-08-04T21:35+08:00",
+        )
+
+    def test_user_turn_without_time_uses_following_assistant_timestamp(self):
+        conversation, source_times = _conversation_context([
+            {
+                "id": 11,
+                "role": "user",
+                "content": "昨天和 A 吵架了",
+                "_cleaned_content": "昨天和 A 吵架了",
+            },
+            {
+                "id": 12,
+                "role": "assistant",
+                "content": "26.08.04 21:35\n我知道了",
+                "_cleaned_content": "我知道了",
+            },
+        ])
+
+        self.assertEqual(source_times[11], "2026-08-04T21:35+08:00")
+        self.assertIn("[id=11 t=2026-08-04T21:35+08:00 role=user]", conversation)
+        self.assertNotIn("26.08.04", conversation)
 
     def test_append_candidates_never_keep_a_model_supplied_memory_key(self):
         payload = {

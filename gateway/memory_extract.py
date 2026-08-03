@@ -27,29 +27,24 @@ MAX_BATCH_SIZE = 100
 DEFAULT_MAX_CHARS = 12000
 STALE_RUN_MINUTES = 30
 FAILED_RETRY_MINUTES = 60
+MAX_EXTRACTED_MEMORIES = 8
 
 _pipeline_lock = threading.Lock()
 
-EXTRACT_SYSTEM_PROMPT = """你是长期记忆提取器。请从提供的聊天原文中提取值得长期记住、且被原文明确信息支持的事实。
+EXTRACT_SYSTEM_PROMPT = """从带 id、北京时间 t 和 role 的聊天原文中，提取最多 8 条有长期价值且有原文证据的独立记忆。
 
-严格规则：
-1. 禁止推测、脑补或把模型生成内容当成用户现实事实。
-2. 优先提取用户明确表达的偏好、边界、长期习惯、重要事件、承诺和关系变化。
-3. 角色扮演或成人内容只可抽象成明确的长期偏好、边界或约定；必须使用中性、不露骨的语言，不能复述过程。
-4. 模型拒绝、系统报错、时间戳、控制标签和同一轮的重复回复都不是记忆。
-5. 日常寒暄、短暂情绪、待办事项、一次性指令和没有长期价值的信息不要提取。
-6. 没有合格记忆时返回空数组。
-7. 每条记忆必须能独立理解，content 一到两句话，title 是一句短摘要。
-8. importance 为 1-10；emotion_weight 和 confidence 为 0-1；tags 为 1-5 个简短关键词。
-9. memory_type 只允许：profile（用户资料）、preference（偏好与边界）、relationship（人物关系与约定）、habit（长期习惯）、event（重要经历）、goal（长期目标与项目）、other（其他长期事实）。
-10. memory_type 表示内容讲的是什么；不要把“动态”当作一种 memory_type。
-11. update_mode 只允许 append 或 replace。独立事实和历史事件使用 append；明确描述同一主题当前状态的新版本时才使用 replace。
-12. replace 必须提供稳定的 memory_key，只能使用 3-120 位小写 ASCII 字母、数字或 ._:/-，并准确指向一个可变侧面，例如 relationship.a.state 或 project.qi-gateway.progress。append 的 memory_key 必须是 null。
-13. 不要因为一次事件擅自覆盖长期关系。例如“今天和 A 吵架了”应提取为 append 的 event；只有明确说“最近和 A 关系紧张”时，才可另提取 relationship.a.state 的 replace 记忆。“A 是好朋友”和“当前关系紧张”是不同侧面。
-14. reason 用一句短话说明为什么值得长期记住或为什么应替换同一主题旧状态。
+规则：
+1. 只提取用户明确表达的资料、偏好边界、长期习惯、人物关系约定、重要经历和长期目标；禁止推测，也不能把 assistant 的说法当成用户现实事实。
+2. 排除寒暄、短暂情绪、待办、一次性指令、报错、拒绝、控制标签和重复回复。角色扮演内容只能中性抽象为明确的长期偏好、边界或约定。
+3. memory_type 只允许 profile、preference、relationship、habit、event、goal、other。“动态”不是类型。
+4. 独立事实与历史事件用 append 且 memory_key=null。只有原文明示同一侧面的当前状态变化时才用 replace，并给 3-120 位小写 ASCII 主题键，如 relationship.a.state 或 project.qi-gateway.progress。
+5. 一次事件不能覆盖长期关系：“和 A 吵架”是 append event；“最近和 A 关系紧张”才可另作 relationship.a.state 的 replace。
+6. evidence_message_ids 必须列出直接支持该记忆的原文 id。importance 为 1-10，confidence 为 0-1。
+7. memory_time 是事情实际发生或状态生效的北京时间 ISO 8601；无法从原文明示时间或相对时间可靠确定时填 null。time_precision 只允许 minute、day、approximate、unknown。
+8. content 用一到两句话独立说明记忆。没有合格内容时返回空数组。
 
-只返回严格 JSON，不要 Markdown，不要解释：
-{"memories":[{"content":"...","title":"...","memory_type":"preference","update_mode":"append","memory_key":null,"reason":"...","importance":5,"emotion_weight":0.5,"confidence":0.8,"tags":["...","..."]}]}"""
+只返回严格 JSON：
+{"memories":[{"content":"...","memory_type":"relationship","update_mode":"append","memory_key":null,"importance":6,"confidence":0.9,"evidence_message_ids":[12,13],"memory_time":"2026-08-03","time_precision":"day"}]}"""
 
 MEMORY_TYPES = frozenset({
     "profile",
@@ -62,6 +57,20 @@ MEMORY_TYPES = frozenset({
 })
 UPDATE_MODES = frozenset({"append", "replace"})
 MEMORY_KEY_PATTERN = re.compile(r"[a-z0-9][a-z0-9._:/-]{2,119}")
+TIME_PRECISIONS = frozenset({"minute", "day", "approximate", "unknown"})
+MEMORY_TYPE_TAGS = {
+    "profile": "用户资料",
+    "preference": "偏好与边界",
+    "relationship": "人物关系",
+    "habit": "长期习惯",
+    "event": "重要经历",
+    "goal": "长期目标",
+    "other": "长期记忆",
+}
+EMBEDDED_TIMESTAMP_PATTERN = re.compile(
+    r"(?m)^\s*(?P<year>\d{2}|\d{4})[.\-/](?P<month>\d{1,2})[.\-/](?P<day>\d{1,2})"
+    r"\s+(?P<hour>\d{1,2}):(?P<minute>\d{2})(?::(?P<second>\d{2}))?\s*$"
+)
 
 _REFUSAL_MARKERS = (
     "i cannot fulfill this request",
@@ -123,6 +132,51 @@ def _parse_time(value: Any, assume_tz=timezone.utc) -> datetime | None:
     return parsed
 
 
+def _parse_embedded_timestamp(content: Any) -> datetime | None:
+    """Parse OrangeChat's display timestamp without asking the model to do it."""
+    match = EMBEDDED_TIMESTAMP_PATTERN.search(str(content or ""))
+    if not match:
+        return None
+    try:
+        year = int(match.group("year"))
+        if year < 100:
+            year += 2000
+        return datetime(
+            year,
+            int(match.group("month")),
+            int(match.group("day")),
+            int(match.group("hour")),
+            int(match.group("minute")),
+            int(match.group("second") or 0),
+            tzinfo=CST,
+        )
+    except ValueError:
+        return None
+
+
+def _resolve_message_time(created_at: Any, content: Any) -> str | None:
+    """Return one canonical Beijing source time, preferring a sane display time."""
+    embedded = _parse_embedded_timestamp(content)
+    database_time = _parse_time(created_at, timezone.utc)
+    if database_time:
+        database_time = database_time.astimezone(CST)
+
+    chosen = database_time
+    if embedded and database_time:
+        if abs((embedded - database_time).total_seconds()) <= 6 * 60 * 60:
+            chosen = embedded
+        else:
+            log.warning(
+                "消息内时间戳与数据库时间冲突，使用数据库时间（embedded=%s database=%s）",
+                embedded.isoformat(),
+                database_time.isoformat(),
+            )
+    elif embedded:
+        chosen = embedded
+
+    return chosen.isoformat(timespec="minutes") if chosen else None
+
+
 def resolve_assistant_id() -> str:
     configured = cfg.MEMORY_ASSISTANT_ID.strip()
     if configured:
@@ -171,14 +225,14 @@ def _clean_message_content(role: str, content: Any) -> str:
     text = str(content or "")
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<<(?:delay|schedule|busy):.*?>>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"(?m)^\s*\d{2}\.\d{2}\.\d{2}\s+\d{2}:\d{2}\s*$", "", text)
+    text = EMBEDDED_TIMESTAMP_PATTERN.sub("", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
     lowered = text.lower()
     if role == "assistant" and any(marker in lowered for marker in _REFUSAL_MARKERS):
         return ""
 
-    per_message_limit = 1000 if role == "user" else 700
+    per_message_limit = 800 if role == "user" else 400
     return text[:per_message_limit].strip()
 
 
@@ -205,12 +259,16 @@ def _fetch_batch(assistant_id: str, max_messages: int) -> tuple[int, list[dict[s
             break
         copied = dict(row)
         copied["_cleaned_content"] = cleaned
+        copied["_source_time"] = _resolve_message_time(
+            row.get("created_at"),
+            row.get("content"),
+        )
         selected.append(copied)
         used_chars += estimated
     return cursor, selected
 
 
-def _format_conversation(messages: list[dict[str, Any]]) -> str:
+def _conversation_context(messages: list[dict[str, Any]]) -> tuple[str, dict[int, str | None]]:
     normalized: list[dict[str, Any]] = []
     for row in messages:
         role = str(row.get("role") or "").strip().lower()
@@ -224,7 +282,10 @@ def _format_conversation(messages: list[dict[str, Any]]) -> str:
             "id": int(row["id"]),
             "role": role,
             "content": content,
-            "created_at": row.get("created_at") or "",
+            "source_time": row.get("_source_time") or _resolve_message_time(
+                row.get("created_at"),
+                row.get("content"),
+            ),
         }
         # Multiple consecutive assistant rows are usually retries/alternatives.
         # Keep only the final one without modifying the source table.
@@ -233,16 +294,54 @@ def _format_conversation(messages: list[dict[str, Any]]) -> str:
         else:
             normalized.append(item)
 
-    lines = []
+    # When a user row genuinely has no usable time, the immediately following
+    # assistant display timestamp is the best time anchor for that chat turn.
+    for index, item in enumerate(normalized[:-1]):
+        following = normalized[index + 1]
+        if (
+            item["role"] == "user"
+            and not item["source_time"]
+            and following["role"] == "assistant"
+            and following["source_time"]
+        ):
+            item["source_time"] = following["source_time"]
+
+    lines: list[str] = []
+    source_times: dict[int, str | None] = {}
     for item in normalized:
-        speaker = "叶子" if item["role"] == "user" else "栖"
-        lines.append(
-            f"[message_id={item['id']} time={item['created_at']}] {speaker}: {item['content']}"
-        )
-    return "\n".join(lines)
+        source_time = item["source_time"] or "unknown"
+        source_times[item["id"]] = item["source_time"]
+        lines.append(f"[id={item['id']} t={source_time} role={item['role']}] {item['content']}")
+    return "\n".join(lines), source_times
 
 
-def _parse_model_output(text: str) -> list[dict[str, Any]]:
+def _format_conversation(messages: list[dict[str, Any]]) -> str:
+    """Backward-compatible formatter used by tests and older callers."""
+    return _conversation_context(messages)[0]
+
+
+def _normalize_memory_time(value: Any, precision: str) -> tuple[str | None, str]:
+    raw = str(value or "").strip()
+    clean_precision = precision if precision in TIME_PRECISIONS else "unknown"
+    if not raw:
+        return None, "unknown"
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        try:
+            datetime.strptime(raw, "%Y-%m-%d")
+        except ValueError:
+            return None, "unknown"
+        return raw, "day" if clean_precision == "unknown" else clean_precision
+    parsed = _parse_time(raw, CST)
+    if not parsed:
+        return None, "unknown"
+    normalized = parsed.astimezone(CST).isoformat(timespec="minutes")
+    return normalized, "minute" if clean_precision == "unknown" else clean_precision
+
+
+def _parse_model_output(
+    text: str,
+    source_times: dict[int, str | None] | None = None,
+) -> list[dict[str, Any]]:
     cleaned = re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL | re.IGNORECASE).strip()
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE)
     try:
@@ -256,13 +355,13 @@ def _parse_model_output(text: str) -> list[dict[str, Any]]:
 
     validated: list[dict[str, Any]] = []
     seen_hashes: set[str] = set()
-    for raw in items:
+    for raw in items[:MAX_EXTRACTED_MEMORIES]:
         if not isinstance(raw, dict):
             continue
         content = re.sub(r"\s+", " ", str(raw.get("content") or "")).strip()[:600]
         if len(content) < 5:
             continue
-        title = re.sub(r"\s+", " ", str(raw.get("title") or content[:40])).strip()[:100]
+        title = content[:40]
         memory_type = str(raw.get("memory_type") or "other").strip().casefold()
         if memory_type not in MEMORY_TYPES:
             memory_type = "other"
@@ -283,24 +382,36 @@ def _parse_model_output(text: str) -> list[dict[str, Any]]:
         else:
             memory_key = None
 
-        reason = re.sub(
-            r"\s+",
-            " ",
-            str(raw.get("reason") or "自动总结发现的长期信息"),
-        ).strip()[:240]
-
-        raw_tags = raw.get("tags")
-        if isinstance(raw_tags, str):
-            raw_tags = re.split(r"[,，]", raw_tags)
-        tags: list[str] = []
-        for tag in raw_tags if isinstance(raw_tags, list) else []:
-            clean_tag = re.sub(r"\s+", " ", str(tag)).strip()[:24]
-            if clean_tag and clean_tag not in tags:
-                tags.append(clean_tag)
-            if len(tags) >= 5:
+        evidence_ids: list[int] = []
+        for candidate in raw.get("evidence_message_ids") or []:
+            if isinstance(candidate, bool):
+                continue
+            try:
+                message_id = int(candidate)
+            except (TypeError, ValueError):
+                continue
+            if source_times is not None and message_id not in source_times:
+                continue
+            if message_id not in evidence_ids:
+                evidence_ids.append(message_id)
+            if len(evidence_ids) >= 8:
                 break
-        if not tags:
-            tags = ["长期记忆"]
+        if source_times is not None and not evidence_ids:
+            continue
+
+        source_time = None
+        if source_times is not None and evidence_ids:
+            evidence_times = [
+                source_times[message_id]
+                for message_id in evidence_ids
+                if source_times[message_id]
+            ]
+            source_time = max(evidence_times) if evidence_times else None
+        raw_precision = str(raw.get("time_precision") or "unknown").strip().casefold()
+        memory_time, time_precision = _normalize_memory_time(
+            raw.get("memory_time"),
+            raw_precision,
+        )
 
         content_hash = hashlib.sha256(content.casefold().encode("utf-8")).hexdigest()
         if content_hash in seen_hashes:
@@ -313,17 +424,25 @@ def _parse_model_output(text: str) -> list[dict[str, Any]]:
             "memory_type": memory_type,
             "update_mode": update_mode,
             "memory_key": memory_key,
-            "reason": reason,
             "importance": int(round(_clamp(raw.get("importance"), 1, 10, 5))),
-            "emotion_weight": round(_clamp(raw.get("emotion_weight"), 0, 1, 0.5), 3),
+            # Kept internally for compatibility with the current pending-memory
+            # commit RPC; the model no longer spends output tokens on this field.
+            "emotion_weight": 0.5,
             "confidence": round(_clamp(raw.get("confidence"), 0, 1, 0.6), 3),
-            "tags": tags,
+            "tags": [MEMORY_TYPE_TAGS[memory_type]],
+            "evidence_message_ids": evidence_ids,
+            "source_time": source_time,
+            "memory_time": memory_time,
+            "time_precision": time_precision,
             "content_hash": content_hash,
         })
     return validated
 
 
-def _extract_memories(conversation: str) -> tuple[list[dict[str, Any]], str]:
+def _extract_memories(
+    conversation: str,
+    source_times: dict[int, str | None] | None = None,
+) -> tuple[list[dict[str, Any]], str]:
     if not conversation.strip():
         return [], '{"memories":[]}'
     if not _analysis_configured():
@@ -348,7 +467,7 @@ def _extract_memories(conversation: str) -> tuple[list[dict[str, Any]], str]:
                         {"role": "user", "content": f"<chat_log>\n{conversation}\n</chat_log>"},
                     ],
                     "response_format": {"type": "json_object"},
-                    "max_tokens": 2200,
+                    "max_tokens": 1200,
                     "temperature": 0.1,
                 },
             )
@@ -370,7 +489,7 @@ def _extract_memories(conversation: str) -> tuple[list[dict[str, Any]], str]:
             "Memory extraction response is not valid OpenAI-compatible JSON",
             response.text[:1500],
         ) from exc
-    return _parse_model_output(output), output
+    return _parse_model_output(output, source_times), output
 
 
 def _get_embedding_sync(text: str) -> list[float]:
@@ -508,10 +627,10 @@ def run_memory_digest(trigger: str, mode: str, max_messages: int | None = None) 
 
         run = _create_run(assistant_id, trigger, mode, messages)
         run_id = int(run["id"])
-        conversation = _format_conversation(messages)
+        conversation, source_times = _conversation_context(messages)
 
         try:
-            memories, raw_output = _extract_memories(conversation)
+            memories, raw_output = _extract_memories(conversation, source_times)
             public_preview = _public_memories(memories)
 
             if mode == "preview":
