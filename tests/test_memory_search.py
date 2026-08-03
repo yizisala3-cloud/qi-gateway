@@ -4,7 +4,7 @@ import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 if "dotenv" not in sys.modules and importlib.util.find_spec("dotenv") is None:
@@ -13,8 +13,11 @@ if "dotenv" not in sys.modules and importlib.util.find_spec("dotenv") is None:
     sys.modules["dotenv"] = dotenv
 
 from gateway.memory_search import (
+    EMBEDDING_DIM,
+    EMBEDDING_MODEL,
     MAX_INJECTION_CHARS,
     MEMORY_CONTEXT_HEADER,
+    _get_embedding,
     _hybrid_rank,
     _keyword_search,
     _select_memories_for_injection,
@@ -200,6 +203,25 @@ class LayeredInjectionTests(unittest.TestCase):
 
 
 class SearchFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_embedding_request_matches_supported_model_and_database_dimension(self):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"data": [{"embedding": [0.1, 0.2]}]}
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client.post = AsyncMock(return_value=response)
+
+        with (
+            patch(f"{MODULE}.cfg.ANALYSIS_API_KEY", "configured"),
+            patch(f"{MODULE}.httpx.AsyncClient", return_value=client, create=True),
+        ):
+            self.assertEqual(await _get_embedding("memory query"), [0.1, 0.2])
+
+        request = client.post.await_args.kwargs
+        self.assertEqual(request["json"]["model"], EMBEDDING_MODEL)
+        self.assertEqual(request["json"]["dimensions"], EMBEDDING_DIM)
+
     async def test_keyword_fallback_works_without_embedding_provider(self):
         keyword_rows = [
             _memory(1, "用户喜欢清晨散步", heat=55, importance=7, title="清晨偏好"),

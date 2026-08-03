@@ -121,6 +121,20 @@ class ModelBoundaryTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "embedding_http_error")
         self.assertEqual(raised.exception.model_output, "embedding unavailable")
 
+    def test_embedding_request_uses_supported_model_and_database_dimension(self):
+        response = MagicMock(status_code=200, text="provider response")
+        response.json.return_value = {"data": [{"embedding": [0.1, 0.2]}]}
+        client = _http_client_returning(response)
+        with (
+            patch.object(cfg, "ANALYSIS_API_KEY", "configured"),
+            patch(f"{MODULE}.httpx.Client", return_value=client),
+        ):
+            self.assertEqual(_get_embedding_sync("durable memory"), [0.1, 0.2])
+
+        request = client.__enter__.return_value.post.call_args.kwargs
+        self.assertEqual(request["json"]["model"], "Qwen/Qwen3-Embedding-0.6B")
+        self.assertEqual(request["json"]["dimensions"], 1024)
+
     def test_content_hash_is_stable_and_case_insensitive_for_deduplication(self):
         payload = {
             "memories": [
@@ -463,3 +477,4 @@ class AtomicCommitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

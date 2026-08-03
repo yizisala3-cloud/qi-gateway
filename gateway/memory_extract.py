@@ -21,7 +21,8 @@ from .db import get_client
 log = logging.getLogger("gateway.memory_extract")
 
 CST = timezone(timedelta(hours=8))
-EMBEDDING_MODEL = "Pro/Qwen/Qwen3-Embedding-0.6B"
+EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+EMBEDDING_DIM = 1024
 DEFAULT_BATCH_SIZE = 60
 MAX_BATCH_SIZE = 100
 DEFAULT_MAX_CHARS = 12000
@@ -510,7 +511,11 @@ def _get_embedding_sync(text: str) -> list[float]:
             response = client.post(
                 url,
                 headers={"Authorization": f"Bearer {cfg.ANALYSIS_API_KEY}"},
-                json={"model": EMBEDDING_MODEL, "input": text[:2000]},
+                json={
+                    "model": EMBEDDING_MODEL,
+                    "input": text[:2000],
+                    "dimensions": EMBEDDING_DIM,
+                },
             )
     except Exception as exc:
         raise DigestPipelineError(
@@ -831,3 +836,4 @@ def run_scheduled_digest_if_due() -> dict[str, Any] | None:
 # Backward-compatible entry point used by older callers.
 def run_daily_digest() -> dict[str, Any]:
     return run_memory_digest("scheduled_daily", "execute")
+

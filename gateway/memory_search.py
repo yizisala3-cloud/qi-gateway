@@ -11,7 +11,7 @@ from .db import get_client, safe_query
 
 log = logging.getLogger("gateway.memory_search")
 
-EMBEDDING_MODEL = "Pro/Qwen/Qwen3-Embedding-0.6B"
+EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 EMBEDDING_DIM = 1024
 MAX_CANDIDATES = 50
 MAX_INJECTION_CHARS = 2400
@@ -56,7 +56,11 @@ async def _get_embedding(text: str) -> Optional[list[float]]:
         return None
     url = f"{cfg.ANALYSIS_BASE_URL.rstrip('/')}/embeddings"
     headers = {"Authorization": f"Bearer {cfg.ANALYSIS_API_KEY}"}
-    payload = {"model": EMBEDDING_MODEL, "input": text[:2000]}
+    payload = {
+        "model": EMBEDDING_MODEL,
+        "input": text[:2000],
+        "dimensions": EMBEDDING_DIM,
+    }
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(url, json=payload, headers=headers)
