@@ -30,6 +30,7 @@ from .memory_digest_api import memory_digest_routes
 from .memory_request_api import memory_request_routes
 from .memory_review_api import memory_review_routes
 from .todo_api import todo_routes
+from .todos import get_proactive_todo_context
 from .model_routing import normalize_upstream_model
 from .request_context import (
     append_gateway_context,
@@ -186,7 +187,23 @@ async def chat_completions(request: Request):
         # only a separate must-reply/no-repeat instruction, and do not count
         # the trigger as a new message from the human user.
         user_text = ""
-        body["messages"] = require_proactive_reply(messages)
+        proactive_messages = require_proactive_reply(messages)
+        try:
+            todo_context = await asyncio.wait_for(
+                loop.run_in_executor(bg_executor, get_proactive_todo_context),
+                timeout=3.0,
+            )
+        except asyncio.TimeoutError:
+            # The reminder is optional; a slow database must not delay or
+            # suppress the proactive chat request itself.
+            todo_context = ""
+            log.warning("主动消息待办读取超时，已跳过")
+        if todo_context:
+            proactive_messages = append_gateway_context(
+                proactive_messages,
+                todo_context,
+            )
+        body["messages"] = proactive_messages
         log.info("OrangeChat proactive request detected; preserving client system prompt")
     else:
         user_text = extract_last_user_text(messages)

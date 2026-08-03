@@ -1,12 +1,15 @@
-"""Validated, role-scoped access to OrangeChat's existing ``todos`` table.
+"""Validated access to OrangeChat's existing ``todos`` table.
 
 The plugin never receives Supabase credentials. Every operation is scoped by
 both ``user_name`` and ``ai_name`` because the gateway uses an elevated server
-key that bypasses RLS. Cancellation is a soft hide; this module never deletes
-todo rows and never reads or writes ``chat_messages``.
+key that bypasses RLS. The proactive-message read deliberately has no identity
+selector because this gateway deployment has exactly one user and one AI.
+Cancellation is a soft hide; this module never deletes todo rows and never
+reads or writes ``chat_messages``.
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -15,6 +18,8 @@ from uuid import UUID
 from .config import cfg
 from .db import get_client
 
+
+log = logging.getLogger("gateway.todos")
 
 MAX_NAME_LENGTH = 100
 MAX_CONTENT_LENGTH = 1_000
@@ -331,6 +336,93 @@ def list_todos(payload: Any, *, now: datetime | None = None) -> dict[str, Any]:
         "current_time": _iso(now_utc),
         "timezone_offset_minutes": request_data["timezone_offset_minutes"],
     }
+
+
+def get_proactive_todo_context(
+    *,
+    now: datetime | None = None,
+    timezone_offset_minutes: int = 480,
+    limit: int = 8,
+) -> str:
+    """Build a small fail-open todo block for OrangeChat proactive requests.
+
+    This read intentionally has no ``user_name`` or ``ai_name`` filter. The
+    deployed gateway is single-owner, so adding identity configuration would
+    only create another failure mode. Plugin write/update routes remain scoped.
+    """
+    try:
+        client = _client()
+        response = (
+            client.table("todos")
+            .select(TODO_FIELDS)
+            .eq("is_completed", False)
+            .eq("is_hidden", False)
+            .eq("is_start_marker", False)
+            .eq("is_end_marker", False)
+            .limit(MAX_QUERY_ROWS)
+            .execute()
+        )
+
+        now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        local_tz = timezone(timedelta(minutes=timezone_offset_minutes))
+        local_now = now_utc.astimezone(local_tz)
+        tomorrow_local = (local_now + timedelta(days=1)).replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        tomorrow_utc = tomorrow_local.astimezone(timezone.utc)
+
+        selected: list[tuple[dict[str, Any], datetime | None]] = []
+        for row in response.data or []:
+            if row.get("status") == "hollow":
+                continue
+            scheduled = _stored_datetime(row.get("scheduled_start"))
+            if scheduled and scheduled >= tomorrow_utc:
+                continue
+            selected.append((row, scheduled))
+
+        selected.sort(key=lambda item: (
+            item[1] is None,
+            item[1] or datetime.max.replace(tzinfo=timezone.utc),
+            int(item[0].get("sort_order") or 0),
+            str(item[0].get("created_at") or ""),
+        ))
+        visible = selected[:max(1, min(limit, 20))]
+        if not visible:
+            return ""
+
+        lines = [
+            "【当前开放待办】",
+            f"当前时间：{local_now.strftime('%Y-%m-%d %H:%M')}（UTC{local_now.strftime('%z')[:3]}:{local_now.strftime('%z')[3:]}）",
+            "以下是待办表中的真实记录。可以自然提醒其中合适的一项；不要虚构新待办或声称用户已经完成。",
+        ]
+        for row, scheduled in visible:
+            content = re.sub(r"\s+", " ", str(row.get("content") or "")).strip()[:160]
+            if not content:
+                continue
+            if scheduled is None:
+                time_label = "未排期"
+            else:
+                local_scheduled = scheduled.astimezone(local_tz)
+                if scheduled < now_utc:
+                    time_label = f"已逾期 {local_scheduled.strftime('%m-%d %H:%M')}"
+                else:
+                    time_label = f"今天 {local_scheduled.strftime('%H:%M')}"
+            lines.append(f"- [{time_label}] {content}")
+
+        if len(lines) == 3:
+            return ""
+        remaining = len(selected) - len(visible)
+        if remaining > 0:
+            lines.append(f"- 另有 {remaining} 项未在本次上下文中展开")
+        return "\n".join(lines)
+    except Exception as exc:
+        # Todo context is optional. A database/configuration problem must never
+        # suppress OrangeChat's otherwise healthy proactive reply.
+        log.warning("主动消息待办读取失败，已跳过（error=%s）", type(exc).__name__)
+        return ""
 
 
 def _mutation_scope(payload: Any, extra_allowed: set[str]) -> tuple[dict[str, Any], str, str]:

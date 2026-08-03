@@ -68,11 +68,22 @@ class TodoGatewayContractTests(unittest.TestCase):
         self.assertIn("_routes.extend(todo_routes)", main)
 
     def test_todo_code_never_touches_chat_messages_or_deletes_rows(self):
-        code = (TODO_PY.read_text(encoding="utf-8") + API_PY.read_text(encoding="utf-8")).casefold()
+        code = (
+            TODO_PY.read_text(encoding="utf-8")
+            + API_PY.read_text(encoding="utf-8")
+        ).casefold()
         self.assertNotIn('table("chat_messages")', code)
         self.assertNotIn(".delete(", code)
         self.assertIn('"is_hidden": true', code)
 
+    def test_proactive_todos_are_appended_without_identity_environment_variables(self):
+        main = GATEWAY_MAIN.read_text(encoding="utf-8")
+        todos = TODO_PY.read_text(encoding="utf-8")
+        self.assertIn("get_proactive_todo_context", main)
+        self.assertIn("append_gateway_context", main)
+        self.assertIn("asyncio.wait_for", main)
+        self.assertNotIn("PROACTIVE_TODO_USER_NAME", todos + main)
+        self.assertNotIn("PROACTIVE_TODO_AI_NAME", todos + main)
 
 if __name__ == "__main__":
     unittest.main()
