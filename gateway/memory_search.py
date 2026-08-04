@@ -116,15 +116,19 @@ def _vector_search_sync(embedding: list[float], limit: int = 20) -> list[dict]:
 
 
 @safe_query
-def _boost_heat(memory_ids: list[int]):
+def _boost_heat(memories: list[dict]):
     client = get_client()
-    if not client or not memory_ids:
+    if not client or not memories:
         return
     now = datetime.now(timezone.utc).isoformat()
-    for memory_id in memory_ids:
+    for memory in memories:
+        memory_id = memory.get("id")
+        if memory_id is None:
+            continue
+        boost_amount = 8 if memory.get("inject_mode") == "full" else 3
         client.rpc("boost_memory_heat", {
             "memory_id": memory_id,
-            "boost_amount": 15,
+            "boost_amount": boost_amount,
             "recalled_at": now,
         }).execute()
 
@@ -325,10 +329,8 @@ async def search_memories(query: str, top_k: int = 8) -> list[dict]:
         candidate_limit,
     )
     selected = _select_memories_for_injection(ranked_candidates, bounded_top_k)
-    recalled_ids = [item["id"] for item in selected]
-
-    if recalled_ids:
-        _boost_heat(recalled_ids)
+    if selected:
+        _boost_heat(selected)
     log.info(
         "记忆搜索完成: query=%s 关键词=%s keyword=%d vector=%d selected=%d",
         query[:30], keywords, len(keyword_results), len(vector_results), len(selected),

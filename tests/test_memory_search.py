@@ -12,11 +12,17 @@ if "dotenv" not in sys.modules and importlib.util.find_spec("dotenv") is None:
     dotenv.load_dotenv = lambda: None
     sys.modules["dotenv"] = dotenv
 
+if "httpx" not in sys.modules and importlib.util.find_spec("httpx") is None:
+    httpx = types.ModuleType("httpx")
+    httpx.AsyncClient = object
+    sys.modules["httpx"] = httpx
+
 from gateway.memory_search import (
     EMBEDDING_DIM,
     EMBEDDING_MODEL,
     MAX_INJECTION_CHARS,
     MEMORY_CONTEXT_HEADER,
+    _boost_heat,
     _get_embedding,
     _hybrid_rank,
     _keyword_search,
@@ -101,6 +107,24 @@ class KeywordQueryTests(unittest.TestCase):
         )
         self.assertEqual(client.query.ordering, ("heat", True))
         self.assertEqual(client.query.limit_value, 30)
+
+
+class HeatBoostTests(unittest.TestCase):
+    def test_full_and_title_recollections_use_different_base_boosts(self):
+        client = MagicMock()
+        with patch(f"{MODULE}.get_client", return_value=client):
+            _boost_heat([
+                {"id": 1, "inject_mode": "full"},
+                {"id": 2, "inject_mode": "title_only"},
+            ])
+
+        calls = client.rpc.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0].args[0], "boost_memory_heat")
+        self.assertEqual(calls[0].args[1]["memory_id"], 1)
+        self.assertEqual(calls[0].args[1]["boost_amount"], 8)
+        self.assertEqual(calls[1].args[1]["memory_id"], 2)
+        self.assertEqual(calls[1].args[1]["boost_amount"], 3)
 
 
 class HybridRankingTests(unittest.TestCase):
@@ -237,7 +261,7 @@ class SearchFlowTests(unittest.IsolatedAsyncioTestCase):
             result = await search_memories("还记得我喜欢什么时候散步吗？", top_k=1)
 
         vector_search.assert_not_called()
-        boost.assert_called_once_with([1])
+        boost.assert_called_once_with(result)
         self.assertEqual([item["id"] for item in result], [1])
         self.assertEqual(result[0]["inject_mode"], "full")
         self.assertFalse(any(key.startswith("_") for key in result[0]))
@@ -272,7 +296,7 @@ class SearchFlowTests(unittest.IsolatedAsyncioTestCase):
             result = await search_memories("核心")
 
         self.assertEqual([item["id"] for item in result], [1])
-        boost.assert_called_once_with([1])
+        boost.assert_called_once_with(result)
 
     def test_formatter_only_injects_full_content_for_full_mode(self):
         text = format_memories_for_injection([

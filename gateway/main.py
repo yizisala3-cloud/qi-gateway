@@ -141,13 +141,13 @@ async def daily_task_loop():
 
             now_cst = datetime.now(timezone(timedelta(hours=8)))
             today = now_cst.strftime("%Y-%m-%d")
-            if 3 <= now_cst.hour < 4 and _last_heat_decay_date != today:
+            if _last_heat_decay_date != today:
                 decay_result = await loop.run_in_executor(bg_executor, run_heat_decay)
                 if decay_result.get("status") in {"succeeded", "already_ran"}:
                     _last_heat_decay_date = today
                 else:
                     log.warning(
-                        "热度衰减将在当前时段重试: status=%s reason=%s",
+                        "热度衰减将在下一次调度检查时重试: status=%s reason=%s",
                         decay_result.get("status"),
                         decay_result.get("reason", ""),
                     )
