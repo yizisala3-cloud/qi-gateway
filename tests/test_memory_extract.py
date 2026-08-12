@@ -244,7 +244,7 @@ class ModelBoundaryTests(unittest.TestCase):
             "2026-08-04T21:35+08:00",
         )
 
-    def test_user_turn_without_time_uses_following_assistant_timestamp(self):
+    def test_user_turn_without_time_does_not_borrow_following_assistant_timestamp(self):
         conversation, source_times = _conversation_context([
             {
                 "id": 11,
@@ -260,10 +260,39 @@ class ModelBoundaryTests(unittest.TestCase):
             },
         ])
 
-        self.assertEqual(source_times[11], "2026-08-04T21:35+08:00")
-        self.assertIn("[id=11 t=2026-08-04T21:35+08:00 role=user]", conversation)
+        self.assertIsNone(source_times[11])
+        self.assertEqual(source_times[12], "2026-08-04T21:35+08:00")
+        self.assertIn("[id=11 t=unknown role=user]", conversation)
         self.assertNotIn("26.08.04", conversation)
 
+    def test_consecutive_assistants_are_merged_only_within_same_conversation(self):
+        conversation, source_times = _conversation_context([
+            {
+                "id": 10,
+                "role": "assistant",
+                "content": "first retry",
+                "_cleaned_content": "first retry",
+                "conversation_id": "conv-a",
+            },
+            {
+                "id": 11,
+                "role": "assistant",
+                "content": "final in conv-a",
+                "_cleaned_content": "final in conv-a",
+                "conversation_id": "conv-a",
+            },
+            {
+                "id": 12,
+                "role": "assistant",
+                "content": "different conv",
+                "_cleaned_content": "different conv",
+                "conversation_id": "conv-b",
+            },
+        ])
+
+        self.assertNotIn("[id=10", conversation)
+        self.assertIn("[id=11 t=unknown role=assistant] final in conv-a", conversation)
+        self.assertIn("[id=12 t=unknown role=assistant] different conv", conversation)
     def test_append_candidates_never_keep_a_model_supplied_memory_key(self):
         payload = {
             "memories": [{
@@ -399,7 +428,8 @@ class AtomicCommitTests(unittest.TestCase):
             patch(f"{MODULE}._mark_stale_runs"),
             patch(f"{MODULE}.resolve_assistant_id", return_value="assistant-1"),
             patch(f"{MODULE}._fetch_batch", return_value=(10, self.messages)),
-            patch(f"{MODULE}._create_run", return_value=run),
+            patch(f"{MODULE}._claim_slot", return_value={"status": "claimed", "run_id": 7}),
+            patch(f"{MODULE}._update_heartbeat"),
             extract,
             embedding,
             patch(f"{MODULE}._client", return_value=client),
@@ -475,6 +505,53 @@ class AtomicCommitTests(unittest.TestCase):
         self.assertEqual(client.updates[-1]["status"], "failed")
 
 
+    def test_extraction_retries_without_response_format_on_provider_400(self):
+        first_response = MagicMock(status_code=400, text='unsupported response_format type json_object')
+        second_response = MagicMock(status_code=200, text='ok')
+        second_response.json.return_value = {
+            "choices": [{"message": {"content": '{"memories":[]}'}}],
+        }
+
+        call_count = [0]
+        def _post(*args, **kwargs):
+            idx = call_count[0]
+            call_count[0] += 1
+            return [first_response, second_response][idx]
+
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value.post = _post
+
+        with (
+            patch.object(cfg, "ANALYSIS_API_KEY", "configured"),
+            patch(f"{MODULE}.httpx.Client", return_value=mock_client),
+        ):
+            memories, raw = _extract_memories("user: hello")
+
+        self.assertEqual(memories, [])
+        self.assertEqual(call_count[0], 2)
+
+    def test_scheduled_digest_persists_error_on_exception(self):
+        with (
+            patch.object(cfg, "ANALYSIS_API_KEY", "configured"),
+            patch(f"{MODULE}._mark_stale_runs"),
+            patch(f"{MODULE}.resolve_assistant_id", return_value="assistant-1"),
+            patch(f"{MODULE}.get_digest_status", side_effect=RuntimeError("db down")),
+            patch(f"{MODULE}._create_run", return_value={
+                "id": 99,
+                "assistant_id": "assistant-1",
+                "trigger": "scheduled_daily",
+                "mode": "execute",
+                "status": "failed",
+                "error_code": "scheduled_check_error",
+            }) as create_run,
+        ):
+            result = run_scheduled_digest_if_due()
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_code"], "scheduled_check_error")
+        create_run.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
-

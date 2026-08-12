@@ -9,7 +9,6 @@ import hashlib
 import json
 import logging
 import re
-import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -30,16 +29,14 @@ STALE_RUN_MINUTES = 30
 FAILED_RETRY_MINUTES = 60
 MAX_EXTRACTED_MEMORIES = 8
 
-_pipeline_lock = threading.Lock()
-
 EXTRACT_SYSTEM_PROMPT = """从带 id、北京时间 t 和 role 的聊天原文中，提取最多 8 条有长期价值且有原文证据的独立记忆。
 
 规则：
 1. 只提取用户明确表达的资料、偏好边界、长期习惯、人物关系约定、重要经历和长期目标；禁止推测，也不能把 assistant 的说法当成用户现实事实。
 2. 排除寒暄、短暂情绪、待办、一次性指令、报错、拒绝、控制标签和重复回复。角色扮演内容只能中性抽象为明确的长期偏好、边界或约定。
-3. memory_type 只允许 profile、preference、relationship、habit、event、goal、other。“动态”不是类型。
+3. memory_type 只允许 profile、preference、relationship、habit、event、goal、other。"动态"不是类型。
 4. 独立事实与历史事件用 append 且 memory_key=null。只有原文明示同一侧面的当前状态变化时才用 replace，并给 3-120 位小写 ASCII 主题键，如 relationship.a.state 或 project.qi-gateway.progress。
-5. 一次事件不能覆盖长期关系：“和 A 吵架”是 append event；“最近和 A 关系紧张”才可另作 relationship.a.state 的 replace。
+5. 一次事件不能覆盖长期关系："和 A 吵架"是 append event；"最近和 A 关系紧张"才可另作 relationship.a.state 的 replace。
 6. evidence_message_ids 必须列出直接支持该记忆的原文 id。importance 为 1-10，confidence 为 0-1。
 7. memory_time 是事情实际发生或状态生效的北京时间 ISO 8601；无法从原文明示时间或相对时间可靠确定时填 null。time_precision 只允许 minute、day、approximate、unknown。
 8. content 用一到两句话独立说明记忆。没有合格内容时返回空数组。
@@ -78,7 +75,6 @@ EMBEDDED_TIMESTAMP_PATTERN = re.compile(
 
 _REFUSAL_MARKERS = (
     "i cannot fulfill this request",
-    "i can’t fulfill this request",
     "i can't fulfill this request",
     "i cannot engage in",
     "我无法满足这个请求",
@@ -107,6 +103,38 @@ def _client():
     if not client:
         raise DigestPipelineError("database_unavailable", "Supabase server client is unavailable")
     return client
+
+
+def _claim_slot(assistant_id: str, trigger: str, mode: str) -> dict[str, Any]:
+    """Atomically claim a cross-instance processing slot for this assistant.
+
+    Uses the database advisory lock + heartbeat lease so only one gateway
+    instance processes a given assistant at a time.
+    """
+    try:
+        resp = _client().rpc(
+            "claim_digest_slot",
+            {
+                "p_assistant_id": assistant_id,
+                "p_trigger": trigger,
+                "p_mode": mode,
+            },
+        ).execute()
+        return resp.data or {}
+    except Exception as exc:
+        log.warning("Failed to claim digest slot: %s", exc)
+        return {"status": "error"}
+
+
+def _update_heartbeat(run_id: int) -> None:
+    """Best-effort heartbeat while doing long model calls."""
+    try:
+        _client().rpc(
+            "update_digest_heartbeat",
+            {"p_run_id": run_id},
+        ).execute()
+    except Exception:
+        pass
 
 
 def _iso_now() -> str:
@@ -256,22 +284,74 @@ def _fetch_batch(assistant_id: str, max_messages: int) -> tuple[int, list[dict[s
         .execute()
     )
 
+    raw = response.data or []
+    if not raw:
+        return cursor, []
+
+    # Pre-clean and compute per-message size budget.
+    prepared: list[dict[str, Any]] = []
+    for row in raw:
+        cleaned = _clean_message_content(str(row.get("role") or ""), row.get("content"))
+        prepared.append({
+            **row,
+            "_cleaned_content": cleaned,
+            "_source_time": _resolve_message_time(
+                row.get("created_at"),
+                row.get("content"),
+            ),
+            "_chars": len(cleaned) + 80,
+        })
+
+    max_chars = max(2000, int(cfg.MEMORY_DIGEST_MAX_CHARS or DEFAULT_MAX_CHARS))
+
+    # Build complete turns. A turn is either:
+    #   - a user message + all following assistant messages in the same
+    #     conversation_id, or
+    #   - a standalone orphan assistant block in one conversation_id.
+    # We never break in the middle of a turn so the cursor never skips
+    # partially-processed messages.
+    turn_ends: list[int] = []
+    i = 0
+    n = len(prepared)
+    while i < n:
+        role = str(prepared[i].get("role") or "").strip().lower()
+        conv_id = str(prepared[i].get("conversation_id") or "")
+        j = i + 1
+        if role == "user":
+            # Consume following assistants in the SAME conversation.
+            while j < n:
+                next_role = str(prepared[j].get("role") or "").strip().lower()
+                next_conv = str(prepared[j].get("conversation_id") or "")
+                if next_role == "assistant" and next_conv == conv_id:
+                    j += 1
+                else:
+                    break
+        elif role == "assistant":
+            # Consume consecutive assistants in the SAME conversation.
+            while j < n:
+                next_role = str(prepared[j].get("role") or "").strip().lower()
+                next_conv = str(prepared[j].get("conversation_id") or "")
+                if next_role == "assistant" and next_conv == conv_id:
+                    j += 1
+                else:
+                    break
+        # Unknown roles are silently skipped (they do not form a turn).
+        turn_ends.append(j)
+        i = j
+
+    # Accumulate complete turns until the character budget is exhausted.
     selected: list[dict[str, Any]] = []
     used_chars = 0
-    max_chars = max(2000, int(cfg.MEMORY_DIGEST_MAX_CHARS or DEFAULT_MAX_CHARS))
-    for row in response.data or []:
-        cleaned = _clean_message_content(str(row.get("role") or ""), row.get("content"))
-        estimated = len(cleaned) + 80
-        if selected and used_chars + estimated > max_chars:
+    prev = 0
+    for end in turn_ends:
+        turn = prepared[prev:end]
+        turn_chars = sum(item["_chars"] for item in turn)
+        if selected and used_chars + turn_chars > max_chars:
             break
-        copied = dict(row)
-        copied["_cleaned_content"] = cleaned
-        copied["_source_time"] = _resolve_message_time(
-            row.get("created_at"),
-            row.get("content"),
-        )
-        selected.append(copied)
-        used_chars += estimated
+        selected.extend(turn)
+        used_chars += turn_chars
+        prev = end
+
     return cursor, selected
 
 
@@ -289,29 +369,23 @@ def _conversation_context(messages: list[dict[str, Any]]) -> tuple[str, dict[int
             "id": int(row["id"]),
             "role": role,
             "content": content,
+            "conversation_id": str(row.get("conversation_id") or ""),
             "source_time": row.get("_source_time") or _resolve_message_time(
                 row.get("created_at"),
                 row.get("content"),
             ),
         }
         # Multiple consecutive assistant rows are usually retries/alternatives.
-        # Keep only the final one without modifying the source table.
-        if role == "assistant" and normalized and normalized[-1]["role"] == "assistant":
+        # Keep only the final one, but ONLY within the same conversation.
+        if (
+            role == "assistant"
+            and normalized
+            and normalized[-1]["role"] == "assistant"
+            and normalized[-1]["conversation_id"] == item["conversation_id"]
+        ):
             normalized[-1] = item
         else:
             normalized.append(item)
-
-    # When a user row genuinely has no usable time, the immediately following
-    # assistant display timestamp is the best time anchor for that chat turn.
-    for index, item in enumerate(normalized[:-1]):
-        following = normalized[index + 1]
-        if (
-            item["role"] == "user"
-            and not item["source_time"]
-            and following["role"] == "assistant"
-            and following["source_time"]
-        ):
-            item["source_time"] = following["source_time"]
 
     lines: list[str] = []
     source_times: dict[int, str | None] = {}
@@ -459,6 +533,17 @@ def _extract_memories(
         )
 
     url = f"{cfg.ANALYSIS_BASE_URL.rstrip('/')}/chat/completions"
+    request_body = {
+        "model": cfg.ANALYSIS_MODEL,
+        "messages": [
+            {"role": "system", "content": EXTRACT_SYSTEM_PROMPT},
+            {"role": "user", "content": f"<chat_log>\n{conversation}\n</chat_log>"},
+        ],
+        "response_format": {"type": "json_object"},
+        "max_tokens": 1200,
+        "temperature": 0.1,
+    }
+
     try:
         with httpx.Client(timeout=60.0) as client:
             response = client.post(
@@ -467,19 +552,30 @@ def _extract_memories(
                     "Authorization": f"Bearer {cfg.ANALYSIS_API_KEY}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": cfg.ANALYSIS_MODEL,
-                    "messages": [
-                        {"role": "system", "content": EXTRACT_SYSTEM_PROMPT},
-                        {"role": "user", "content": f"<chat_log>\n{conversation}\n</chat_log>"},
-                    ],
-                    "response_format": {"type": "json_object"},
-                    "max_tokens": 1200,
-                    "temperature": 0.1,
-                },
+                json=request_body,
             )
     except Exception as exc:
         raise DigestPipelineError("model_request_failed", f"Memory extraction request failed: {type(exc).__name__}") from exc
+
+    # Fallback: some providers (e.g. certain SiliconFlow endpoints) return 400
+    # because they do not support response_format: {"type": "json_object"}.
+    if response.status_code == 400:
+        body_excerpt = response.text[:500].lower()
+        if "response_format" in body_excerpt or "json_object" in body_excerpt:
+            log.warning("Provider rejected response_format; retrying without it")
+            request_body.pop("response_format", None)
+            try:
+                with httpx.Client(timeout=60.0) as client:
+                    response = client.post(
+                        url,
+                        headers={
+                            "Authorization": f"Bearer {cfg.ANALYSIS_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
+                        json=request_body,
+                    )
+            except Exception as exc:
+                raise DigestPipelineError("model_request_failed", f"Memory extraction retry failed: {type(exc).__name__}") from exc
 
     if response.status_code != 200:
         excerpt = response.text[:1500]
@@ -544,17 +640,22 @@ def _get_embedding_sync(text: str) -> list[float]:
 
 
 def _mark_stale_runs() -> None:
-    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=STALE_RUN_MINUTES)).isoformat()
+    heartbeat_cutoff = (
+        datetime.now(timezone.utc) - timedelta(minutes=STALE_RUN_MINUTES)
+    ).isoformat()
     (
         _client().table("memory_digest_runs")
         .update({
             "status": "failed",
             "error_code": "stale_run_recovered",
-            "error_message": "Run was still marked running after a restart or timeout",
+            "error_message": "Run heartbeat expired; recovered by another instance",
             "completed_at": _iso_now(),
         })
-        .eq("status", "running")
-        .lt("started_at", cutoff)
+        .in_("status", ["claimed", "running"])
+        .or_(
+            f"and(heartbeat_at.is.null,claimed_at.lt.{heartbeat_cutoff}),"
+            f"heartbeat_at.lt.{heartbeat_cutoff}"
+        )
         .execute()
     )
 
@@ -617,108 +718,146 @@ def run_memory_digest(trigger: str, mode: str, max_messages: int | None = None) 
     batch_size = max_messages or cfg.MEMORY_DIGEST_MAX_MESSAGES or DEFAULT_BATCH_SIZE
     batch_size = max(1, min(MAX_BATCH_SIZE, int(batch_size)))
 
-    with _pipeline_lock:
-        _mark_stale_runs()
-        assistant_id = resolve_assistant_id()
-        cursor_before, messages = _fetch_batch(assistant_id, batch_size)
+    _mark_stale_runs()
+    assistant_id = resolve_assistant_id()
+    cursor_before, messages = _fetch_batch(assistant_id, batch_size)
 
-        if not messages:
-            run = _create_run(
-                assistant_id,
-                trigger,
-                mode,
-                [],
-                status="skipped",
-                error_code="no_new_messages",
-                error_message="No unprocessed chat messages are available",
+    if not messages:
+        run = _create_run(
+            assistant_id,
+            trigger,
+            mode,
+            [],
+            status="skipped",
+            error_code="no_new_messages",
+            error_message="No unprocessed chat messages are available",
+        )
+        result = _public_run(run)
+        result.update({"cursor_before": cursor_before, "cursor_after": cursor_before})
+        return result
+
+    # Cross-instance claim: advisory lock + heartbeat lease.
+    claim = _claim_slot(assistant_id, trigger, mode)
+    if claim.get("status") != "claimed":
+        run = _create_run(
+            assistant_id,
+            trigger,
+            mode,
+            [],
+            status="skipped",
+            error_code="concurrent_run",
+            error_message="Another instance is actively processing this assistant",
+        )
+        result = _public_run(run)
+        result.update({"cursor_before": cursor_before, "cursor_after": cursor_before})
+        return result
+
+    run_id = int(claim["run_id"])
+
+    # Transition the claimed slot to running and populate source metadata.
+    running_update = {
+        "status": "running",
+        "source_first_message_id": int(messages[0]["id"]),
+        "source_last_message_id": int(messages[-1]["id"]),
+        "message_count": len(messages),
+        "model_name": cfg.ANALYSIS_MODEL,
+    }
+    _client().table("memory_digest_runs").update(running_update).eq("id", run_id).execute()
+    _update_heartbeat(run_id)
+
+    # Re-fetch so the in-memory run dict reflects the database state.
+    run_resp = (
+        _client().table("memory_digest_runs")
+        .select("*")
+        .eq("id", run_id)
+        .limit(1)
+        .execute()
+    )
+    run = run_resp.data[0] if run_resp.data else {**claim, **running_update}
+
+    conversation, source_times = _conversation_context(messages)
+
+    try:
+        memories, raw_output = _extract_memories(conversation, source_times)
+        _update_heartbeat(run_id)
+        public_preview = _public_memories(memories)
+
+        if mode == "preview":
+            update_payload = {
+                "status": "succeeded",
+                "extracted_count": len(memories),
+                "inserted_count": 0,
+                "preview_memories": public_preview,
+                "model_output_excerpt": (raw_output or "")[:1500],
+                "completed_at": _iso_now(),
+            }
+            response = (
+                _client().table("memory_digest_runs")
+                .update(update_payload)
+                .eq("id", run_id)
+                .execute()
             )
-            result = _public_run(run)
+            saved = response.data[0] if response.data else {**run, **update_payload}
+            result = _public_run(saved)
             result.update({"cursor_before": cursor_before, "cursor_after": cursor_before})
             return result
 
-        run = _create_run(assistant_id, trigger, mode, messages)
-        run_id = int(run["id"])
-        conversation, source_times = _conversation_context(messages)
+        enriched: list[dict[str, Any]] = []
+        for memory in memories:
+            _update_heartbeat(run_id)
+            item = dict(memory)
+            embedding = _get_embedding_sync(item["content"])
+            item["embedding"] = embedding
+            enriched.append(item)
 
-        try:
-            memories, raw_output = _extract_memories(conversation, source_times)
-            public_preview = _public_memories(memories)
-
-            if mode == "preview":
-                update_payload = {
-                    "status": "succeeded",
-                    "extracted_count": len(memories),
-                    "inserted_count": 0,
-                    "preview_memories": public_preview,
-                    "model_output_excerpt": (raw_output or "")[:1500],
-                    "completed_at": _iso_now(),
-                }
-                response = (
-                    _client().table("memory_digest_runs")
-                    .update(update_payload)
-                    .eq("id", run_id)
-                    .execute()
-                )
-                saved = response.data[0] if response.data else {**run, **update_payload}
-                result = _public_run(saved)
-                result.update({"cursor_before": cursor_before, "cursor_after": cursor_before})
-                return result
-
-            enriched: list[dict[str, Any]] = []
-            for memory in memories:
-                item = dict(memory)
-                embedding = _get_embedding_sync(item["content"])
-                item["embedding"] = embedding
-                enriched.append(item)
-
-            commit_response = _client().rpc(
-                "commit_memory_digest_run",
-                {"p_run_id": run_id, "p_memories": enriched},
-            ).execute()
-            inserted_count = int(commit_response.data or 0)
-            saved_response = (
-                _client().table("memory_digest_runs")
-                .select("*")
-                .eq("id", run_id)
-                .limit(1)
-                .execute()
-            )
-            saved = saved_response.data[0] if saved_response.data else run
-            result = _public_run(saved)
-            result.update({
-                "inserted_count": inserted_count,
-                "cursor_before": cursor_before,
-                "cursor_after": int(messages[-1]["id"]),
-            })
-            return result
-
-        except DigestPipelineError as exc:
-            error_code = exc.code
-            error_message = str(exc)
-            model_excerpt = exc.model_output[:1500]
-        except Exception as exc:
-            log.exception("Memory digest run failed: run_id=%s", run_id)
-            error_code = "pipeline_error"
-            error_message = f"{type(exc).__name__}: {str(exc)[:1200]}"
-            model_excerpt = ""
-
-        failed_payload = {
-            "status": "failed",
-            "error_code": error_code,
-            "error_message": error_message[:2000],
-            "model_output_excerpt": model_excerpt,
-            "completed_at": _iso_now(),
-        }
-        response = (
+        commit_response = _client().rpc(
+            "commit_memory_digest_run",
+            {"p_run_id": run_id, "p_memories": enriched},
+        ).execute()
+        inserted_count = int(commit_response.data or 0)
+        saved_response = (
             _client().table("memory_digest_runs")
-            .update(failed_payload)
+            .select("*")
             .eq("id", run_id)
+            .limit(1)
             .execute()
         )
-        saved = response.data[0] if response.data else {**run, **failed_payload}
+        saved = saved_response.data[0] if saved_response.data else run
         result = _public_run(saved)
-        result.update({"cursor_before": cursor_before, "cursor_after": cursor_before})
+        result.update({
+            "inserted_count": inserted_count,
+            "cursor_before": cursor_before,
+            "cursor_after": int(messages[-1]["id"]),
+        })
         return result
+
+    except DigestPipelineError as exc:
+        error_code = exc.code
+        error_message = str(exc)
+        model_excerpt = exc.model_output[:1500]
+    except Exception as exc:
+        log.exception("Memory digest run failed: run_id=%s", run_id)
+        error_code = "pipeline_error"
+        error_message = f"{type(exc).__name__}: {str(exc)[:1200]}"
+        model_excerpt = ""
+
+    failed_payload = {
+        "status": "failed",
+        "error_code": error_code,
+        "error_message": error_message[:2000],
+        "model_output_excerpt": model_excerpt,
+        "completed_at": _iso_now(),
+    }
+    response = (
+        _client().table("memory_digest_runs")
+        .update(failed_payload)
+        .eq("id", run_id)
+        .execute()
+    )
+    saved = response.data[0] if response.data else {**run, **failed_payload}
+    result = _public_run(saved)
+    result.update({"cursor_before": cursor_before, "cursor_after": cursor_before})
+    return result
 
 
 def list_digest_runs(limit: int = 30) -> list[dict[str, Any]]:
@@ -811,29 +950,48 @@ def run_scheduled_digest_if_due() -> dict[str, Any] | None:
     # the provider is intentionally not configured.
     if not _analysis_configured():
         return None
+    assistant_id: str | None = None
+    try:
+        assistant_id = resolve_assistant_id()
+    except Exception:
+        log.exception("Scheduled digest failed: cannot resolve assistant_id")
+        return None
+
     try:
         _mark_stale_runs()
         status = get_digest_status()
         if status["backlog_count"] <= 0:
             return None
 
-        assistant_id = status["assistant_id"]
         if _recent_run_blocks_retry(assistant_id):
             return None
 
         now_cst = datetime.now(CST)
-        if 3 <= now_cst.hour < 4 and not _daily_run_exists(assistant_id, now_cst):
+        daily_hour = max(0, min(23, int(cfg.MEMORY_DIGEST_DAILY_HOUR or 3)))
+        if now_cst.hour >= daily_hour and not _daily_run_exists(assistant_id, now_cst):
             return run_memory_digest("scheduled_daily", "execute")
 
         latest_at = _parse_time(status.get("latest_message_at"), CST)
         if latest_at and now_cst - latest_at.astimezone(CST) >= timedelta(hours=cfg.MEMORY_DIGEST_IDLE_HOURS):
             return run_memory_digest("idle_six_hours", "execute")
-    except Exception:
+    except Exception as exc:
         log.exception("Scheduled memory digest check failed")
+        try:
+            failed_run = _create_run(
+                assistant_id,
+                "scheduled_daily",
+                "execute",
+                [],
+                status="failed",
+                error_code="scheduled_check_error",
+                error_message=f"{type(exc).__name__}: {str(exc)[:1200]}",
+            )
+            return _public_run(failed_run)
+        except Exception:
+            log.exception("Failed to persist scheduled digest error")
     return None
 
 
 # Backward-compatible entry point used by older callers.
 def run_daily_digest() -> dict[str, Any]:
     return run_memory_digest("scheduled_daily", "execute")
-

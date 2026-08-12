@@ -9,6 +9,13 @@ MIGRATION = (
     / "20260802010000_memory_digest_assistant_provenance.sql"
 )
 
+MIGRATION_CLAIM = (
+    Path(__file__).resolve().parents[1]
+    / "supabase"
+    / "migrations"
+    / "20260811000000_memory_digest_claim_and_heartbeat.sql"
+)
+
 
 class MemoryDigestMigrationContractTests(unittest.TestCase):
     @classmethod
@@ -37,6 +44,34 @@ class MemoryDigestMigrationContractTests(unittest.TestCase):
 
     def test_automatic_memories_stay_pending(self):
         self.assertIn("'pending'", self.sql)
+
+
+class MemoryDigestClaimMigrationContractTests(unittest.TestCase):
+    """Contract tests for 20260811000000_memory_digest_claim_and_heartbeat.sql"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = MIGRATION_CLAIM.read_text(encoding="utf-8").casefold()
+
+    def test_migration_never_alters_chat_messages(self):
+        self.assertNotIn("alter table public.chat_messages", self.sql)
+        self.assertNotIn("update public.chat_messages", self.sql)
+        self.assertNotIn("delete from public.chat_messages", self.sql)
+
+    def test_migration_adds_claimed_at_and_heartbeat_at(self):
+        self.assertIn("claimed_at", self.sql)
+        self.assertIn("heartbeat_at", self.sql)
+
+    def test_migration_adds_claimed_to_status_constraint(self):
+        # The SQL must drop the old constraint and recreate it with 'claimed'
+        self.assertIn("memory_digest_runs_status_check", self.sql)
+        self.assertIn("'claimed'", self.sql)
+
+    def test_migration_creates_claim_digest_slot_rpc(self):
+        self.assertIn("claim_digest_slot", self.sql)
+
+    def test_migration_creates_update_digest_heartbeat_rpc(self):
+        self.assertIn("update_digest_heartbeat", self.sql)
 
 
 if __name__ == "__main__":
