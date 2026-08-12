@@ -2,6 +2,8 @@
 import os
 from dotenv import load_dotenv
 
+from .model_routing import normalize_upstream_model
+
 load_dotenv()
 
 
@@ -9,7 +11,7 @@ class Config:
     GATEWAY_TOKEN: str = os.getenv("GATEWAY_TOKEN", "")
     UPSTREAM_BASE_URL: str = os.getenv("UPSTREAM_BASE_URL", "")
     UPSTREAM_API_KEY: str = os.getenv("UPSTREAM_API_KEY", "")
-    UPSTREAM_MODEL: str = os.getenv("UPSTREAM_MODEL", "")
+    UPSTREAM_MODEL: str = normalize_upstream_model(os.getenv("UPSTREAM_MODEL", ""))
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
     # Preferred backend-only key. Modern sb_secret_* keys and legacy service_role
     # keys bypass RLS and must never be exposed to the browser or source control.
@@ -27,7 +29,23 @@ class Config:
     MEMORY_ASSISTANT_ID: str = os.getenv("MEMORY_ASSISTANT_ID", "")
     MEMORY_DIGEST_MAX_MESSAGES: int = int(os.getenv("MEMORY_DIGEST_MAX_MESSAGES", "60"))
     MEMORY_DIGEST_MAX_CHARS: int = int(os.getenv("MEMORY_DIGEST_MAX_CHARS", "12000"))
+    MEMORY_DIGEST_DAILY_HOUR: int = max(0, min(23, int(os.getenv("MEMORY_DIGEST_DAILY_HOUR", "3"))))
     MEMORY_DIGEST_IDLE_HOURS: float = float(os.getenv("MEMORY_DIGEST_IDLE_HOURS", "6"))
+    # OrangeChat request_memory tool. Keep this token separate from gateway and
+    # Supabase credentials so plugin access can be revoked independently.
+    MEMORY_PLUGIN_TOKEN: str = os.getenv("MEMORY_PLUGIN_TOKEN", "")
+    MEMORY_REQUEST_RATE_LIMIT: int = int(os.getenv("MEMORY_REQUEST_RATE_LIMIT", "6"))
+    # OrangeChat todo tools. This token is independent from every other token.
+    TODO_PLUGIN_TOKEN: str = os.getenv("TODO_PLUGIN_TOKEN", "")
+    TODO_REQUEST_RATE_LIMIT: int = int(os.getenv("TODO_REQUEST_RATE_LIMIT", "60"))
+
+    # 备用模型链：主模型失败时依次尝试
+    UPSTREAM_FALLBACK1_URL: str = os.getenv("UPSTREAM_FALLBACK1_URL", "")
+    UPSTREAM_FALLBACK1_API_KEY: str = os.getenv("UPSTREAM_FALLBACK1_API_KEY", "")
+    UPSTREAM_FALLBACK1_MODEL: str = normalize_upstream_model(os.getenv("UPSTREAM_FALLBACK1_MODEL", ""))
+    UPSTREAM_FALLBACK2_URL: str = os.getenv("UPSTREAM_FALLBACK2_URL", "")
+    UPSTREAM_FALLBACK2_API_KEY: str = os.getenv("UPSTREAM_FALLBACK2_API_KEY", "")
+    UPSTREAM_FALLBACK2_MODEL: str = normalize_upstream_model(os.getenv("UPSTREAM_FALLBACK2_MODEL", ""))
 
     @property
     def supabase_server_key(self) -> str:
@@ -44,3 +62,20 @@ class Config:
 
 cfg = Config()
 
+# 备用模型配置项（按优先级排序）
+FALLBACK_CONFIGS = [
+    {
+        "url": cfg.UPSTREAM_FALLBACK1_URL,
+        "key": cfg.UPSTREAM_FALLBACK1_API_KEY,
+        "model": cfg.UPSTREAM_FALLBACK1_MODEL,
+        "name": "fallback1",
+    },
+    {
+        "url": cfg.UPSTREAM_FALLBACK2_URL,
+        "key": cfg.UPSTREAM_FALLBACK2_API_KEY,
+        "model": cfg.UPSTREAM_FALLBACK2_MODEL,
+        "name": "fallback2",
+    },
+]
+# 过滤掉未配置的项
+FALLBACK_CONFIGS = [c for c in FALLBACK_CONFIGS if c["url"] and c["key"] and c["model"]]
