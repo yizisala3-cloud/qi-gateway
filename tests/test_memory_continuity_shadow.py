@@ -58,39 +58,30 @@ def _candidate(**overrides):
 
 
 class ShadowPromptContractTests(unittest.TestCase):
-    def test_prompt_requires_concrete_evidence_bounded_summaries(self):
-        self.assertIn(
-            "不得用“某种方式”“特殊的方式”“极端的方式”",
-            SHADOW_SYSTEM_PROMPT,
-        )
-        for vague_phrase in (
-            "某种方式",
-            "特殊的方式",
-            "极端的方式",
-            "发生了一些事情",
-            "进行了一些互动",
-        ):
-            with self.subTest(vague_phrase=vague_phrase):
-                self.assertIn(vague_phrase, SHADOW_SYSTEM_PROMPT)
-
+    def test_prompt_preserves_content_detail_without_forcing_length(self):
         for requirement in (
-            "直白、具体、客观",
-            "必须保留理解候选所需的关键动作",
-            "不得自行补全",
-            "不要仅因敏感而排除或自动模糊化",
-            "内部梗、具体称呼、共同玩法、承诺和约定",
-            "绝不能当作输入事实",
+            "4～24 字的建议只适用于 title，绝对不适用于 content",
+            "content 不受 title 长度限制",
+            "不得退化成 title 的扩写",
+            "episode：相对完整的共同经历；保留起因、关键互动和结果",
+            "简单且证据有限的候选可以只写一句",
+            "不得为了变长而重复、编造",
+            "证据不足时不得补全",
+            "一般亲密、暧昧、性相关或敏感互动不自动模糊化",
         ):
             with self.subTest(requirement=requirement):
                 self.assertIn(requirement, SHADOW_SYSTEM_PROMPT)
 
-    def test_prompt_requires_a_specific_title_for_every_candidate(self):
+    def test_prompt_preserves_title_source_evidence_and_safety_boundaries(self):
         for requirement in (
-            "每条 candidate 都必须包含非空 title 字段",
-            "简短、具体、便于一眼识别的中文标题",
+            "每条候选必须有非空 title",
             "建议 4～24 个中文字符",
             "不得包含原文没有的信息",
-            "原神至冬地图讨论",
+            "evidence_message_ids 必须是输入中真实且直接支持候选的消息",
+            "API Key、Token、service_role、密码、私钥、支付凭据及其他认证秘密绝对禁止输出",
+            "title 和 content 不写死“今天”“昨晚”“前天”“刚才”“N 天前”",
+            "source_type 只能是 natural_chat、persona_prompt、code、document、quote、roleplay、tool_result、system_meta、unknown",
+            "禁止当作输入事实",
         ):
             with self.subTest(requirement=requirement):
                 self.assertIn(requirement, SHADOW_SYSTEM_PROMPT)
