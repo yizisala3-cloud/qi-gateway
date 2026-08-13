@@ -84,8 +84,56 @@ class ShadowPromptContractTests(unittest.TestCase):
             with self.subTest(requirement=requirement):
                 self.assertIn(requirement, SHADOW_SYSTEM_PROMPT)
 
+    def test_prompt_requires_a_specific_title_for_every_candidate(self):
+        for requirement in (
+            "每条 candidate 都必须包含非空 title 字段",
+            "简短、具体、便于一眼识别的中文标题",
+            "建议 4～24 个中文字符",
+            "不得包含原文没有的信息",
+            "原神至冬地图讨论",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, SHADOW_SYSTEM_PROMPT)
+
 
 class ShadowParserTests(unittest.TestCase):
+    def _parse_candidate(self, **overrides):
+        return parse_shadow_output(
+            json.dumps({"candidates": [_candidate(**overrides)]}, ensure_ascii=False),
+            {11: None, 12: None},
+        )[0]
+
+    def test_model_title_is_preserved(self):
+        result = self._parse_candidate(title="旅行计划待续")
+        self.assertEqual(result["title"], "旅行计划待续")
+
+    def test_missing_title_uses_content_fallback(self):
+        candidate = _candidate()
+        candidate.pop("title")
+        result = parse_shadow_output(
+            json.dumps({"candidates": [candidate]}, ensure_ascii=False),
+            {11: None, 12: None},
+        )[0]
+        self.assertEqual(result["title"], "叶子和栖约好下次继续讨论旅行计划")
+
+    def test_blank_title_uses_content_fallback(self):
+        result = self._parse_candidate(title="   ")
+        self.assertEqual(result["title"], "叶子和栖约好下次继续讨论旅行计划")
+
+    def test_placeholder_titles_use_content_fallback(self):
+        for title in ("（无标题）", "untitled"):
+            with self.subTest(title=title):
+                result = self._parse_candidate(title=title)
+                self.assertEqual(result["title"], "叶子和栖约好下次继续讨论旅行计划")
+
+    def test_fallback_title_is_at_most_twenty_four_characters(self):
+        result = self._parse_candidate(
+            title=None,
+            content="叶子和栖约好下次继续讨论一个需要反复确认细节的很长旅行计划。后续说明。",
+        )
+        self.assertLessEqual(len(result["title"]), 24)
+        self.assertTrue(result["title"].endswith("…"))
+
     def test_parser_accepts_core_candidate_types_and_normalizes_thread_state(self):
         payload = {
             "candidates": [

@@ -37,6 +37,7 @@ THREAD_STATES = frozenset({"open", "paused", "resolved", "abandoned", "unknown"}
 TIME_PRECISIONS = frozenset({"minute", "day", "approximate", "unknown"})
 RETENTION_CLASSES = frozenset({"normal", "core"})
 PARTICIPANTS = frozenset({"yezi", "qi", "other"})
+INVALID_TITLES = frozenset({"无标题", "（无标题）", "(无标题)", "untitled", "...", "……"})
 
 EMBEDDED_TIMESTAMP_PATTERN = re.compile(
     r"(?m)^\s*(?P<year>\d{2}|\d{4})[.\-/](?P<month>\d{1,2})[.\-/](?P<day>\d{1,2})"
@@ -86,6 +87,7 @@ continuity_type：
 13. profile 是 continuity_type；core 只通过 retention_class=core 表示实验性保留层级，不代表最终数据库结构。不要因为内容亲密、强烈或感人就自动标 core。
 14. 不确定时降低 confidence、保守表达或不提取，不得补全精确事实。
 15. content 必须是不会随当前日期失效的叙事正文，不要写死“今天”“昨晚”“前天”“刚才”“最近几天”“N 天前”等相对时间词。绝对时间只放在 memory_time 等独立时间字段中；不得把“昨晚”等词作为长期固定正文的一部分。
+16. 每条 candidate 都必须包含非空 title 字段。title 应是简短、具体、便于一眼识别的中文标题，建议 4～24 个中文字符，不要写成长句；应概括候选实际讲的事情、未完线索、内部梗或关系模式。不得使用“无标题”“连续感记忆”“一段互动”“特殊事件”“某件事情”，也不得只写类型名（如“episode”或“thread”）。title 不要写死“今天”“昨晚”“前天”“刚才”等会过期的相对时间，也不得包含原文没有的信息。
 
 正文写作标准：
 - content 通常使用一到三句话，使用直白、具体、客观的叙述。第一句交代谁做了什么；必要时第二句交代对方如何回应，以及互动最终形成的结果、约定、未完线索、关系模式或内部梗。
@@ -112,6 +114,10 @@ continuity_type：
 
 不推荐：“叶子和栖讨论了一件有趣的事情。”
 推荐：“叶子和栖讨论了原神新地图至冬；叶子认为地图很美，栖表示认同，但这段话题没有继续展开。”
+
+标题示例只说明标题写法，不得作为输入事实：
+正文：“叶子和栖讨论了原神新地图至冬；叶子认为地图很美，栖表示认同，但话题没有继续展开。”
+推荐标题：“原神至冬地图讨论”
 
 只返回严格 JSON，不要 Markdown、解释或代码围栏：
 {"candidates":[{"content":"...","continuity_type":"thread","subject":"shared","source_type":"natural_chat","thread_state":"open","importance":5,"continuity_value":9,"confidence":0.85,"evidence_message_ids":[123,124],"evidence_start_time":null,"evidence_end_time":null,"source_time":null,"memory_time":null,"time_precision":"unknown","title":"...","participants":["yezi","qi"],"reason":"...","retention_class":"normal"}]}"""
@@ -326,6 +332,20 @@ def _normalize_memory_time(value: Any, precision: str) -> tuple[str | None, str]
     )
 
 
+def _normalize_title(value: Any, content: str) -> str:
+    title = re.sub(r"\s+", " ", str(value or "")).strip()[:120]
+    if title and title.casefold() not in INVALID_TITLES:
+        return title
+
+    first_sentence = re.split(r"[。！？；]", content, maxsplit=1)[0].strip()
+    first_sentence = first_sentence.rstrip("。！？；，、,.!?;:：…").strip()
+    if not first_sentence:
+        return "连续感候选"
+    if len(first_sentence) > 24:
+        return first_sentence[:23].rstrip() + "…"
+    return first_sentence
+
+
 def parse_shadow_output(
     text: str,
     evidence_times: dict[int, str | None],
@@ -347,10 +367,11 @@ def parse_shadow_output(
         content = re.sub(r"\s+", " ", str(raw.get("content") or "")).strip()[:1000]
         if not content:
             continue
-        title = re.sub(r"\s+", " ", str(raw.get("title") or "")).strip()[:120] or None
+        raw_title = re.sub(r"\s+", " ", str(raw.get("title") or "")).strip()[:120]
         reason = re.sub(r"\s+", " ", str(raw.get("reason") or "")).strip()[:400] or None
-        if _contains_secret(content, title, reason):
+        if _contains_secret(content, raw_title, reason):
             continue
+        title = _normalize_title(raw_title, content)
         fingerprint = content.casefold()
         if fingerprint in seen:
             continue
