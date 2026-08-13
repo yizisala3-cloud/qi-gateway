@@ -72,6 +72,33 @@ function memoryCards(memories) {
   `).join('');
 }
 
+function shadowCandidateCards(candidates) {
+  if (!candidates?.length) return '<p class="muted">本批聊天没有提取到连续感候选。</p>';
+  return candidates.map(candidate => {
+    const evidence = (candidate.evidence_message_ids || []).map(id => `#${esc(id)}`).join('、') || '-';
+    const participants = (candidate.participants || []).map(item => esc(item)).join('、') || '-';
+    return `
+      <div class="item">
+        <div class="item-title">${esc(candidate.title || '(无标题)')}</div>
+        <div class="text-sm muted mt8">${esc(candidate.content || '')}</div>
+        <div class="kv mt16"><span class="k">连续感类型</span><span class="v">${esc(candidate.continuity_type || '-')}</span></div>
+        <div class="kv"><span class="k">主体</span><span class="v">${esc(candidate.subject || '-')}</span></div>
+        <div class="kv"><span class="k">来源类型</span><span class="v">${esc(candidate.source_type || '-')}</span></div>
+        ${candidate.thread_state ? `<div class="kv"><span class="k">Thread 状态</span><span class="v">${esc(candidate.thread_state)}</span></div>` : ''}
+        <div class="kv"><span class="k">重要性</span><span class="v">${esc(candidate.importance ?? '-')}</span></div>
+        <div class="kv"><span class="k">承接价值</span><span class="v">${esc(candidate.continuity_value ?? '-')}</span></div>
+        <div class="kv"><span class="k">置信度</span><span class="v">${esc(candidate.confidence ?? '-')}</span></div>
+        <div class="kv"><span class="k">证据消息</span><span class="v">${evidence}</span></div>
+        <div class="kv"><span class="k">来源时间</span><span class="v">${esc(candidate.source_time || '-')}</span></div>
+        <div class="kv"><span class="k">记忆时间</span><span class="v">${esc(candidate.memory_time || '-')}</span></div>
+        <div class="kv"><span class="k">参与者</span><span class="v">${participants}</span></div>
+        <div class="kv"><span class="k">保留级别</span><span class="v">${esc(candidate.retention_class || '-')}</span></div>
+        <div class="kv"><span class="k">提取理由</span><span class="v">${esc(candidate.reason || '-')}</span></div>
+      </div>
+    `;
+  }).join('');
+}
+
 export default {
   busy: false,
   modelReady: false,
@@ -83,6 +110,7 @@ export default {
       refresh: () => this.load(),
       preview: () => this.run('preview'),
       execute: () => this.run('execute'),
+      continuity: () => this.runContinuityPreview(),
       detail: el => this.openRun(el.dataset.id),
     });
     await this.load();
@@ -92,7 +120,10 @@ export default {
     this.root.innerHTML = `
       <div class="banner">
         <span>ℹ️</span>
-        <div><strong>chat_messages is read-only.</strong> Preview calls the extraction model without writing or advancing the cursor. Execute creates pending memory applications and advances the cursor only after an atomic successful commit.</div>
+        <div>
+          <strong>chat_messages is read-only.</strong> Preview calls the extraction model without writing or advancing the cursor. Execute creates pending memory applications and advances the cursor only after an atomic successful commit.
+          <div class="mt8">“连续感预览”独立读取最近聊天，只用于观察新的连续感提取效果；不会写入记忆申请、不会推进正式总结游标。</div>
+        </div>
       </div>
       <div id="digest-config-warning"></div>
       <div class="toolbar">
@@ -103,6 +134,7 @@ export default {
         <span style="flex:1"></span>
         <button class="btn btn-secondary" data-act="refresh">Refresh</button>
         <button class="btn btn-soft" data-act="preview" disabled>Dry-run Preview</button>
+        <button class="btn btn-soft" data-act="continuity" disabled>连续感预览</button>
         <button class="btn btn-primary" data-act="execute" disabled>Execute & Save Pending</button>
       </div>
       <div id="digest-summary">${loading()}</div>
@@ -114,7 +146,7 @@ export default {
   },
 
   syncControls() {
-    this.root.querySelectorAll('[data-act="preview"],[data-act="execute"]').forEach(button => {
+    this.root.querySelectorAll('[data-act="preview"],[data-act="continuity"],[data-act="execute"]').forEach(button => {
       button.disabled = this.busy || !this.modelReady;
     });
   },
@@ -219,6 +251,56 @@ export default {
     } finally {
       this.setBusy(false);
     }
+  },
+
+  async runContinuityPreview() {
+    if (this.busy) return;
+    if (!this.modelReady) {
+      toast('ANALYSIS_API_KEY is not configured on qi-gateway', 'err');
+      return;
+    }
+    const limit = Math.max(1, Math.min(100, Number(this.root.querySelector('#digest-limit').value) || 60));
+
+    this.setBusy(true);
+    toast('正在提取连续感候选……');
+    try {
+      const result = await gw('/admin/api/memory-continuity/shadow-preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          max_messages: limit,
+          max_chars: 16000,
+        }),
+      });
+      this.showContinuityResult(result);
+    } catch (error) {
+      toast('连续感预览失败：' + error.message, 'err');
+    } finally {
+      this.setBusy(false);
+    }
+  },
+
+  showContinuityResult(result) {
+    const candidates = Array.isArray(result.candidates) ? result.candidates : [];
+    const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+    const warningBlock = warnings.length ? `
+      <div class="banner mt16">
+        <span>ℹ️</span>
+        <div>${warnings.map(item => esc(item)).join('<br>')}</div>
+      </div>` : '';
+    const { root, close } = modal({
+      title: '连续感预览',
+      body: `
+        <div class="kv"><span class="k">Persistence</span><span class="v">${esc(result.persistence || '-')}</span></div>
+        <div class="kv"><span class="k">Source range</span><span class="v">${esc(result.source_first_message_id ?? '-')} → ${esc(result.source_last_message_id ?? '-')}</span></div>
+        <div class="kv"><span class="k">Message count</span><span class="v">${esc(result.message_count ?? 0)}</span></div>
+        <div class="kv"><span class="k">Candidates</span><span class="v">${esc(candidates.length)}</span></div>
+        ${warningBlock}
+        <div class="mt16">${shadowCandidateCards(candidates)}</div>
+      `,
+      footer: '<button class="btn btn-secondary" data-close>Close</button>',
+    });
+    root.querySelector('[data-close]').onclick = close;
   },
 
   showResult(run) {
