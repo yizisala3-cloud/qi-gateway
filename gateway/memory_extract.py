@@ -47,6 +47,16 @@ EXTRACT_SYSTEM_PROMPT += """
 9. 如果原文明确显示该内容已通过记忆工具提交，或已通过待办工具创建，不要再提取。不能确定时仍可输出，由数据库保守去重和用户审核。
 """
 
+# Sent as an extra user turn when the first model response parsed as JSON but
+# had no memories array. Must be strict: an empty object is not an empty result.
+EXTRACT_REPAIR_PROMPT = (
+    "上一次输出缺少 memories 数组。只返回严格 JSON：\n"
+    '{"memories":[...]}\n'
+    "没有合格记忆时必须返回：\n"
+    '{"memories":[]}\n'
+    "不得返回空对象、说明文字或 Markdown。"
+)
+
 MEMORY_TYPES = frozenset({
     "profile",
     "preference",
@@ -533,66 +543,103 @@ def _extract_memories(
         )
 
     url = f"{cfg.ANALYSIS_BASE_URL.rstrip('/')}/chat/completions"
-    request_body = {
-        "model": cfg.ANALYSIS_MODEL,
-        "messages": [
-            {"role": "system", "content": EXTRACT_SYSTEM_PROMPT},
-            {"role": "user", "content": f"<chat_log>\n{conversation}\n</chat_log>"},
-        ],
-        "response_format": {"type": "json_object"},
-        "max_tokens": 1200,
-        "temperature": 0.1,
-    }
+    base_messages = [
+        {"role": "system", "content": EXTRACT_SYSTEM_PROMPT},
+        {"role": "user", "content": f"<chat_log>\n{conversation}\n</chat_log>"},
+    ]
 
-    try:
-        with httpx.Client(timeout=60.0) as client:
-            response = client.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {cfg.ANALYSIS_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json=request_body,
+    def _post(
+        messages: list[dict[str, Any]],
+        with_response_format: bool,
+    ) -> httpx.Response:
+        body = {
+            "model": cfg.ANALYSIS_MODEL,
+            "messages": messages,
+            "max_tokens": 1200,
+            "temperature": 0.1,
+        }
+        if with_response_format:
+            body["response_format"] = {"type": "json_object"}
+        try:
+            with httpx.Client(timeout=60.0) as client:
+                return client.post(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {cfg.ANALYSIS_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json=body,
+                )
+        except Exception as exc:
+            raise DigestPipelineError(
+                "model_request_failed",
+                f"Memory extraction request failed: {type(exc).__name__}",
+            ) from exc
+
+    def _content(response: httpx.Response) -> str:
+        if response.status_code != 200:
+            raise DigestPipelineError(
+                "model_http_error",
+                f"Memory extraction model returned HTTP {response.status_code}",
+                response.text[:1500],
             )
-    except Exception as exc:
-        raise DigestPipelineError("model_request_failed", f"Memory extraction request failed: {type(exc).__name__}") from exc
+        try:
+            payload = response.json()
+            output = payload["choices"][0]["message"]["content"]
+            if not isinstance(output, str) or not output.strip():
+                raise ValueError("model content is empty")
+        except Exception as exc:
+            raise DigestPipelineError(
+                "model_response_error",
+                "Memory extraction response is not valid OpenAI-compatible JSON",
+                response.text[:1500],
+            ) from exc
+        return output
+
+    response = _post(base_messages, with_response_format=True)
 
     # Fallback: some providers (e.g. certain SiliconFlow endpoints) return 400
     # because they do not support response_format: {"type": "json_object"}.
+    # This fallback consumes the single retry attempt.
+    retry_used = False
     if response.status_code == 400:
         body_excerpt = response.text[:500].lower()
         if "response_format" in body_excerpt or "json_object" in body_excerpt:
             log.warning("Provider rejected response_format; retrying without it")
-            request_body.pop("response_format", None)
-            try:
-                with httpx.Client(timeout=60.0) as client:
-                    response = client.post(
-                        url,
-                        headers={
-                            "Authorization": f"Bearer {cfg.ANALYSIS_API_KEY}",
-                            "Content-Type": "application/json",
-                        },
-                        json=request_body,
-                    )
-            except Exception as exc:
-                raise DigestPipelineError("model_request_failed", f"Memory extraction retry failed: {type(exc).__name__}") from exc
+            retry_used = True
+            response = _post(base_messages, with_response_format=False)
 
-    if response.status_code != 200:
-        excerpt = response.text[:1500]
-        raise DigestPipelineError("model_http_error", f"Memory extraction model returned HTTP {response.status_code}", excerpt)
+    output = _content(response)
 
     try:
-        payload = response.json()
-        output = payload["choices"][0]["message"]["content"]
-        if not isinstance(output, str) or not output.strip():
-            raise ValueError("model content is empty")
-    except Exception as exc:
+        return _parse_model_output(output, source_times), output
+    except DigestPipelineError as exc:
+        # Only a JSON body that parses but lacks the memories array is worth a
+        # repair retry. Invalid JSON stays a hard error, and the repair retry
+        # must never run when the 400 fallback already used the retry budget.
+        if exc.code != "model_schema_error" or retry_used:
+            raise
+        log.warning("Model output parsed as JSON but has no memories array; running one repair retry")
+
+    # Repair retry: same conversation, explicit format instruction, and
+    # response_format removed so JSON-mode providers do not degrade to {}.
+    repair_response = _post(
+        base_messages + [{"role": "user", "content": EXTRACT_REPAIR_PROMPT}],
+        with_response_format=False,
+    )
+    try:
+        repair_output = _content(repair_response)
+        return _parse_model_output(repair_output, source_times), repair_output
+    except DigestPipelineError as exc:
+        if exc.code == "model_http_error":
+            raise
+        # Any content failure on the repair attempt is a schema failure:
+        # {} is never silently converted into a legal empty result.
         raise DigestPipelineError(
-            "model_response_error",
-            "Memory extraction response is not valid OpenAI-compatible JSON",
-            response.text[:1500],
+            "model_schema_error",
+            f"Model did not return a memories array on the repair attempt ({exc.code})",
+            repair_response.text[:1500],
         ) from exc
-    return _parse_model_output(output, source_times), output
 
 
 def _get_embedding_sync(text: str) -> list[float]:

@@ -44,6 +44,28 @@ def _http_client_returning(response):
     return client
 
 
+def _openai_response(content_text, status_code=200):
+    response = MagicMock(status_code=status_code, text=content_text)
+    response.json.return_value = {
+        "choices": [{"message": {"content": content_text}}],
+    }
+    return response
+
+
+def _sequential_posts(responses):
+    """Return (client, call_log); every post consumes the next queued response."""
+    call_log = []
+
+    def _post(*args, **kwargs):
+        idx = len(call_log)
+        call_log.append(kwargs)
+        return responses[idx]
+
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value.post = _post
+    return mock_client, call_log
+
+
 class ModelBoundaryTests(unittest.TestCase):
     def test_scheduled_digest_does_nothing_when_analysis_is_not_configured(self):
         with (
@@ -108,6 +130,119 @@ class ModelBoundaryTests(unittest.TestCase):
                 _extract_memories("user: remember this")
 
         self.assertEqual(raised.exception.code, "model_parse_error")
+
+    def test_extraction_repairs_missing_memories_with_explicit_empty_result(self):
+        mock_client, call_log = _sequential_posts([
+            _openai_response("{}"),
+            _openai_response('{"memories":[]}'),
+        ])
+        with (
+            patch.object(cfg, "ANALYSIS_API_KEY", "configured"),
+            patch(f"{MODULE}.httpx.Client", return_value=mock_client),
+        ):
+            memories, raw = _extract_memories("user: hello")
+
+        self.assertEqual(memories, [])
+        self.assertEqual(len(call_log), 2)
+        # The repair request drops response_format and carries the strict prompt.
+        self.assertNotIn("response_format", call_log[1]["json"])
+        self.assertIn("上一次输出缺少 memories 数组", call_log[1]["json"]["messages"][-1]["content"])
+
+    def test_extraction_repairs_missing_memories_and_extracts_real_memories(self):
+        mock_client, call_log = _sequential_posts([
+            _openai_response("{}"),
+            _openai_response(json.dumps({
+                "memories": [{
+                    "content": "User prefers quiet mornings",
+                    "memory_type": "preference",
+                }],
+            })),
+        ])
+        with (
+            patch.object(cfg, "ANALYSIS_API_KEY", "configured"),
+            patch(f"{MODULE}.httpx.Client", return_value=mock_client),
+        ):
+            memories, raw = _extract_memories("user: hello")
+
+        self.assertEqual(len(memories), 1)
+        self.assertEqual(memories[0]["content"], "User prefers quiet mornings")
+        self.assertEqual(len(call_log), 2)
+
+    def test_extraction_raises_model_schema_error_when_repair_also_returns_empty_object(self):
+        mock_client, call_log = _sequential_posts([
+            _openai_response("{}"),
+            _openai_response("{}"),
+        ])
+        with (
+            patch.object(cfg, "ANALYSIS_API_KEY", "configured"),
+            patch(f"{MODULE}.httpx.Client", return_value=mock_client),
+        ):
+            with self.assertRaises(DigestPipelineError) as raised:
+                _extract_memories("user: hello")
+
+        self.assertEqual(raised.exception.code, "model_schema_error")
+        self.assertEqual(len(call_log), 2)
+
+    def test_repair_retries_at_most_once(self):
+        # Three responses are queued; the third must never be requested.
+        mock_client, call_log = _sequential_posts([
+            _openai_response("{}"),
+            _openai_response("{}"),
+            _openai_response('{"memories":[]}'),
+        ])
+        with (
+            patch.object(cfg, "ANALYSIS_API_KEY", "configured"),
+            patch(f"{MODULE}.httpx.Client", return_value=mock_client),
+        ):
+            with self.assertRaises(DigestPipelineError) as raised:
+                _extract_memories("user: hello")
+
+        self.assertEqual(raised.exception.code, "model_schema_error")
+        self.assertEqual(len(call_log), 2)
+
+    def test_extraction_raises_model_schema_error_when_repair_returns_invalid_json(self):
+        mock_client, call_log = _sequential_posts([
+            _openai_response("{}"),
+            _openai_response("not-json"),
+        ])
+        with (
+            patch.object(cfg, "ANALYSIS_API_KEY", "configured"),
+            patch(f"{MODULE}.httpx.Client", return_value=mock_client),
+        ):
+            with self.assertRaises(DigestPipelineError) as raised:
+                _extract_memories("user: hello")
+
+        self.assertEqual(raised.exception.code, "model_schema_error")
+        self.assertEqual(len(call_log), 2)
+
+    def test_extraction_repairs_non_empty_object_without_memories(self):
+        mock_client, call_log = _sequential_posts([
+            _openai_response('{"memories_count": 3}'),
+            _openai_response('{"memories":[]}'),
+        ])
+        with (
+            patch.object(cfg, "ANALYSIS_API_KEY", "configured"),
+            patch(f"{MODULE}.httpx.Client", return_value=mock_client),
+        ):
+            memories, raw = _extract_memories("user: hello")
+
+        self.assertEqual(memories, [])
+        self.assertEqual(len(call_log), 2)
+
+    def test_extraction_invalid_first_json_is_not_repaired(self):
+        # Non-JSON on the first attempt is a hard parse error: no repair retry.
+        mock_client, call_log = _sequential_posts([
+            _openai_response("not-json"),
+        ])
+        with (
+            patch.object(cfg, "ANALYSIS_API_KEY", "configured"),
+            patch(f"{MODULE}.httpx.Client", return_value=mock_client),
+        ):
+            with self.assertRaises(DigestPipelineError) as raised:
+                _extract_memories("user: hello")
+
+        self.assertEqual(raised.exception.code, "model_parse_error")
+        self.assertEqual(len(call_log), 1)
 
     def test_embedding_http_error_is_not_silently_ignored(self):
         response = MagicMock(status_code=503, text="embedding unavailable")
@@ -412,12 +547,13 @@ class AtomicCommitTests(unittest.TestCase):
         }))[0]
 
     @contextmanager
-    def _pipeline_patches(self, client, *, mode="execute", embedding=None):
+    def _pipeline_patches(self, client, *, mode="execute", embedding=None, extract=None):
         run = {**self.run, "mode": mode}
-        extract = patch(
-            f"{MODULE}._extract_memories",
-            return_value=([self.memory], '{"memories":[]}'),
-        )
+        if extract is None:
+            extract = patch(
+                f"{MODULE}._extract_memories",
+                return_value=([self.memory], '{"memories":[]}'),
+            )
         if embedding is None:
             embedding = patch(
                 f"{MODULE}._get_embedding_sync",
@@ -503,6 +639,47 @@ class AtomicCommitTests(unittest.TestCase):
         self.assertEqual(committed_memory["content_hash"], self.memory["content_hash"])
         self.assertEqual(committed_memory["embedding"], [0.1, 0.2])
         self.assertEqual(client.updates[-1]["status"], "failed")
+
+    def test_execute_consecutive_schema_failures_do_not_advance_cursor_or_write_requests(self):
+        # Real extraction flow: first {} then repair {} -> model_schema_error.
+        client = _DigestClient(self.run)
+        mock_client, call_log = _sequential_posts([
+            _openai_response("{}"),
+            _openai_response("{}"),
+        ])
+        extract = patch(f"{MODULE}._extract_memories", side_effect=_extract_memories)
+        with (
+            self._pipeline_patches(client, extract=extract),
+            patch(f"{MODULE}.httpx.Client", return_value=mock_client),
+        ):
+            result = run_memory_digest("manual_execute", "execute")
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_code"], "model_schema_error")
+        self.assertEqual(result["cursor_before"], 10)
+        self.assertEqual(result["cursor_after"], 10)
+        self.assertEqual(client.rpc_calls, [])
+        self.assertEqual(len(call_log), 2)
+
+    def test_preview_success_after_repair_still_does_not_advance_cursor(self):
+        client = _DigestClient({**self.run, "mode": "preview"})
+        mock_client, call_log = _sequential_posts([
+            _openai_response("{}"),
+            _openai_response('{"memories":[]}'),
+        ])
+        extract = patch(f"{MODULE}._extract_memories", side_effect=_extract_memories)
+        embedding = patch(f"{MODULE}._get_embedding_sync")
+        with (
+            self._pipeline_patches(client, mode="preview", embedding=embedding, extract=extract),
+            patch(f"{MODULE}.httpx.Client", return_value=mock_client),
+        ):
+            result = run_memory_digest("manual_preview", "preview")
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["cursor_before"], 10)
+        self.assertEqual(result["cursor_after"], 10)
+        self.assertEqual(client.rpc_calls, [])
+        self.assertEqual(len(call_log), 2)
 
 
     def test_extraction_retries_without_response_format_on_provider_400(self):
