@@ -23,6 +23,7 @@ if importlib.util.find_spec("httpx") is None:
 
 from gateway.config import cfg
 from gateway.memory_continuity_shadow import (
+    SHADOW_SYSTEM_PROMPT,
     _normalize_messages,
     parse_shadow_output,
     run_shadow_preview,
@@ -54,6 +55,34 @@ def _candidate(**overrides):
     }
     value.update(overrides)
     return value
+
+
+class ShadowPromptContractTests(unittest.TestCase):
+    def test_prompt_requires_concrete_evidence_bounded_summaries(self):
+        self.assertIn(
+            "不得用“某种方式”“特殊的方式”“极端的方式”",
+            SHADOW_SYSTEM_PROMPT,
+        )
+        for vague_phrase in (
+            "某种方式",
+            "特殊的方式",
+            "极端的方式",
+            "发生了一些事情",
+            "进行了一些互动",
+        ):
+            with self.subTest(vague_phrase=vague_phrase):
+                self.assertIn(vague_phrase, SHADOW_SYSTEM_PROMPT)
+
+        for requirement in (
+            "直白、具体、客观",
+            "必须保留理解候选所需的关键动作",
+            "不得自行补全",
+            "不要仅因敏感而排除或自动模糊化",
+            "内部梗、具体称呼、共同玩法、承诺和约定",
+            "绝不能当作输入事实",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, SHADOW_SYSTEM_PROMPT)
 
 
 class ShadowParserTests(unittest.TestCase):
