@@ -23,6 +23,7 @@ CST = timezone(timedelta(hours=8))
 DEFAULT_MAX_MESSAGES = 80
 DEFAULT_MAX_CHARS = 16000
 MAX_CANDIDATES = 6
+MAX_EVIDENCE_IDS = 8
 
 CONTINUITY_TYPES = frozenset({
     "moment", "thread", "episode", "inside_joke", "relationship", "profile",
@@ -73,7 +74,7 @@ continuity_type：
 1. content 使用“叶子”和“栖”，不要写“用户”和“助手”。
 2. 短期、亲密、暧昧或一般敏感内容，只要有连续感价值，可以抽象保留。不要仅因敏感而排除。
 3. 严禁提取或复述 API Key、Token、service_role、密码、私钥、支付凭据或认证秘密。
-4. evidence_message_ids 必须全部来自输入中真实存在且直接支持候选的 id，不得编造。
+4. evidence_message_ids 必须全部来自输入中真实存在且直接支持候选的 id，不得编造；每条候选最多 8 条，只引用直接支持该候选的最少证据，不要因为某条消息属于同一批聊天就引用它，也不要把批次最后一条消息机械加入所有候选。episode 可以引用分布在多个 turn 的关键证据，但仍只选最有代表性的消息；thread 只引用证明话题存在且尚未结束的必要消息；relationship 必须引用能够证明互动重复出现或明确形成约定的消息。
 5. 栖单方面提出的建议不能成为叶子的事实。只有叶子明确接受、双方形成约定或已经实际执行，才可成为 shared thread/relationship。
 6. 叶子粘贴的人设 Prompt、system prompt、代码、文档、引用、角色扮演或工具结果中的第一人称，不等于叶子的真实自述。
 7. 代码、文档和工具结果可以形成 subject=project 的当前工作 thread，但其中的示例人物、示例偏好或第一人称不能成为叶子的 profile。
@@ -81,12 +82,13 @@ continuity_type：
 9. subject 只能是 yezi、qi、shared、project、other。共同经历、约定和关系通常是 shared。
 10. thread_state 仅在 continuity_type=thread 时使用 open、paused、resolved、abandoned、unknown；其他类型必须为 null。没有明确结束证据时不要臆断 resolved。
 11. importance 表示内容本身的重要程度，1-10；continuity_value 表示对下一个窗口自然承接的直接价值，1-10。两者分别判断。
-12. source_time 一律输出 null，由程序根据 evidence 计算。memory_time 仅在原文可靠支持实际发生或生效时间时填写，否则为 null。time_precision 只能是 minute、day、approximate、unknown。
+12. source_time、evidence_start_time、evidence_end_time 一律输出 null，由程序根据 evidence 计算。memory_time 仅在原文可靠支持事情实际发生或状态生效时间时填写，否则为 null；不要把证据消息的对话时间冒充 memory_time。time_precision 只能是 minute、day、approximate、unknown。
 13. profile 是 continuity_type；core 只通过 retention_class=core 表示实验性保留层级，不代表最终数据库结构。不要因为内容亲密、强烈或感人就自动标 core。
 14. 不确定时降低 confidence、保守表达或不提取，不得补全精确事实。
+15. content 必须是不会随当前日期失效的叙事正文，不要写死“今天”“昨晚”“前天”“刚才”“最近几天”“N 天前”等相对时间词。绝对时间只放在 memory_time 等独立时间字段中；不得把“昨晚”等词作为长期固定正文的一部分。
 
 只返回严格 JSON，不要 Markdown、解释或代码围栏：
-{"candidates":[{"content":"...","continuity_type":"thread","subject":"shared","source_type":"natural_chat","thread_state":"open","importance":5,"continuity_value":9,"confidence":0.85,"evidence_message_ids":[123,124],"source_time":null,"memory_time":null,"time_precision":"unknown","title":"...","participants":["yezi","qi"],"reason":"...","retention_class":"normal"}]}"""
+{"candidates":[{"content":"...","continuity_type":"thread","subject":"shared","source_type":"natural_chat","thread_state":"open","importance":5,"continuity_value":9,"confidence":0.85,"evidence_message_ids":[123,124],"evidence_start_time":null,"evidence_end_time":null,"source_time":null,"memory_time":null,"time_precision":"unknown","title":"...","participants":["yezi","qi"],"reason":"...","retention_class":"normal"}]}"""
 
 
 class ShadowPreviewError(RuntimeError):
@@ -347,11 +349,18 @@ def parse_shadow_output(
                 continue
             if message_id in evidence_times and message_id not in evidence_ids:
                 evidence_ids.append(message_id)
+                if len(evidence_ids) == MAX_EVIDENCE_IDS:
+                    break
         if not evidence_ids:
             continue
 
-        valid_times = [evidence_times[item] for item in evidence_ids if evidence_times[item]]
-        source_time = max(valid_times) if valid_times else None
+        valid_times: list[datetime] = []
+        for message_id in evidence_ids:
+            parsed_time = _parse_time(evidence_times[message_id], CST)
+            if parsed_time:
+                valid_times.append(parsed_time.astimezone(CST))
+        evidence_start_time = min(valid_times).isoformat(timespec="minutes") if valid_times else None
+        evidence_end_time = max(valid_times).isoformat(timespec="minutes") if valid_times else None
         precision = str(raw.get("time_precision") or "unknown").strip().casefold()
         memory_time, time_precision = _normalize_memory_time(raw.get("memory_time"), precision)
 
@@ -381,7 +390,9 @@ def parse_shadow_output(
             "continuity_value": int(round(_clamp(raw.get("continuity_value"), 1, 10, 5))),
             "confidence": round(_clamp(raw.get("confidence"), 0, 1, 0.6), 3),
             "evidence_message_ids": evidence_ids,
-            "source_time": source_time,
+            "evidence_start_time": evidence_start_time,
+            "evidence_end_time": evidence_end_time,
+            "source_time": evidence_end_time,
             "memory_time": memory_time,
             "time_precision": time_precision,
             "title": title,

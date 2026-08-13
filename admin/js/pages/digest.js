@@ -7,6 +7,23 @@ function fmt(value) {
   try { return new Date(value).toLocaleString(); } catch { return String(value); }
 }
 
+function fmtMinute(value) {
+  if (!value) return '-';
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit',
+    }).format(new Date(value));
+  } catch { return String(value); }
+}
+
+function fmtTimeRange(start, end) {
+  if (!start && !end) return '-';
+  const startText = fmtMinute(start || end);
+  const endText = fmtMinute(end || start);
+  return startText === endText ? startText : `${startText} ～ ${endText}`;
+}
+
 function statusBadge(status) {
   const kind = status === 'succeeded' ? 'accent' : status === 'failed' ? 'danger' : status === 'running' ? 'warn' : 'muted';
   return badge(status || 'unknown', kind);
@@ -89,8 +106,8 @@ function shadowCandidateCards(candidates) {
         <div class="kv"><span class="k">承接价值</span><span class="v">${esc(candidate.continuity_value ?? '-')}</span></div>
         <div class="kv"><span class="k">置信度</span><span class="v">${esc(candidate.confidence ?? '-')}</span></div>
         <div class="kv"><span class="k">证据消息</span><span class="v">${evidence}</span></div>
-        <div class="kv"><span class="k">来源时间</span><span class="v">${esc(candidate.source_time || '-')}</span></div>
-        <div class="kv"><span class="k">记忆时间</span><span class="v">${esc(candidate.memory_time || '-')}</span></div>
+        <div class="kv"><span class="k">对话时间</span><span class="v">${esc(fmtTimeRange(candidate.evidence_start_time, candidate.evidence_end_time))}</span></div>
+        <div class="kv"><span class="k">记忆时间</span><span class="v">${esc(fmtMinute(candidate.memory_time))}</span></div>
         <div class="kv"><span class="k">参与者</span><span class="v">${participants}</span></div>
         <div class="kv"><span class="k">保留级别</span><span class="v">${esc(candidate.retention_class || '-')}</span></div>
         <div class="kv"><span class="k">提取理由</span><span class="v">${esc(candidate.reason || '-')}</span></div>

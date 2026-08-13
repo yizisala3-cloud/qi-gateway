@@ -100,12 +100,38 @@ class ShadowParserTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["evidence_message_ids"], [11])
 
-    def test_source_time_is_computed_from_valid_evidence(self):
+    def test_evidence_ids_are_limited_to_eight(self):
+        evidence_times = {message_id: None for message_id in range(1, 11)}
         result = parse_shadow_output(
-            json.dumps({"candidates": [_candidate(source_time="2099-01-01T00:00Z")]}, ensure_ascii=False),
+            json.dumps({"candidates": [_candidate(evidence_message_ids=list(range(1, 11)))]}, ensure_ascii=False),
+            evidence_times,
+        )
+
+        self.assertEqual(result[0]["evidence_message_ids"], list(range(1, 9)))
+
+    def test_evidence_time_range_and_source_time_are_computed_from_valid_evidence(self):
+        result = parse_shadow_output(
+            json.dumps({"candidates": [_candidate(
+                evidence_start_time="2099-01-01T00:00Z",
+                evidence_end_time="2099-01-02T00:00Z",
+                source_time="2099-01-02T00:00Z",
+            )]}, ensure_ascii=False),
             {11: "2026-08-13T20:00+08:00", 12: "2026-08-13T20:05+08:00"},
         )
+
+        self.assertEqual(result[0]["evidence_start_time"], "2026-08-13T20:00+08:00")
+        self.assertEqual(result[0]["evidence_end_time"], "2026-08-13T20:05+08:00")
         self.assertEqual(result[0]["source_time"], "2026-08-13T20:05+08:00")
+
+    def test_unreliable_evidence_times_produce_null_time_fields(self):
+        result = parse_shadow_output(
+            json.dumps({"candidates": [_candidate()]}, ensure_ascii=False),
+            {11: None, 12: "not-a-time"},
+        )
+
+        self.assertIsNone(result[0]["evidence_start_time"])
+        self.assertIsNone(result[0]["evidence_end_time"])
+        self.assertIsNone(result[0]["source_time"])
 
     def test_obvious_credentials_drop_entire_candidate(self):
         for secret in (
