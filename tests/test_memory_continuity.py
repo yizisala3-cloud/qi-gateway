@@ -88,6 +88,24 @@ class ContinuityBatchTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in raw], [178, 179])
         self.assertEqual([row["id"] for row in messages], [178, 179])
 
+    def test_oversized_first_turn_is_complete_but_model_text_is_trimmed(self):
+        rows = [
+            _row(178, "user", "用户粘贴" + "a" * 900, "c1"),
+            _row(179, "assistant", "最终回复" + "b" * 900, "c1"),
+            _row(180, "user", "下一个 turn 不应进入", "c2"),
+        ]
+
+        raw, messages = prepare_continuity_batch(rows, max_chars=500)
+
+        self.assertEqual([row["id"] for row in raw], [178, 179])
+        self.assertEqual([row["id"] for row in messages], [178, 179])
+        self.assertLessEqual(sum(len(row["content"]) + 100 for row in messages), 500)
+        self.assertTrue(messages[0]["content"])
+        self.assertTrue(messages[1]["content"])
+        for message in messages:
+            for field in ("id", "role", "conversation_id", "source_time"):
+                self.assertIn(field, message)
+
     def test_assistant_retries_fold_only_within_same_conversation(self):
         rows = [
             _row(178, "user", "问题", "c1"),
@@ -151,6 +169,19 @@ class ContinuityExecutionTests(unittest.TestCase):
                 run_continuity_digest(automatic=True)
         claim.assert_not_called()
         model.assert_not_called()
+
+    def test_oversized_first_turn_advances_only_to_that_turns_last_raw_message(self):
+        self.rows = [
+            _row(178, "user", "x" * 17000, "c1"),
+            _row(179, "assistant", "y" * 1000, "c1"),
+            _row(180, "user", "next turn", "c2"),
+        ]
+        client = _RpcClient()
+        patches = self._patch_success(client)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9], patches[10]:
+            result = run_continuity_digest()
+
+        self.assertEqual(result["cursor_after"], 179)
 
     def test_automatic_threshold_executes_and_manual_ignores_auto_cooldown(self):
         client = _RpcClient()

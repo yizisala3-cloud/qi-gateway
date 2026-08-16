@@ -240,6 +240,87 @@ def _normalize_selected(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return normalized
 
 
+def _trim_oversized_turn_messages(
+    messages: list[dict[str, Any]],
+    max_chars: int,
+) -> list[dict[str, Any]]:
+    """Trim model text while preserving the oversized turn's source boundary.
+
+    Normal batches never use this path. For the first turn only, retain as many
+    normalized message envelopes as the budget can represent, favoring user
+    text and the final assistant reply, then distribute the remaining content
+    budget with the same priority. Raw rows are deliberately left untouched.
+    """
+    usable = [dict(message) for message in messages if str(message.get("content") or "")]
+    if not usable or max_chars <= 100:
+        return []
+
+    final_assistant = next(
+        (
+            index
+            for index in range(len(usable) - 1, -1, -1)
+            if usable[index].get("role") == "assistant"
+        ),
+        None,
+    )
+
+    def weight(index: int) -> int:
+        if usable[index].get("role") == "user":
+            return 3
+        if index == final_assistant:
+            return 2
+        return 1
+
+    # Each retained message costs 100 characters of formatting allowance plus
+    # at least one character of useful body text.
+    max_message_count = min(len(usable), max_chars // 101)
+    if max_message_count < 1:
+        return []
+    selected_indices = sorted(
+        sorted(range(len(usable)), key=lambda index: (-weight(index), index))[:max_message_count]
+    )
+    selected = [usable[index] for index in selected_indices]
+    weights = [weight(index) for index in selected_indices]
+    capacity = max_chars - (100 * len(selected))
+    allocations = [1] * len(selected)
+    remaining = capacity - len(selected)
+
+    while remaining > 0:
+        active = [
+            index
+            for index, message in enumerate(selected)
+            if allocations[index] < len(message["content"])
+        ]
+        if not active:
+            break
+        total_weight = sum(weights[index] for index in active)
+        grants = {
+            index: min(
+                len(selected[index]["content"]) - allocations[index],
+                max(1, remaining * weights[index] // total_weight),
+            )
+            for index in active
+        }
+        progressed = 0
+        for index in active:
+            grant = min(grants[index], remaining)
+            allocations[index] += grant
+            remaining -= grant
+            progressed += grant
+            if remaining <= 0:
+                break
+        if progressed == 0:
+            break
+
+    trimmed: list[dict[str, Any]] = []
+    for message, allocation in zip(selected, allocations):
+        copied = dict(message)
+        copied["content"] = message["content"][:allocation].rstrip()
+        if copied["content"]:
+            trimmed.append(copied)
+    return trimmed
+
+
 def prepare_continuity_batch(
     rows: list[dict[str, Any]],
     max_chars: int = MAX_BATCH_CHARS,
@@ -252,11 +333,10 @@ def prepare_continuity_batch(
         candidate_chars = sum(len(item["content"]) + 100 for item in candidate_messages)
         if candidate_chars > max_chars:
             if not selected_raw:
-                raise ContinuityPipelineError(
-                    "batch_too_large",
-                    "The next complete conversation turn exceeds the character budget",
-                    422,
-                )
+                # The cursor must be able to move past a single pasted document
+                # or code block. Cover the complete raw turn, but trim only the
+                # model-facing copies to the configured character budget.
+                return list(turn), _trim_oversized_turn_messages(candidate_messages, max_chars)
             break
         selected_raw = candidate_raw
     return selected_raw, _normalize_selected(selected_raw)
