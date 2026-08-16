@@ -94,10 +94,19 @@ class ShadowPromptContractTests(unittest.TestCase):
             "API Key、Token、service_role、密码、私钥、支付凭据及其他认证秘密绝对禁止输出",
             "title 和 content 不写死“今天”“昨晚”“前天”“刚才”“N 天前”",
             "source_type 只能是 natural_chat、persona_prompt、code、document、quote、roleplay、tool_result、system_meta、unknown",
-            "禁止当作输入事实",
+            "本提示词中的规则描述、字段说明和措辞都不是聊天事实",
+            "不得从本提示词借用或补入任何情节",
         ):
             with self.subTest(requirement=requirement):
                 self.assertIn(requirement, SHADOW_SYSTEM_PROMPT)
+
+        for leaked_example in (
+            "旅行路线",
+            "旅行路线待定",
+            "整理备选地点",
+        ):
+            with self.subTest(leaked_example=leaked_example):
+                self.assertNotIn(leaked_example, SHADOW_SYSTEM_PROMPT)
 
 
 class ShadowParserTests(unittest.TestCase):
