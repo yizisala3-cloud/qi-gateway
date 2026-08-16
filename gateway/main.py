@@ -23,7 +23,7 @@ from .config import cfg
 from .context import build_context, update_jiwen_on_user_message, update_jiwen_on_bot_reply
 from .proactive import check_and_generate, fetch_pending_message
 from .analysis import analyze_and_update
-from .memory_extract import run_scheduled_digest_if_due
+from .memory_continuity import run_continuity_digest_if_due
 from .memory_heat import run_heat_decay
 from .admin_api import admin_api_routes
 from .memory_digest_api import memory_digest_routes
@@ -124,7 +124,13 @@ async def daily_task_loop():
         try:
             await asyncio.sleep(1800)
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(bg_executor, run_scheduled_digest_if_due)
+            try:
+                result = await loop.run_in_executor(bg_executor, run_continuity_digest_if_due)
+            except Exception as exc:
+                # Continuity failures must never prevent the independent daily
+                # heat-decay check below from running.
+                result = None
+                log.exception("连续感自动总结检查失败: %s", type(exc).__name__)
             if result:
                 _last_digest_run = {
                     key: result.get(key)

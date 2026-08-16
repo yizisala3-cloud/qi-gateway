@@ -23,6 +23,7 @@ if importlib.util.find_spec("httpx") is None:
 
 from gateway.config import cfg
 from gateway.memory_continuity_shadow import (
+    CONTINUITY_SYSTEM_PROMPT,
     MAX_CANDIDATES,
     SHADOW_SYSTEM_PROMPT,
     _normalize_messages,
@@ -59,6 +60,18 @@ def _candidate(**overrides):
 
 
 class ShadowPromptContractTests(unittest.TestCase):
+    def test_formal_prompt_only_removes_shadow_observation_label(self):
+        self.assertIn("结果只供人工观察", SHADOW_SYSTEM_PROMPT)
+        self.assertNotIn("结果只供人工观察", CONTINUITY_SYSTEM_PROMPT)
+        self.assertEqual(
+            CONTINUITY_SYSTEM_PROMPT,
+            SHADOW_SYSTEM_PROMPT.replace(
+                "“连续感记忆 Shadow Preview”提取器，结果只供人工观察",
+                "“连续感记忆”提取器",
+                1,
+            ),
+        )
+
     def test_prompt_preserves_personal_expression_and_allows_twelve_candidates(self):
         for requirement in (
             "提取最多 12 条",

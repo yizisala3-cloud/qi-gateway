@@ -109,6 +109,14 @@ SHADOW_SYSTEM_PROMPT = """你是“连续感记忆 Shadow Preview”提取器，
 只返回严格 JSON，不要 Markdown、说明或代码围栏。每条 candidate 必须包含非空 title，并使用以下字段：
 {"candidates":[{"content":"...","continuity_type":"thread","subject":"shared","source_type":"natural_chat","thread_state":"open","importance":5,"continuity_value":9,"confidence":0.85,"evidence_message_ids":[123,124],"evidence_start_time":null,"evidence_end_time":null,"source_time":null,"memory_time":null,"time_precision":"unknown","title":"...","participants":["yezi","qi"],"reason":"...","retention_class":"normal"}]}"""
 
+# Formal execution shares the validated prompt verbatim except for the
+# Shadow-only observation label. Keeping this derived avoids prompt drift.
+CONTINUITY_SYSTEM_PROMPT = SHADOW_SYSTEM_PROMPT.replace(
+    "“连续感记忆 Shadow Preview”提取器，结果只供人工观察",
+    "“连续感记忆”提取器",
+    1,
+)
+
 
 class ShadowPreviewError(RuntimeError):
     def __init__(self, code: str, message: str):
@@ -439,9 +447,10 @@ def parse_shadow_output(
     return validated
 
 
-def _extract_shadow_candidates(
+def extract_continuity_candidates(
     conversation: str,
     evidence_times: dict[int, str | None],
+    system_prompt: str = CONTINUITY_SYSTEM_PROMPT,
 ) -> list[dict[str, Any]]:
     if not conversation.strip():
         return []
@@ -452,7 +461,7 @@ def _extract_shadow_candidates(
     request_body = {
         "model": cfg.ANALYSIS_MODEL,
         "messages": [
-            {"role": "system", "content": SHADOW_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"<chat_log>\n{conversation}\n</chat_log>"},
         ],
         "response_format": {"type": "json_object"},
@@ -485,6 +494,18 @@ def _extract_shadow_candidates(
     except Exception as exc:
         raise ShadowPreviewError("model_response_error", "Shadow model response shape is invalid") from exc
     return parse_shadow_output(output, evidence_times)
+
+
+def _extract_shadow_candidates(
+    conversation: str,
+    evidence_times: dict[int, str | None],
+) -> list[dict[str, Any]]:
+    """Preserve the zero-persistence preview's exact validated prompt."""
+    return extract_continuity_candidates(
+        conversation,
+        evidence_times,
+        SHADOW_SYSTEM_PROMPT,
+    )
 
 
 def run_shadow_preview(max_messages: int = DEFAULT_MAX_MESSAGES, max_chars: int = DEFAULT_MAX_CHARS) -> dict[str, Any]:

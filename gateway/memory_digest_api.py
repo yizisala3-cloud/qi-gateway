@@ -10,6 +10,12 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .config import cfg
+from .memory_continuity import (
+    ContinuityPipelineError,
+    get_continuity_status,
+    run_continuity_digest,
+    skip_blocked_continuity_batch,
+)
 from .memory_continuity_shadow import ShadowPreviewError, run_shadow_preview
 from .memory_extract import (
     DigestPipelineError,
@@ -130,6 +136,58 @@ async def continuity_shadow_preview(request: Request):
         )
 
 
+def _continuity_error(exc: ContinuityPipelineError) -> JSONResponse:
+    return JSONResponse(
+        {"error": str(exc), "error_code": exc.code},
+        status_code=exc.status_code,
+    )
+
+
+async def continuity_status(request: Request):
+    if not _authorized(request):
+        return _error("unauthorized", 401)
+    try:
+        return JSONResponse(await asyncio.to_thread(get_continuity_status))
+    except ContinuityPipelineError as exc:
+        return _continuity_error(exc)
+    except Exception:
+        log.exception("Failed to read continuity status")
+        return JSONResponse(
+            {"error": "Failed to read continuity status", "error_code": "status_failed"},
+            status_code=500,
+        )
+
+
+async def continuity_execute(request: Request):
+    if not _authorized(request):
+        return _error("unauthorized", 401)
+    try:
+        return JSONResponse(await asyncio.to_thread(run_continuity_digest))
+    except ContinuityPipelineError as exc:
+        return _continuity_error(exc)
+    except Exception:
+        log.exception("Continuity execute failed")
+        return JSONResponse(
+            {"error": "Continuity execute failed", "error_code": "execute_failed"},
+            status_code=500,
+        )
+
+
+async def continuity_skip_blocked(request: Request):
+    if not _authorized(request):
+        return _error("unauthorized", 401)
+    try:
+        return JSONResponse(await asyncio.to_thread(skip_blocked_continuity_batch))
+    except ContinuityPipelineError as exc:
+        return _continuity_error(exc)
+    except Exception:
+        log.exception("Continuity skip failed")
+        return JSONResponse(
+            {"error": "Continuity skip failed", "error_code": "skip_failed"},
+            status_code=500,
+        )
+
+
 memory_digest_routes = [
     Route("/admin/api/memory-digest/status", digest_status, methods=["GET"]),
     Route("/admin/api/memory-digest/runs", digest_runs, methods=["GET"]),
@@ -138,6 +196,13 @@ memory_digest_routes = [
     Route(
         "/admin/api/memory-continuity/shadow-preview",
         continuity_shadow_preview,
+        methods=["POST"],
+    ),
+    Route("/admin/api/memory-continuity/status", continuity_status, methods=["GET"]),
+    Route("/admin/api/memory-continuity/execute", continuity_execute, methods=["POST"]),
+    Route(
+        "/admin/api/memory-continuity/skip-blocked",
+        continuity_skip_blocked,
         methods=["POST"],
     ),
 ]

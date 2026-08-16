@@ -718,6 +718,7 @@ def _create_run(
 ) -> dict[str, Any]:
     payload = {
         "assistant_id": assistant_id,
+        "pipeline": "legacy",
         "trigger": trigger,
         "mode": mode,
         "status": status,
@@ -741,7 +742,7 @@ def _public_memories(memories: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _public_run(run: dict[str, Any]) -> dict[str, Any]:
     allowed = {
-        "id", "assistant_id", "trigger", "mode", "status", "source_first_message_id",
+        "id", "assistant_id", "pipeline", "trigger", "mode", "status", "source_first_message_id",
         "source_last_message_id", "message_count", "extracted_count", "inserted_count",
         "model_name", "preview_memories", "error_code", "error_message",
         "model_output_excerpt", "started_at", "completed_at", "created_at",
@@ -912,6 +913,7 @@ def list_digest_runs(limit: int = 30) -> list[dict[str, Any]]:
     response = (
         _client().table("memory_digest_runs")
         .select("*")
+        .eq("pipeline", "legacy")
         .order("started_at", desc=True)
         .limit(safe_limit)
         .execute()

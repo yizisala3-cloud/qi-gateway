@@ -25,8 +25,15 @@ function fmtTimeRange(start, end) {
 }
 
 function statusBadge(status) {
-  const kind = status === 'succeeded' ? 'accent' : status === 'failed' ? 'danger' : status === 'running' ? 'warn' : 'muted';
+  const kind = status === 'succeeded' || status === 'ready' ? 'accent' : status === 'failed' ? 'danger' : status === 'running' || status === 'paused_empty' ? 'warn' : 'muted';
   return badge(status || 'unknown', kind);
+}
+
+function cooldownStatus(value) {
+  if (!value) return '可用';
+  const until = new Date(value);
+  if (Number.isNaN(until.getTime()) || until <= new Date()) return '可用';
+  return `冷却至 ${fmtMinute(value)}`;
 }
 
 const MEMORY_TYPE_LABELS = {
@@ -128,6 +135,8 @@ export default {
       preview: () => this.run('preview'),
       execute: () => this.run('execute'),
       continuity: () => this.runContinuityPreview(),
+      continuityExecute: () => this.runContinuityExecute(),
+      continuitySkip: () => this.skipContinuityBatch(),
       detail: el => this.openRun(el.dataset.id),
     });
     await this.load();
@@ -140,6 +149,7 @@ export default {
         <div>
           <strong>chat_messages is read-only.</strong> Preview calls the extraction model without writing or advancing the cursor. Execute creates pending memory applications and advances the cursor only after an atomic successful commit.
           <div class="mt8">“连续感预览”独立读取最近聊天，只用于观察新的连续感提取效果；不会写入记忆申请、不会推进正式总结游标。</div>
+          <div class="mt8">正式连续感总结使用独立游标；候选只写入 pending 审核队列，审核通过后才会成为正式记忆。</div>
         </div>
       </div>
       <div id="digest-config-warning"></div>
@@ -155,6 +165,7 @@ export default {
         <button class="btn btn-primary" data-act="execute" disabled>Execute & Save Pending</button>
       </div>
       <div id="digest-summary">${loading()}</div>
+      <div id="continuity-summary" class="mt16">${loading()}</div>
       <div class="card mt16">
         <div class="card-head"><div class="card-title">Run History</div></div>
         <div id="digest-runs">${loading()}</div>
@@ -166,6 +177,16 @@ export default {
     this.root.querySelectorAll('[data-act="preview"],[data-act="continuity"],[data-act="execute"]').forEach(button => {
       button.disabled = this.busy || !this.modelReady;
     });
+    const continuityExecute = this.root.querySelector('[data-act="continuityExecute"]');
+    if (continuityExecute) {
+      continuityExecute.disabled = this.busy || !this.modelReady;
+      continuityExecute.textContent = this.continuity?.status === 'paused_empty' ? '重试当前批次' : '执行连续感总结';
+    }
+    const continuitySkip = this.root.querySelector('[data-act="continuitySkip"]');
+    if (continuitySkip) {
+      continuitySkip.disabled = this.busy || this.continuity?.status !== 'paused_empty';
+      continuitySkip.style.display = this.continuity?.status === 'paused_empty' ? '' : 'none';
+    }
   },
 
   setBusy(value) {
@@ -176,12 +197,18 @@ export default {
   async load() {
     const summary = this.root.querySelector('#digest-summary');
     const runs = this.root.querySelector('#digest-runs');
+    const continuitySummary = this.root.querySelector('#continuity-summary');
     const warning = this.root.querySelector('#digest-config-warning');
     summary.innerHTML = loading();
+    continuitySummary.innerHTML = loading();
     runs.innerHTML = loading();
     try {
-      const data = await gw('/admin/api/memory-digest/status');
+      const [data, continuity] = await Promise.all([
+        gw('/admin/api/memory-digest/status'),
+        gw('/admin/api/memory-continuity/status'),
+      ]);
       this.data = data;
+      this.continuity = continuity;
       this.modelReady = Boolean(data.analysis_configured);
       this.syncControls();
       warning.innerHTML = this.modelReady ? '' : `
@@ -204,12 +231,15 @@ export default {
           <div class="kv"><span class="k">Last successful commit</span><span class="v">${fmt(cursor.last_success_at)}</span></div>
         </div>
       `;
+      this.renderContinuityStatus(continuity);
       this.renderRuns(data.recent_runs || []);
     } catch (error) {
       this.modelReady = false;
+      this.continuity = null;
       this.syncControls();
       warning.innerHTML = '';
       summary.innerHTML = `<div class="banner banner-danger">${esc(error.message)}</div>`;
+      continuitySummary.innerHTML = empty('Unable to read continuity status');
       runs.innerHTML = empty('Unable to read digest history');
     }
   },
@@ -270,6 +300,51 @@ export default {
     }
   },
 
+  renderContinuityStatus(data) {
+    const target = this.root.querySelector('#continuity-summary');
+    const paused = data.status === 'paused_empty';
+    const blockedRange = data.blocked_first_message_id == null
+      ? '-'
+      : `${esc(data.blocked_first_message_id)} → ${esc(data.blocked_last_message_id)}`;
+    const recentRuns = data.recent_runs || [];
+    target.innerHTML = `
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">正式连续感总结 ${statusBadge(data.status)}</div>
+            <div class="text-sm muted mt8">自动阈值 ${esc(data.auto_threshold ?? 80)} 条；自动与手动冷却彼此独立。</div>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-primary" data-act="continuityExecute">${paused ? '重试当前批次' : '执行连续感总结'}</button>
+            <button class="btn btn-secondary" data-act="continuitySkip" style="display:${paused ? '' : 'none'}">跳过本批并恢复</button>
+          </div>
+        </div>
+        ${paused ? `<div class="banner banner-danger mt16">本批未生成候选，连续感自动总结已暂停。请重试或确认跳过本批。</div>` : ''}
+        <div class="grid grid-4 mt16">
+          <div class="stat"><div class="label">BACKLOG</div><div class="value ${data.backlog_count ? 'warn' : 'accent'}">${esc(data.backlog_count ?? 0)}</div></div>
+          <div class="stat"><div class="label">CURSOR</div><div class="value">${esc(data.cursor ?? 177)}</div></div>
+          <div class="stat"><div class="label">LATEST MESSAGE</div><div class="value">${esc(data.latest_message_id ?? 0)}</div></div>
+          <div class="stat"><div class="label">AUTO THRESHOLD</div><div class="value">${esc(data.auto_threshold ?? 80)}</div></div>
+        </div>
+        <div class="mt16">
+          <div class="kv"><span class="k">手动执行</span><span class="v">${esc(cooldownStatus(data.manual_cooldown_until))}</span></div>
+          <div class="kv"><span class="k">自动执行</span><span class="v">${esc(cooldownStatus(data.auto_cooldown_until))}</span></div>
+          <div class="kv"><span class="k">阻塞批次</span><span class="v">${blockedRange} · ${esc(data.blocked_message_count ?? 0)} 条</span></div>
+          <div class="kv"><span class="k">暂停原因</span><span class="v">${esc(data.pause_reason || '-')}</span></div>
+        </div>
+        <div class="mt16">
+          <div class="text-sm muted">最近连续感运行</div>
+          ${recentRuns.length ? recentRuns.slice(0, 5).map(run => `
+            <div class="item mt8">
+              <div class="item-title">#${esc(run.id)} · ${esc(run.trigger)} ${statusBadge(run.status)}</div>
+              <div class="text-sm muted mt8">${esc(run.source_first_message_id ?? '-')} → ${esc(run.source_last_message_id ?? '-')} · ${esc(run.message_count ?? 0)} messages · ${esc(run.inserted_count ?? 0)} pending</div>
+              ${run.error_code ? `<div class="text-sm mt8" style="color:var(--danger)">${esc(run.error_code)}: ${esc(run.error_message || '')}</div>` : ''}
+            </div>`).join('') : '<div class="text-sm muted mt8">暂无正式连续感运行记录。</div>'}
+        </div>
+      </div>`;
+    this.syncControls();
+  },
+
   async runContinuityPreview() {
     if (this.busy) return;
     if (!this.modelReady) {
@@ -295,6 +370,73 @@ export default {
     } finally {
       this.setBusy(false);
     }
+  },
+
+  async runContinuityExecute() {
+    if (this.busy) return;
+    if (!this.modelReady) {
+      toast('ANALYSIS_API_KEY is not configured on qi-gateway', 'err');
+      return;
+    }
+    const paused = this.continuity?.status === 'paused_empty';
+    const backlog = Number(this.continuity?.backlog_count || 0);
+    if (!paused && backlog < 10) {
+      const ok = await confirm(`当前只有 ${backlog} 条新消息，仍要执行连续感总结吗？`);
+      if (!ok) return;
+    }
+
+    this.setBusy(true);
+    toast(paused ? '正在重试固定批次……' : '正在执行连续感总结……');
+    try {
+      const result = await gw('/admin/api/memory-continuity/execute', { method: 'POST' });
+      this.showContinuityExecution(result);
+      await this.load();
+      if (result.paused_empty) {
+        toast('本批未生成候选，连续感自动总结已暂停。请重试或确认跳过本批。', 'err');
+      } else {
+        toast(`已写入 ${result.inserted_count || 0} 条 pending 记忆申请`);
+      }
+    } catch (error) {
+      toast('连续感总结失败：' + error.message, 'err');
+    } finally {
+      this.setBusy(false);
+    }
+  },
+
+  async skipContinuityBatch() {
+    if (this.busy || this.continuity?.status !== 'paused_empty') return;
+    const first = this.continuity.blocked_first_message_id ?? '-';
+    const last = this.continuity.blocked_last_message_id ?? '-';
+    const count = this.continuity.blocked_message_count ?? 0;
+    const ok = await confirm(`确定跳过固定批次 ${first} → ${last}（${count} 条消息）并恢复自动总结吗？此操作不会调用模型，也不会写入记忆申请。`);
+    if (!ok) return;
+
+    this.setBusy(true);
+    try {
+      await gw('/admin/api/memory-continuity/skip-blocked', { method: 'POST' });
+      toast('已跳过固定批次并恢复连续感自动总结');
+      await this.load();
+    } catch (error) {
+      toast('跳过批次失败：' + error.message, 'err');
+    } finally {
+      this.setBusy(false);
+    }
+  },
+
+  showContinuityExecution(result) {
+    const candidates = Array.isArray(result.preview_memories) ? result.preview_memories : [];
+    const { root, close } = modal({
+      title: result.paused_empty ? '连续感总结已暂停' : `连续感总结 #${esc(result.id || '-')}`,
+      body: `
+        <div class="kv"><span class="k">状态</span><span class="v">${esc(result.status || '-')}</span></div>
+        <div class="kv"><span class="k">来源范围</span><span class="v">${esc(result.source_first_message_id ?? '-')} → ${esc(result.source_last_message_id ?? '-')}</span></div>
+        <div class="kv"><span class="k">Cursor</span><span class="v">${esc(result.cursor_before ?? '-')} → ${esc(result.cursor_after ?? '-')}</span></div>
+        <div class="kv"><span class="k">写入 pending</span><span class="v">${esc(result.inserted_count ?? 0)}</span></div>
+        ${result.paused_empty ? '<div class="banner banner-danger mt16">本批没有生成候选，cursor 未推进。</div>' : ''}
+        <div class="mt16">${shadowCandidateCards(candidates)}</div>`,
+      footer: '<button class="btn btn-secondary" data-close>Close</button>',
+    });
+    root.querySelector('[data-close]').onclick = close;
   },
 
   showContinuityResult(result) {
