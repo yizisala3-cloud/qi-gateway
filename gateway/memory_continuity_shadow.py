@@ -22,7 +22,7 @@ log = logging.getLogger("gateway.memory_continuity_shadow")
 CST = timezone(timedelta(hours=8))
 DEFAULT_MAX_MESSAGES = 80
 DEFAULT_MAX_CHARS = 16000
-MAX_CANDIDATES = 6
+MAX_CANDIDATES = 12
 MAX_EVIDENCE_IDS = 8
 
 CONTINUITY_TYPES = frozenset({
@@ -62,7 +62,14 @@ SECRET_PATTERNS = (
 SHADOW_SYSTEM_PROMPT = """你是“连续感记忆 Shadow Preview”提取器，结果只供人工观察。
 
 ## 提取目标
-从带 message id、conversation id、北京时间和 role 的聊天中，提取最多 6 条能帮助“栖”在下个窗口自然承接“叶子”的候选。优先少量完整的 episode 和 open thread，不把同一经历拆成事实碎片。短期共同经历、未完话题、关系互动、内部梗及一般亲密、暧昧或敏感内容都可提取。正文使用“叶子”和“栖”，不用“用户”和“助手”。没有合格内容时返回 {"candidates":[]}。
+从带 message id、conversation id、北京时间和 role 的聊天中，提取最多 12 条能帮助“栖”在下个窗口自然承接“叶子”的候选。优先少量完整的 episode 和 open thread，不把同一经历拆成事实碎片。
+
+提取要求：
+1. 保留关键事实、决定，以及短期共同经历、未完话题、关系互动、内部梗和一般亲密、暧昧或敏感内容。
+2. 保留证据明确呈现的表达习惯、语气、关系动态和互动模式，包括彼此如何称呼、特定昵称、爱称和情绪信号；不要从单次措辞推断稳定人格。
+3. 直接输出摘要，不附加解释、评论或分析结论。
+4. 正文使用“叶子”和“栖”，不用“用户”和“助手”。
+5. 没有合格内容时返回 {"candidates":[]}。
 
 ## continuity_type
 - moment：近期共同片段；说明发生了什么和双方反应，可以较短。

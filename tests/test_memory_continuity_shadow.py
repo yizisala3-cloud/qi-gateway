@@ -23,6 +23,7 @@ if importlib.util.find_spec("httpx") is None:
 
 from gateway.config import cfg
 from gateway.memory_continuity_shadow import (
+    MAX_CANDIDATES,
     SHADOW_SYSTEM_PROMPT,
     _normalize_messages,
     parse_shadow_output,
@@ -58,6 +59,18 @@ def _candidate(**overrides):
 
 
 class ShadowPromptContractTests(unittest.TestCase):
+    def test_prompt_preserves_personal_expression_and_allows_twelve_candidates(self):
+        for requirement in (
+            "提取最多 12 条",
+            "保留关键事实、决定",
+            "表达习惯、语气、关系动态和互动模式",
+            "彼此如何称呼、特定昵称、爱称和情绪信号",
+            "不要从单次措辞推断稳定人格",
+            "直接输出摘要，不附加解释、评论或分析结论",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, SHADOW_SYSTEM_PROMPT)
+
     def test_prompt_preserves_content_detail_without_forcing_length(self):
         for requirement in (
             "4～24 字的建议只适用于 title，绝对不适用于 content",
@@ -97,6 +110,20 @@ class ShadowParserTests(unittest.TestCase):
     def test_model_title_is_preserved(self):
         result = self._parse_candidate(title="旅行计划待续")
         self.assertEqual(result["title"], "旅行计划待续")
+
+    def test_parser_keeps_at_most_twelve_candidates(self):
+        payload = {
+            "candidates": [
+                _candidate(content=f"叶子和栖继续讨论第 {index} 个话题。")
+                for index in range(MAX_CANDIDATES + 1)
+            ]
+        }
+        result = parse_shadow_output(
+            json.dumps(payload, ensure_ascii=False),
+            {11: None, 12: None},
+        )
+        self.assertEqual(MAX_CANDIDATES, 12)
+        self.assertEqual(len(result), 12)
 
     def test_missing_title_uses_content_fallback(self):
         candidate = _candidate()
