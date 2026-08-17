@@ -1,24 +1,24 @@
 import unittest
 
 from gateway.config import DEFAULT_UPSTREAM_BASE_URL
-from gateway.model_routing import DEFAULT_UPSTREAM_MODEL, normalize_upstream_model
+from gateway.model_routing import DEFAULT_UPSTREAM_MODEL, select_upstream_model
 
 
-class NormalizeUpstreamModelTests(unittest.TestCase):
-    def test_replaces_claude_model_names(self):
-        for model in (
-            "claude-sonnet-4-20250514",
-            "Claude-Opus-4",
-            "provider/CLAUDE-haiku",
-        ):
-            with self.subTest(model=model):
-                self.assertEqual(normalize_upstream_model(model), DEFAULT_UPSTREAM_MODEL)
+class SelectUpstreamModelTests(unittest.TestCase):
+    def test_configured_model_overrides_any_client_model(self):
+        self.assertEqual(
+            select_upstream_model("my-next-model", "claude-sonnet-4"),
+            "my-next-model",
+        )
 
-    def test_keeps_non_claude_model_names(self):
-        self.assertEqual(normalize_upstream_model("Qwen/Qwen2.5-7B-Instruct"), "Qwen/Qwen2.5-7B-Instruct")
+    def test_client_model_is_preserved_without_a_configured_model(self):
+        self.assertEqual(
+            select_upstream_model("", "claude-sonnet-4"),
+            "claude-sonnet-4",
+        )
 
-    def test_replacement_is_idempotent(self):
-        self.assertEqual(normalize_upstream_model(DEFAULT_UPSTREAM_MODEL), DEFAULT_UPSTREAM_MODEL)
+    def test_empty_models_remain_empty(self):
+        self.assertEqual(select_upstream_model("", ""), "")
 
     def test_deepseek_defaults_match_the_chat_provider(self):
         self.assertEqual(DEFAULT_UPSTREAM_BASE_URL, "https://api.deepseek.com/v1")

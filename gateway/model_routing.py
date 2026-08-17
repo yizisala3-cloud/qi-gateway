@@ -3,8 +3,6 @@
 DEFAULT_UPSTREAM_MODEL = "deepseek-v4-pro"
 
 
-def normalize_upstream_model(model: str) -> str:
-    """Route legacy Claude-family client names to the current chat model."""
-    if "claude" in model.casefold():
-        return DEFAULT_UPSTREAM_MODEL
-    return model
+def select_upstream_model(configured_model: str, requested_model: str) -> str:
+    """Prefer the deployment setting, otherwise preserve the client model."""
+    return (configured_model or "").strip() or (requested_model or "").strip()

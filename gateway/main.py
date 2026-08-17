@@ -28,7 +28,7 @@ from .memory_request_api import memory_request_routes
 from .memory_review_api import memory_review_routes
 from .todo_api import todo_routes
 from .todos import get_proactive_todo_context
-from .model_routing import normalize_upstream_model
+from .model_routing import select_upstream_model
 from .request_context import (
     append_gateway_context,
     build_todo_feedback_guidance,
@@ -170,10 +170,12 @@ async def chat_completions(request: Request):
         "Content-Type": "application/json",
     }
     requested_model = body.get("model")
-    if isinstance(requested_model, str) and requested_model:
-        body["model"] = normalize_upstream_model(requested_model)
-    elif cfg.UPSTREAM_MODEL:
-        body["model"] = cfg.UPSTREAM_MODEL
+    selected_model = select_upstream_model(
+        cfg.UPSTREAM_MODEL,
+        requested_model if isinstance(requested_model, str) else "",
+    )
+    if selected_model:
+        body["model"] = selected_model
     is_stream = body.get("stream", False)
 
     if not is_stream:
