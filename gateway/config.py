@@ -2,16 +2,20 @@
 import os
 from dotenv import load_dotenv
 
-from .model_routing import normalize_upstream_model
+from .model_routing import DEFAULT_UPSTREAM_MODEL, normalize_upstream_model
 
 load_dotenv()
+
+DEFAULT_UPSTREAM_BASE_URL = "https://api.deepseek.com/v1"
 
 
 class Config:
     GATEWAY_TOKEN: str = os.getenv("GATEWAY_TOKEN", "")
-    UPSTREAM_BASE_URL: str = os.getenv("UPSTREAM_BASE_URL", "")
+    UPSTREAM_BASE_URL: str = os.getenv("UPSTREAM_BASE_URL", DEFAULT_UPSTREAM_BASE_URL)
     UPSTREAM_API_KEY: str = os.getenv("UPSTREAM_API_KEY", "")
-    UPSTREAM_MODEL: str = normalize_upstream_model(os.getenv("UPSTREAM_MODEL", ""))
+    UPSTREAM_MODEL: str = normalize_upstream_model(
+        os.getenv("UPSTREAM_MODEL", DEFAULT_UPSTREAM_MODEL)
+    )
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
     # Preferred backend-only key. Modern sb_secret_* keys and legacy service_role
     # keys bypass RLS and must never be exposed to the browser or source control.

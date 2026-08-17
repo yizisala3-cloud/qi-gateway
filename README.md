@@ -27,9 +27,9 @@
 | 变量 | 说明 |
 |------|------|
 | `GATEWAY_TOKEN` | 网关鉴权 token（橘瓣填的 API Key） |
-| `UPSTREAM_BASE_URL` | 上游 LLM API 地址（如中转站） |
-| `UPSTREAM_API_KEY` | 上游 API Key |
-| `UPSTREAM_MODEL` | 默认模型名 |
+| `UPSTREAM_BASE_URL` | 聊天上游地址，默认 `https://api.deepseek.com/v1` |
+| `UPSTREAM_API_KEY` | DeepSeek API Key，只通过部署环境变量配置 |
+| `UPSTREAM_MODEL` | 默认 `deepseek-v4-pro` |
 | `SUPABASE_URL` | Supabase 项目地址 |
 | `SUPABASE_SECRET_KEY` / `SUPABASE_SERVICE_ROLE_KEY` | 仅服务端使用的 Supabase 写入密钥 |
 | `SUPABASE_KEY` | 兼容用 publishable/anon key，不用于主动记忆写入 |

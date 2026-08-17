@@ -1,6 +1,7 @@
 import unittest
 
-from gateway.model_routing import CLAUDE_UPSTREAM_MODEL, normalize_upstream_model
+from gateway.config import DEFAULT_UPSTREAM_BASE_URL
+from gateway.model_routing import DEFAULT_UPSTREAM_MODEL, normalize_upstream_model
 
 
 class NormalizeUpstreamModelTests(unittest.TestCase):
@@ -11,13 +12,17 @@ class NormalizeUpstreamModelTests(unittest.TestCase):
             "provider/CLAUDE-haiku",
         ):
             with self.subTest(model=model):
-                self.assertEqual(normalize_upstream_model(model), CLAUDE_UPSTREAM_MODEL)
+                self.assertEqual(normalize_upstream_model(model), DEFAULT_UPSTREAM_MODEL)
 
     def test_keeps_non_claude_model_names(self):
         self.assertEqual(normalize_upstream_model("Qwen/Qwen2.5-7B-Instruct"), "Qwen/Qwen2.5-7B-Instruct")
 
     def test_replacement_is_idempotent(self):
-        self.assertEqual(normalize_upstream_model(CLAUDE_UPSTREAM_MODEL), CLAUDE_UPSTREAM_MODEL)
+        self.assertEqual(normalize_upstream_model(DEFAULT_UPSTREAM_MODEL), DEFAULT_UPSTREAM_MODEL)
+
+    def test_deepseek_defaults_match_the_chat_provider(self):
+        self.assertEqual(DEFAULT_UPSTREAM_BASE_URL, "https://api.deepseek.com/v1")
+        self.assertEqual(DEFAULT_UPSTREAM_MODEL, "deepseek-v4-pro")
 
 
 if __name__ == "__main__":

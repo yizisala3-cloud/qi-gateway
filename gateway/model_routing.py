@@ -1,10 +1,10 @@
 """Helpers for selecting the upstream chat model."""
 
-CLAUDE_UPSTREAM_MODEL = "[特特价次kiro]claude-opus-4-6"
+DEFAULT_UPSTREAM_MODEL = "deepseek-v4-pro"
 
 
 def normalize_upstream_model(model: str) -> str:
-    """Route every Claude-family model name to the configured replacement."""
+    """Route legacy Claude-family client names to the current chat model."""
     if "claude" in model.casefold():
-        return CLAUDE_UPSTREAM_MODEL
+        return DEFAULT_UPSTREAM_MODEL
     return model
