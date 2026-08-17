@@ -15,6 +15,8 @@ EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 EMBEDDING_DIM = 1024
 MAX_CANDIDATES = 50
 MAX_INJECTION_CHARS = 2400
+MAX_KEYWORDS = 5
+MAX_KEYWORD_LENGTH = 64
 MEMORY_CONTEXT_HEADER = (
     "[相关长期记忆]\n"
     "以下内容是经用户审核的辅助记忆；仅在与当前对话相关时自然参考，"
@@ -85,20 +87,17 @@ def _keyword_search(keywords: list[str], limit: int = 20) -> list[dict]:
     client = get_client()
     if not client or not keywords:
         return []
-    safe_keywords = [re.sub(r"[,%()]", " ", word).strip() for word in keywords[:5]]
-    conditions = ",".join(f"content.ilike.%{word}%" for word in safe_keywords if word)
-    if not conditions:
+    bounded_keywords = []
+    for keyword in keywords[:MAX_KEYWORDS]:
+        normalized = " ".join(str(keyword or "").split())[:MAX_KEYWORD_LENGTH]
+        if normalized and normalized not in bounded_keywords:
+            bounded_keywords.append(normalized)
+    if not bounded_keywords:
         return []
-    resp = (
-        client.table("memories")
-        .select("id,content,title,tags,heat,importance,layer,created_at,last_recalled_at")
-        .eq("is_active", True)
-        .eq("verified", "verified")
-        .or_(conditions)
-        .order("heat", desc=True)
-        .limit(limit)
-        .execute()
-    )
+    resp = client.rpc("search_memories_by_keywords", {
+        "search_keywords": bounded_keywords,
+        "result_limit": min(max(int(limit), 1), MAX_CANDIDATES),
+    }).execute()
     return resp.data or []
 
 
@@ -175,6 +174,17 @@ def _freshness_score(created_at: object, now: datetime) -> float:
         return 0.1
 
 
+def _freshness_time(memory: dict) -> object:
+    """Use event time for episodic memories without changing legacy behavior."""
+    if memory.get("continuity_type") in {"moment", "episode"}:
+        return (
+            memory.get("memory_time")
+            or memory.get("evidence_end_time")
+            or memory.get("created_at")
+        )
+    return memory.get("created_at")
+
+
 def _hybrid_rank(
     keyword_results: list[dict],
     vector_results: list[dict],
@@ -218,13 +228,34 @@ def _hybrid_rank(
         primary_relevance = max(keyword_score, vector_score)
         secondary_relevance = min(keyword_score, vector_score)
         both_channels = bool(item.get("_from_keyword") and item.get("_from_vector"))
+        has_relevance = primary_relevance > 0.0
+        continuity_value_bonus = (
+            _clamp(item.get("continuity_value"), 0.0, 10.0) / 10.0 * 0.04
+            if has_relevance and item.get("continuity_value") is not None
+            else 0.0
+        )
+        open_thread_bonus = (
+            0.025
+            if has_relevance
+            and item.get("continuity_type") == "thread"
+            and item.get("thread_state") == "open"
+            else 0.0
+        )
+        core_retention_bonus = (
+            0.02
+            if has_relevance and item.get("retention_class") == "core"
+            else 0.0
+        )
         item["_retrieval_score"] = (
             primary_relevance * 0.60
             + secondary_relevance * 0.12
             + (0.08 if both_channels else 0.0)
             + _clamp(item.get("importance"), 0.0, 10.0) / 10.0 * 0.08
             + _clamp(item.get("heat"), 0.0, 100.0) / 100.0 * 0.06
-            + _freshness_score(item.get("created_at"), current_time) * 0.06
+            + _freshness_score(_freshness_time(item), current_time) * 0.06
+            + continuity_value_bonus
+            + open_thread_bonus
+            + core_retention_bonus
         )
 
     ranked = sorted(
@@ -317,7 +348,7 @@ async def search_memories(query: str, top_k: int = 8) -> list[dict]:
         return []
 
     bounded_top_k = max(1, min(int(top_k), 20))
-    keywords = _extract_keywords(query)[:5]
+    keywords = _extract_keywords(query)[:MAX_KEYWORDS]
     candidate_limit = min(MAX_CANDIDATES, max(20, bounded_top_k * 5))
     keyword_results = _keyword_search(keywords, candidate_limit) or []
     embedding = await _get_embedding(query)

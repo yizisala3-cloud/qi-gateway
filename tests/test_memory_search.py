@@ -23,8 +23,10 @@ from gateway.memory_search import (
     MAX_INJECTION_CHARS,
     MEMORY_CONTEXT_HEADER,
     _boost_heat,
+    _freshness_time,
     _get_embedding,
     _hybrid_rank,
+    _keyword_relevance,
     _keyword_search,
     _select_memories_for_injection,
     format_memories_for_injection,
@@ -49,64 +51,36 @@ def _memory(memory_id, content, *, heat=50, importance=5, created_at=None, **ext
     }
 
 
-class _MemoryQuery:
-    def __init__(self, rows):
-        self.rows = rows
-        self.selected = None
-        self.filters = []
-        self.condition = None
-        self.ordering = None
-        self.limit_value = None
-
-    def select(self, fields):
-        self.selected = fields
-        return self
-
-    def eq(self, field, value):
-        self.filters.append((field, value))
-        return self
-
-    def or_(self, condition):
-        self.condition = condition
-        return self
-
-    def order(self, field, desc=False):
-        self.ordering = (field, desc)
-        return self
-
-    def limit(self, value):
-        self.limit_value = value
-        return self
-
-    def execute(self):
-        return SimpleNamespace(data=self.rows)
-
-
 class _Client:
     def __init__(self, rows):
-        self.query = _MemoryQuery(rows)
-        self.table_name = None
+        self.rows = rows
+        self.rpc_name = None
+        self.rpc_args = None
 
-    def table(self, name):
-        self.table_name = name
-        return self.query
+    def rpc(self, name, args):
+        self.rpc_name = name
+        self.rpc_args = args
+        return SimpleNamespace(execute=lambda: SimpleNamespace(data=self.rows))
 
 
 class KeywordQueryTests(unittest.TestCase):
-    def test_keyword_query_reads_only_verified_active_memories(self):
+    def test_keyword_query_uses_bounded_structured_rpc(self):
         client = _Client([_memory(1, "用户喜欢清晨散步")])
         with patch(f"{MODULE}.get_client", return_value=client):
-            rows = _keyword_search(["清晨", "散步"], 30)
+            rows = _keyword_search(["清晨", "散步", "清晨"], 80)
 
         self.assertEqual(len(rows), 1)
-        self.assertEqual(client.table_name, "memories")
-        self.assertIn("layer", client.query.selected)
-        self.assertEqual(
-            client.query.filters,
-            [("is_active", True), ("verified", "verified")],
-        )
-        self.assertEqual(client.query.ordering, ("heat", True))
-        self.assertEqual(client.query.limit_value, 30)
+        self.assertEqual(client.rpc_name, "search_memories_by_keywords")
+        self.assertEqual(client.rpc_args["search_keywords"], ["清晨", "散步"])
+        self.assertEqual(client.rpc_args["result_limit"], 50)
+
+    def test_title_only_match_has_keyword_relevance(self):
+        memory = _memory(1, "正文没有目标词", title="凌晨散步计划")
+        self.assertGreater(_keyword_relevance(memory, ["散步"]), 0)
+
+    def test_tag_only_match_has_keyword_relevance(self):
+        memory = _memory(1, "正文没有目标词", tags=["内部梗", "旅行"])
+        self.assertGreater(_keyword_relevance(memory, ["内部梗"]), 0)
 
 
 class HeatBoostTests(unittest.TestCase):
@@ -160,8 +134,143 @@ class HybridRankingTests(unittest.TestCase):
 
         self.assertEqual(ranked[0]["id"], 1)
 
+    def test_channels_preserve_metadata_and_merge_same_id_once(self):
+        keyword = _memory(
+            1,
+            "继续网关工作",
+            layer="场景",
+            continuity_type="thread",
+            thread_state="open",
+            continuity_value=8,
+            retention_class="normal",
+            subject="project",
+        )
+        vector = dict(
+            keyword,
+            layer=None,
+            continuity_type=None,
+            thread_state=None,
+            continuity_value=None,
+            retention_class=None,
+            subject=None,
+            similarity=0.82,
+        )
+
+        ranked = _hybrid_rank([keyword], [vector], ["网关"], 10, now=NOW)
+
+        self.assertEqual(len(ranked), 1)
+        self.assertEqual(ranked[0]["layer"], "场景")
+        self.assertEqual(ranked[0]["continuity_type"], "thread")
+        self.assertEqual(ranked[0]["thread_state"], "open")
+        self.assertEqual(ranked[0]["continuity_value"], 8)
+        self.assertEqual(ranked[0]["subject"], "project")
+        self.assertEqual(ranked[0]["similarity"], 0.82)
+
+    def test_open_thread_bonus_requires_actual_relevance(self):
+        related_open = _memory(
+            1, "网关问题待续", continuity_type="thread", thread_state="open"
+        )
+        related_paused = _memory(
+            2, "网关问题待续", continuity_type="thread", thread_state="paused"
+        )
+        unrelated_open = _memory(
+            3, "完全无关", continuity_type="thread", thread_state="open"
+        )
+        unrelated_paused = _memory(
+            4, "完全无关", continuity_type="thread", thread_state="paused"
+        )
+
+        ranked = _hybrid_rank(
+            [related_paused, unrelated_open, related_open, unrelated_paused],
+            [],
+            ["网关"],
+            4,
+            now=NOW,
+        )
+        by_id = {item["id"]: item for item in ranked}
+
+        self.assertAlmostEqual(
+            by_id[1]["_retrieval_score"] - by_id[2]["_retrieval_score"],
+            0.025,
+        )
+        self.assertAlmostEqual(
+            by_id[3]["_retrieval_score"],
+            by_id[4]["_retrieval_score"],
+        )
+
+    def test_high_continuity_without_relevance_cannot_beat_related_memory(self):
+        unrelated = _memory(1, "完全无关", continuity_value=10, heat=100, importance=10)
+        related = _memory(2, "网关", continuity_value=1, heat=0, importance=0)
+
+        ranked = _hybrid_rank([unrelated, related], [], ["网关"], 2, now=NOW)
+
+        self.assertEqual(ranked[0]["id"], 2)
+
+    def test_episode_and_moment_use_event_time_for_freshness(self):
+        old = (NOW - timedelta(days=180)).isoformat()
+        recent = (NOW - timedelta(days=1)).isoformat()
+
+        self.assertEqual(
+            _freshness_time(_memory(1, "片段", continuity_type="moment", memory_time=recent)),
+            recent,
+        )
+        self.assertEqual(
+            _freshness_time(_memory(2, "经历", continuity_type="episode", evidence_end_time=recent)),
+            recent,
+        )
+        self.assertEqual(
+            _freshness_time(_memory(3, "旧记忆", created_at=old)),
+            old,
+        )
+
+    def test_legacy_null_continuity_fields_keep_original_score(self):
+        memory = _memory(
+            1,
+            "清晨散步",
+            heat=50,
+            importance=5,
+            continuity_type=None,
+            continuity_value=None,
+            thread_state=None,
+            retention_class=None,
+        )
+        ranked = _hybrid_rank([memory], [], ["清晨", "散步"], 1, now=NOW)
+        expected = 0.48 + 0.04 + 0.03 + 0.06
+
+        self.assertAlmostEqual(ranked[0]["_retrieval_score"], expected)
+
 
 class LayeredInjectionTests(unittest.TestCase):
+    def test_vector_only_core_keeps_core_layer(self):
+        ranked = _hybrid_rank(
+            [],
+            [_memory(1, "核心记忆", layer="核心", similarity=0.55)],
+            [],
+            5,
+            now=NOW,
+        )
+
+        selected = _select_memories_for_injection(ranked, 5)
+
+        self.assertEqual(selected[0]["layer"], "核心")
+        self.assertEqual(selected[0]["inject_mode"], "full")
+
+    def test_vector_only_scene_uses_scene_threshold_and_quota(self):
+        ranked = _hybrid_rank(
+            [],
+            [
+                _memory(i, f"场景 {i}", layer="场景", similarity=0.95)
+                for i in range(1, 6)
+            ],
+            [],
+            10,
+            now=NOW,
+        )
+
+        selected = _select_memories_for_injection(ranked, 10)
+
+        self.assertEqual([item["id"] for item in selected], [1, 2, 3])
+        self.assertTrue(all(item["layer"] == "场景" for item in selected))
     def test_layers_apply_different_relevance_thresholds(self):
         ranked = [
             _memory(1, "稳定的核心关系", layer="核心", _retrieval_score=0.20),
