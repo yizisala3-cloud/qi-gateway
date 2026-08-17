@@ -29,7 +29,7 @@ def _key_candidates() -> list[tuple[str, str]]:
 
 def _probe_client(client) -> None:
     """Run a harmless query so malformed/revoked keys fail before activation."""
-    client.table("jiwen_state").select("id").eq("id", 1).limit(1).execute()
+    client.table("memory_digest_runs").select("id").limit(1).execute()
 
 
 def get_client():
@@ -108,41 +108,6 @@ def safe_query(fn):
                     log.error(f"Supabase 查询失败: {fn.__name__} | {e}")
                     return None
     return wrapper
-
-
-# ── 积温状态 ──────────────────────────────────────────────────────
-
-@safe_query
-def load_jiwen_state() -> dict[str, Any] | None:
-    """从 Supabase 读取积温状态。"""
-    client = get_client()
-    if not client:
-        return None
-    resp = client.table("jiwen_state").select("*").eq("id", 1).execute()
-    if resp.data:
-        return resp.data[0]
-    return None
-
-
-@safe_query
-def save_jiwen_state(state_dict: dict[str, Any]) -> bool:
-    """保存积温状态到 Supabase。"""
-    client = get_client()
-    if not client:
-        return False
-    data = {
-        "connection": state_dict.get("connection", 0),
-        "pride": state_dict.get("pride", 0),
-        "valence": state_dict.get("valence", 0),
-        "arousal": state_dict.get("arousal", 0),
-        "immersion": state_dict.get("immersion", 0),
-        "last_tick_at": state_dict.get("last_tick_at"),
-        "last_chat_at": state_dict.get("last_chat_at"),
-        "last_bot_at": state_dict.get("last_bot_at"),
-        "user_status": state_dict.get("user_status", "active"),
-    }
-    client.table("jiwen_state").update(data).eq("id", 1).execute()
-    return True
 
 
 # ── Eventide 状态 ─────────────────────────────────────────────────

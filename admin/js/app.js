@@ -1,10 +1,10 @@
 // app.js - router shell, theme, sidebar, auth
-import { NAV, ROUTE_INDEX } from './routes.js?v=20260802-memory-review3';
+import { NAV, ROUTE_INDEX } from './routes.js?v=20260817-retired-runtime1';
 import { loading, errorBlock } from './ui.js?v=20260802-memory-review3';
 import { gw, getToken, setToken, clearToken } from './api.js?v=20260802-memory-review3';
 
 const DEFAULT_ROUTE = 'dashboard';
-const ASSET_VERSION = '20260816-continuity-formal1';
+const ASSET_VERSION = '20260817-retired-runtime1';
 
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);

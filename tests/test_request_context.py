@@ -2,13 +2,13 @@ import unittest
 
 from gateway.request_context import (
     GATEWAY_CONTEXT_HEADING,
-    PROACTIVE_REPLY_HEADING,
+    PROACTIVE_CONTROL_HEADING,
     TODO_FEEDBACK_HEADING,
     append_gateway_context,
     build_todo_feedback_guidance,
     extract_last_user_text,
     is_orangechat_proactive_request,
-    require_proactive_reply,
+    annotate_proactive_control_signal,
 )
 
 
@@ -108,7 +108,7 @@ class ContextInjectionTests(unittest.TestCase):
         self.assertEqual(result, messages)
         self.assertIsNot(result, messages)
 
-    def test_proactive_requirement_explains_synthetic_trigger_without_editing_original_system(self):
+    def test_proactive_annotation_explains_control_signal_without_overriding_client_policy(self):
         original_system = {
             "role": "system",
             "content": "原始人设和主动消息规则：没什么好说的就回复 [PASS]。",
@@ -120,7 +120,7 @@ class ContextInjectionTests(unittest.TestCase):
         ]
         messages = [original_system, *history]
 
-        result = require_proactive_reply(messages)
+        result = annotate_proactive_control_signal(messages)
 
         self.assertEqual(messages, [original_system, *history])
         self.assertEqual(
@@ -129,11 +129,14 @@ class ContextInjectionTests(unittest.TestCase):
         )
         self.assertIs(result[0], original_system)
         self.assertEqual(result[1]["role"], "system")
-        self.assertIn(PROACTIVE_REPLY_HEADING, result[1]["content"])
+        self.assertIn(PROACTIVE_CONTROL_HEADING, result[1]["content"])
         self.assertIn("不是用户本人发言", result[1]["content"])
         self.assertIn("不要重复回答", result[1]["content"])
-        self.assertIn("只读查询工具", result[1]["content"])
-        self.assertIn("不要猜测或编造用户的信息", result[1]["content"])
+        self.assertIn("遵循客户端原始 system prompt", result[1]["content"])
+        self.assertNotIn("请直接输出", result[1]["content"])
+        self.assertNotIn("必须回复", result[1]["content"])
+        self.assertNotIn("NO_REPLY", result[1]["content"])
+        self.assertNotIn("SKIP", result[1]["content"])
         self.assertEqual(result[2:], history)
 
 

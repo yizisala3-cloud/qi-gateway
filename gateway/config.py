@@ -21,7 +21,7 @@ class Config:
     SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "")
     PORT: int = int(os.getenv("PORT", "8000"))
     UPSTREAM_READ_TIMEOUT: float = float(os.getenv("UPSTREAM_READ_TIMEOUT", "180"))
-    # 情绪分析 + 记忆提取（硅基流动）
+    # 记忆检索、提取与连续感分析（硅基流动）
     ANALYSIS_BASE_URL: str = os.getenv("ANALYSIS_BASE_URL", "https://api.siliconflow.cn/v1")
     ANALYSIS_API_KEY: str = os.getenv("ANALYSIS_API_KEY", "")
     ANALYSIS_MODEL: str = os.getenv("ANALYSIS_MODEL", "Qwen/Qwen2.5-7B-Instruct")

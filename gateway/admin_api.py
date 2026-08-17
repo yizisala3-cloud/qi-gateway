@@ -43,33 +43,6 @@ _TABLES: dict[str, dict[str, Any]] = {
         "delete": False,
         "default_order": "id",
     },
-    "jiwen_state": {
-        "read": {
-            "id", "connection", "pride", "valence", "arousal", "immersion",
-            "last_activity", "last_tick_at", "last_chat_message_id",
-            "last_bot_message_id", "user_status", "updated_at", "last_chat_at",
-            "last_bot_at",
-        },
-        "write": {
-            "connection", "pride", "valence", "arousal", "immersion", "user_status",
-        },
-        "insert": False,
-        "update": True,
-        "delete": False,
-        "default_order": "id",
-    },
-    "timers": {
-        "read": {
-            "id", "type", "minutes", "target_time", "summary", "target_date",
-            "set_at", "expire_at", "executed", "executed_at", "cancelled",
-            "fail_count", "trigger_context", "created_at",
-        },
-        "write": {"cancelled"},
-        "insert": False,
-        "update": True,
-        "delete": False,
-        "default_order": "created_at",
-    },
     "chat_messages": {
         "read": {"id", "assistant_id", "conversation_id", "role", "content", "created_at"},
         "write": set(),
