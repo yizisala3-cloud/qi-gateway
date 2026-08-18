@@ -164,7 +164,7 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(result["memory_id"], 77)
         self.assertEqual(result["status"], "approved")
         self.assertTrue(result["changed"])
-        self.assertEqual(client.rpc_name, "review_memory_request_v4")
+        self.assertEqual(client.rpc_name, "review_memory_request_v5")
         self.assertEqual(client.rpc_payload["p_request_id"], 42)
         self.assertEqual(client.rpc_payload["p_action"], "approve")
         self.assertEqual(client.rpc_payload["p_reviewed_by"], "gateway_admin")

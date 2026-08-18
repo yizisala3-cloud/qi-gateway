@@ -14,6 +14,7 @@ from typing import Any
 
 from .config import cfg
 from .db import get_client
+from .memory_continuity_schema import SCHEMA_VERSION, ContinuityDataError, validate_continuity_data
 
 
 MAX_CONTENT_LENGTH = 600
@@ -163,6 +164,8 @@ def validate_memory_request(payload: Any, idempotency_key: str = "") -> dict[str
         "importance",
         "memory_key",
         "update_mode",
+        "continuity_type", "thread_state", "continuity_data", "proposed_relations",
+        "subject", "source_type", "continuity_value", "retention_class", "participants",
     }
     unknown = set(payload) - allowed
     if unknown:
@@ -207,6 +210,27 @@ def validate_memory_request(payload: Any, idempotency_key: str = "") -> dict[str
     content_hash = hashlib.sha256(content.casefold().encode("utf-8")).hexdigest()
     memory_key = _clean_memory_key(payload.get("memory_key"))
     update_mode = _clean_update_mode(payload.get("update_mode"), memory_key)
+    continuity_type = str(payload.get("continuity_type") or "").strip().casefold()
+    thread_state = str(payload.get("thread_state") or "").strip().casefold() or None
+    try:
+        continuity_data = validate_continuity_data(continuity_type, thread_state, payload.get("continuity_data"))
+    except ContinuityDataError as exc:
+        raise MemoryRequestError("invalid_payload", str(exc)) from exc
+    subject = str(payload.get("subject") or "shared").strip().casefold()
+    source_type = str(payload.get("source_type") or "natural_chat").strip().casefold()
+    if subject not in {"yezi", "qi", "shared", "project", "other"}:
+        raise MemoryRequestError("invalid_payload", "invalid subject")
+    if source_type not in {"natural_chat", "persona_prompt", "code", "document", "quote", "roleplay", "tool_result", "system_meta", "unknown"}:
+        raise MemoryRequestError("invalid_payload", "invalid source_type")
+    continuity_value = _clean_importance(payload.get("continuity_value"))
+    retention_class = str(payload.get("retention_class") or "normal").strip().casefold()
+    if retention_class not in {"normal", "core"}:
+        raise MemoryRequestError("invalid_payload", "invalid retention_class")
+    participants = payload.get("participants", [])
+    proposed_relations = payload.get("proposed_relations", [])
+    if not isinstance(participants, list) or not isinstance(proposed_relations, list) or len(proposed_relations) > 20:
+        raise MemoryRequestError("invalid_payload", "invalid participants or proposed_relations")
+    participants = list(dict.fromkeys(str(v).strip().casefold() for v in participants if str(v).strip().casefold() in {"yezi", "qi", "other"}))[:3]
 
     supplied_key = str(idempotency_key or "").strip()
     if supplied_key:
@@ -234,6 +258,10 @@ def validate_memory_request(payload: Any, idempotency_key: str = "") -> dict[str
         "update_mode": update_mode,
         "content_hash": content_hash,
         "idempotency_key": normalized_key,
+        "continuity_type": continuity_type, "thread_state": thread_state,
+        "continuity_schema_version": SCHEMA_VERSION, "continuity_data": continuity_data,
+        "proposed_relations": proposed_relations, "subject": subject, "source_type": source_type,
+        "continuity_value": continuity_value, "retention_class": retention_class, "participants": participants,
     }
 
 
@@ -315,9 +343,14 @@ def create_memory_request(payload: Any, idempotency_key: str = "") -> dict[str, 
         "p_rate_limit": max(1, min(60, int(cfg.MEMORY_REQUEST_RATE_LIMIT))),
         "p_memory_key": request_data["memory_key"],
         "p_update_mode": request_data["update_mode"],
+        "p_continuity_type": request_data["continuity_type"], "p_thread_state": request_data["thread_state"],
+        "p_continuity_schema_version": request_data["continuity_schema_version"], "p_continuity_data": request_data["continuity_data"],
+        "p_proposed_relations": request_data["proposed_relations"], "p_subject": request_data["subject"],
+        "p_source_type": request_data["source_type"], "p_continuity_value": request_data["continuity_value"],
+        "p_retention_class": request_data["retention_class"], "p_participants": request_data["participants"],
     }
     try:
-        response = client.rpc("create_memory_request_v2", rpc_payload).execute()
+        response = client.rpc("create_memory_request_v3", rpc_payload).execute()
     except Exception as exc:
         if "memory_request_rate_limited" in str(exc).casefold():
             raise MemoryRequestError(
@@ -341,5 +374,7 @@ def create_memory_request(payload: Any, idempotency_key: str = "") -> dict[str, 
         "deduplicated": not bool(result.get("created")),
         "memory_key": request_row.get("memory_key"),
         "update_mode": request_row.get("update_mode") or "append",
+        "continuity_id": request_row.get("continuity_id"),
+        "continuity_type": request_row.get("continuity_type"),
     }
 

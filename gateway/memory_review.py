@@ -244,7 +244,7 @@ def review_memory_request(request_id: Any, payload: Any) -> dict[str, Any]:
         "p_related_memory_id": review["related_memory_id"],
     }
     try:
-        response = client.rpc("review_memory_request_v4", rpc_payload).execute()
+        response = client.rpc("review_memory_request_v5", rpc_payload).execute()
     except Exception as exc:
         message = str(exc).casefold()
         if "memory_request_not_found" in message:
@@ -261,6 +261,8 @@ def review_memory_request(request_id: Any, payload: Any) -> dict[str, Any]:
                 "a newer version of this memory key is already active",
                 409,
             ) from exc
+        if "memory_request_unclassified_legacy" in message:
+            raise MemoryRequestError("unclassified_legacy_request", "legacy request has no safe continuity classification", 409) from exc
         if "memory_request_related_memory_not_found" in message:
             raise MemoryRequestError(
                 "related_memory_not_found",

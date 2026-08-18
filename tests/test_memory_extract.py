@@ -28,7 +28,7 @@ from gateway.memory_extract import (
     _extract_memories,
     _get_embedding_sync,
     _parse_embedded_timestamp,
-    _parse_model_output,
+    _parse_model_output as _parse_model_output_v1,
     _resolve_message_time,
     run_memory_digest,
     run_scheduled_digest_if_due,
@@ -36,6 +36,26 @@ from gateway.memory_extract import (
 
 
 MODULE = "gateway.memory_extract"
+
+
+def _parse_model_output(text, source_times=None):
+    payload = json.loads(text)
+    items = payload.get("memories", []) if isinstance(payload, dict) else payload
+    mapping = {"event": "episode", "relationship": "thread", "goal": "thread"}
+    for item in items:
+        legacy = str(item.pop("memory_type", "")).casefold()
+        kind = item.setdefault("continuity_type", mapping.get(legacy, "moment"))
+        item.setdefault("thread_state", "open" if kind == "thread" else None)
+        content = item.get("content") or "test content"
+        item.setdefault("continuity_data", {
+            "moment": {"scene": content, "event": content, "moment_state": "standalone"},
+            "thread": {"open_question": content, "current_state": content, "closure_criteria": [],
+                       "abstract_retrieval_hints": [], "concrete_retrieval_hints": []},
+            "episode": {"beginning": content, "development": content, "outcome": content, "closure_quality": "uncertain"},
+            "inside_joke": {"origin": content, "trigger_phrases": ["test"], "shared_meaning": content,
+                            "usage_context": [], "avoid_context": [], "reinforcement_count": 0},
+        }[kind])
+    return _parse_model_output_v1(json.dumps(payload), source_times)
 
 
 def _http_client_returning(response):
@@ -154,7 +174,8 @@ class ModelBoundaryTests(unittest.TestCase):
             _openai_response(json.dumps({
                 "memories": [{
                     "content": "User prefers quiet mornings",
-                    "memory_type": "preference",
+                    "continuity_type": "moment",
+                    "continuity_data": {"scene": "quiet mornings", "event": "User prefers quiet mornings", "moment_state": "standalone"},
                 }],
             })),
         ])
@@ -282,10 +303,10 @@ class ModelBoundaryTests(unittest.TestCase):
 
         self.assertEqual(len(memories), 1)
         self.assertEqual(len(memories[0]["content_hash"]), 64)
-        self.assertEqual(memories[0]["memory_type"], "other")
+        self.assertEqual(memories[0]["continuity_type"], "moment")
         self.assertEqual(memories[0]["update_mode"], "append")
         self.assertIsNone(memories[0]["memory_key"])
-        self.assertEqual(memories[0]["tags"], ["长期记忆"])
+        self.assertEqual(memories[0]["tags"], ["近期片段"])
         self.assertNotIn("reason", memories[0])
 
     def test_parser_keeps_semantic_type_separate_from_replace_strategy(self):
@@ -301,10 +322,10 @@ class ModelBoundaryTests(unittest.TestCase):
 
         memory = _parse_model_output(json.dumps(payload))[0]
 
-        self.assertEqual(memory["memory_type"], "relationship")
+        self.assertEqual(memory["continuity_type"], "thread")
         self.assertEqual(memory["update_mode"], "replace")
         self.assertEqual(memory["memory_key"], "relationship.a.state")
-        self.assertEqual(memory["tags"], ["人物关系"])
+        self.assertEqual(memory["tags"], ["未完线索"])
 
     def test_invalid_replace_key_is_safely_downgraded_to_append(self):
         payload = {
@@ -318,7 +339,7 @@ class ModelBoundaryTests(unittest.TestCase):
 
         memory = _parse_model_output(json.dumps(payload))[0]
 
-        self.assertEqual(memory["memory_type"], "goal")
+        self.assertEqual(memory["continuity_type"], "thread")
         self.assertEqual(memory["update_mode"], "append")
         self.assertIsNone(memory["memory_key"])
 
@@ -440,7 +461,7 @@ class ModelBoundaryTests(unittest.TestCase):
 
         memory = _parse_model_output(json.dumps(payload))[0]
 
-        self.assertEqual(memory["memory_type"], "event")
+        self.assertEqual(memory["continuity_type"], "episode")
         self.assertEqual(memory["update_mode"], "append")
         self.assertIsNone(memory["memory_key"])
 
@@ -587,7 +608,7 @@ class AtomicCommitTests(unittest.TestCase):
         self.assertEqual(result["cursor_after"], 10)
         self.assertEqual(client.rpc_calls, [])
         self.assertNotIn("content_hash", result["preview_memories"][0])
-        self.assertEqual(result["preview_memories"][0]["memory_type"], "preference")
+        self.assertEqual(result["preview_memories"][0]["continuity_type"], "moment")
         self.assertEqual(result["preview_memories"][0]["update_mode"], "append")
 
     def test_embedding_failure_records_specific_error_without_committing(self):

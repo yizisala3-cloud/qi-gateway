@@ -1,16 +1,12 @@
 // pages/memories.js
-import { query, update, insert, esc, count } from '../api.js?v=20260728-rls1';
+import { query, update, esc, count } from '../api.js?v=20260728-rls1';
 import { loading, empty, heatDot, badge, toast, modal, confirm, delegate } from '../ui.js?v=20260728-rls1';
 
 const PAGE_SIZE = 20;
-const MEMORY_TYPE_LABELS = {
+const CONTINUITY_TYPE_LABELS = {
+  moment: '近期片段', thread: '未完线索', episode: '共同经历', inside_joke: '内部梗',
   profile: '用户资料',
-  preference: '偏好与边界',
-  relationship: '人物关系与约定',
-  habit: '长期习惯',
-  event: '重要经历',
-  goal: '长期目标与项目',
-  other: '其他长期事实',
+  interaction_rule: '互动规则',
 };
 
 export default {
@@ -20,7 +16,6 @@ export default {
     this.root = root;
     this.renderShell();
     delegate(root, {
-      add: () => this.openEditor(null),
       edit: (el) => this.openEditor(el.dataset.id),
       del: (el) => this.doDelete(el.dataset.id),
       verify: (el) => this.setVerified(el.dataset.id, 'verified'),
@@ -69,7 +64,6 @@ export default {
           <option value="importance">By importance</option>
         </select>
         <span style="flex:1"></span>
-        <button class="btn btn-primary" data-act="add">+ Add Memory</button>
       </div>
       <div id="mem-list">${loading()}</div>
       <div id="mem-pager" class="pagination"></div>
@@ -88,7 +82,7 @@ export default {
 
       const [data, total] = await Promise.all([
         query('memories', {
-          select: 'id,title,content,heat,importance,tags,verified,source,layer,memory_type,evidence_message_ids,source_time,memory_time,time_precision,created_at',
+          select: 'id,title,content,heat,importance,tags,verified,source,layer,continuity_id,continuity_type,continuity_schema_version,continuity_data,thread_state,evidence_message_ids,source_time,memory_time,time_precision,created_at',
           order: { col: this.state.sort, asc: false },
           limit: PAGE_SIZE,
           offset: this.state.page * PAGE_SIZE,
@@ -113,7 +107,7 @@ export default {
                 ${heatDot(m.heat)}
                 ${badge('imp:' + m.importance, m.importance >= 8 ? 'purple' : m.importance >= 5 ? 'accent' : 'muted')}
                 ${badge(m.verified || 'pending', m.verified === 'verified' ? 'accent' : m.verified === 'rejected' ? 'danger' : 'warn')}
-                ${badge(MEMORY_TYPE_LABELS[m.memory_type] || MEMORY_TYPE_LABELS.other, 'accent')}
+                ${badge(CONTINUITY_TYPE_LABELS[m.continuity_type] || m.continuity_type || '未分类历史数据', 'accent')}
                 ${badge(m.layer || '-', 'muted')}
                 ${(m.tags || []).slice(0, 3).map(t => badge(t, 'info')).join('')}
               </div>
@@ -173,8 +167,8 @@ export default {
       };
       if (!row.content) { toast('Content required', 'err'); return; }
       try {
-        if (isNew) await insert('memories', row);
-        else await update('memories', id, row);
+        if (isNew) throw new Error('请通过待审核申请创建正式记忆');
+        await update('memories', id, row);
         toast(isNew ? 'Created' : 'Updated');
         close();
         this.loadList();

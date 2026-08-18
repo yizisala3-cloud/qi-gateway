@@ -16,6 +16,7 @@ import httpx
 
 from .config import cfg
 from .db import get_client
+from .memory_continuity_schema import AUTOMATIC_TYPES, SCHEMA_VERSION, THREAD_STATES, ContinuityDataError, validate_continuity_data
 
 log = logging.getLogger("gateway.memory_extract")
 
@@ -32,17 +33,18 @@ MAX_EXTRACTED_MEMORIES = 8
 EXTRACT_SYSTEM_PROMPT = """从带 id、北京时间 t 和 role 的聊天原文中，提取最多 8 条有长期价值且有原文证据的独立记忆。
 
 规则：
-1. 只提取用户明确表达的资料、偏好边界、长期习惯、人物关系约定、重要经历和长期目标；禁止推测，也不能把 assistant 的说法当成用户现实事实。
+1. 只提取证据明确的近期片段、未完线索、完整共同经历和内部梗；禁止推测。
 2. 排除寒暄、短暂情绪、待办、一次性指令、报错、拒绝、控制标签和重复回复。角色扮演内容只能中性抽象为明确的长期偏好、边界或约定。
-3. memory_type 只允许 profile、preference、relationship、habit、event、goal、other。"动态"不是类型。
-4. 独立事实与历史事件用 append 且 memory_key=null。只有原文明示同一侧面的当前状态变化时才用 replace，并给 3-120 位小写 ASCII 主题键，如 relationship.a.state 或 project.qi-gateway.progress。
-5. 一次事件不能覆盖长期关系："和 A 吵架"是 append event；"最近和 A 关系紧张"才可另作 relationship.a.state 的 replace。
+3. continuity_type 只允许 moment、thread、episode、inside_joke；不得生成 profile、interaction_rule 或 relationship。
+4. 独立对象用 append 且 memory_key=null；只有原文明示同一对象的当前状态变化时才用 replace，并给稳定主题键。
+5. 不要把关系模式改名为 interaction_rule；自动总结绝对不能推断互动规则。
 6. evidence_message_ids 必须列出直接支持该记忆的原文 id。importance 为 1-10，confidence 为 0-1。
 7. memory_time 是事情实际发生或状态生效的北京时间 ISO 8601；无法从原文明示时间或相对时间可靠确定时填 null。time_precision 只允许 minute、day、approximate、unknown。
 8. content 用一到两句话独立说明记忆。没有合格内容时返回空数组。
 
+每条必须提供符合分类结构的 continuity_data；thread_state 允许 open、paused、resolved、dissolved、abandoned、unknown。
 只返回严格 JSON：
-{"memories":[{"content":"...","memory_type":"relationship","update_mode":"append","memory_key":null,"importance":6,"confidence":0.9,"evidence_message_ids":[12,13],"memory_time":"2026-08-03","time_precision":"day"}]}"""
+{"memories":[{"content":"...","continuity_type":"moment","continuity_data":{"scene":"...","event":"...","moment_state":"standalone"},"thread_state":null,"proposed_relations":[],"update_mode":"append","memory_key":null,"importance":6,"confidence":0.9,"evidence_message_ids":[12,13],"memory_time":"2026-08-03","time_precision":"day"}]}"""
 EXTRACT_SYSTEM_PROMPT += """
 9. 如果原文明确显示该内容已通过记忆工具提交，或已通过待办工具创建，不要再提取。不能确定时仍可输出，由数据库保守去重和用户审核。
 """
@@ -57,27 +59,11 @@ EXTRACT_REPAIR_PROMPT = (
     "不得返回空对象、说明文字或 Markdown。"
 )
 
-MEMORY_TYPES = frozenset({
-    "profile",
-    "preference",
-    "relationship",
-    "habit",
-    "event",
-    "goal",
-    "other",
-})
+CONTINUITY_TYPES = AUTOMATIC_TYPES
 UPDATE_MODES = frozenset({"append", "replace"})
 MEMORY_KEY_PATTERN = re.compile(r"[a-z0-9][a-z0-9._:/-]{2,119}")
 TIME_PRECISIONS = frozenset({"minute", "day", "approximate", "unknown"})
-MEMORY_TYPE_TAGS = {
-    "profile": "用户资料",
-    "preference": "偏好与边界",
-    "relationship": "人物关系",
-    "habit": "长期习惯",
-    "event": "重要经历",
-    "goal": "长期目标",
-    "other": "长期记忆",
-}
+CONTINUITY_TYPE_TAGS = {"moment": "近期片段", "thread": "未完线索", "episode": "共同经历", "inside_joke": "内部梗"}
 EMBEDDED_TIMESTAMP_PATTERN = re.compile(
     r"(?m)^\s*(?P<year>\d{2}|\d{4})[.\-/](?P<month>\d{1,2})[.\-/](?P<day>\d{1,2})"
     r"\s+(?P<hour>\d{1,2}):(?P<minute>\d{2})(?::(?P<second>\d{2}))?\s*$"
@@ -453,9 +439,18 @@ def _parse_model_output(
         if len(content) < 5:
             continue
         title = content[:40]
-        memory_type = str(raw.get("memory_type") or "other").strip().casefold()
-        if memory_type not in MEMORY_TYPES:
-            memory_type = "other"
+        continuity_type = str(raw.get("continuity_type") or "").strip().casefold()
+        if continuity_type not in CONTINUITY_TYPES:
+            continue
+        thread_state = str(raw.get("thread_state") or "").strip().casefold() or None
+        if continuity_type == "thread" and thread_state not in THREAD_STATES:
+            thread_state = "unknown"
+        elif continuity_type != "thread":
+            thread_state = None
+        try:
+            continuity_data = validate_continuity_data(continuity_type, thread_state, raw.get("continuity_data"), automatic=True)
+        except ContinuityDataError:
+            continue
 
         update_mode = str(raw.get("update_mode") or "append").strip().casefold()
         if update_mode not in UPDATE_MODES:
@@ -512,7 +507,16 @@ def _parse_model_output(
         validated.append({
             "content": content,
             "title": title,
-            "memory_type": memory_type,
+            "continuity_type": continuity_type,
+            "thread_state": thread_state,
+            "continuity_schema_version": SCHEMA_VERSION,
+            "continuity_data": continuity_data,
+            "proposed_relations": raw.get("proposed_relations", [])[:20] if isinstance(raw.get("proposed_relations", []), list) else [],
+            "subject": "shared",
+            "source_type": "natural_chat",
+            "continuity_value": int(round(_clamp(raw.get("continuity_value"), 1, 10, raw.get("importance") or 5))),
+            "retention_class": "normal",
+            "participants": ["yezi", "qi"],
             "update_mode": update_mode,
             "memory_key": memory_key,
             "importance": int(round(_clamp(raw.get("importance"), 1, 10, 5))),
@@ -520,7 +524,7 @@ def _parse_model_output(
             # commit RPC; the model no longer spends output tokens on this field.
             "emotion_weight": 0.5,
             "confidence": round(_clamp(raw.get("confidence"), 0, 1, 0.6), 3),
-            "tags": [MEMORY_TYPE_TAGS[memory_type]],
+            "tags": [CONTINUITY_TYPE_TAGS[continuity_type]],
             "evidence_message_ids": evidence_ids,
             "source_time": source_time,
             "memory_time": memory_time,

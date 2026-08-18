@@ -333,7 +333,7 @@ class MemoryReviewDashboardContractTests(unittest.TestCase):
         self.assertIn("openRelation(el.dataset.id, 'merge')", self.page)
         self.assertIn("openRelation(el.dataset.id, 'duplicate')", self.page)
         self.assertIn("openRelation(el.dataset.id, 'conflict')", self.page)
-        self.assertIn("request-memory-type", self.page)
+        self.assertIn("request-continuity-type", self.page)
         self.assertIn("evidence_message_ids", self.page)
         self.assertIn("time_precision", self.page)
         self.assertIn("dedupe_state", self.page)

@@ -26,14 +26,10 @@ function relationLabel(action) {
   }[action] || action;
 }
 
-const MEMORY_TYPE_LABELS = {
+const CONTINUITY_TYPE_LABELS = {
+  moment: '近期片段', thread: '未完线索', episode: '共同经历', inside_joke: '内部梗',
   profile: '用户资料',
-  preference: '偏好与边界',
-  relationship: '人物关系与约定',
-  habit: '长期习惯',
-  event: '重要经历',
-  goal: '长期目标与项目',
-  other: '其他长期事实',
+  interaction_rule: '互动规则',
 };
 
 const TIME_PRECISION_LABELS = {
@@ -43,8 +39,8 @@ const TIME_PRECISION_LABELS = {
   unknown: '时间未知',
 };
 
-function memoryTypeLabel(value) {
-  return MEMORY_TYPE_LABELS[value] || MEMORY_TYPE_LABELS.other;
+function continuityTypeLabel(value) {
+  return CONTINUITY_TYPE_LABELS[value] || value || '未分类历史数据';
 }
 
 async function submitReview(id, payload) {
@@ -56,7 +52,7 @@ async function submitReview(id, payload) {
 }
 
 export default {
-  state: { status: 'pending', memoryType: '' },
+  state: { status: 'pending', continuityType: '' },
 
   async mount(root) {
     this.root = root;
@@ -74,8 +70,8 @@ export default {
       this.state.status = event.target.value;
       this.loadList();
     });
-    root.querySelector('#request-memory-type')?.addEventListener('change', (event) => {
-      this.state.memoryType = event.target.value;
+    root.querySelector('#request-continuity-type')?.addEventListener('change', (event) => {
+      this.state.continuityType = event.target.value;
       this.loadList();
     });
     await this.loadList();
@@ -97,15 +93,12 @@ export default {
           <option value="conflict">冲突待处理</option>
           <option value="">全部状态</option>
         </select>
-        <select id="request-memory-type" style="width:180px">
-          <option value="">全部记忆类型</option>
+        <select id="request-continuity-type" style="width:180px">
+          <option value="">全部连续记忆类型</option>
+          <option value="moment">近期片段</option><option value="thread">未完线索</option>
+          <option value="episode">共同经历</option><option value="inside_joke">内部梗</option>
           <option value="profile">用户资料</option>
-          <option value="preference">偏好与边界</option>
-          <option value="relationship">人物关系与约定</option>
-          <option value="habit">长期习惯</option>
-          <option value="event">重要经历</option>
-          <option value="goal">长期目标与项目</option>
-          <option value="other">其他长期事实</option>
+          <option value="interaction_rule">互动规则</option>
         </select>
         <button class="btn btn-secondary" data-act="refresh">刷新</button>
       </div>
@@ -119,9 +112,9 @@ export default {
     try {
       const eq = {};
       if (this.state.status) eq.status = this.state.status;
-      if (this.state.memoryType) eq.memory_type = this.state.memoryType;
+      if (this.state.continuityType) eq.continuity_type = this.state.continuityType;
       const rows = await query('memory_requests', {
-        select: 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,memory_key,update_mode,related_memory_id,related_request_id,memory_type,confidence,evidence_message_ids,source_time,memory_time,time_precision,digest_run_id,dedupe_state,dedupe_reason,created_at,reviewed_at,reviewed_by,review_note',
+        select: 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,memory_key,update_mode,related_memory_id,related_request_id,continuity_id,continuity_type,continuity_schema_version,continuity_data,proposed_relations,thread_state,confidence,evidence_message_ids,source_time,memory_time,time_precision,digest_run_id,dedupe_state,dedupe_reason,created_at,reviewed_at,reviewed_by,review_note',
         order: { col: 'created_at', asc: false },
         limit: 100,
         eq,
@@ -140,7 +133,7 @@ export default {
               ${row.review_note ? `<div class="text-sm muted mt8">审核备注：${esc(row.review_note)}</div>` : ''}
               <div class="btn-row mt8">
                 ${statusBadge(row.status)}
-                ${badge(memoryTypeLabel(row.memory_type), 'accent')}
+                ${badge(continuityTypeLabel(row.continuity_type), 'accent')}
                 ${badge(`重要性 ${Number(row.importance) || 5}`, Number(row.importance) >= 8 ? 'purple' : 'muted')}
                 ${row.confidence != null ? badge(`可信度 ${Number(row.confidence).toFixed(2)}`, 'info') : ''}
                 ${row.update_mode === 'replace' ? badge('替换更新', 'purple') : badge('新增记忆', 'muted')}

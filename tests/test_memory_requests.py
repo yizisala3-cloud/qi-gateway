@@ -84,6 +84,11 @@ def _payload(**overrides):
         "title": "清晨偏好",
         "tags": "偏好，清晨, 安静,偏好",
         "importance": 7,
+        "continuity_type": "profile",
+        "continuity_data": {
+            "facet": "daily_rhythm", "statement": "用户偏好安静的清晨活动", "scope": "daily_life",
+            "stability": "stable", "exceptions": [], "basis": "explicit_preference",
+        },
     }
     payload.update(overrides)
     return payload
@@ -163,7 +168,7 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(result["status"], "pending")
         self.assertTrue(result["created"])
         self.assertFalse(result["deduplicated"])
-        self.assertEqual(client.rpc_name, "create_memory_request_v2")
+        self.assertEqual(client.rpc_name, "create_memory_request_v3")
         self.assertEqual(client.rpc_payload["p_rate_limit"], 6)
         self.assertEqual(client.rpc_payload["p_update_mode"], "append")
         self.assertIsNone(client.rpc_payload["p_memory_key"])

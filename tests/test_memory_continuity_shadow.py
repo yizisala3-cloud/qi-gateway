@@ -56,6 +56,16 @@ def _candidate(**overrides):
         "retention_class": "normal",
     }
     value.update(overrides)
+    if "continuity_data" not in overrides:
+        kind = value["continuity_type"]
+        value["continuity_data"] = {
+            "thread": {"open_question": value["content"], "current_state": value["content"], "closure_criteria": [],
+                       "abstract_retrieval_hints": [], "concrete_retrieval_hints": []},
+            "episode": {"beginning": value["content"], "development": value["content"], "outcome": value["content"], "closure_quality": "uncertain"},
+            "inside_joke": {"origin": value["content"], "trigger_phrases": [value.get("title") or "梗"], "shared_meaning": value["content"],
+                            "usage_context": [], "avoid_context": [], "reinforcement_count": 0},
+            "moment": {"scene": value["content"], "event": value["content"], "moment_state": "standalone"},
+        }[kind]
     return value
 
 

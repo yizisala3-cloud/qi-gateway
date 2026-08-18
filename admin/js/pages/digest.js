@@ -36,18 +36,17 @@ function cooldownStatus(value) {
   return `冷却至 ${fmtMinute(value)}`;
 }
 
-const MEMORY_TYPE_LABELS = {
+const CONTINUITY_TYPE_LABELS = {
+  moment: '近期片段',
+  thread: '未完线索',
+  episode: '共同经历',
+  inside_joke: '内部梗',
   profile: '用户资料',
-  preference: '偏好与边界',
-  relationship: '人物关系与约定',
-  habit: '长期习惯',
-  event: '重要经历',
-  goal: '长期目标与项目',
-  other: '其他长期事实',
+  interaction_rule: '互动规则',
 };
 
-function memoryTypeLabel(value) {
-  return MEMORY_TYPE_LABELS[value] || MEMORY_TYPE_LABELS.other;
+function continuityTypeLabel(value) {
+  return CONTINUITY_TYPE_LABELS[value] || value || '未分类历史数据';
 }
 
 const TIME_PRECISION_LABELS = {
@@ -85,7 +84,7 @@ function memoryCards(memories) {
       <div class="btn-row mt8">
         ${commitBadge(memory)}
         ${memory.dedupe_state === 'possible_duplicate' ? badge('疑似重复，保留审核', 'warn') : ''}
-        ${badge(memoryTypeLabel(memory.memory_type), 'accent')}
+        ${badge(continuityTypeLabel(memory.continuity_type), 'accent')}
         ${memory.update_mode === 'replace' ? badge('替换当前状态', 'purple') : badge('新增长期记忆', 'muted')}
         ${memory.memory_key ? badge('主题键: ' + esc(memory.memory_key), 'info') : ''}
         ${badge('imp:' + (memory.importance ?? '-'), 'purple')}

@@ -16,6 +16,7 @@ import httpx
 
 from .config import cfg
 from .db import get_client
+from .memory_continuity_schema import AUTOMATIC_TYPES, SCHEMA_VERSION, THREAD_STATES, ContinuityDataError, validate_continuity_data
 
 log = logging.getLogger("gateway.memory_continuity_shadow")
 
@@ -25,15 +26,12 @@ DEFAULT_MAX_CHARS = 16000
 MAX_CANDIDATES = 12
 MAX_EVIDENCE_IDS = 8
 
-CONTINUITY_TYPES = frozenset({
-    "moment", "thread", "episode", "inside_joke", "relationship", "profile",
-})
+CONTINUITY_TYPES = AUTOMATIC_TYPES
 SUBJECTS = frozenset({"yezi", "qi", "shared", "project", "other"})
 SOURCE_TYPES = frozenset({
     "natural_chat", "persona_prompt", "code", "document", "quote",
     "roleplay", "tool_result", "system_meta", "unknown",
 })
-THREAD_STATES = frozenset({"open", "paused", "resolved", "abandoned", "unknown"})
 TIME_PRECISIONS = frozenset({"minute", "day", "approximate", "unknown"})
 RETENTION_CLASSES = frozenset({"normal", "core"})
 PARTICIPANTS = frozenset({"yezi", "qi", "other"})
@@ -76,8 +74,8 @@ SHADOW_SYSTEM_PROMPT = """你是“连续感记忆 Shadow Preview”提取器，
 - thread：未完话题、约定、计划、承诺或悬念；写清事情、进展和尚未完成的部分。
 - episode：相对完整的共同经历；保留起因、关键互动和结果。
 - inside_joke：内部梗、称呼、句子、玩法或事物；写清具体内容及为何会被再次引用。
-- relationship：反复出现的互动、约定、边界或理解；写清具体模式及能解释它的实际表现。
-- profile：叶子的稳定资料或长期偏好；只保留证据支持的内容，不扩写。
+- 当前自动总结只能生成上述四类，不得生成 profile、interaction_rule 或 relationship。
+- 每条必须提供该分类完整的 continuity_data JSON 对象；thread 的检索提示只用于检索，不能写成已发生事实。
 
 ## title 与 content
 - 每条候选必须有非空 title。title 只用于一眼识别主题，应是简短、具体的中文标题，建议 4～24 个中文字符。不得用“无标题”“连续感记忆”“一段互动”“特殊事件”“某件事情”或单独的类型名；不得包含原文没有的信息。
@@ -99,7 +97,7 @@ SHADOW_SYSTEM_PROMPT = """你是“连续感记忆 Shadow Preview”提取器，
 - evidence_message_ids 必须是输入中真实且直接支持候选的消息；每条最多 8 条，只选最必要证据，不机械加入批次最后一条消息。
 - evidence_start_time、evidence_end_time、source_time 输出 null，由程序计算。memory_time 只表示事情实际发生或状态生效的时间，原文不能可靠支持时为 null；不得用对话时间代替。time_precision 只能是 minute、day、approximate、unknown。
 - title 和 content 不写死“今天”“昨晚”“前天”“刚才”“N 天前”等会失效的相对时间；绝对时间放在独立时间字段。
-- thread_state 仅用于 thread，可为 open、paused、resolved、abandoned、unknown；其他类型为 null。importance 和 continuity_value 为 1～10，confidence 为 0～1。retention_class 为 normal 或 core；不要因内容亲密或强烈就标 core。
+- thread_state 仅用于 thread，可为 open、paused、resolved、dissolved、abandoned、unknown；其他类型为 null。关闭状态必须提供 closure_summary、closure_reason、closed_at。importance 和 continuity_value 为 1～10，confidence 为 0～1。
 
 ## 防误提取与敏感信息
 - 证据不足时不得编造；不确定时降低 confidence、缩小表述或不提取。
@@ -107,7 +105,7 @@ SHADOW_SYSTEM_PROMPT = """你是“连续感记忆 Shadow Preview”提取器，
 
 ## 输出 JSON
 只返回严格 JSON，不要 Markdown、说明或代码围栏。每条 candidate 必须包含非空 title，并使用以下字段：
-{"candidates":[{"content":"...","continuity_type":"thread","subject":"shared","source_type":"natural_chat","thread_state":"open","importance":5,"continuity_value":9,"confidence":0.85,"evidence_message_ids":[123,124],"evidence_start_time":null,"evidence_end_time":null,"source_time":null,"memory_time":null,"time_precision":"unknown","title":"...","participants":["yezi","qi"],"reason":"...","retention_class":"normal"}]}"""
+{"candidates":[{"content":"...","continuity_type":"thread","continuity_data":{"open_question":"...","current_state":"...","next_expected":null,"closure_criteria":[],"closure_summary":null,"closure_reason":null,"opened_at":null,"closed_at":null,"abstract_retrieval_hints":[],"concrete_retrieval_hints":[]},"proposed_relations":[],"subject":"shared","source_type":"natural_chat","thread_state":"open","importance":5,"continuity_value":9,"confidence":0.85,"evidence_message_ids":[123,124],"evidence_start_time":null,"evidence_end_time":null,"source_time":null,"memory_time":null,"time_precision":"unknown","title":"...","participants":["yezi","qi"],"reason":"...","retention_class":"normal"}]}"""
 
 # Formal execution shares the validated prompt verbatim except for the
 # Shadow-only observation label. Keeping this derived avoids prompt drift.
@@ -411,6 +409,10 @@ def parse_shadow_output(
             thread_state = None
         elif thread_state not in THREAD_STATES:
             thread_state = "unknown"
+        try:
+            continuity_data = validate_continuity_data(continuity_type, thread_state, raw.get("continuity_data"), automatic=True)
+        except ContinuityDataError:
+            continue
 
         participants: list[str] = []
         for participant in raw.get("participants") or []:
@@ -425,6 +427,9 @@ def parse_shadow_output(
         item = {
             "content": content,
             "continuity_type": continuity_type,
+            "continuity_schema_version": SCHEMA_VERSION,
+            "continuity_data": continuity_data,
+            "proposed_relations": raw.get("proposed_relations", [])[:20] if isinstance(raw.get("proposed_relations", []), list) else [],
             "subject": subject,
             "source_type": source_type,
             "thread_state": thread_state,
