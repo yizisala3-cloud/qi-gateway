@@ -36,6 +36,9 @@ class Config:
     # OrangeChat request_memory tool. Keep this token separate from gateway and
     # Supabase credentials so plugin access can be revoked independently.
     MEMORY_PLUGIN_TOKEN: str = os.getenv("MEMORY_PLUGIN_TOKEN", "")
+    # Remote MCP uses a separate bearer token and never shares the legacy
+    # OrangeChat compatibility credential.
+    MCP_MEMORY_TOKEN: str = os.getenv("MCP_MEMORY_TOKEN", "")
     MEMORY_REQUEST_RATE_LIMIT: int = int(os.getenv("MEMORY_REQUEST_RATE_LIMIT", "6"))
     # OrangeChat todo tools. This token is independent from every other token.
     TODO_PLUGIN_TOKEN: str = os.getenv("TODO_PLUGIN_TOKEN", "")

@@ -168,13 +168,80 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(result["status"], "pending")
         self.assertTrue(result["created"])
         self.assertFalse(result["deduplicated"])
-        self.assertEqual(client.rpc_name, "create_memory_request_v3")
+        self.assertEqual(client.rpc_name, "create_memory_request_v4")
         self.assertEqual(client.rpc_payload["p_rate_limit"], 6)
         self.assertEqual(client.rpc_payload["p_update_mode"], "append")
         self.assertIsNone(client.rpc_payload["p_memory_key"])
+        self.assertEqual(client.rpc_payload["p_source"], "orangechat_plugin")
         self.assertNotIn("plugin_token", client.rpc_payload)
         self.assertNotIn("service_role", " ".join(client.rpc_payload))
         self.assertEqual(client.table_names, [])
+
+    def test_low_risk_type_uses_atomic_direct_writer(self):
+        client = _Client(rpc_result={
+            "created": True,
+            "request": {"id": 44, "status": "approved", "memory_id": 88, "continuity_type": "moment"},
+        })
+        payload = _payload(
+            continuity_type="moment",
+            continuity_data={"scene": "聊天窗口", "event": "确认计划", "moment_state": "standalone"},
+        )
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+        ):
+            result = create_memory_request(payload, source="mcp_memory")
+        self.assertEqual(client.rpc_name, "write_memory_direct_v1")
+        self.assertEqual(client.rpc_payload["p_source"], "mcp_memory")
+        self.assertEqual(client.rpc_payload["p_reviewed_by"], "orangechat_ai")
+        self.assertFalse(result["requires_user_review"])
+        self.assertEqual(result["memory_id"], 88)
+
+    def test_all_six_types_follow_server_controlled_business_split(self):
+        payloads = {
+            "moment": (None, {"scene": "聊天", "event": "确认", "moment_state": "standalone"}),
+            "thread": ("open", {"open_question": "下一步", "current_state": "待继续", "closure_criteria": []}),
+            "inside_joke": (None, {"origin": "口误", "trigger_phrases": ["小橘子"], "shared_meaning": "共同玩笑"}),
+            "episode": (None, {"beginning": "开始", "development": "讨论", "outcome": "确认", "closure_quality": "complete"}),
+            "profile": (None, {"facet": "偏好", "statement": "喜欢清晨", "scope": "日常", "stability": "stable", "basis": "explicit_preference"}),
+            "interaction_rule": (None, {"trigger": "求助", "expected_behavior": "先给结论", "scope": "对话", "priority": 8, "rule_state": "active", "explicit_instruction": "用户明确要求先给结论"}),
+        }
+        for kind, (state, data) in payloads.items():
+            with self.subTest(kind=kind):
+                automatic = kind in {"moment", "thread", "inside_joke"}
+                client = _Client(rpc_result={
+                    "created": True,
+                    "request": {
+                        "id": 50,
+                        "status": "approved" if automatic else "pending",
+                        "memory_id": 90 if automatic else None,
+                        "continuity_type": kind,
+                    },
+                })
+                extra = {}
+                if kind == "interaction_rule":
+                    extra = {"update_mode": "replace", "memory_key": "rule.reply-order"}
+                with (
+                    patch(f"{MODULE}._server_writes_allowed", return_value=True),
+                    patch(f"{MODULE}.get_client", return_value=client),
+                ):
+                    result = create_memory_request(_payload(
+                        continuity_type=kind,
+                        thread_state=state,
+                        continuity_data=data,
+                        **extra,
+                    ))
+                self.assertEqual(
+                    client.rpc_name,
+                    "write_memory_direct_v1" if automatic else "create_memory_request_v4",
+                )
+                self.assertEqual(result["requires_user_review"], not automatic)
+                self.assertNotIn("p_proposed_relations", client.rpc_payload)
+
+    def test_server_controlled_assistant_cannot_be_overridden(self):
+        with self.assertRaises(MemoryRequestError) as raised:
+            create_memory_request(_payload(), source="mcp_memory", assistant_id="server-assistant")
+        self.assertEqual(raised.exception.code, "invalid_payload")
 
     def test_duplicate_request_returns_existing_pending_application(self):
         client = _Client(rpc_result={

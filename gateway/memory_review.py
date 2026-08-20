@@ -217,7 +217,75 @@ def _result(data: Any) -> dict[str, Any]:
     return data
 
 
-def review_memory_request(request_id: Any, payload: Any) -> dict[str, Any]:
+AI_REVIEWABLE_TYPES = ("moment", "thread", "inside_joke")
+
+
+def list_reviewable_memory_requests(assistant_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    assistant = _text(assistant_id, "assistant_id", 160)
+    if not assistant:
+        raise MemoryRequestError("invalid_review", "assistant_id is required")
+    if not _server_writes_allowed():
+        raise MemoryRequestError(
+            "database_permissions_unavailable",
+            "an elevated Supabase server key is required",
+            503,
+        )
+    client = get_client()
+    if not client:
+        raise MemoryRequestError("database_unavailable", "Supabase is unavailable", 503)
+    try:
+        response = (
+            client.table("memory_requests")
+            .select(
+                "id,content,title,tags,importance,reason,status,source,created_at,"
+                "memory_key,update_mode,continuity_type,thread_state,continuity_data,"
+                "subject,source_type,continuity_value,retention_class,participants"
+            )
+            .eq("assistant_id", assistant)
+            .eq("status", "pending")
+            .in_("continuity_type", list(AI_REVIEWABLE_TYPES))
+            .order("created_at", desc=True)
+            .limit(max(1, min(int(limit), 50)))
+            .execute()
+        )
+    except Exception as exc:
+        raise MemoryRequestError(
+            "review_list_failed",
+            f"failed to list reviewable memory applications: {type(exc).__name__}",
+            500,
+        ) from exc
+    return response.data if isinstance(response.data, list) else []
+
+
+def _assert_review_scope(client: Any, request_id: int, assistant_id: str, allowed_types: tuple[str, ...]) -> None:
+    try:
+        response = (
+            client.table("memory_requests")
+            .select("id,assistant_id,status,continuity_type")
+            .eq("id", request_id)
+            .eq("assistant_id", assistant_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        raise MemoryRequestError("review_failed", "failed to verify review scope", 500) from exc
+    row = response.data[0] if isinstance(response.data, list) and response.data else None
+    if not row or row.get("status") != "pending" or row.get("continuity_type") not in allowed_types:
+        raise MemoryRequestError(
+            "request_not_reviewable",
+            "memory application is unavailable or requires user review",
+            404,
+        )
+
+
+def review_memory_request(
+    request_id: Any,
+    payload: Any,
+    *,
+    assistant_id: str | None = None,
+    reviewed_by: str = "gateway_admin",
+    allowed_types: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
     review = validate_review(request_id, payload)
     if not _server_writes_allowed():
         raise MemoryRequestError(
@@ -229,6 +297,14 @@ def review_memory_request(request_id: Any, payload: Any) -> dict[str, Any]:
     if not client:
         raise MemoryRequestError("database_unavailable", "Supabase is unavailable", 503)
 
+    if assistant_id is not None:
+        _assert_review_scope(
+            client,
+            review["request_id"],
+            _text(assistant_id, "assistant_id", 160),
+            allowed_types or AI_REVIEWABLE_TYPES,
+        )
+
     rpc_payload = {
         "p_request_id": review["request_id"],
         "p_action": review["action"],
@@ -237,7 +313,7 @@ def review_memory_request(request_id: Any, payload: Any) -> dict[str, Any]:
         "p_tags": review["tags"],
         "p_importance": review["importance"],
         "p_content_hash": review["content_hash"],
-        "p_reviewed_by": "gateway_admin",
+        "p_reviewed_by": reviewed_by,
         "p_review_note": review["review_note"],
         "p_memory_key": review["memory_key"],
         "p_update_mode": review["update_mode"],
@@ -316,4 +392,34 @@ def review_memory_request(request_id: Any, payload: Any) -> dict[str, Any]:
         "superseded_memory_id": result.get("superseded_memory_id"),
         "related_memory_id": result.get("related_memory_id"),
     }
+
+
+def review_ai_memory_request(assistant_id: str, request_id: Any, payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise MemoryRequestError("invalid_review", "JSON body must be an object")
+    rows = list_reviewable_memory_requests(assistant_id, 50)
+    try:
+        normalized_id = int(request_id)
+    except (TypeError, ValueError):
+        normalized_id = 0
+    selected = next((row for row in rows if int(row.get("id") or 0) == normalized_id), None)
+    if selected is None:
+        raise MemoryRequestError(
+            "request_not_reviewable",
+            "memory application is unavailable or requires user review",
+            404,
+        )
+    normalized = dict(payload)
+    if str(normalized.get("action") or "").strip().casefold() in {"approve", "merge"}:
+        normalized.setdefault("content", selected.get("content"))
+        normalized.setdefault("title", selected.get("title"))
+        normalized.setdefault("tags", selected.get("tags") or [])
+        normalized.setdefault("importance", selected.get("importance") or 5)
+    return review_memory_request(
+        normalized_id,
+        normalized,
+        assistant_id=assistant_id,
+        reviewed_by="orangechat_ai",
+        allowed_types=AI_REVIEWABLE_TYPES,
+    )
 

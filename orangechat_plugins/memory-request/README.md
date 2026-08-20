@@ -1,57 +1,84 @@
-# 橘瓣记忆与待办插件
+# 橘瓣记忆插件 3.1.0
 
-这是原“记忆申请”插件的原位升级版，保留相同插件 ID。它同时提供：
+这是面向 qi-gateway 的小体量 OrangeChat 插件，只负责两件事：
 
-- 向 qi-gateway 提交 `pending` 记忆申请；申请必须经过用户审核，AI 不能自行批准。
-- 创建、查看、完成、延后和取消当前用户与角色范围内的待办。
+- `request_memory`：栖主动提交连续感记忆。
+- `review_memory_requests`：查看和审核栖有权处理的普通待审记忆。
 
-两个功能共用网关地址，但使用两个独立 Token。插件不直接连接 Supabase，也不会写入聊天记录。
+插件不包含待办、不直连 Supabase、不保存第二份记忆、不扫描聊天记录，也不会自动触发审核。
 
-## 安装前准备
+## 配置
 
-1. 按文件名顺序应用 `supabase/migrations/` 中的记忆迁移；版本替代功能需要 `20260802070000_memory_supersession.sql`。
-2. 在 qi-gateway 服务端分别生成并配置 `MEMORY_PLUGIN_TOKEN` 与 `TODO_PLUGIN_TOKEN`。
-3. 部署包含 `/v1/memory-requests` 和 `/v1/todos` 系列端点的新版本网关。
-4. 将本目录作为橘瓣插件导入，填写：
-   - `gateway_url`：网关的 HTTPS 地址。
-   - `plugin_token`：记忆 Token，与服务端 `MEMORY_PLUGIN_TOKEN` 相同。
-   - `assistant_id`：当前橘瓣角色的 Assistant ID。
-   - `todo_plugin_token`：待办 Token，与服务端 `TODO_PLUGIN_TOKEN` 相同。
-   - `user_name`：`todos.user_name` 中当前用户的准确名称。
-   - `ai_name`：`todos.ai_name` 中当前角色的准确名称。
-   - `timezone_offset_minutes`：中国标准时间填写 `480`。
+安装后只需填写：
 
-申请提交后，在 qi-dashboard 的“记忆申请”页面编辑并通过或拒绝。只有通过后的正式记忆才会参与召回。
+- `gateway_url`：qi-gateway 的 HTTP(S) 地址。
+- `plugin_token`：记忆插件专用 Token。
+- `assistant_id`：当前橘瓣角色的 assistant_id。
 
-不要把 Supabase `service_role`、secret key 或 `GATEWAY_TOKEN` 填入插件，也不要混用两个插件 Token。
+不要填写 Supabase `service_role`、secret key、`GATEWAY_TOKEN` 或任何数据库密钥。
 
-## 记忆工具
+## 记忆写入
 
-`request_memory` 通过普通 HTTP POST 调用：
+`request_memory` 调用：
 
 ```text
 POST {gateway_url}/v1/memory-requests
 Authorization: Bearer {plugin_token}
+Content-Type: application/json
 ```
 
-重复内容会被幂等去重。成功响应只表示申请进入审核队列，不表示记忆已经生效。
+可写六类连续感记忆：
 
-对于进度、状态、位置等会变化的事实，使用：
+- `moment`：近期但值得保留的具体片段。
+- `thread`：尚未结束、未来需要继续的线索。
+- `episode`：有起点、过程和阶段性结果的完整共同经历。
+- `inside_joke`：双方可再次唤起的内部梗、称呼或玩法。
+- `profile`：有直接证据的稳定资料、偏好或背景。
+- `interaction_rule`：叶子明确提出或确认的长期互动规则。
 
-- `update_mode=replace`
-- 稳定且可复用的 `memory_key`，例如 `project.qi-gateway.progress`
+审核策略按图片要求固定：
 
-同一事实后续更新必须沿用相同的 `memory_key`。用户审核通过后，新版本生效，旧版本软失效但仍保留审计与恢复关系。普通相似内容不要使用 `replace`；它们应作为独立申请或由用户决定是否合并。
+- `moment/thread/inside_joke` 请求 `auto_approve`。
+- `episode/profile/interaction_rule` 请求 `user_review`，只能由叶子审核。
+- `interaction_rule` 还必须带叶子明确指令摘要，并使用 `replace + memory_key`。
 
-## 待办工具
+`continuity_data` 在 OrangeChat 工具参数中使用 JSON 对象字符串，插件解析后按对象发送给网关。详细结构由网关最终校验。时间没有把握时使用 `null`，不得编造。
 
-- `create_todo`：创建用户或 AI 待办。
-- `list_today_todos`：读取今天、逾期和未排期的开放待办。
-- `complete_todo`：标记完成。
-- `snooze_todo`：修改提醒时间并恢复为开放状态。
-- `cancel_todo`：软隐藏，不永久删除。
+网关返回什么状态，插件就如实返回，不会把所有成功改写成 pending，也不会在失败时假装保存成功。
 
-待办请求使用 `TODO_PLUGIN_TOKEN`，并始终带上已配置的 `user_name + ai_name`。时间必须使用带时区的 ISO 8601 格式，例如 `2026-08-03T09:00:00+08:00`。
+## AI 审核
 
-当前整合仅把记忆与待办工具放进同一个插件；它不会自行唤醒橘瓣。后台主动提醒仍由橘瓣原生主动消息服务负责，后续再由网关在该请求中追加到期待办上下文。
+`review_memory_requests` 支持：
+
+- `list`
+- `approve`
+- `reject`
+- `merge`
+- `duplicate`
+- `conflict`
+
+插件先读取当前 AI 可审核列表，再执行动作；本地还会再次过滤 `episode/profile/interaction_rule`。这些高权重分类不会出现在 AI 列表中，也不能通过猜测 ID 绕过列表进行审核。
+
+## append 与 replace
+
+- `append`：创建独立记忆，不提供 `memory_key`。
+- `replace`：更新同一稳定对象，必须沿用稳定 `memory_key`。
+- `interaction_rule` 固定使用 `replace`，便于以后撤销或替代同一规则。
+
+## 主动记忆与自动总结
+
+- 本插件的写入由栖结合完整人设、当前上下文和长期记忆主动判断。
+- 插件自身不做自动总结，也不自动扫描聊天记录。
+- qi-gateway 的自动总结仍是独立流程，不由本插件控制。
+
+## 网关兼容行为
+
+- 分类策略由网关按 `continuity_type` 强制决定，插件请求头不能改变审核边界。
+- `moment/thread/inside_joke` 校验后原子写入正式记忆。
+- `episode/profile/interaction_rule` 始终进入 pending，只能由叶子审核。
+- AI 审核接口按 assistant、pending 状态和低权重分类再次校验。
+
+## 已移除
+
+本插件已完全移除待办配置、待办 Token、待办工具和待办 HTTP 请求。qi-gateway 内现有待办模块不受影响。
 

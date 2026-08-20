@@ -164,7 +164,7 @@ def validate_memory_request(payload: Any, idempotency_key: str = "") -> dict[str
         "importance",
         "memory_key",
         "update_mode",
-        "continuity_type", "thread_state", "continuity_data", "proposed_relations",
+        "continuity_type", "thread_state", "continuity_data",
         "subject", "source_type", "continuity_value", "retention_class", "participants",
     }
     unknown = set(payload) - allowed
@@ -227,9 +227,8 @@ def validate_memory_request(payload: Any, idempotency_key: str = "") -> dict[str
     if retention_class not in {"normal", "core"}:
         raise MemoryRequestError("invalid_payload", "invalid retention_class")
     participants = payload.get("participants", [])
-    proposed_relations = payload.get("proposed_relations", [])
-    if not isinstance(participants, list) or not isinstance(proposed_relations, list) or len(proposed_relations) > 20:
-        raise MemoryRequestError("invalid_payload", "invalid participants or proposed_relations")
+    if not isinstance(participants, list):
+        raise MemoryRequestError("invalid_payload", "participants must be an array")
     participants = list(dict.fromkeys(str(v).strip().casefold() for v in participants if str(v).strip().casefold() in {"yezi", "qi", "other"}))[:3]
 
     supplied_key = str(idempotency_key or "").strip()
@@ -242,7 +241,7 @@ def validate_memory_request(payload: Any, idempotency_key: str = "") -> dict[str
         normalized_key = supplied_key
     else:
         normalized_key = hashlib.sha256(
-            f"{assistant_id}\0{content_hash}".encode("utf-8")
+            f"{assistant_id}\0{continuity_type}\0{content_hash}".encode("utf-8")
         ).hexdigest()
 
     return {
@@ -260,7 +259,7 @@ def validate_memory_request(payload: Any, idempotency_key: str = "") -> dict[str
         "idempotency_key": normalized_key,
         "continuity_type": continuity_type, "thread_state": thread_state,
         "continuity_schema_version": SCHEMA_VERSION, "continuity_data": continuity_data,
-        "proposed_relations": proposed_relations, "subject": subject, "source_type": source_type,
+        "subject": subject, "source_type": source_type,
         "continuity_value": continuity_value, "retention_class": retention_class, "participants": participants,
     }
 
@@ -311,7 +310,21 @@ def _rpc_result(data: Any) -> dict[str, Any]:
     return data
 
 
-def create_memory_request(payload: Any, idempotency_key: str = "") -> dict[str, Any]:
+def create_memory_request(
+    payload: Any,
+    idempotency_key: str = "",
+    *,
+    source: str = "orangechat_plugin",
+    assistant_id: str | None = None,
+) -> dict[str, Any]:
+    if source not in {"orangechat_plugin", "mcp_memory"}:
+        raise MemoryRequestError("invalid_source", "unsupported memory request source")
+    if assistant_id is not None:
+        if not isinstance(payload, dict):
+            raise MemoryRequestError("invalid_payload", "JSON body must be an object")
+        if "assistant_id" in payload:
+            raise MemoryRequestError("invalid_payload", "assistant_id is server controlled")
+        payload = {**payload, "assistant_id": assistant_id}
     request_data = validate_memory_request(payload, idempotency_key)
     if not _server_writes_allowed():
         raise MemoryRequestError(
@@ -345,12 +358,17 @@ def create_memory_request(payload: Any, idempotency_key: str = "") -> dict[str, 
         "p_update_mode": request_data["update_mode"],
         "p_continuity_type": request_data["continuity_type"], "p_thread_state": request_data["thread_state"],
         "p_continuity_schema_version": request_data["continuity_schema_version"], "p_continuity_data": request_data["continuity_data"],
-        "p_proposed_relations": request_data["proposed_relations"], "p_subject": request_data["subject"],
+        "p_subject": request_data["subject"],
         "p_source_type": request_data["source_type"], "p_continuity_value": request_data["continuity_value"],
         "p_retention_class": request_data["retention_class"], "p_participants": request_data["participants"],
+        "p_source": source,
     }
+    automatic = request_data["continuity_type"] in {"moment", "thread", "inside_joke"}
+    rpc_name = "write_memory_direct_v1" if automatic else "create_memory_request_v4"
+    if automatic:
+        rpc_payload["p_reviewed_by"] = "orangechat_ai"
     try:
-        response = client.rpc("create_memory_request_v3", rpc_payload).execute()
+        response = client.rpc(rpc_name, rpc_payload).execute()
     except Exception as exc:
         if "memory_request_rate_limited" in str(exc).casefold():
             raise MemoryRequestError(
@@ -371,10 +389,13 @@ def create_memory_request(payload: Any, idempotency_key: str = "") -> dict[str, 
         "status": request_row.get("status") or "pending",
         "created_at": request_row.get("created_at"),
         "created": bool(result.get("created")),
-        "deduplicated": not bool(result.get("created")),
+        "deduplicated": not bool(result.get("created")) and not bool(result.get("updated")),
         "memory_key": request_row.get("memory_key"),
         "update_mode": request_row.get("update_mode") or "append",
         "continuity_id": request_row.get("continuity_id"),
         "continuity_type": request_row.get("continuity_type"),
+        "memory_id": request_row.get("memory_id"),
+        "updated": bool(result.get("updated")),
+        "requires_user_review": not automatic,
     }
 

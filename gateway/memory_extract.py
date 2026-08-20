@@ -44,7 +44,7 @@ EXTRACT_SYSTEM_PROMPT = """从带 id、北京时间 t 和 role 的聊天原文�
 
 每条必须提供符合分类结构的 continuity_data；thread_state 允许 open、paused、resolved、dissolved、abandoned、unknown。
 只返回严格 JSON：
-{"memories":[{"content":"...","continuity_type":"moment","continuity_data":{"scene":"...","event":"...","moment_state":"standalone"},"thread_state":null,"proposed_relations":[],"update_mode":"append","memory_key":null,"importance":6,"confidence":0.9,"evidence_message_ids":[12,13],"memory_time":"2026-08-03","time_precision":"day"}]}"""
+{"memories":[{"content":"...","continuity_type":"moment","continuity_data":{"scene":"...","event":"...","moment_state":"standalone"},"thread_state":null,"update_mode":"append","memory_key":null,"importance":6,"confidence":0.9,"evidence_message_ids":[12,13],"memory_time":"2026-08-03","time_precision":"day"}]}"""
 EXTRACT_SYSTEM_PROMPT += """
 9. 如果原文明确显示该内容已通过记忆工具提交，或已通过待办工具创建，不要再提取。不能确定时仍可输出，由数据库保守去重和用户审核。
 """
@@ -511,7 +511,6 @@ def _parse_model_output(
             "thread_state": thread_state,
             "continuity_schema_version": SCHEMA_VERSION,
             "continuity_data": continuity_data,
-            "proposed_relations": raw.get("proposed_relations", [])[:20] if isinstance(raw.get("proposed_relations", []), list) else [],
             "subject": "shared",
             "source_type": "natural_chat",
             "continuity_value": int(round(_clamp(raw.get("continuity_value"), 1, 10, raw.get("importance") or 5))),

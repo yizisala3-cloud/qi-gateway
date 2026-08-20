@@ -12,7 +12,7 @@ if "dotenv" not in sys.modules and importlib.util.find_spec("dotenv") is None:
     sys.modules["dotenv"] = dotenv
 
 from gateway.memory_requests import MemoryRequestError
-from gateway.memory_review import review_memory_request, validate_review
+from gateway.memory_review import review_ai_memory_request, review_memory_request, validate_review
 
 
 MODULE = "gateway.memory_review"
@@ -139,6 +139,31 @@ class ValidationTests(unittest.TestCase):
 
 
 class PersistenceTests(unittest.TestCase):
+    def test_ai_review_scope_and_reviewer_are_server_controlled(self):
+        selected = {
+            "id": 42,
+            "continuity_type": "moment",
+            "status": "pending",
+            "content": "用户喜欢清晨散步。",
+            "title": "清晨",
+            "tags": ["清晨"],
+            "importance": 7,
+        }
+        with (
+            patch(f"{MODULE}.list_reviewable_memory_requests", return_value=[selected]),
+            patch(f"{MODULE}.review_memory_request", return_value={"status": "approved"}) as review,
+        ):
+            result = review_ai_memory_request("assistant-1", 42, {"action": "approve"})
+        self.assertEqual(result["status"], "approved")
+        self.assertEqual(review.call_args.kwargs["reviewed_by"], "orangechat_ai")
+        self.assertEqual(review.call_args.kwargs["allowed_types"], ("moment", "thread", "inside_joke"))
+        self.assertEqual(review.call_args.args[1]["content"], selected["content"])
+
+        with patch(f"{MODULE}.list_reviewable_memory_requests", return_value=[]):
+            with self.assertRaises(MemoryRequestError) as raised:
+                review_ai_memory_request("assistant-1", 99, {"action": "approve"})
+        self.assertEqual(raised.exception.code, "request_not_reviewable")
+
     def test_approve_calls_atomic_rpc_and_returns_memory(self):
         client = _Client({
             "changed": True,

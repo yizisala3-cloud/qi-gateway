@@ -265,39 +265,25 @@ class OrangeChatPluginContractTests(unittest.TestCase):
         cls.tools = {tool["name"]: tool for tool in cls.manifest["tools"]}
 
     def test_manifest_tool_matches_export(self):
-        expected = {
-            "request_memory",
-            "create_todo",
-            "list_today_todos",
-            "complete_todo",
-            "snooze_todo",
-            "cancel_todo",
-        }
+        expected = {"request_memory", "review_memory_requests"}
         self.assertEqual(set(self.tools), expected)
         for name in expected:
             self.assertIn(f"exports.{name} = {name}", self.main_js)
 
     def test_plugin_uses_http_gateway_without_supabase_credentials(self):
         config_names = {item["name"] for item in self.manifest["config"]}
-        self.assertEqual(config_names, {
-            "gateway_url",
-            "plugin_token",
-            "assistant_id",
-            "todo_plugin_token",
-            "user_name",
-            "ai_name",
-            "timezone_offset_minutes",
-        })
+        self.assertEqual(config_names, {"gateway_url", "plugin_token", "assistant_id"})
         self.assertIn("/v1/memory-requests", self.main_js)
-        self.assertIn("/v1/todos/query", self.main_js)
+        self.assertIn("/v1/memory-requests/reviewable", self.main_js)
         self.assertIn("fetch(", self.main_js)
         self.assertNotIn("supabase", self.main_js.casefold())
         self.assertNotIn("websocket", self.main_js.casefold())
 
-    def test_tool_description_requires_user_review(self):
+    def test_tool_description_preserves_split_review_policy(self):
         description = self.tools["request_memory"]["description"]
-        self.assertIn("pending", description)
-        self.assertIn("用户审核", description)
+        for value in ("episode", "profile", "interaction_rule"):
+            self.assertIn(value, description)
+        self.assertIn("叶子审核", description)
 
     def test_tool_supports_explicit_mutable_fact_replacement(self):
         parameters = {
@@ -306,15 +292,16 @@ class OrangeChatPluginContractTests(unittest.TestCase):
         }
         self.assertIn("update_mode", parameters)
         self.assertIn("memory_key", parameters)
-        self.assertIn("payload.update_mode", self.main_js)
+        self.assertIn("update_mode: mode", self.main_js)
         self.assertIn("payload.memory_key", self.main_js)
         self.assertIn("replace", self.tools["request_memory"]["description"])
 
-    def test_integrated_todo_tools_use_separate_token_and_soft_cancel(self):
-        self.assertIn("cfg.todoPluginToken", self.main_js)
-        self.assertIn("user_name: cfg.userName", self.main_js)
-        self.assertIn("ai_name: cfg.aiName", self.main_js)
-        self.assertIn("软隐藏", self.tools["cancel_todo"]["description"])
+    def test_v3_plugin_has_no_todo_or_relation_proposal_payload(self):
+        self.assertEqual(self.manifest["version"], "3.1.0")
+        self.assertNotIn("todo", self.main_js.casefold())
+        self.assertNotIn("proposed_relations", self.main_js)
+        self.assertIn("USER_REVIEW_TYPES = ['episode', 'profile', 'interaction_rule']", self.main_js)
+        self.assertIn("assistant_id: cfg.assistantId", self.main_js)
 
 
 class MemoryReviewDashboardContractTests(unittest.TestCase):

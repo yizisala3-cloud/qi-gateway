@@ -28,8 +28,7 @@ alter table public.memory_continuity_objects enable row level security;
 alter table public.memory_requests
     add column continuity_id uuid,
     add column continuity_schema_version smallint,
-    add column continuity_data jsonb,
-    add column proposed_relations jsonb;
+    add column continuity_data jsonb;
 alter table public.memories
     add column continuity_id uuid,
     add column continuity_schema_version smallint,
@@ -37,9 +36,7 @@ alter table public.memories
 
 alter table public.memory_requests
     add constraint memory_requests_continuity_object_fkey foreign key (continuity_id)
-        references public.memory_continuity_objects(continuity_id),
-    add constraint memory_requests_proposed_relations_array
-        check (proposed_relations is null or jsonb_typeof(proposed_relations) = 'array');
+        references public.memory_continuity_objects(continuity_id);
 alter table public.memories
     add constraint memories_continuity_object_fkey foreign key (continuity_id)
         references public.memory_continuity_objects(continuity_id);
@@ -51,6 +48,30 @@ returns boolean language sql immutable set search_path to 'pg_catalog' as $funct
         else jsonb_typeof(p_data->p_key) = 'string'
              and char_length(btrim(p_data->>p_key)) between case when p_required then 1 else 0 end and p_max
     end;
+$function$;
+
+create or replace function public.continuity_object_keys_ok(p_data jsonb, p_allowed text[])
+returns boolean language sql immutable set search_path to 'pg_catalog' as $function$
+    select jsonb_typeof(p_data) = 'object'
+       and not exists (
+            select 1 from jsonb_object_keys(p_data) key
+            where not (key = any(p_allowed))
+       );
+$function$;
+
+create or replace function public.continuity_integer_ok(
+    p_data jsonb, p_key text, p_min integer, p_max integer, p_required boolean default true
+)
+returns boolean language plpgsql immutable set search_path to 'pg_catalog' as $function$
+declare v_text text; v_number numeric;
+begin
+    if not (p_data ? p_key) or p_data->p_key = 'null'::jsonb then return not p_required; end if;
+    if jsonb_typeof(p_data->p_key) <> 'number' then return false; end if;
+    v_text := p_data->>p_key;
+    if v_text !~ '^-?[0-9]+$' then return false; end if;
+    begin v_number := v_text::numeric; exception when others then return false; end;
+    return v_number between p_min and p_max;
+end;
 $function$;
 
 create or replace function public.continuity_string_array_ok(p_data jsonb, p_key text, p_required boolean default false)
@@ -72,20 +93,22 @@ create or replace function public.validate_continuity_data(p_type text, p_thread
 returns boolean language plpgsql immutable set search_path to 'pg_catalog', 'public' as $function$
 declare v_closed boolean;
 begin
-    if p_type not in ('moment','thread','episode','inside_joke','profile','interaction_rule')
-       or jsonb_typeof(p_data) <> 'object' then return false; end if;
+    if p_type is null or p_type not in ('moment','thread','episode','inside_joke','profile','interaction_rule')
+       or p_data is null or jsonb_typeof(p_data) <> 'object' then return false; end if;
     if p_type = 'thread' then
         if p_thread_state not in ('open','paused','resolved','dissolved','abandoned','unknown') then return false; end if;
     elsif p_thread_state is not null then return false; end if;
 
     if p_type = 'moment' then
-        return public.continuity_text_ok(p_data,'scene',true)
+        return public.continuity_object_keys_ok(p_data,array['scene','event','response','outcome','moment_state','salience_reason'])
+           and public.continuity_text_ok(p_data,'scene',true)
            and public.continuity_text_ok(p_data,'event',true)
            and public.continuity_text_ok(p_data,'response')
            and public.continuity_text_ok(p_data,'outcome')
            and p_data->>'moment_state' in ('standalone','linked','absorbed')
            and public.continuity_text_ok(p_data,'salience_reason');
     elsif p_type = 'thread' then
+        if not public.continuity_object_keys_ok(p_data,array['open_question','current_state','next_expected','closure_criteria','closure_summary','closure_reason','opened_at','closed_at','abstract_retrieval_hints','concrete_retrieval_hints']) then return false; end if;
         v_closed := p_thread_state in ('resolved','dissolved','abandoned');
         if not public.continuity_text_ok(p_data,'open_question',true)
            or not public.continuity_text_ok(p_data,'current_state',true)
@@ -103,56 +126,38 @@ begin
         end if;
         return true;
     elsif p_type = 'episode' then
-        return public.continuity_text_ok(p_data,'beginning',true)
+        return public.continuity_object_keys_ok(p_data,array['beginning','development','turning_point','outcome','aftereffect','episode_start_time','episode_end_time','closure_quality'])
+           and public.continuity_text_ok(p_data,'beginning',true)
            and public.continuity_text_ok(p_data,'development',true)
            and public.continuity_text_ok(p_data,'outcome',true)
            and p_data->>'closure_quality' in ('complete','partial','uncertain');
     elsif p_type = 'inside_joke' then
-        return public.continuity_text_ok(p_data,'origin',true)
+        return public.continuity_object_keys_ok(p_data,array['origin','trigger_phrases','shared_meaning','usage_context','avoid_context','response_style','first_seen_at','last_reinforced_at','reinforcement_count'])
+           and public.continuity_text_ok(p_data,'origin',true)
            and public.continuity_string_array_ok(p_data,'trigger_phrases',true)
            and public.continuity_text_ok(p_data,'shared_meaning',true)
            and public.continuity_string_array_ok(p_data,'usage_context')
            and public.continuity_string_array_ok(p_data,'avoid_context')
-           and jsonb_typeof(coalesce(p_data->'reinforcement_count','0'::jsonb)) = 'number'
-           and (p_data->>'reinforcement_count')::integer >= 0;
+           and public.continuity_integer_ok(p_data,'reinforcement_count',0,2147483647,false);
     elsif p_type = 'profile' then
-        return public.continuity_text_ok(p_data,'facet',true)
+        return public.continuity_object_keys_ok(p_data,array['facet','statement','scope','effective_from','effective_until','stability','exceptions','basis'])
+           and public.continuity_text_ok(p_data,'facet',true)
            and public.continuity_text_ok(p_data,'statement',true)
            and public.continuity_text_ok(p_data,'scope',true)
            and p_data->>'stability' in ('stable','contextual','provisional')
            and public.continuity_string_array_ok(p_data,'exceptions')
            and p_data->>'basis' in ('explicit_self_report','explicit_preference','repeated_observation','reviewed_summary');
     end if;
-    return public.continuity_text_ok(p_data,'trigger',true)
+    return public.continuity_object_keys_ok(p_data,array['trigger','expected_behavior','forbidden_behavior','scope','priority','rule_state','effective_from','effective_until','exceptions','explicit_instruction'])
+       and public.continuity_text_ok(p_data,'trigger',true)
        and public.continuity_text_ok(p_data,'expected_behavior',true)
        and public.continuity_string_array_ok(p_data,'forbidden_behavior')
        and public.continuity_text_ok(p_data,'scope',true)
-       and jsonb_typeof(p_data->'priority') = 'number'
-       and (p_data->>'priority')::integer between 1 and 10
+       and public.continuity_integer_ok(p_data,'priority',1,10,true)
        and p_data->>'rule_state' in ('active','revoked','superseded')
        and public.continuity_string_array_ok(p_data,'exceptions')
        and public.continuity_text_ok(p_data,'explicit_instruction',true);
 end;
-$function$;
-
-create or replace function public.validate_proposed_relations(p_value jsonb)
-returns boolean language sql immutable set search_path to 'pg_catalog' as $function$
-    select p_value is null or (
-        jsonb_typeof(p_value) = 'array' and jsonb_array_length(p_value) <= 20
-        and not exists (
-            select 1 from jsonb_array_elements(p_value) item
-            where jsonb_typeof(item) <> 'object'
-               or item->>'relation_type' not in ('part_of','advances','resolves','dissolves','origin_of','evokes','supports','contradicts','governed_by')
-               or (item ? 'confidence' and (
-                    jsonb_typeof(item->'confidence') <> 'number'
-                    or (item->>'confidence')::double precision not between 0 and 1
-               ))
-               or (item ? 'description' and (
-                    jsonb_typeof(item->'description') <> 'string'
-                    or char_length(item->>'description') > 600
-               ))
-        )
-    );
 $function$;
 
 alter table public.memory_requests
@@ -167,16 +172,16 @@ alter table public.memory_requests
     ),
     add constraint memory_requests_continuity_v1_check check (
         (continuity_schema_version is null and continuity_data is null)
-        or (continuity_schema_version = 1 and continuity_id is not null and public.validate_continuity_data(continuity_type,thread_state,continuity_data))
+        or (continuity_schema_version = 1 and public.validate_continuity_data(continuity_type,thread_state,continuity_data))
     ),
     add constraint memory_requests_automatic_type_check check (
         source <> 'daily_digest' or continuity_type in ('moment','thread','episode','inside_joke')
     ),
     add constraint memory_requests_interaction_rule_source_check check (
-        continuity_type is distinct from 'interaction_rule' or source = 'orangechat_plugin'
+        continuity_type is distinct from 'interaction_rule' or source in ('orangechat_plugin','mcp_memory')
     ),
-    add constraint memory_requests_proposed_relations_shape_check check (
-        public.validate_proposed_relations(proposed_relations)
+    add constraint memory_requests_source_values check (
+        source in ('orangechat_plugin','mcp_memory','daily_digest')
     );
 
 alter table public.memories
@@ -204,8 +209,12 @@ declare v_id uuid; v_memory_id integer;
 begin
     if p_update_mode = 'replace' then
         select id, continuity_id into v_memory_id, v_id from public.memories
-        where memory_key = p_memory_key and verified = 'verified' and is_active = true for update;
-        if v_memory_id is null then raise exception 'memory_request_stale_update'; end if;
+        where assistant_id = p_assistant_id and memory_key = p_memory_key
+          and verified = 'verified' and is_active = true for update;
+        if v_memory_id is null then
+            insert into public.memory_continuity_objects(assistant_id) values (p_assistant_id) returning continuity_id into v_id;
+            return v_id;
+        end if;
         if v_id is null then
             insert into public.memory_continuity_objects(assistant_id) values (p_assistant_id) returning continuity_id into v_id;
             update public.memories set continuity_id = v_id where id = v_memory_id;
@@ -217,19 +226,19 @@ begin
 end;
 $function$;
 
-create or replace function public.create_memory_request_v3(
+create or replace function public.create_memory_request_v4(
     p_assistant_id text, p_conversation_id text, p_source_message_id bigint, p_content text,
     p_title text, p_tags text[], p_importance integer, p_reason text, p_content_hash text,
     p_idempotency_key text, p_rate_limit integer, p_memory_key text, p_update_mode text,
     p_continuity_type text, p_thread_state text, p_continuity_schema_version smallint,
-    p_continuity_data jsonb, p_proposed_relations jsonb, p_subject text, p_source_type text,
-    p_continuity_value integer, p_retention_class text, p_participants text[]
+    p_continuity_data jsonb, p_subject text, p_source_type text,
+    p_continuity_value integer, p_retention_class text, p_participants text[], p_source text
 ) returns jsonb language plpgsql security definer set search_path to 'public' as $function$
-declare v_request public.memory_requests%rowtype; v_id uuid; v_recent_count integer;
+declare v_request public.memory_requests%rowtype; v_recent_count integer;
 begin
     if p_continuity_schema_version <> 1 or not public.validate_continuity_data(p_continuity_type,p_thread_state,p_continuity_data)
        then raise exception 'memory_request_invalid_continuity_data'; end if;
-    if not public.validate_proposed_relations(p_proposed_relations) then raise exception 'memory_request_invalid_proposed_relations'; end if;
+    if p_source not in ('orangechat_plugin','mcp_memory') then raise exception 'memory_request_invalid_source'; end if;
     if p_update_mode not in ('append','replace')
        or (p_update_mode='append' and p_memory_key is not null)
        or (p_update_mode='replace' and p_memory_key is null)
@@ -237,26 +246,26 @@ begin
     if p_continuity_type = 'interaction_rule' and coalesce(p_continuity_data->>'explicit_instruction','') = ''
        then raise exception 'memory_request_interaction_rule_requires_instruction'; end if;
     perform pg_advisory_xact_lock(hashtextextended(p_assistant_id,0));
-    select count(*) into v_recent_count from public.memory_requests
-    where assistant_id=p_assistant_id and source='orangechat_plugin' and created_at>now()-interval '1 hour';
-    if v_recent_count>=least(greatest(coalesce(p_rate_limit,6),1),60) then raise exception 'memory_request_rate_limited'; end if;
     select * into v_request from public.memory_requests where assistant_id=p_assistant_id and idempotency_key=p_idempotency_key limit 1;
     if found then return jsonb_build_object('created',false,'request',to_jsonb(v_request)); end if;
     select * into v_request from public.memory_requests
-    where assistant_id=p_assistant_id and content_hash=p_content_hash and status in ('pending','approved','merged')
+    where assistant_id=p_assistant_id and content_hash=p_content_hash and continuity_type=p_continuity_type
+      and status in ('pending','approved','merged')
     order by id desc limit 1;
     if found then return jsonb_build_object('created',false,'request',to_jsonb(v_request)); end if;
-    v_id := public.allocate_memory_continuity_id(p_assistant_id,p_update_mode,p_memory_key);
+    select count(*) into v_recent_count from public.memory_requests
+    where assistant_id=p_assistant_id and source=p_source and created_at>now()-interval '1 minute';
+    if v_recent_count>=least(greatest(coalesce(p_rate_limit,6),1),60) then raise exception 'memory_request_rate_limited'; end if;
     insert into public.memory_requests(
         assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,content_hash,
         idempotency_key,status,source,memory_key,update_mode,evidence_message_ids,
-        continuity_type,thread_state,continuity_id,continuity_schema_version,continuity_data,proposed_relations,
+        continuity_type,thread_state,continuity_id,continuity_schema_version,continuity_data,
         subject,source_type,continuity_value,retention_class,participants
     ) values (
         p_assistant_id,nullif(trim(p_conversation_id),''),p_source_message_id,p_content,p_title,p_tags,p_importance,p_reason,p_content_hash,
-        p_idempotency_key,'pending','orangechat_plugin',p_memory_key,p_update_mode,
+        p_idempotency_key,'pending',p_source,p_memory_key,p_update_mode,
         case when p_source_message_id is null then '{}'::bigint[] else array[p_source_message_id] end,
-        p_continuity_type,p_thread_state,v_id,1,p_continuity_data,coalesce(p_proposed_relations,'[]'::jsonb),
+        p_continuity_type,p_thread_state,null,1,p_continuity_data,
         p_subject,p_source_type,p_continuity_value,p_retention_class,p_participants
     ) returning * into v_request;
     return jsonb_build_object('created',true,'request',to_jsonb(v_request));
@@ -266,62 +275,114 @@ $function$;
 -- Shared candidate writer used by both automatic pipelines. It never creates formal relations.
 create or replace function public.store_continuity_candidate(p_run public.memory_digest_runs, p_item jsonb)
 returns integer language plpgsql security definer set search_path to 'public','extensions' as $function$
-declare v_ids bigint[]; v_source bigint; v_conversation text; v_id uuid; v_delta integer; v_mode text; v_key text; v_type text;
+declare v_ids bigint[]; v_source bigint; v_conversation text; v_delta integer; v_mode text; v_key text; v_type text;
+        v_requested_evidence_count integer; v_content text; v_content_hash text; v_embedding extensions.vector;
         v_related_request bigint; v_related_memory integer; v_dedupe text:='none'; v_dedupe_reason text;
+        v_request_id bigint;
 begin
     v_type := p_item->>'continuity_type';
     if v_type not in ('moment','thread','episode','inside_joke') then raise exception 'memory_digest_invalid_continuity_type'; end if;
     if coalesce((p_item->>'continuity_schema_version')::integer,0) <> 1
        or not public.validate_continuity_data(v_type,p_item->>'thread_state',p_item->'continuity_data')
        then raise exception 'memory_digest_invalid_continuity_data'; end if;
-    if not public.validate_proposed_relations(p_item->'proposed_relations') then raise exception 'memory_digest_invalid_proposed_relations'; end if;
     if nullif(p_item->>'embedding','') is null then raise exception 'memory_digest_missing_embedding'; end if;
+    v_content:=left(trim(coalesce(p_item->>'content','')),600);
+    v_content_hash:=lower(trim(coalesce(p_item->>'content_hash','')));
+    if char_length(v_content)<5 or v_content_hash !~ '^[0-9a-f]{64}$' then raise exception 'memory_digest_invalid_content'; end if;
+    v_embedding:=(p_item->>'embedding')::extensions.vector;
+    select count(distinct value::bigint) into v_requested_evidence_count
+    from jsonb_array_elements_text(coalesce(p_item->'evidence_message_ids','[]'::jsonb))
+    where value ~ '^[0-9]+$';
+    if v_requested_evidence_count not between 1 and 8
+       or jsonb_array_length(coalesce(p_item->'evidence_message_ids','[]'::jsonb))<>v_requested_evidence_count
+       then raise exception 'memory_digest_invalid_evidence'; end if;
     select coalesce(array_agg(m.id order by m.id),'{}'::bigint[]) into v_ids
     from public.chat_messages m join (
         select distinct value::bigint id from jsonb_array_elements_text(coalesce(p_item->'evidence_message_ids','[]'::jsonb))
         where value ~ '^[0-9]+$'
     ) e on e.id=m.id where m.assistant_id=p_run.assistant_id and m.id between p_run.source_first_message_id and p_run.source_last_message_id;
-    if cardinality(v_ids) not between 1 and 8 then raise exception 'memory_digest_invalid_evidence'; end if;
+    if cardinality(v_ids)<>v_requested_evidence_count then raise exception 'memory_digest_invalid_evidence'; end if;
     v_source:=v_ids[1]; select conversation_id into v_conversation from public.chat_messages where id=v_source;
-    if exists(select 1 from public.memory_requests where assistant_id=p_run.assistant_id and content_hash=(p_item->>'content_hash'))
-       or exists(select 1 from public.memories where is_active=true and verified='verified' and content_hash=(p_item->>'content_hash'))
-       then return 0; end if;
     v_mode:=case when p_item->>'update_mode'='replace' then 'replace' else 'append' end;
     v_key:=case when v_mode='replace' then nullif(p_item->>'memory_key','') else null end;
+
+    -- Preserve the durable receipt written by the legacy plugin/MCP path.
+    -- Rephrased content is skipped only when provenance or a stable key ties
+    -- it to the same source-time window.
+    select id into v_related_request from public.memory_requests
+    where assistant_id=p_run.assistant_id
+      and status in ('pending','approved','merged','duplicate','conflict','rejected')
+      and (
+        content_hash=v_content_hash
+        or (v_key is not null and memory_key=v_key and created_at>=coalesce(nullif(p_item->>'source_time','')::timestamptz,p_run.started_at,now())-interval '15 minutes')
+        or (public.memory_dedupe_text_similarity(content,v_content)>=.72 and (
+            source_message_id=any(v_ids)
+            or (nullif(trim(v_conversation),'') is not null and conversation_id=nullif(trim(v_conversation),'')
+                and created_at between coalesce(nullif(p_item->>'source_time','')::timestamptz,p_run.started_at,now())-interval '15 minutes' and now()+interval '1 minute')
+        ))
+      )
+    order by (content_hash=v_content_hash) desc,created_at desc,id desc limit 1;
+    if found then return 0; end if;
+
+    -- The retired digest schema checked todos only for memory_type='goal'.
+    -- Phase 1 has no goal continuity type; a thread is not necessarily a todo,
+    -- so treating every thread as a todo duplicate would lose valid memories.
+    select id into v_related_memory from public.memories
+    where is_active=true and verified='verified'
+      and (assistant_id=p_run.assistant_id or assistant_id is null)
+      and content_hash=v_content_hash order by id desc limit 1;
+    if found then return 0; end if;
+
+    v_related_request:=null; v_related_memory:=null;
     select id into v_related_request from public.memory_requests
     where assistant_id=p_run.assistant_id and status in ('pending','approved','merged')
-      and public.memory_dedupe_text_similarity(content,left(trim(p_item->>'content'),600))>=.86
+      and not (v_mode='replace' and v_key is not null and memory_key=v_key)
+      and (public.memory_dedupe_text_similarity(content,v_content)>=.86
+        or (embedding is not null and 1-(embedding<=>v_embedding)>=.94
+            and public.memory_dedupe_text_similarity(content,v_content)>=.38))
     order by created_at desc limit 1;
     if v_related_request is not null then v_dedupe:='possible_duplicate'; v_dedupe_reason:='similar_to_existing_request';
     else
         select id into v_related_memory from public.memories where is_active=true and verified='verified'
-          and public.memory_dedupe_text_similarity(content,left(trim(p_item->>'content'),600))>=.86 order by created_at desc limit 1;
+          and (assistant_id=p_run.assistant_id or assistant_id is null)
+          and not (v_mode='replace' and v_key is not null and memory_key=v_key)
+          and (public.memory_dedupe_text_similarity(content,v_content)>=.86
+            or (embedding is not null and 1-(embedding<=>v_embedding)>=.94
+                and public.memory_dedupe_text_similarity(content,v_content)>=.38))
+        order by id desc limit 1;
         if v_related_memory is not null then v_dedupe:='possible_duplicate'; v_dedupe_reason:='similar_to_active_memory'; end if;
     end if;
-    v_id:=public.allocate_memory_continuity_id(p_run.assistant_id,v_mode,v_key);
     insert into public.memory_requests(
         assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,content_hash,idempotency_key,
         status,source,memory_key,update_mode,confidence,evidence_message_ids,source_time,memory_time,time_precision,digest_run_id,embedding,
         dedupe_state,dedupe_reason,related_request_id,related_memory_id,
         continuity_type,subject,source_type,thread_state,continuity_value,retention_class,participants,evidence_start_time,evidence_end_time,
-        continuity_id,continuity_schema_version,continuity_data,proposed_relations
+        continuity_id,continuity_schema_version,continuity_data
     ) values (
-        p_run.assistant_id,v_conversation,v_source,left(trim(p_item->>'content'),600),nullif(left(trim(coalesce(p_item->>'title','')),100),''),
+        p_run.assistant_id,v_conversation,v_source,v_content,nullif(left(trim(coalesce(p_item->>'title','')),100),''),
         array[v_type],least(greatest(coalesce((p_item->>'importance')::integer,5),1),10),'自动总结提取，等待用户审核',
-        p_item->>'content_hash','continuity-'||p_run.id||'-'||(p_item->>'content_hash'),'pending','daily_digest',v_key,v_mode,
+        v_content_hash,'continuity-'||p_run.id||'-'||v_content_hash,'pending','daily_digest',v_key,v_mode,
         least(greatest(coalesce((p_item->>'confidence')::double precision,0.6),0),1),v_ids,
         nullif(p_item->>'source_time','')::timestamptz,
         case when p_item->>'time_precision'='day' and p_item->>'memory_time' ~ '^\d{4}-\d{2}-\d{2}$'
              then (p_item->>'memory_time')::date::timestamp at time zone 'Asia/Shanghai'
              else nullif(p_item->>'memory_time','')::timestamptz end,coalesce(p_item->>'time_precision','unknown'),
-        p_run.id,(p_item->>'embedding')::extensions.vector,v_dedupe,v_dedupe_reason,v_related_request,v_related_memory,
+        p_run.id,v_embedding,v_dedupe,v_dedupe_reason,v_related_request,v_related_memory,
         v_type,p_item->>'subject',p_item->>'source_type',p_item->>'thread_state',
         least(greatest(coalesce((p_item->>'continuity_value')::integer,5),1),10),coalesce(p_item->>'retention_class','normal'),
         array(select value from jsonb_array_elements_text(coalesce(p_item->'participants','[]'::jsonb)) limit 3),
         nullif(p_item->>'evidence_start_time','')::timestamptz,nullif(p_item->>'evidence_end_time','')::timestamptz,
-        v_id,1,p_item->'continuity_data',coalesce(p_item->'proposed_relations','[]'::jsonb)
-    ) on conflict do nothing;
-    get diagnostics v_delta=row_count; return v_delta;
+        null,1,p_item->'continuity_data'
+    ) on conflict do nothing returning id into v_request_id;
+    get diagnostics v_delta=row_count;
+    if v_delta=1 and v_type in ('moment','thread','inside_joke') then
+        perform public.review_memory_request_v5(
+            v_request_id,'approve',v_content,nullif(left(trim(coalesce(p_item->>'title','')),100),''),
+            array[v_type],least(greatest(coalesce((p_item->>'importance')::integer,5),1),10),v_content_hash,
+            'daily_digest_ai','automatic low-risk continuity memory',v_key,v_mode,null
+        );
+    end if;
+    return v_delta;
 end;
 $function$;
 
@@ -377,18 +438,27 @@ begin
     select * into v_request from public.memory_requests where id=p_request_id for update;
     if not found then raise exception 'memory_request_not_found'; end if;
     if lower(trim(p_action)) in ('approve','merge') and (
-        v_request.continuity_id is null or v_request.continuity_schema_version<>1
+        v_request.continuity_schema_version<>1
         or not public.validate_continuity_data(v_request.continuity_type,v_request.thread_state,v_request.continuity_data)
     ) then raise exception 'memory_request_unclassified_legacy'; end if;
-    if lower(trim(p_action))='approve' then
+    if v_request.status in ('pending','conflict') and lower(trim(p_action))='approve' then
         v_mode:=lower(trim(coalesce(p_update_mode,v_request.update_mode,'append')));
         v_key:=case when v_mode='replace' then nullif(lower(trim(coalesce(p_memory_key,v_request.memory_key,''))),'') else null end;
         if v_mode not in ('append','replace') or (v_mode='replace' and v_key is null) then raise exception 'memory_request_invalid_update_mode'; end if;
-        if v_mode is distinct from v_request.update_mode or v_key is distinct from v_request.memory_key then
-            v_id:=public.allocate_memory_continuity_id(v_request.assistant_id,v_mode,v_key);
-            update public.memory_requests set continuity_id=v_id,update_mode=v_mode,memory_key=v_key,updated_at=now()
-            where id=v_request.id returning * into v_request;
+        v_id:=public.allocate_memory_continuity_id(v_request.assistant_id,v_mode,v_key);
+        update public.memory_requests set continuity_id=v_id,update_mode=v_mode,memory_key=v_key,updated_at=now()
+        where id=v_request.id returning * into v_request;
+    elsif v_request.status in ('pending','conflict') and lower(trim(p_action))='merge' then
+        select continuity_id into v_id from public.memories
+        where id=p_related_memory_id and verified='verified' and is_active=true
+          and (assistant_id is null or assistant_id=v_request.assistant_id) for update;
+        if not found then raise exception 'memory_request_related_memory_not_found'; end if;
+        if v_id is null then
+            insert into public.memory_continuity_objects(assistant_id) values(v_request.assistant_id) returning continuity_id into v_id;
+            update public.memories set continuity_id=v_id where id=p_related_memory_id;
         end if;
+        update public.memory_requests set continuity_id=v_id,updated_at=now()
+        where id=v_request.id returning * into v_request;
     end if;
     return public.review_memory_request_v4(p_request_id,p_action,p_content,p_title,p_tags,p_importance,p_content_hash,
         p_reviewed_by,p_review_note,p_memory_key,p_update_mode,p_related_memory_id);
@@ -401,6 +471,9 @@ declare v_existing_continuity_id uuid; v_replace_continuity boolean:=false;
 begin
     if new.status in ('approved','merged') and new.memory_id is not null then
         select continuity_id into v_existing_continuity_id from public.memories where id=new.memory_id for update;
+        if v_existing_continuity_id is not null and v_existing_continuity_id is distinct from new.continuity_id then
+            raise exception 'memory_request_continuity_identity_conflict';
+        end if;
         v_replace_continuity := (v_existing_continuity_id is null or v_existing_continuity_id=new.continuity_id)
             and new.continuity_id is not null and new.continuity_data is not null
             and new.continuity_schema_version=1
@@ -443,6 +516,51 @@ end;
 $function$;
 create trigger sync_reviewed_memory_request_metadata after insert or update of status,memory_id on public.memory_requests
 for each row execute function public.sync_reviewed_memory_request_metadata();
+
+-- Low-risk tool writes are pending only inside this transaction. They become a
+-- fully reviewed memory before the RPC returns, so callers never see or mutate
+-- an intermediate application.
+create or replace function public.write_memory_direct_v1(
+    p_assistant_id text, p_conversation_id text, p_source_message_id bigint, p_content text,
+    p_title text, p_tags text[], p_importance integer, p_reason text, p_content_hash text,
+    p_idempotency_key text, p_rate_limit integer, p_memory_key text, p_update_mode text,
+    p_continuity_type text, p_thread_state text, p_continuity_schema_version smallint,
+    p_continuity_data jsonb, p_subject text, p_source_type text,
+    p_continuity_value integer, p_retention_class text, p_participants text[], p_source text,
+    p_reviewed_by text
+) returns jsonb language plpgsql security definer set search_path to 'public' as $function$
+declare v_created jsonb; v_request jsonb; v_review jsonb; v_had_previous boolean:=false;
+begin
+    if p_continuity_type not in ('moment','thread','inside_joke') then
+        raise exception 'memory_request_type_requires_user_review';
+    end if;
+    if p_update_mode='replace' then
+        select exists(select 1 from public.memories where assistant_id=p_assistant_id
+            and memory_key=p_memory_key and verified='verified' and is_active=true)
+        into v_had_previous;
+    end if;
+    v_created:=public.create_memory_request_v4(
+        p_assistant_id,p_conversation_id,p_source_message_id,p_content,p_title,p_tags,p_importance,p_reason,
+        p_content_hash,p_idempotency_key,p_rate_limit,p_memory_key,p_update_mode,p_continuity_type,p_thread_state,
+        p_continuity_schema_version,p_continuity_data,p_subject,p_source_type,p_continuity_value,p_retention_class,
+        p_participants,p_source
+    );
+    v_request:=v_created->'request';
+    if v_request->>'continuity_type' is distinct from p_continuity_type then
+        raise exception 'memory_request_idempotency_conflict';
+    end if;
+    v_review:=public.review_memory_request_v5(
+        (v_request->>'id')::bigint,'approve',p_content,p_title,p_tags,p_importance,p_content_hash,
+        left(coalesce(nullif(trim(p_reviewed_by),''),'orangechat_ai'),120),null,p_memory_key,p_update_mode,null
+    );
+    select to_jsonb(request_row) into v_request from public.memory_requests request_row
+    where request_row.id=(v_request->>'id')::bigint;
+    return jsonb_set(v_review,'{request}',v_request) || jsonb_build_object(
+        'created',coalesce((v_created->>'created')::boolean,false) and not v_had_previous,
+        'updated',v_had_previous and coalesce((v_review->>'changed')::boolean,false)
+    );
+end;
+$function$;
 
 create table public.memory_relations(
     id bigint generated by default as identity primary key,
@@ -506,8 +624,10 @@ $function$;
 revoke all on table public.memory_continuity_objects,public.memory_relations from anon,authenticated;
 grant select,insert,update on table public.memory_continuity_objects,public.memory_relations to service_role;
 grant usage,select on sequence public.memory_relations_id_seq to service_role;
-revoke all on function public.create_memory_request_v3(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,jsonb,text,text,integer,text,text[]) from public,anon,authenticated;
-grant execute on function public.create_memory_request_v3(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,jsonb,text,text,integer,text,text[]) to service_role;
+revoke all on function public.create_memory_request_v4(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,integer,text,text[],text) from public,anon,authenticated;
+grant execute on function public.create_memory_request_v4(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,integer,text,text[],text) to service_role;
+revoke all on function public.write_memory_direct_v1(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,integer,text,text[],text,text) from public,anon,authenticated;
+grant execute on function public.write_memory_direct_v1(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,integer,text,text[],text,text) to service_role;
 revoke all on function public.review_memory_request_v5(bigint,text,text,text,text[],integer,text,text,text,text,text,integer) from public,anon,authenticated;
 grant execute on function public.review_memory_request_v5(bigint,text,text,text,text[],integer,text,text,text,text,text,integer) to service_role;
 revoke execute on function public.review_memory_request_v2(bigint,text,text,text,text[],integer,text,text,text,text,text) from service_role;

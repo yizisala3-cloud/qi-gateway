@@ -26,6 +26,7 @@ from .admin_api import admin_api_routes
 from .memory_digest_api import memory_digest_routes
 from .memory_request_api import memory_request_routes
 from .memory_review_api import memory_review_routes
+from .memory_mcp import memory_mcp, memory_mcp_http_app
 from .todo_api import todo_routes
 from .todos import get_proactive_todo_context
 from .model_routing import select_upstream_model
@@ -242,6 +243,7 @@ async def status(request: Request):
         "last_digest_run": _last_digest_run,
         "last_heat_decay_date": _last_heat_decay_date,
         "memory_plugin_configured": bool(cfg.MEMORY_PLUGIN_TOKEN),
+        "memory_mcp_configured": bool(cfg.MCP_MEMORY_TOKEN),
         "todo_plugin_configured": bool(cfg.TODO_PLUGIN_TOKEN),
     })
 
@@ -268,13 +270,16 @@ async def lifespan(app):
     )
     log.info(f"网关启动 Phase 4.5 Memory Digest | upstream={cfg.UPSTREAM_BASE_URL}")
     daily_task = track_task(daily_task_loop())
-    yield
-    global _daily_running
-    _daily_running = False
-    daily_task.cancel()
-    await http_client.aclose()
-    bg_executor.shutdown(wait=False)
-    log.info("网关关闭")
+    try:
+        async with memory_mcp.session_manager.run():
+            yield
+    finally:
+        global _daily_running
+        _daily_running = False
+        daily_task.cancel()
+        await http_client.aclose()
+        bg_executor.shutdown(wait=False)
+        log.info("网关关闭")
 
 
 _routes = [
@@ -292,6 +297,10 @@ _routes.extend(todo_routes)
 if os.path.isdir(_admin_dir):
     _routes.append(Mount("/admin", app=StaticFiles(directory=_admin_dir, html=True), name="admin"))
     log.info(f"Admin panel mounted at /admin (dir={_admin_dir})")
+
+# The SDK owns the exact /mcp Streamable HTTP route. This catch-all mount is
+# deliberately last so it cannot shadow gateway, admin, memory, or todo paths.
+_routes.append(Mount("/", app=memory_mcp_http_app, name="memory-mcp"))
 
 app = Starlette(routes=_routes, lifespan=lifespan)
 

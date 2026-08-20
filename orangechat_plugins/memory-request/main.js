@@ -1,278 +1,304 @@
-// OrangeChat request_memory plugin for qi-gateway.
+// Small OrangeChat memory client. Validation, deduplication and persistence belong to qi-gateway.
+
+const CONTINUITY_TYPES = ['moment', 'thread', 'episode', 'inside_joke', 'profile', 'interaction_rule'];
+const USER_REVIEW_TYPES = ['episode', 'profile', 'interaction_rule'];
+const THREAD_STATES = ['open', 'paused', 'resolved', 'dissolved', 'abandoned', 'unknown'];
+const REVIEW_ACTIONS = ['list', 'approve', 'reject', 'merge', 'duplicate', 'conflict'];
 
 function getConfig() {
-  const offset = Number(config.timezone_offset_minutes || 480);
   return {
     gatewayUrl: String(config.gateway_url || '').trim().replace(/\/+$/, ''),
     pluginToken: String(config.plugin_token || '').trim(),
     assistantId: String(config.assistant_id || '').trim(),
-    todoPluginToken: String(config.todo_plugin_token || '').trim(),
-    userName: String(config.user_name || '').trim(),
-    aiName: String(config.ai_name || '').trim(),
-    timezoneOffsetMinutes: Number.isInteger(offset) ? offset : 480,
   };
 }
 
-function failure(error, errorCode) {
+function failure(error, errorCode, status) {
   return {
     success: false,
     error: error,
-    data: { error_code: errorCode || 'plugin_error' },
+    data: { error_code: errorCode || 'plugin_error', http_status: status || null },
   };
 }
 
-async function request_memory(params) {
-  const cfg = getConfig();
-  const input = params || {};
-
-  if (!cfg.gatewayUrl || !/^https?:\/\//i.test(cfg.gatewayUrl)) {
+function validateConfig(cfg) {
+  if (!/^https?:\/\/[^\s]+$/i.test(cfg.gatewayUrl)) {
     return failure('请先配置有效的 qi-gateway HTTP(S) 地址', 'invalid_gateway_url');
   }
   if (!cfg.pluginToken) {
-    return failure('请先配置插件专用 Token', 'missing_plugin_token');
+    return failure('请先配置记忆插件 Token', 'missing_plugin_token');
   }
   if (!cfg.assistantId) {
     return failure('请先配置 assistant_id', 'missing_assistant_id');
   }
-
-  const content = typeof input.content === 'string' ? input.content.trim() : '';
-  const reason = typeof input.reason === 'string' ? input.reason.trim() : '';
-  if (content.length < 5) {
-    return failure('content 至少需要 5 个字符', 'invalid_content');
-  }
-  if (reason.length < 3) {
-    return failure('reason 至少需要 3 个字符', 'invalid_reason');
-  }
-
-  const payload = {
-    assistant_id: cfg.assistantId,
-    content: content,
-    reason: reason,
-  };
-
-  if (typeof input.title === 'string' && input.title.trim()) {
-    payload.title = input.title.trim();
-  }
-  if (typeof input.tags === 'string' && input.tags.trim()) {
-    payload.tags = input.tags.trim();
-  }
-  if (input.importance !== undefined && input.importance !== null && input.importance !== '') {
-    const importance = Number(input.importance);
-    if (!Number.isInteger(importance) || importance < 1 || importance > 10) {
-      return failure('importance 必须是 1-10 的整数', 'invalid_importance');
-    }
-    payload.importance = importance;
-  }
-  const updateMode = typeof input.update_mode === 'string'
-    ? input.update_mode.trim().toLowerCase()
-    : 'append';
-  const memoryKey = typeof input.memory_key === 'string'
-    ? input.memory_key.trim().toLowerCase().replace(/\s+/g, '-')
-    : '';
-  if (updateMode !== 'append' && updateMode !== 'replace') {
-    return failure('update_mode 必须是 append 或 replace', 'invalid_update_mode');
-  }
-  if (updateMode === 'replace' && !/^[a-z0-9][a-z0-9._:/-]{2,119}$/.test(memoryKey)) {
-    return failure('replace 模式必须提供有效的稳定 memory_key', 'invalid_memory_key');
-  }
-  if (updateMode === 'append' && memoryKey) {
-    return failure('memory_key 只能与 replace 模式一起使用', 'invalid_memory_key');
-  }
-  payload.update_mode = updateMode;
-  if (memoryKey) {
-    payload.memory_key = memoryKey;
-  }
-  if (typeof input.conversation_id === 'string' && input.conversation_id.trim()) {
-    payload.conversation_id = input.conversation_id.trim();
-  }
-  if (input.source_message_id !== undefined && input.source_message_id !== null && input.source_message_id !== '') {
-    const sourceMessageId = Number(input.source_message_id);
-    if (!Number.isInteger(sourceMessageId) || sourceMessageId <= 0) {
-      return failure('source_message_id 必须是正整数', 'invalid_source_message_id');
-    }
-    payload.source_message_id = sourceMessageId;
-  }
-
-  let response;
-  try {
-    response = await fetch(cfg.gatewayUrl + '/v1/memory-requests', {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer ' + cfg.pluginToken,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
-  } catch (error) {
-    return failure(
-      '无法连接记忆网关：' + (error && error.message ? error.message : 'network error'),
-      'network_error'
-    );
-  }
-
-  let result;
-  try {
-    result = await response.json();
-  } catch (_error) {
-    return failure('记忆网关返回了无效 JSON', 'invalid_gateway_response');
-  }
-
-  if (!response.ok || !result.success) {
-    return failure(
-      result.error || ('记忆申请失败，HTTP ' + response.status),
-      result.error_code || 'gateway_error'
-    );
-  }
-
-  return {
-    success: true,
-    data: {
-      request_id: result.request_id,
-      status: result.status,
-      deduplicated: Boolean(result.deduplicated),
-      message: result.message || '记忆申请已进入用户审核队列',
-    },
-  };
+  return null;
 }
 
-function validateTodoConfig(cfg) {
-  if (!cfg.gatewayUrl || !/^https?:\/\//i.test(cfg.gatewayUrl)) {
-    return failure('请先配置有效的 qi-gateway HTTP(S) 地址', 'invalid_gateway_url');
+function text(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function integer(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
+function stringList(value, allowed, fallback) {
+  const source = Array.isArray(value) ? value : text(value).split(/[,，]/);
+  const result = [];
+  for (const item of source) {
+    const cleaned = String(item || '').trim().toLowerCase();
+    if (cleaned && (!allowed || allowed.indexOf(cleaned) >= 0) && result.indexOf(cleaned) < 0) {
+      result.push(cleaned);
+    }
   }
-  if (!cfg.todoPluginToken) {
-    return failure('请先配置待办插件专用 Token', 'missing_todo_plugin_token');
+  return result.length ? result : (fallback || []);
+}
+
+function parseContinuityData(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch (_error) {
+    return null;
   }
-  if (!cfg.userName || !cfg.aiName) {
-    return failure('请先配置 user_name 和 ai_name', 'missing_role_scope');
+}
+
+function hasFields(data, fields) {
+  return fields.every(function (name) {
+    const value = data[name];
+    return value !== undefined && value !== null && value !== '';
+  });
+}
+
+function validateContinuityData(kind, data) {
+  const required = {
+    moment: ['scene', 'event', 'moment_state'],
+    thread: ['open_question', 'current_state'],
+    episode: ['beginning', 'development', 'outcome', 'closure_quality'],
+    inside_joke: ['origin', 'trigger_phrases', 'shared_meaning'],
+    profile: ['facet', 'statement', 'scope', 'stability', 'basis'],
+    interaction_rule: ['trigger', 'expected_behavior', 'scope', 'priority', 'rule_state', 'explicit_instruction'],
+  };
+  if (!data || !hasFields(data, required[kind] || [])) {
+    return failure('continuity_data 缺少 ' + kind + ' 所需的完整字段', 'invalid_continuity_data');
   }
-  if (cfg.timezoneOffsetMinutes < -720 || cfg.timezoneOffsetMinutes > 840) {
-    return failure('时区偏移分钟必须在 -720 到 840 之间', 'invalid_timezone');
+  if (kind === 'inside_joke' && (!Array.isArray(data.trigger_phrases) || !data.trigger_phrases.length)) {
+    return failure('inside_joke.trigger_phrases 必须是非空数组', 'invalid_continuity_data');
+  }
+  if (kind === 'interaction_rule' && !text(data.explicit_instruction)) {
+    return failure('interaction_rule 必须包含叶子明确指令的摘要', 'missing_explicit_instruction');
   }
   return null;
 }
 
-async function callTodoGateway(path, payload) {
+async function callGateway(path, options) {
   const cfg = getConfig();
-  const configError = validateTodoConfig(cfg);
-  if (configError) {
-    return configError;
-  }
+  const configError = validateConfig(cfg);
+  if (configError) return configError;
+
+  const headers = {
+    'Authorization': 'Bearer ' + cfg.pluginToken,
+    'Content-Type': 'application/json',
+  };
+  const extraHeaders = options && options.headers ? options.headers : {};
+  Object.keys(extraHeaders).forEach(function (name) { headers[name] = extraHeaders[name]; });
 
   let response;
   try {
     response = await fetch(cfg.gatewayUrl + path, {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer ' + cfg.todoPluginToken,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        user_name: cfg.userName,
-        ai_name: cfg.aiName,
-        ...payload,
-      }),
+      method: (options && options.method) || 'POST',
+      headers: headers,
+      body: JSON.stringify((options && options.body) || {}),
     });
   } catch (error) {
-    return failure(
-      '无法连接待办网关：' + (error && error.message ? error.message : 'network error'),
-      'network_error'
-    );
+    return failure('无法连接记忆网关：' + (error && error.message ? error.message : 'network error'), 'network_error');
   }
 
   let result;
   try {
     result = await response.json();
   } catch (_error) {
-    return failure('待办网关返回了无效 JSON', 'invalid_gateway_response');
+    return failure('记忆网关返回了无效 JSON', 'invalid_gateway_response', response.status);
   }
   if (!response.ok || !result.success) {
-    return failure(
-      result.error || ('待办操作失败，HTTP ' + response.status),
-      result.error_code || 'gateway_error'
-    );
+    return failure(result.error || ('记忆操作失败，HTTP ' + response.status), result.error_code || 'gateway_error', response.status);
   }
   return { success: true, data: result };
 }
 
-function optionalText(input, name, payload) {
-  if (typeof input[name] === 'string' && input[name].trim()) {
-    payload[name] = input[name].trim();
-  }
-}
-
-async function create_todo(params) {
+function cleanMemoryPayload(params) {
   const input = params || {};
-  const content = typeof input.content === 'string' ? input.content.trim() : '';
-  if (!content) {
-    return failure('content 不能为空', 'invalid_content');
+  const kind = text(input.continuity_type).toLowerCase();
+  if (CONTINUITY_TYPES.indexOf(kind) < 0) {
+    return failure('continuity_type 必须是六类连续感记忆之一', 'invalid_continuity_type');
   }
-  const payload = { content: content };
-  for (const name of ['scheduled_start', 'scheduled_end', 'todo_type', 'status', 'estimated_time', 'note']) {
-    optionalText(input, name, payload);
+  const content = text(input.content);
+  const reason = text(input.reason);
+  if (content.length < 5 || reason.length < 3) {
+    return failure('content 至少 5 个字符，reason 至少 3 个字符', 'invalid_content');
   }
-  if (input.is_private !== undefined) {
-    if (typeof input.is_private !== 'boolean') {
-      return failure('is_private 必须是布尔值', 'invalid_is_private');
+
+  const data = parseContinuityData(input.continuity_data);
+  const dataError = validateContinuityData(kind, data);
+  if (dataError) return dataError;
+
+  const threadState = text(input.thread_state).toLowerCase();
+  if (kind === 'thread' && THREAD_STATES.indexOf(threadState) < 0) {
+    return failure('thread 必须提供有效 thread_state', 'invalid_thread_state');
+  }
+  if (kind !== 'thread' && threadState) {
+    return failure('只有 thread 可以提供 thread_state', 'invalid_thread_state');
+  }
+
+  const importance = integer(input.importance, 5);
+  const continuityValue = integer(input.continuity_value, importance);
+  if (importance === null || importance < 1 || importance > 10 || continuityValue === null || continuityValue < 1 || continuityValue > 10) {
+    return failure('importance 和 continuity_value 必须是 1-10 的整数', 'invalid_importance');
+  }
+
+  const mode = text(input.update_mode).toLowerCase() || 'append';
+  const key = text(input.memory_key).toLowerCase();
+  if (mode !== 'append' && mode !== 'replace') {
+    return failure('update_mode 必须是 append 或 replace', 'invalid_update_mode');
+  }
+  if (mode === 'replace' && !/^[a-z0-9][a-z0-9._:/-]{2,119}$/.test(key)) {
+    return failure('replace 必须提供有效的稳定 memory_key', 'invalid_memory_key');
+  }
+  if (mode === 'append' && key) {
+    return failure('append 时不要提供 memory_key', 'invalid_memory_key');
+  }
+  if (kind === 'interaction_rule' && mode !== 'replace') {
+    return failure('interaction_rule 必须使用 replace 和稳定 memory_key', 'invalid_interaction_rule_mode');
+  }
+
+  const subject = text(input.subject).toLowerCase() || 'shared';
+  if (['yezi', 'qi', 'shared', 'project', 'other'].indexOf(subject) < 0) {
+    return failure('subject 无效', 'invalid_subject');
+  }
+  const sourceType = text(input.source_type).toLowerCase() || 'natural_chat';
+  const sourceTypes = ['natural_chat', 'persona_prompt', 'code', 'document', 'quote', 'roleplay', 'tool_result', 'system_meta', 'unknown'];
+  if (sourceTypes.indexOf(sourceType) < 0) {
+    return failure('source_type 无效', 'invalid_source_type');
+  }
+  const retentionClass = text(input.retention_class).toLowerCase() || 'normal';
+  if (['normal', 'core'].indexOf(retentionClass) < 0) {
+    return failure('retention_class 必须是 normal 或 core', 'invalid_retention_class');
+  }
+
+  const cfg = getConfig();
+  const payload = {
+    assistant_id: cfg.assistantId,
+    content: content,
+    reason: reason,
+    continuity_type: kind,
+    thread_state: kind === 'thread' ? threadState : null,
+    continuity_data: data,
+    importance: importance,
+    continuity_value: continuityValue,
+    subject: subject,
+    source_type: sourceType,
+    retention_class: retentionClass,
+    participants: stringList(input.participants, ['yezi', 'qi', 'other'], ['yezi', 'qi']).slice(0, 3),
+    update_mode: mode,
+  };
+  if (key) payload.memory_key = key;
+  if (text(input.title)) payload.title = text(input.title);
+  if (text(input.tags)) payload.tags = stringList(input.tags, null, []).slice(0, 5);
+  if (text(input.conversation_id)) payload.conversation_id = text(input.conversation_id);
+  if (input.source_message_id !== undefined && input.source_message_id !== null && input.source_message_id !== '') {
+    const sourceMessageId = integer(input.source_message_id, null);
+    if (sourceMessageId === null || sourceMessageId <= 0) {
+      return failure('source_message_id 必须是正整数', 'invalid_source_message_id');
     }
-    payload.is_private = input.is_private;
+    payload.source_message_id = sourceMessageId;
   }
-  return callTodoGateway('/v1/todos', payload);
+  return payload;
 }
 
-async function list_today_todos(_params) {
-  const cfg = getConfig();
-  return callTodoGateway('/v1/todos/query', {
-    scope: 'today',
-    timezone_offset_minutes: cfg.timezoneOffsetMinutes,
-    limit: 50,
+async function request_memory(params) {
+  const payload = cleanMemoryPayload(params);
+  if (payload && payload.success === false) return payload;
+  const needsUserReview = USER_REVIEW_TYPES.indexOf(payload.continuity_type) >= 0;
+  const result = await callGateway('/v1/memory-requests', { body: payload });
+  if (!result.success) return result;
+  const gatewayResult = result.data;
+  return {
+    success: true,
+    data: {
+      request_id: gatewayResult.request_id || null,
+      memory_id: gatewayResult.memory_id || null,
+      status: gatewayResult.status || null,
+      created: Boolean(gatewayResult.created),
+      updated: Boolean(gatewayResult.updated),
+      deduplicated: Boolean(gatewayResult.deduplicated),
+      requires_user_review: needsUserReview,
+      message: gatewayResult.message || '网关已处理记忆请求',
+    },
+  };
+}
+
+function extractReviewable(result) {
+  const rows = Array.isArray(result.requests)
+    ? result.requests
+    : (result.data && Array.isArray(result.data.requests) ? result.data.requests : []);
+  return rows.filter(function (item) {
+    return USER_REVIEW_TYPES.indexOf(String(item.continuity_type || '').toLowerCase()) < 0;
   });
 }
 
-function cleanTodoId(params) {
-  const value = params && typeof params.todo_id === 'string' ? params.todo_id.trim() : '';
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
-    return '';
-  }
-  return value;
+async function fetchReviewableRequests() {
+  const cfg = getConfig();
+  const result = await callGateway('/v1/memory-requests/reviewable', {
+    body: { assistant_id: cfg.assistantId, excluded_continuity_types: USER_REVIEW_TYPES, limit: 50 },
+  });
+  if (!result.success) return result;
+  return { success: true, data: { requests: extractReviewable(result.data) } };
 }
 
-async function complete_todo(params) {
-  const todoId = cleanTodoId(params);
-  if (!todoId) {
-    return failure('todo_id 必须是有效 UUID', 'invalid_todo_id');
-  }
-  return callTodoGateway('/v1/todos/' + encodeURIComponent(todoId) + '/complete', {});
-}
-
-async function snooze_todo(params) {
+async function review_memory_requests(params) {
+  const cfg = getConfig();
   const input = params || {};
-  const todoId = cleanTodoId(input);
-  if (!todoId) {
-    return failure('todo_id 必须是有效 UUID', 'invalid_todo_id');
+  const action = text(input.action).toLowerCase();
+  if (REVIEW_ACTIONS.indexOf(action) < 0) {
+    return failure('action 必须是 list、approve、reject、merge、duplicate 或 conflict', 'invalid_review_action');
   }
-  const scheduledStart = typeof input.scheduled_start === 'string'
-    ? input.scheduled_start.trim()
-    : '';
-  if (!scheduledStart) {
-    return failure('scheduled_start 不能为空', 'invalid_scheduled_start');
-  }
-  const payload = { scheduled_start: scheduledStart };
-  optionalText(input, 'scheduled_end', payload);
-  return callTodoGateway('/v1/todos/' + encodeURIComponent(todoId) + '/snooze', payload);
-}
+  const reviewable = await fetchReviewableRequests();
+  if (!reviewable.success || action === 'list') return reviewable;
 
-async function cancel_todo(params) {
-  const todoId = cleanTodoId(params);
-  if (!todoId) {
-    return failure('todo_id 必须是有效 UUID', 'invalid_todo_id');
+  const requestId = integer(input.request_id, null);
+  if (requestId === null || requestId <= 0) {
+    return failure('审核动作必须提供有效 request_id', 'invalid_request_id');
   }
-  return callTodoGateway('/v1/todos/' + encodeURIComponent(todoId) + '/cancel', {});
+  const selected = reviewable.data.requests.find(function (item) { return Number(item.id) === requestId; });
+  if (!selected) {
+    return failure('该申请不存在、已处理，或属于只能由叶子审核的分类', 'request_not_reviewable');
+  }
+
+  const body = { action: action, assistant_id: cfg.assistantId };
+  ['content', 'title', 'review_note', 'update_mode', 'memory_key'].forEach(function (name) {
+    if (text(input[name])) body[name] = text(input[name]);
+  });
+  if (text(input.tags)) body.tags = stringList(input.tags, null, []).slice(0, 5);
+  if (input.importance !== undefined && input.importance !== null && input.importance !== '') {
+    const importance = integer(input.importance, null);
+    if (importance === null || importance < 1 || importance > 10) {
+      return failure('importance 必须是 1-10 的整数', 'invalid_importance');
+    }
+    body.importance = importance;
+  }
+  if (input.related_memory_id !== undefined && input.related_memory_id !== null && input.related_memory_id !== '') {
+    const relatedMemoryId = integer(input.related_memory_id, null);
+    if (relatedMemoryId === null || relatedMemoryId <= 0) {
+      return failure('related_memory_id 必须是正整数', 'invalid_related_memory_id');
+    }
+    body.related_memory_id = relatedMemoryId;
+  }
+  return callGateway('/v1/memory-requests/' + encodeURIComponent(String(requestId)) + '/review', { body: body });
 }
 
 exports.request_memory = request_memory;
-exports.create_todo = create_todo;
-exports.list_today_todos = list_today_todos;
-exports.complete_todo = complete_todo;
-exports.snooze_todo = snooze_todo;
-exports.cancel_todo = cancel_todo;
-
+exports.review_memory_requests = review_memory_requests;

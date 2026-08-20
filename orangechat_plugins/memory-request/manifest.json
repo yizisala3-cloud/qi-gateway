@@ -1,8 +1,8 @@
 {
   "id": "com.orangechat.plugin.memory-request",
-  "name": "记忆与待办",
-  "description": "让 AI 提交待用户审核的长期记忆申请，并管理当前用户与角色的待办。所有操作均通过 qi-gateway 的普通 HTTP 接口完成。",
-  "version": "2.0.0",
+  "name": "记忆",
+      "description": "让栖主动写入连续感记忆，并在叶子要求或栖认为需要时审核普通待审记忆。episode、profile、interaction_rule 始终保留给叶子审核。replace 必须配合稳定 memory_key。",
+  "version": "3.1.0",
   "author": "qi-gateway",
   "icon": "🧠",
   "entry": "main.js",
@@ -11,15 +11,15 @@
       "name": "gateway_url",
       "type": "string",
       "label": "网关地址",
-      "description": "qi-gateway 的 HTTPS 地址，例如 https://example.com",
+      "description": "qi-gateway 的 HTTP(S) 地址",
       "required": true,
       "placeholder": "https://example.com"
     },
     {
       "name": "plugin_token",
       "type": "string",
-      "label": "插件专用 Token",
-      "description": "与网关 MEMORY_PLUGIN_TOKEN 相同；不要填写 Supabase 密钥或聊天网关 Token",
+      "label": "记忆插件 Token",
+      "description": "记忆插件专用 Token；不要填写 Supabase 或网关管理密钥",
       "required": true,
       "placeholder": "单独生成的长随机字符串"
     },
@@ -30,143 +30,47 @@
       "description": "当前橘瓣角色对应的 assistant_id",
       "required": true,
       "placeholder": "assistant UUID"
-    },
-    {
-      "name": "todo_plugin_token",
-      "type": "string",
-      "label": "待办插件 Token",
-      "description": "与网关 TODO_PLUGIN_TOKEN 相同；必须和记忆 Token 分开配置",
-      "required": true,
-      "placeholder": "另一个长随机字符串"
-    },
-    {
-      "name": "user_name",
-      "type": "string",
-      "label": "用户名",
-      "description": "必须与 Supabase todos 表中的 user_name 完全一致",
-      "required": true,
-      "placeholder": "例如：叶子"
-    },
-    {
-      "name": "ai_name",
-      "type": "string",
-      "label": "AI 名称",
-      "description": "当前橘瓣角色在 todos 表中使用的 ai_name",
-      "required": true,
-      "placeholder": "例如：苏02"
-    },
-    {
-      "name": "timezone_offset_minutes",
-      "type": "string",
-      "label": "时区偏移分钟",
-      "description": "中国标准时间填写 480",
-      "required": false,
-      "placeholder": "480"
     }
   ],
   "tools": [
     {
       "name": "request_memory",
-      "description": "申请长期记住一条信息。仅当信息对未来多次对话有明确长期价值时调用；不要记录密码、Token、支付信息、完整敏感原文、短暂情绪、一次性指令、普通寒暄或模型自行推测的事实。进度、状态、位置等会变化的信息应使用 replace 和稳定 memory_key；普通相似内容不要擅自覆盖。调用后只进入 pending，必须由用户审核才会生效。",
+      "description": "主动写入有长期价值的连续感记忆，不要每轮调用，也不必每次先询问叶子。可写 moment、thread、episode、inside_joke、profile、interaction_rule；普通聊天、重复内容、短暂情绪、秘密凭据不要保存。episode、profile、interaction_rule 必须由叶子审核；interaction_rule 只有叶子明确提出长期适用规则或明确要求记住时才可调用，并使用 replace + memory_key。记忆正文使用“叶子”和“栖”，应能脱离当前窗口独立理解。工具失败时不得假装成功，成功后不要机械复述数据库操作。",
       "parameters": [
-        {
-          "name": "content",
-          "type": "string",
-          "required": true,
-          "description": "希望长期记住的客观内容，使用简洁、中性、可独立理解的一到两句话"
-        },
-        {
-          "name": "reason",
-          "type": "string",
-          "required": true,
-          "description": "该信息为何对未来对话具有长期价值"
-        },
-        {
-          "name": "title",
-          "type": "string",
-          "required": false,
-          "description": "简短标题"
-        },
-        {
-          "name": "tags",
-          "type": "string",
-          "required": false,
-          "description": "1-5 个逗号分隔的关键词"
-        },
-        {
-          "name": "importance",
-          "type": "integer",
-          "required": false,
-          "description": "长期重要度 1-10，默认 5"
-        },
-        {
-          "name": "update_mode",
-          "type": "string",
-          "required": false,
-          "description": "默认 append；仅当这是进度、状态、位置等同一可变事实的新版本时填写 replace"
-        },
-        {
-          "name": "memory_key",
-          "type": "string",
-          "required": false,
-          "description": "replace 时必填的稳定主题键，3-120 位小写 ASCII，例如 project.qi-gateway.progress；同一事实后续更新必须沿用完全相同的键"
-        },
-        {
-          "name": "conversation_id",
-          "type": "string",
-          "required": false,
-          "description": "当前会话 ID；不知道时不要编造"
-        },
-        {
-          "name": "source_message_id",
-          "type": "integer",
-          "required": false,
-          "description": "Supabase chat_messages 中的来源消息 ID；不知道时不要编造"
-        }
+        {"name": "content", "type": "string", "required": true, "description": "可独立理解的自然语言记忆正文，使用叶子和栖称呼"},
+        {"name": "reason", "type": "string", "required": true, "description": "为什么这条内容在未来仍有价值"},
+        {"name": "continuity_type", "type": "string", "required": true, "description": "moment、thread、episode、inside_joke、profile 或 interaction_rule"},
+        {"name": "continuity_data", "type": "string", "required": true, "description": "对应分类的完整 JSON 对象字符串；时间不确定时使用 null，不得编造"},
+        {"name": "thread_state", "type": "string", "required": false, "description": "仅 thread 使用：open、paused、resolved、dissolved、abandoned 或 unknown"},
+        {"name": "title", "type": "string", "required": false, "description": "简短、具体的标题"},
+        {"name": "tags", "type": "string", "required": false, "description": "最多 5 个逗号分隔标签"},
+        {"name": "importance", "type": "integer", "required": false, "description": "重要度 1-10，默认 5"},
+        {"name": "continuity_value", "type": "integer", "required": false, "description": "连续感价值 1-10，默认与 importance 相同"},
+        {"name": "subject", "type": "string", "required": false, "description": "yezi、qi、shared、project 或 other；默认 shared"},
+        {"name": "source_type", "type": "string", "required": false, "description": "默认 natural_chat；也可用 code、document、quote、roleplay、tool_result 等"},
+        {"name": "retention_class", "type": "string", "required": false, "description": "normal 或 core；默认 normal"},
+        {"name": "participants", "type": "string", "required": false, "description": "逗号分隔的 yezi、qi、other；默认 yezi,qi"},
+        {"name": "update_mode", "type": "string", "required": false, "description": "append 或 replace；默认 append"},
+        {"name": "memory_key", "type": "string", "required": false, "description": "replace 时必填的稳定主题键；append 时不要提供"},
+        {"name": "conversation_id", "type": "string", "required": false, "description": "当前会话 ID；不知道时不要编造"},
+        {"name": "source_message_id", "type": "integer", "required": false, "description": "来源 chat_messages ID；不知道时不要编造"}
       ]
     },
     {
-      "name": "create_todo",
-      "description": "为当前用户或 AI 新建待办。用户明确交代事项、每日计划或需要未来提醒的事情时可主动调用；时间必须带时区，例如 2026-08-03T09:00:00+08:00。不要重复创建已经存在的同一事项。",
+      "name": "review_memory_requests",
+      "description": "查看或审核栖有权处理的普通待审记忆。通常在叶子主动要求时调用；栖也可自行判断是否需要查看，但插件不会自动触发。episode、profile、interaction_rule 永远不会出现在本工具列表中，也不能由本工具审核。action=list 查看；其余动作与叶子审核权限一致。",
       "parameters": [
-        {"name": "content", "type": "string", "required": true, "description": "简洁、可执行的待办内容"},
-        {"name": "scheduled_start", "type": "string", "required": false, "description": "开始或提醒时间，ISO 8601 且必须带时区"},
-        {"name": "scheduled_end", "type": "string", "required": false, "description": "结束时间，ISO 8601 且必须带时区"},
-        {"name": "todo_type", "type": "string", "required": false, "description": "user 表示用户待办，ai 表示 AI 自己的待办；默认 ai"},
-        {"name": "status", "type": "string", "required": false, "description": "regular 或 long_term；默认 regular"},
-        {"name": "estimated_time", "type": "string", "required": false, "description": "预计耗时，例如 30分钟"},
-        {"name": "is_private", "type": "boolean", "required": false, "description": "是否为私密待办，默认 false"},
-        {"name": "note", "type": "string", "required": false, "description": "必要的简短备注"}
-      ]
-    },
-    {
-      "name": "list_today_todos",
-      "description": "读取当前用户与当前 AI 今天应处理的待办，包括已逾期和未设置时间的开放待办；不会返回已完成、已取消、空心占位或时间标记。需要规划今天、检查进度或决定是否提醒时主动调用。",
-      "parameters": []
-    },
-    {
-      "name": "complete_todo",
-      "description": "将指定待办标记为已完成。只有用户确认完成，或 AI 确认自己的待办已完成时调用。",
-      "parameters": [
-        {"name": "todo_id", "type": "string", "required": true, "description": "list_today_todos 返回的待办 UUID"}
-      ]
-    },
-    {
-      "name": "snooze_todo",
-      "description": "将指定待办延后到新的时间，并重新设为开放状态。用户说稍后、改天或给出新时间时调用；新时间必须带时区。",
-      "parameters": [
-        {"name": "todo_id", "type": "string", "required": true, "description": "待办 UUID"},
-        {"name": "scheduled_start", "type": "string", "required": true, "description": "新的开始或提醒时间，ISO 8601 且必须带时区"},
-        {"name": "scheduled_end", "type": "string", "required": false, "description": "可选的新结束时间，ISO 8601 且必须带时区"}
-      ]
-    },
-    {
-      "name": "cancel_todo",
-      "description": "取消指定待办。该操作只会软隐藏记录，不会永久删除，用户明确取消事项时调用。",
-      "parameters": [
-        {"name": "todo_id", "type": "string", "required": true, "description": "待办 UUID"}
+        {"name": "action", "type": "string", "required": true, "description": "list、approve、reject、merge、duplicate 或 conflict"},
+        {"name": "request_id", "type": "integer", "required": false, "description": "除 list 外必填的待审申请 ID"},
+        {"name": "content", "type": "string", "required": false, "description": "审核时可选的修订正文"},
+        {"name": "title", "type": "string", "required": false, "description": "审核时可选的修订标题"},
+        {"name": "tags", "type": "string", "required": false, "description": "审核时可选的逗号分隔标签"},
+        {"name": "importance", "type": "integer", "required": false, "description": "审核时可选的重要度 1-10"},
+        {"name": "review_note", "type": "string", "required": false, "description": "简短审核说明"},
+        {"name": "update_mode", "type": "string", "required": false, "description": "append 或 replace"},
+        {"name": "memory_key", "type": "string", "required": false, "description": "replace 时使用的稳定主题键"},
+        {"name": "related_memory_id", "type": "integer", "required": false, "description": "merge、duplicate 或 conflict 的目标正式记忆 ID"}
       ]
     }
   ]
 }
-

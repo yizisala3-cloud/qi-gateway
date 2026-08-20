@@ -1,4 +1,5 @@
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -126,6 +127,7 @@ class Phase1MigrationContractTests(unittest.TestCase):
         writer = self.sql.split("create or replace function public.store_continuity_candidate", 1)[1].split("create or replace function public.commit_memory_digest_run", 1)[0]
         self.assertIn("insert into public.memory_requests", writer)
         self.assertNotIn("insert into public.memory_relations", writer)
+        self.assertNotIn("insert into public.memory_relations", self.sql)
 
     def test_relation_types_and_direction_trigger_are_bounded(self):
         for value in ("part_of", "advances", "resolves", "dissolves", "origin_of", "evokes", "supports", "contradicts", "governed_by"):
@@ -142,7 +144,9 @@ class Phase1MigrationContractTests(unittest.TestCase):
 
     def test_legacy_nulls_remain_allowed_but_new_writes_are_complete(self):
         self.assertIn("continuity_schema_version is null and continuity_data is null", self.sql)
-        self.assertIn("continuity_schema_version = 1 and continuity_id is not null", self.sql)
+        request_constraint = self.sql.split("memory_requests_continuity_v1_check", 1)[1].split("memory_requests_automatic_type_check", 1)[0]
+        self.assertIn("continuity_schema_version = 1 and public.validate_continuity_data", request_constraint)
+        self.assertNotIn("continuity_id is not null", request_constraint)
         self.assertIn("memory_request_unclassified_legacy", self.sql)
 
     def test_review_sync_preserves_non_null_values_when_request_fields_are_null(self):
@@ -161,11 +165,81 @@ class Phase1MigrationContractTests(unittest.TestCase):
         self.assertIn("then new.continuity_data else memory.continuity_data end", sync)
 
     def test_plugin_request_source_is_preserved_until_review(self):
-        create = self.sql.split("create or replace function public.create_memory_request_v3", 1)[1].split("create or replace function public.store_continuity_candidate", 1)[0]
-        self.assertIn("'pending','orangechat_plugin'", create)
-        self.assertIn("source='orangechat_plugin'", create)
-        self.assertIn("continuity_type is distinct from 'interaction_rule' or source = 'orangechat_plugin'", self.sql)
+        create = self.sql.split("create or replace function public.create_memory_request_v4", 1)[1].split("create or replace function public.store_continuity_candidate", 1)[0]
+        self.assertIn("'pending',p_source", create)
+        self.assertIn("p_source not in ('orangechat_plugin','mcp_memory')", create)
+        self.assertIn("continuity_type is distinct from 'interaction_rule' or source in ('orangechat_plugin','mcp_memory')", self.sql)
         self.assertIn("source=case when new.source='daily_digest' then 'daily_digest' else memory.source end", self.sql)
+
+    def test_relation_proposals_are_absent_from_phase1(self):
+        self.assertNotIn("proposed_relations", self.sql)
+        self.assertNotIn("validate_proposed_relations", self.sql)
+
+    def test_low_risk_direct_writer_and_high_risk_pending_boundary(self):
+        direct = self.sql.split("create or replace function public.write_memory_direct_v1", 1)[1].split("create table public.memory_relations", 1)[0]
+        self.assertIn("p_continuity_type not in ('moment','thread','inside_joke')", direct)
+        self.assertIn("review_memory_request_v5", direct)
+        writer = self.sql.split("create or replace function public.store_continuity_candidate", 1)[1].split("create or replace function public.commit_memory_digest_run", 1)[0]
+        self.assertIn("v_type in ('moment','thread','inside_joke')", writer)
+        self.assertIn("v_type not in ('moment','thread','episode','inside_joke')", writer)
+
+    def test_pending_does_not_allocate_formal_identity(self):
+        create = self.sql.split("create or replace function public.create_memory_request_v4", 1)[1].split("create or replace function public.store_continuity_candidate", 1)[0]
+        self.assertIn("p_continuity_type,p_thread_state,null,1,p_continuity_data", create)
+        self.assertNotIn("allocate_memory_continuity_id", create)
+
+    def test_first_replace_creates_identity_instead_of_reporting_stale(self):
+        allocator = self.sql.split("create or replace function public.allocate_memory_continuity_id", 1)[1].split("create or replace function public.create_memory_request_v4", 1)[0]
+        missing = allocator.split("if v_memory_id is null then", 1)[1].split("end if;", 1)[0]
+        self.assertIn("insert into public.memory_continuity_objects", missing)
+        self.assertIn("return v_id", missing)
+        self.assertNotIn("memory_request_stale_update", missing)
+
+    def test_idempotency_and_content_dedupe_run_before_one_minute_rate_limit(self):
+        create = self.sql.split("create or replace function public.create_memory_request_v4", 1)[1].split("create or replace function public.store_continuity_candidate", 1)[0]
+        self.assertLess(create.index("idempotency_key=p_idempotency_key"), create.index("select count(*) into v_recent_count"))
+        self.assertLess(create.index("content_hash=p_content_hash"), create.index("select count(*) into v_recent_count"))
+        self.assertIn("now()-interval '1 minute'", create)
+
+    def test_store_candidate_preserves_dedupe_and_evidence_guards(self):
+        writer = self.sql.split("create or replace function public.store_continuity_candidate", 1)[1].split("create or replace function public.commit_memory_digest_run", 1)[0]
+        for contract in (
+            "status in ('pending','approved','merged','duplicate','conflict','rejected')",
+            "memory_dedupe_text_similarity(content,v_content)>=.72",
+            "content_hash=v_content_hash",
+            "memory_key=v_key",
+            "memory_dedupe_text_similarity(content,v_content)>=.86",
+            "1-(embedding<=>v_embedding)>=.94",
+            "is_active=true and verified='verified'",
+            "v_requested_evidence_count not between 1 and 8",
+            "cardinality(v_ids)<>v_requested_evidence_count",
+        ):
+            self.assertIn(contract, writer)
+        self.assertIn("not (v_mode='replace' and v_key is not null and memory_key=v_key)", writer)
+
+    def test_python_rpc_payload_names_match_phase1_signatures(self):
+        source = (ROOT / "gateway" / "memory_requests.py").read_text(encoding="utf-8")
+        create_expected = {
+            "p_assistant_id", "p_conversation_id", "p_source_message_id", "p_content",
+            "p_title", "p_tags", "p_importance", "p_reason", "p_content_hash",
+            "p_idempotency_key", "p_rate_limit", "p_memory_key", "p_update_mode",
+            "p_continuity_type", "p_thread_state", "p_continuity_schema_version",
+            "p_continuity_data", "p_subject", "p_source_type", "p_continuity_value",
+            "p_retention_class", "p_participants", "p_source",
+        }
+        signature = self.sql.split("create or replace function public.create_memory_request_v4(", 1)[1].split(") returns jsonb", 1)[0]
+        sql_names = set(re.findall(r"\b(p_[a-z_]+)\s+", signature))
+        self.assertEqual(sql_names, create_expected)
+        for name in create_expected:
+            self.assertIn(f'"{name}"', source)
+        direct = self.sql.split("create or replace function public.write_memory_direct_v1(", 1)[1].split(") returns jsonb", 1)[0]
+        self.assertEqual(set(re.findall(r"\b(p_[a-z_]+)\s+", direct)), create_expected | {"p_reviewed_by"})
+
+    def test_sql_validator_rejects_unknown_keys_and_fractional_integers_safely(self):
+        self.assertIn("continuity_object_keys_ok", self.sql)
+        self.assertIn("p_data is null or jsonb_typeof(p_data) <> 'object'", self.sql)
+        self.assertIn("v_text !~ '^-?[0-9]+$'", self.sql)
+        self.assertIn("exception when others then return false", self.sql)
 
     def test_recall_returns_new_structure_and_preserves_limits(self):
         for field in ("continuity_id uuid", "continuity_schema_version smallint", "continuity_data jsonb"):

@@ -105,7 +105,7 @@ SHADOW_SYSTEM_PROMPT = """你是“连续感记忆 Shadow Preview”提取器，
 
 ## 输出 JSON
 只返回严格 JSON，不要 Markdown、说明或代码围栏。每条 candidate 必须包含非空 title，并使用以下字段：
-{"candidates":[{"content":"...","continuity_type":"thread","continuity_data":{"open_question":"...","current_state":"...","next_expected":null,"closure_criteria":[],"closure_summary":null,"closure_reason":null,"opened_at":null,"closed_at":null,"abstract_retrieval_hints":[],"concrete_retrieval_hints":[]},"proposed_relations":[],"subject":"shared","source_type":"natural_chat","thread_state":"open","importance":5,"continuity_value":9,"confidence":0.85,"evidence_message_ids":[123,124],"evidence_start_time":null,"evidence_end_time":null,"source_time":null,"memory_time":null,"time_precision":"unknown","title":"...","participants":["yezi","qi"],"reason":"...","retention_class":"normal"}]}"""
+{"candidates":[{"content":"...","continuity_type":"thread","continuity_data":{"open_question":"...","current_state":"...","next_expected":null,"closure_criteria":[],"closure_summary":null,"closure_reason":null,"opened_at":null,"closed_at":null,"abstract_retrieval_hints":[],"concrete_retrieval_hints":[]},"subject":"shared","source_type":"natural_chat","thread_state":"open","importance":5,"continuity_value":9,"confidence":0.85,"evidence_message_ids":[123,124],"evidence_start_time":null,"evidence_end_time":null,"source_time":null,"memory_time":null,"time_precision":"unknown","title":"...","participants":["yezi","qi"],"reason":"...","retention_class":"normal"}]}"""
 
 # Formal execution shares the validated prompt verbatim except for the
 # Shadow-only observation label. Keeping this derived avoids prompt drift.
@@ -429,7 +429,6 @@ def parse_shadow_output(
             "continuity_type": continuity_type,
             "continuity_schema_version": SCHEMA_VERSION,
             "continuity_data": continuity_data,
-            "proposed_relations": raw.get("proposed_relations", [])[:20] if isinstance(raw.get("proposed_relations", []), list) else [],
             "subject": subject,
             "source_type": source_type,
             "thread_state": thread_state,

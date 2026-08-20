@@ -34,6 +34,7 @@
 | `SUPABASE_SECRET_KEY` / `SUPABASE_SERVICE_ROLE_KEY` | 仅服务端使用的 Supabase 写入密钥 |
 | `SUPABASE_KEY` | 兼容用 publishable/anon key，不用于主动记忆写入 |
 | `MEMORY_PLUGIN_TOKEN` | 橘瓣记忆申请插件的独立鉴权 Token |
+| `MCP_MEMORY_TOKEN` | `/mcp` 远程记忆工具的独立 Bearer Token |
 | `MEMORY_REQUEST_RATE_LIMIT` | 每个 assistant 每分钟最多提交的记忆申请数，默认 6 |
 | `TODO_PLUGIN_TOKEN` | 橘瓣待办插件的独立鉴权 Token |
 | `TODO_REQUEST_RATE_LIMIT` | 单实例每分钟最多处理的待办插件请求数，默认 60 |
@@ -59,6 +60,9 @@
 | `/v1/chat/completions` | POST | 核心聊天接口，OpenAI 兼容 |
 | `/v1/models` | GET | 模型列表 |
 | `/v1/memory-requests` | POST | 橘瓣插件提交 pending 记忆申请（插件专用 Token） |
+| `/v1/memory-requests/reviewable` | POST | 列出当前 assistant 下 AI 可审核的低权重申请 |
+| `/v1/memory-requests/{id}/review` | POST | 橘瓣 AI 审核低权重申请；服务端再次限制分类 |
+| `/mcp` | Streamable HTTP | 标准 MCP 记忆工具（独立 MCP Token） |
 | `/v1/todos` | POST | 创建当前用户与角色范围内的待办（待办插件 Token） |
 | `/v1/todos/query` | POST | 查询今日、逾期或全部开放待办（待办插件 Token） |
 | `/v1/todos/{id}/complete` | POST | 标记待办完成（待办插件 Token） |
@@ -68,11 +72,13 @@
 | `/health` | GET | 健康检查（无需鉴权） |
 | `/status` | GET | 网关状态（需鉴权） |
 
-## 橘瓣记忆与待办整合插件
+## MCP 记忆工具与橘瓣兼容插件
 
-插件源码位于 `orangechat_plugins/memory-request/`。同一个插件同时暴露记忆申请和待办管理工具；保留原插件 ID，可作为旧“记忆申请”插件的升级版导入。记忆与待办共用网关地址，但分别使用 `MEMORY_PLUGIN_TOKEN` 和 `TODO_PLUGIN_TOKEN`。Supabase 服务端密钥始终留在网关环境变量中。
+推荐客户端通过官方 Python MCP SDK 提供的 Streamable HTTP 端点连接：URL 填 `https://你的域名/mcp`，自定义请求头填 `Authorization: Bearer <MCP_MEMORY_TOKEN>`。协议协商、初始化、ping、`tools/list`、`tools/call`、请求 ID、Content-Type/Accept 和标准工具错误由 SDK 处理。服务使用无持久会话模式，只暴露 `request_memory` 与 `review_memory_requests`。
 
-AI 调用 `request_memory` 后，重复申请由数据库原子去重，所有新申请均为 `pending`，不会进入正常记忆召回。管理员可以在 Dashboard 的“记忆申请”页面编辑后通过或拒绝；通过操作会在数据库事务内写入一条 `verified` 正式记忆，拒绝记录则留存审计。
+兼容插件源码位于 `orangechat_plugins/memory-request/`，版本 3.1.0，保留原插件 ID，但只包含同名的两个记忆工具和三个配置，不再包含待办。插件继续使用独立的 `MEMORY_PLUGIN_TOKEN`；Supabase 服务端密钥始终留在网关环境变量中。
+
+`moment/thread/inside_joke` 经完整校验、去重和版本处理后，在单个数据库事务中直接成为正式记忆；`episode/profile/interaction_rule` 强制进入 pending，由用户审核。客户端请求头不能改变这个分类边界。MCP 申请保留 `memory_requests.source=mcp_memory`，旧插件申请保留 `orangechat_plugin`，正式记忆按既有规则使用 `ai_tool_request`（自动总结审核结果保留 `daily_digest`）。
 
 进度、状态、位置等可变事实可以使用 `update_mode=replace` 和稳定的 ASCII `memory_key`。审核通过后，新版本会原子启用，旧版本仅软失效，并通过 `supersedes_memory_id` / `superseded_by_memory_id` 保留双向替代关系；过期申请不得反向覆盖较新的已审核版本。普通相似内容默认仍是独立候选，不会仅凭相似度自动覆盖。
 
@@ -80,7 +86,7 @@ AI 调用 `request_memory` 后，重复申请由数据库原子去重，所有�
 
 ## 橘瓣待办插件
 
-整合插件已包含创建、查看今日待办、完成、延后和取消五个工具；`orangechat_plugins/todo/` 仍保留为只需要待办功能时使用的独立版本。插件只通过普通 HTTP 调用网关，不使用 WebSocket，也不持有 Supabase 密钥。网关对每次读写同时约束 `user_name` 与 `ai_name`；取消操作只会设置 `is_hidden=true`，不会永久删除记录。
+待办能力不再并入记忆兼容插件；需要时使用 `orangechat_plugins/todo/` 的独立版本。插件只通过普通 HTTP 调用网关，不使用 WebSocket，也不持有 Supabase 密钥。网关对每次读写同时约束 `user_name` 与 `ai_name`；取消操作只会设置 `is_hidden=true`，不会永久删除记录。
 
 “今日待办”包含今天已排期、已逾期和未排期的开放事项，并排除已完成、已取消、空心占位和开始/结束标记。时间参数必须是带时区的 ISO 8601 字符串。橘瓣原生主动消息触发时，网关会读取这些开放待办并作为独立辅助 system 消息追加，原始 system prompt 保持不变；查询失败时直接跳过，不会阻断主动回复。当前部署仅供一个用户与一个 AI 使用，因此主动提醒读取不增加身份环境变量，插件的写入和修改接口仍保留原有身份约束。
 
