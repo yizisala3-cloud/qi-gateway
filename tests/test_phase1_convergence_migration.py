@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MIGRATION = ROOT / "supabase" / "migrations" / "20260820010000_converge_phase1_continuity_mcp.sql"
+MIGRATION = ROOT / "supabase" / "migrations" / "20260820090617_converge_phase1_continuity_mcp.sql"
 
 
 class Phase1ConvergenceMigrationTests(unittest.TestCase):
