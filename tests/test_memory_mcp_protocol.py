@@ -19,17 +19,60 @@ from gateway.memory_requests import MemoryRequestError
 AUTO_TYPES = {"moment", "thread", "inside_joke"}
 PENDING_TYPES = {"episode", "profile", "interaction_rule"}
 
+EXPECTED_TOOLS = [
+    "remember_moment",
+    "remember_thread",
+    "remember_inside_joke",
+    "propose_episode",
+    "propose_profile",
+    "propose_interaction_rule",
+    "review_memory_requests",
+]
 
-def _continuity_data(kind: str) -> tuple[str | None, dict]:
+
+def _tool_call(kind: str, content: str, reason: str) -> tuple[str, dict]:
+    """Map a continuity type to its typed tool name and flat arguments."""
     values = {
-        "moment": (None, {"scene": "聊天窗口", "event": "确认计划", "moment_state": "standalone"}),
-        "thread": ("open", {"open_question": "下一步是什么", "current_state": "等待继续", "closure_criteria": []}),
-        "inside_joke": (None, {"origin": "一次口误", "trigger_phrases": ["小橘子"], "shared_meaning": "共同玩笑"}),
-        "episode": (None, {"beginning": "开始讨论", "development": "比较方案", "outcome": "确认方案", "closure_quality": "complete"}),
-        "profile": (None, {"facet": "偏好", "statement": "喜欢清晨", "scope": "日常", "stability": "stable", "basis": "explicit_preference"}),
-        "interaction_rule": (None, {"trigger": "需要建议", "expected_behavior": "先给结论", "scope": "对话", "priority": 8, "rule_state": "active", "explicit_instruction": "叶子明确要求先给结论"}),
+        "moment": ("remember_moment", {
+            "scene": "聊天窗口", "event": "确认计划", "moment_state": "standalone",
+        }),
+        "thread": ("remember_thread", {
+            "thread_state": "open",
+            "open_question": "下一步是什么",
+            "current_state": "等待继续",
+            "closure_criteria": [],
+        }),
+        "inside_joke": ("remember_inside_joke", {
+            "origin": "一次口误",
+            "trigger_phrases": ["小橘子"],
+            "shared_meaning": "共同玩笑",
+        }),
+        "episode": ("propose_episode", {
+            "beginning": "开始讨论", "development": "比较方案",
+            "outcome": "确认方案", "closure_quality": "complete",
+        }),
+        "profile": ("propose_profile", {
+            "facet": "偏好", "statement": "喜欢清晨", "scope": "日常",
+            "stability": "stable", "basis": "explicit_preference",
+        }),
+        "interaction_rule": ("propose_interaction_rule", {
+            "memory_key": "rule.reply-order",
+            "trigger": "需要建议",
+            "expected_behavior": "先给结论",
+            "scope": "对话",
+            "priority": 8,
+            "rule_state": "active",
+            "explicit_instruction": "叶子明确要求先给结论",
+        }),
     }
-    return values[kind]
+    tool, typed = values[kind]
+    arguments = {"content": content, "reason": reason, **typed}
+    # The SDK currently ignores unknown arguments; this proves the trusted
+    # server value still wins.
+    arguments["assistant_id"] = "client-cannot-override"
+    arguments["continuity_type"] = "client-cannot-override"
+    arguments["continuity_data"] = {"injected": "client-cannot-override"}
+    return tool, arguments
 
 
 class MCPProtocolTests(unittest.TestCase):
@@ -128,26 +171,15 @@ class MCPProtocolTests(unittest.TestCase):
                 listed = rpc(client, "tools/list", {})
                 self.assertEqual(
                     [tool["name"] for tool in listed.json()["result"]["tools"]],
-                    ["request_memory", "review_memory_requests"],
+                    EXPECTED_TOOLS,
                 )
 
                 for kind in (*sorted(AUTO_TYPES), *sorted(PENDING_TYPES)):
-                    state, data = _continuity_data(kind)
-                    arguments = {
-                        "content": f"用于验证 {kind} 的记忆内容",
-                        "reason": "验证真实 MCP tools/call 分流",
-                        "continuity_type": kind,
-                        "continuity_data": data,
-                        # The SDK currently ignores unknown arguments; this
-                        # proves the trusted server value still wins.
-                        "assistant_id": "client-cannot-override",
-                    }
-                    if state:
-                        arguments["thread_state"] = state
-                    if kind == "interaction_rule":
-                        arguments.update({"update_mode": "replace", "memory_key": "rule.reply-order"})
+                    tool, arguments = _tool_call(
+                        kind, f"用于验证 {kind} 的记忆内容", "验证真实 MCP tools/call 分流"
+                    )
                     response = rpc(client, "tools/call", {
-                        "name": "request_memory",
+                        "name": tool,
                         "arguments": arguments,
                     })
                     result = response.json()["result"]
@@ -155,9 +187,15 @@ class MCPProtocolTests(unittest.TestCase):
                     structured = result["structuredContent"]
                     self.assertEqual(structured["status"], "approved" if kind in AUTO_TYPES else "pending")
                     self.assertIsInstance(calls[-1]["payload"]["continuity_data"], dict)
+                    self.assertEqual(calls[-1]["payload"]["continuity_type"], kind)
                     self.assertNotIn("assistant_id", calls[-1]["payload"])
                     self.assertEqual(calls[-1]["assistant_id"], "server-assistant")
                     self.assertEqual(calls[-1]["source"], "mcp_memory")
+                    # Client-injected generic payload fields must be ignored.
+                    self.assertNotIn("injected", calls[-1]["payload"]["continuity_data"])
+                    if kind == "interaction_rule":
+                        self.assertEqual(calls[-1]["payload"]["update_mode"], "replace")
+                        self.assertEqual(calls[-1]["payload"]["memory_key"], "rule.reply-order")
 
                 review_list = rpc(client, "tools/call", {
                     "name": "review_memory_requests", "arguments": {"action": "list"},
@@ -180,37 +218,44 @@ class MCPProtocolTests(unittest.TestCase):
                     self.assertIn("request_not_reviewable", denied["content"][0]["text"])
 
                 invalid = rpc(client, "tools/call", {
-                    "name": "request_memory",
-                    "arguments": {"content": "缺少参数", "reason": "invalid", "continuity_type": "moment"},
+                    "name": "remember_moment",
+                    "arguments": {"content": "缺少必填字段的片段。", "reason": "invalid"},
                 }).json()["result"]
                 self.assertTrue(invalid["isError"])
+
+                legacy = rpc(client, "tools/call", {
+                    "name": "request_memory",
+                    "arguments": {
+                        "content": "泛型工具不应再存在。",
+                        "reason": "验证泛型工具已移除",
+                        "continuity_type": "moment",
+                        "continuity_data": {"scene": "s", "event": "e", "moment_state": "standalone"},
+                    },
+                }).json()["result"]
+                self.assertTrue(legacy["isError"])
 
                 unknown = rpc(client, "tools/call", {
                     "name": "unknown_memory_tool", "arguments": {},
                 }).json()["result"]
                 self.assertTrue(unknown["isError"])
 
+                failed_tool, failed_arguments = _tool_call(
+                    "moment", "触发业务失败", "验证失败不伪装成功"
+                )
                 failed = rpc(client, "tools/call", {
-                    "name": "request_memory",
-                    "arguments": {
-                        "content": "触发业务失败",
-                        "reason": "验证失败不伪装成功",
-                        "continuity_type": "moment",
-                        "continuity_data": _continuity_data("moment")[1],
-                    },
+                    "name": failed_tool,
+                    "arguments": failed_arguments,
                 }).json()["result"]
                 self.assertTrue(failed["isError"])
                 self.assertNotIn("protocol-secret", failed["content"][0]["text"])
 
                 def concurrent_call(index):
+                    tool, arguments = _tool_call(
+                        "moment", f"并发状态隔离内容 {index}", "验证 stateless 请求状态隔离"
+                    )
                     response = rpc(client, "tools/call", {
-                        "name": "request_memory",
-                        "arguments": {
-                            "content": f"并发状态隔离内容 {index}",
-                            "reason": "验证 stateless 请求状态隔离",
-                            "continuity_type": "moment",
-                            "continuity_data": _continuity_data("moment")[1],
-                        },
+                        "name": tool,
+                        "arguments": arguments,
                     })
                     return response.json()["result"]["structuredContent"]["request_id"]
 

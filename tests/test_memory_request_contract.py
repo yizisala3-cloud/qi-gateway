@@ -1,6 +1,9 @@
 import json
+import re
 import unittest
 from pathlib import Path
+
+from gateway.admin_api import _TABLES
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +18,11 @@ MANIFEST = ROOT / "orangechat_plugins" / "memory-request" / "manifest.json"
 MAIN_JS = ROOT / "orangechat_plugins" / "memory-request" / "main.js"
 REVIEW_PAGE = ROOT / "admin" / "js" / "pages" / "memory_requests.js"
 ROUTES_JS = ROOT / "admin" / "js" / "routes.js"
+INDEX_HTML = ROOT / "admin" / "index.html"
+APP_JS = ROOT / "admin" / "js" / "app.js"
+ADMIN_API = ROOT / "gateway" / "admin_api.py"
 MEMORY_EXTRACT = ROOT / "gateway" / "memory_extract.py"
+ASSET_VERSION = "20260820-mcp-split1"
 
 
 class MemoryRequestMigrationContractTests(unittest.TestCase):
@@ -329,6 +336,36 @@ class MemoryReviewDashboardContractTests(unittest.TestCase):
     def test_dashboard_never_directly_mutates_request_rows(self):
         self.assertNotIn("update('memory_requests'", self.page)
         self.assertNotIn("insert('memory_requests'", self.page)
+
+    def test_dashboard_select_no_longer_queries_retired_relation_field(self):
+        self.assertNotIn("proposed_relations", self.page)
+
+    def test_admin_api_whitelist_rejects_retired_relation_field(self):
+        api = ADMIN_API.read_text(encoding="utf-8")
+        self.assertNotIn("proposed_relations", api)
+        self.assertNotIn("proposed_relations", _TABLES["memory_requests"]["read"])
+
+    def test_banner_distinguishes_direct_writes_from_user_review(self):
+        self.assertIn("episode、profile 和 interaction_rule", self.page)
+        self.assertIn("moment、thread 和 inside_joke", self.page)
+        self.assertIn("直接写入正式记忆", self.page)
+        self.assertIn("叶子审核", self.page)
+
+    def test_static_asset_version_refreshed_for_plain_reload(self):
+        index_html = INDEX_HTML.read_text(encoding="utf-8")
+        app_js = APP_JS.read_text(encoding="utf-8")
+        self.assertIn(f"/admin/js/app.js?v={ASSET_VERSION}", index_html)
+        self.assertIn(f"const ASSET_VERSION = '{ASSET_VERSION}'", app_js)
+
+    def test_dashboard_select_fields_covered_by_admin_whitelist(self):
+        allowed = _TABLES["memory_requests"]["read"]
+        match = re.search(r"select:\s*'([^']+)'", self.page)
+        self.assertIsNotNone(match, "memory_requests select list not found")
+        fields = [field.strip() for field in match.group(1).split(",") if field.strip()]
+        self.assertTrue(fields)
+        for field in fields:
+            with self.subTest(field=field):
+                self.assertIn(field, allowed)
 
 
 if __name__ == "__main__":

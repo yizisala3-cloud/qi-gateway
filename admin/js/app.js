@@ -4,7 +4,7 @@ import { loading, errorBlock } from './ui.js?v=20260802-memory-review3';
 import { gw, getToken, setToken, clearToken } from './api.js?v=20260802-memory-review3';
 
 const DEFAULT_ROUTE = 'dashboard';
-const ASSET_VERSION = '20260817-retired-runtime1';
+const ASSET_VERSION = '20260820-mcp-split1';
 
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);

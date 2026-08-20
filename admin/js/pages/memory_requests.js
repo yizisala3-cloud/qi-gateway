@@ -81,7 +81,7 @@ export default {
     this.root.innerHTML = `
       <div class="banner">
         <span>🧠</span>
-        <div>AI 提交的内容只会先进入申请队列。通过后才会写入正式记忆并参与召回；拒绝记录会保留用于审计。</div>
+        <div>episode、profile 和 interaction_rule 会进入这里等待叶子审核；moment、thread 和 inside_joke 校验通过后会直接写入正式记忆。拒绝记录保留用于审计。</div>
       </div>
       <div class="toolbar">
         <select id="request-status" style="width:150px">
@@ -114,7 +114,7 @@ export default {
       if (this.state.status) eq.status = this.state.status;
       if (this.state.continuityType) eq.continuity_type = this.state.continuityType;
       const rows = await query('memory_requests', {
-        select: 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,memory_key,update_mode,related_memory_id,related_request_id,continuity_id,continuity_type,continuity_schema_version,continuity_data,proposed_relations,thread_state,confidence,evidence_message_ids,source_time,memory_time,time_precision,digest_run_id,dedupe_state,dedupe_reason,created_at,reviewed_at,reviewed_by,review_note',
+        select: 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,memory_key,update_mode,related_memory_id,related_request_id,continuity_id,continuity_type,continuity_schema_version,continuity_data,thread_state,confidence,evidence_message_ids,source_time,memory_time,time_precision,digest_run_id,dedupe_state,dedupe_reason,created_at,reviewed_at,reviewed_by,review_note',
         order: { col: 'created_at', asc: false },
         limit: 100,
         eq,
