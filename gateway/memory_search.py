@@ -22,7 +22,6 @@ MAX_VECTOR_QUERY_CHARS = 2000
 # 向量输入额外携带的普通对话历史轮数（每轮一条 user + 一条 assistant）。
 HISTORICAL_TURNS = 3
 # 角色标签（仅用于 embedding 输入，不会写入记忆或上游 messages）。
-_VECTOR_ROLE_LABELS = {"user": "用户", "assistant": "栖"}
 _TURN_LABELS = ("上一轮", "更早一轮", "更早两轮")
 MEMORY_CONTEXT_HEADER = (
     "[相关长期记忆]\n"
@@ -80,17 +79,27 @@ async def _get_embedding(text: str) -> Optional[list[float]]:
         return None
 
 
+def _turn_label(offset_from_newest: int) -> str:
+    if offset_from_newest < len(_TURN_LABELS):
+        return _TURN_LABELS[offset_from_newest]
+    return f"更早{offset_from_newest - len(_TURN_LABELS) + 1}轮"
+
+
 def build_vector_query(
     current_text: str,
-    history_turns: Optional[list[tuple[str, str]]] = None,
+    history_turns: Optional[list[tuple[str | None, str | None]]] = None,
     *,
     max_turns: int = HISTORICAL_TURNS,
     max_chars: int = MAX_VECTOR_QUERY_CHARS,
 ) -> str:
     """Construct the embedding input with role labels and a current-first budget.
 
-    The latest user message always comes first and is never dropped in favour
-    of history; older turns are appended newest-first while they still fit.
+    ``history_turns`` items are ``(user_text, assistant_text)`` pairs in
+    chronological order; either side may be None for an incomplete turn, and
+    ``(None, text)`` marks a leading assistant kept as extra context. The
+    latest user message always comes first and is never dropped in favour of
+    history. History is rendered oldest→newest (labels count back from the
+    newest), and when the budget runs out the oldest turns are trimmed first.
     """
     current = " ".join(str(current_text or "").split())
     if not current:
@@ -103,36 +112,30 @@ def build_vector_query(
     blocks = [f"[当前用户]\n{current}"]
     used = len(current) + label_cost
 
-    turns = [item for item in (history_turns or []) if item and item[1]]
-    # Group history into turns: scanning oldest→newest, a user message opens a
-    # new turn; assistant messages join the turn currently being built.
-    grouped: list[dict] = []
-    for role, text in turns:
-        compact = " ".join(str(text).split())
-        if not compact:
-            continue
-        if role == "user" or not grouped:
-            grouped.append({"user": None, "assistant": None})
-        grouped[-1][role] = compact
+    turns = list(history_turns or [])
+    if max_turns > 0:
+        turns = turns[-max_turns:]
 
-    turn_labels = list(_TURN_LABELS)
-    for turn_index, turn in enumerate(reversed(grouped)):
-        if turn_index >= max_turns:
-            break
-        turn_label = turn_labels[turn_index] if turn_index < len(turn_labels) else f"更早{turn_index - 1}轮"
+    rendered: list[str] = []
+    for offset, (user_text, assistant_text) in enumerate(reversed(turns)):
+        label = _turn_label(offset)
         lines = []
-        for role in ("user", "assistant"):
-            text = turn.get(role)
-            if text:
-                lines.append(f"[{turn_label}{_VECTOR_ROLE_LABELS[role]}]\n{text}")
+        if user_text:
+            lines.append(f"[{label}用户]\n{' '.join(str(user_text).split())}")
+            if assistant_text:
+                lines.append(f"[{label}栖]\n{' '.join(str(assistant_text).split())}")
+        elif assistant_text:
+            # 孤立 assistant：没有对应的 user，不占用轮次编号。
+            lines.append(f"[此前的栖]\n{' '.join(str(assistant_text).split())}")
         if not lines:
             continue
         block = "\n".join(lines)
         if used + len(block) + 1 > budget:
-            break
-        blocks.append(block)
+            break  # 更早的轮优先裁剪，最近上下文优先保留。
+        rendered.append(block)
         used += len(block) + 1
-    return "\n".join(blocks)
+    rendered.reverse()
+    return "\n".join(blocks + rendered)
 
 
 def _extract_keywords(text: str) -> list[str]:

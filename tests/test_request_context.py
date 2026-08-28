@@ -178,7 +178,7 @@ class TodoFeedbackGuidanceTests(unittest.TestCase):
 
 
 class RecentTurnsTests(unittest.TestCase):
-    def test_collects_up_to_three_turns_before_latest_user_message(self):
+    def test_normal_three_turns_are_paired_chronologically(self):
         messages = [
             {"role": "system", "content": "人设"},
             {"role": "user", "content": "第一种方案讲什么？"},
@@ -195,31 +195,104 @@ class RecentTurnsTests(unittest.TestCase):
         self.assertEqual(
             turns,
             [
-                ("user", "第一种方案讲什么？"),
-                ("assistant", "第一种方案是异步写入。"),
-                ("user", "第二种方案呢？"),
-                ("assistant", "第二种方案是批量导入。"),
-                ("user", "继续之前那个话题"),
-                ("assistant", "好的，继续。"),
+                ("第一种方案讲什么？", "第一种方案是异步写入。"),
+                ("第二种方案呢？", "第二种方案是批量导入。"),
+                ("继续之前那个话题", "好的，继续。"),
             ],
         )
 
-    def test_excludes_current_user_message_and_non_chat_roles(self):
+    def test_more_than_three_turns_keeps_only_the_latest_three(self):
+        messages = [
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "u3"},
+            {"role": "assistant", "content": "a3"},
+            {"role": "user", "content": "u4"},
+            {"role": "assistant", "content": "a4"},
+            {"role": "user", "content": "当前消息"},
+        ]
+
+        turns = extract_recent_turns(messages)
+
+        self.assertEqual(
+            turns,
+            [("u2", "a2"), ("u3", "a3"), ("u4", "a4")],
+        )
+
+    def test_consecutive_assistants_keep_the_latest_one_per_turn(self):
+        messages = [
+            {"role": "user", "content": "第一种方案是什么"},
+            {"role": "assistant", "content": "先说结论。"},
+            {"role": "assistant", "content": "第一种方案是异步写入。"},
+            {"role": "user", "content": "当前消息"},
+        ]
+
+        turns = extract_recent_turns(messages)
+
+        self.assertEqual(turns, [("第一种方案是什么", "第一种方案是异步写入。")])
+
+    def test_consecutive_users_open_separate_turns_without_overwriting(self):
+        messages = [
+            {"role": "user", "content": "第一种方案呢"},
+            {"role": "user", "content": "第二种方案呢"},
+            {"role": "assistant", "content": "分别是异步写入和批量导入。"},
+            {"role": "user", "content": "当前消息"},
+        ]
+
+        turns = extract_recent_turns(messages)
+
+        self.assertEqual(
+            turns,
+            [("第一种方案呢", None), ("第二种方案呢", "分别是异步写入和批量导入。")],
+        )
+
+    def test_leading_orphan_assistant_is_extra_context_not_a_turn(self):
+        messages = [
+            {"role": "assistant", "content": "开场白"},
+            {"role": "user", "content": "第一个问题"},
+            {"role": "assistant", "content": "第一个回答"},
+            {"role": "user", "content": "当前消息"},
+        ]
+
+        turns = extract_recent_turns(messages)
+
+        self.assertEqual(turns, [(None, "开场白"), ("第一个问题", "第一个回答")])
+
+    def test_orphan_assistant_is_dropped_when_turns_are_truncated(self):
+        messages = [
+            {"role": "assistant", "content": "开场白"},
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "u3"},
+            {"role": "assistant", "content": "a3"},
+            {"role": "user", "content": "当前消息"},
+        ]
+
+        turns = extract_recent_turns(messages)
+
+        self.assertEqual(turns, [("u1", "a1"), ("u2", "a2"), ("u3", "a3")])
+
+    def test_incomplete_history_keeps_actual_messages_without_fabricating(self):
+        messages = [
+            {"role": "user", "content": "没有回复的问题"},
+            {"role": "user", "content": "当前消息"},
+        ]
+
+        self.assertEqual(extract_recent_turns(messages), [("没有回复的问题", None)])
+
+    def test_system_tool_and_empty_messages_are_excluded(self):
         messages = [
             {"role": "system", "content": "系统提示"},
-            {"role": "user", "content": "按我们刚才确定的来"},
             {"role": "tool", "content": "工具返回"},
+            {"role": "assistant", "content": [{"type": "text", "text": " "}]},
+            {"role": "user", "content": "按我们刚才确定的来"},
         ]
 
         self.assertEqual(extract_recent_turns(messages), [])
-
-    def test_keeps_incomplete_history_without_fabricating_pairs(self):
-        messages = [
-            {"role": "assistant", "content": "开场白"},
-            {"role": "user", "content": "刚才说的第二种方案"},
-        ]
-
-        self.assertEqual(extract_recent_turns(messages), [("assistant", "开场白")])
 
     def test_multimodal_content_only_contributes_text_parts(self):
         messages = [
@@ -236,10 +309,10 @@ class RecentTurnsTests(unittest.TestCase):
 
         self.assertEqual(
             extract_recent_turns(messages),
-            [("user", "看看这张图"), ("assistant", "好的")],
+            [("看看这张图", "好的")],
         )
 
-    def test_caps_history_at_max_turns_times_two_messages(self):
+    def test_custom_turn_limit_is_respected(self):
         messages = [
             {"role": "user", "content": "u1"},
             {"role": "assistant", "content": "a1"},
@@ -248,16 +321,12 @@ class RecentTurnsTests(unittest.TestCase):
             {"role": "user", "content": "当前消息"},
         ]
 
-        turns = extract_recent_turns(messages, max_turns=2)
-
-        self.assertEqual(
-            turns,
-            [("user", "u1"), ("assistant", "a1"), ("user", "u2"), ("assistant", "a2")],
-        )
+        self.assertEqual(extract_recent_turns(messages, max_turns=1), [("u2", "a2")])
 
     def test_non_list_input_returns_empty(self):
         self.assertEqual(extract_recent_turns(None), [])
         self.assertEqual(extract_recent_turns("text"), [])
+
 
 
 if __name__ == "__main__":

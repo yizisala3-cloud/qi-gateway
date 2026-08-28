@@ -426,11 +426,11 @@ class SearchFlowTests(unittest.IsolatedAsyncioTestCase):
             await search_memories(
                 "那它以后怎么办",
                 top_k=1,
-                history_turns=[("user", "刚才说的第二种方案"), ("assistant", "方案是批量导入")],
+                history_turns=[("刚才说的第二种方案", "方案是批量导入")],
             )
 
         self.assertTrue(captured["vector_query"].startswith("[当前用户]\n那它以后怎么办"))
-        self.assertIn("刚才说的第二种方案", captured["vector_query"])
+        self.assertIn("[上一轮用户]\n刚才说的第二种方案", captured["vector_query"])
         keyword_search.assert_called_once()
         self.assertEqual(keyword_search.call_args.args[0], ["散步"])
         extract.assert_called_once_with("那它以后怎么办")
@@ -450,10 +450,7 @@ class SearchFlowTests(unittest.IsolatedAsyncioTestCase):
 
 class BuildVectorQueryTests(unittest.TestCase):
     def test_current_message_comes_first_with_role_labels(self):
-        history = [
-            ("user", "第二种方案是什么"),
-            ("assistant", "第二种方案是批量导入"),
-        ]
+        history = [("第二种方案是什么", "第二种方案是批量导入")]
 
         query = build_vector_query("继续之前那个", history)
 
@@ -461,29 +458,61 @@ class BuildVectorQueryTests(unittest.TestCase):
         self.assertIn("[上一轮用户]\n第二种方案是什么", query)
         self.assertIn("[上一轮栖]\n第二种方案是批量导入", query)
 
-    def test_history_groups_into_turns_newest_first(self):
+    def test_history_is_rendered_in_chronological_order(self):
         history = [
-            ("user", "最早的问题"),
-            ("assistant", "最早的回答"),
-            ("user", "后来的问题"),
-            ("assistant", "后来的回答"),
+            ("最早的问题", "最早的回答"),
+            ("后来的问题", "后来的回答"),
         ]
 
         query = build_vector_query("那它以后怎么办", history)
 
         earliest = query.index("最早的问题")
         latest = query.index("后来的问题")
-        self.assertLess(latest, earliest, "更近的轮次应排在更早轮次前面")
+        self.assertLess(earliest, latest, "历史应按时间顺序输出（旧→新），当前消息在最前")
         self.assertIn("[更早一轮用户]", query)
         self.assertIn("[更早一轮栖]", query)
+        self.assertIn("[上一轮用户]", query)
+        self.assertIn("[上一轮栖]", query)
 
     def test_current_message_is_never_squeezed_out_by_history(self):
-        history = [("assistant", "历史内容" * 300)]
+        history = [(None, "历史内容" * 300)]
 
         query = build_vector_query("刚才说的第二种方案", history, max_chars=400)
 
         self.assertTrue(query.startswith("[当前用户]\n刚才说的第二种方案"))
         self.assertLessEqual(len(query), 400)
+
+    def test_oldest_turns_are_trimmed_first_when_budget_runs_out(self):
+        history = [
+            ("最旧的问题" * 10, "最旧的回答" * 10),
+            ("中间的问题" * 10, "中间的回答" * 10),
+            ("最近的问题" * 10, "最近的回答" * 10),
+        ]
+
+        query = build_vector_query("当前消息", history, max_chars=300)
+
+        self.assertIn("最近的问题", query)
+        self.assertIn("中间的问题", query)
+        self.assertNotIn("最旧的问题", query)
+        self.assertLessEqual(len(query), 400)
+
+    def test_orphan_assistant_gets_its_own_label(self):
+        history = [(None, "孤立的开场白"), ("问题", "回答")]
+
+        query = build_vector_query("当前消息", history)
+
+        self.assertIn("[此前的栖]\n孤立的开场白", query)
+        self.assertIn("[上一轮用户]\n问题", query)
+        self.assertIn("[上一轮栖]\n回答", query)
+
+    def test_incomplete_turns_render_only_the_existing_side(self):
+        history = [("只有问题没有回复", None), (None, "只有孤立回复")]
+
+        query = build_vector_query("当前消息", history)
+
+        self.assertIn("[更早一轮用户]\n只有问题没有回复", query)
+        self.assertNotIn("更早一轮栖", query)
+        self.assertIn("[此前的栖]\n只有孤立回复", query)
 
     def test_current_message_longer_than_budget_is_truncated_from_the_end(self):
         query = build_vector_query("很长的消息" * 500, [], max_chars=MAX_VECTOR_QUERY_CHARS)
@@ -492,10 +521,13 @@ class BuildVectorQueryTests(unittest.TestCase):
         self.assertTrue(query.startswith("[当前用户]\n很长的消息"))
 
     def test_empty_current_message_returns_empty_query(self):
-        self.assertEqual(build_vector_query("   ", [("user", "历史")]), "")
+        self.assertEqual(build_vector_query("   ", [("历史", None)]), "")
 
     def test_history_without_current_message_still_returns_current_only(self):
-        self.assertEqual(build_vector_query("只有当前消息", None), "[当前用户]\n只有当前消息")
+        self.assertEqual(
+            build_vector_query("只有当前消息", None),
+            "[当前用户]\n只有当前消息",
+        )
 
 
 if __name__ == "__main__":

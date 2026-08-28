@@ -52,13 +52,19 @@ def extract_last_user_text(messages: Any) -> str:
     return ""
 
 
-def extract_recent_turns(messages: Any, max_turns: int = 3) -> list[tuple[str, str]]:
-    """Return ordinary conversation history before the latest user message.
+def extract_recent_turns(
+    messages: Any, max_turns: int = 3
+) -> list[tuple[str | None, str | None]]:
+    """Split ordinary history before the latest user message into strict turns.
 
-    Scans backwards over plain user/assistant messages only (never system,
-    tool, or control content), stops after max_turns*2 messages, and returns
-    them in chronological order. The latest user message itself is excluded;
-    incomplete pairs are kept as-is rather than fabricated or rejected.
+    Returns chronological ``(user_text, assistant_text)`` pairs; either side is
+    None when that half of the turn does not exist (never fabricated). One
+    turn is one historical user message plus the ordinary assistant replies
+    before the next user message; when those replies are consecutive, only the
+    latest one is kept (explicit policy, tested, not silently merged). A
+    leading assistant with no preceding user becomes ``(None, text)`` and does
+    not count against max_turns, but is dropped when turns were truncated.
+    System, tool, and other non-chat roles are excluded.
     """
     if not isinstance(messages, list):
         return []
@@ -70,10 +76,10 @@ def extract_recent_turns(messages: Any, max_turns: int = 3) -> list[tuple[str, s
             break
     if latest_user_index is None:
         return []
-    collected: list[tuple[str, str]] = []
-    for index in range(latest_user_index - 1, -1, -1):
-        if len(collected) >= max_turns * 2:
-            break
+
+    turns: list[list[str | None]] = []
+    leading_assistant: str | None = None
+    for index in range(latest_user_index):
         message = messages[index]
         if not isinstance(message, dict):
             continue
@@ -83,9 +89,20 @@ def extract_recent_turns(messages: Any, max_turns: int = 3) -> list[tuple[str, s
         text = message_text(message).strip()
         if not text:
             continue
-        collected.append((role, text))
-    collected.reverse()
-    return collected
+        if role == "user":
+            turns.append([text, None])
+        elif turns:
+            turns[-1][1] = text
+        else:
+            leading_assistant = text
+
+    limited = turns[-max_turns:] if max_turns > 0 else []
+    result: list[tuple[str | None, str | None]] = [
+        (user_text, assistant_text) for user_text, assistant_text in limited
+    ]
+    if leading_assistant and len(turns) < max_turns:
+        result.insert(0, (None, leading_assistant))
+    return result
 
 
 def is_orangechat_proactive_request(messages: Any) -> bool:
