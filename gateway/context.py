@@ -81,12 +81,15 @@ def build_recent_chat_context(limit: int = 10) -> str:
 
 # ── 主入口：完整上下文构建 ────────────────────────
 
-def build_context(user_message: str = "") -> str:
+def build_context(user_message: str = "", history_turns=None) -> str:
     """并发拼装完整上下文注入内容。
 
     Args:
         user_message: 用户最新一条消息（用于记忆搜索 query）。
                       为空时跳过记忆搜索。
+        history_turns: 最近几轮普通 user/assistant 对话 [(role, text)]，
+                       仅扩展向量召回的 embedding 输入；为空时向量通道
+                       只用当前消息。
     """
     futures = {
         "persona": _executor.submit(load_persona),
@@ -107,7 +110,9 @@ def build_context(user_message: str = "") -> str:
     if user_message.strip():
         try:
             loop = asyncio.new_event_loop()
-            memories = loop.run_until_complete(search_memories(user_message, top_k=8))
+            memories = loop.run_until_complete(
+                search_memories(user_message, top_k=8, history_turns=history_turns)
+            )
             loop.close()
             memories_text = format_memories_for_injection(memories)
         except Exception as e:

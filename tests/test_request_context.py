@@ -7,6 +7,7 @@ from gateway.request_context import (
     append_gateway_context,
     build_todo_feedback_guidance,
     extract_last_user_text,
+    extract_recent_turns,
     is_orangechat_proactive_request,
     annotate_proactive_control_signal,
 )
@@ -174,6 +175,89 @@ class TodoFeedbackGuidanceTests(unittest.TestCase):
         self.assertIn("匹配到多条", guidance)
         self.assertIn("先向用户确认", guidance)
 
+
+
+class RecentTurnsTests(unittest.TestCase):
+    def test_collects_up_to_three_turns_before_latest_user_message(self):
+        messages = [
+            {"role": "system", "content": "人设"},
+            {"role": "user", "content": "第一种方案讲什么？"},
+            {"role": "assistant", "content": "第一种方案是异步写入。"},
+            {"role": "user", "content": "第二种方案呢？"},
+            {"role": "assistant", "content": "第二种方案是批量导入。"},
+            {"role": "user", "content": "继续之前那个话题"},
+            {"role": "assistant", "content": "好的，继续。"},
+            {"role": "user", "content": "那它以后怎么办"},
+        ]
+
+        turns = extract_recent_turns(messages)
+
+        self.assertEqual(
+            turns,
+            [
+                ("user", "第一种方案讲什么？"),
+                ("assistant", "第一种方案是异步写入。"),
+                ("user", "第二种方案呢？"),
+                ("assistant", "第二种方案是批量导入。"),
+                ("user", "继续之前那个话题"),
+                ("assistant", "好的，继续。"),
+            ],
+        )
+
+    def test_excludes_current_user_message_and_non_chat_roles(self):
+        messages = [
+            {"role": "system", "content": "系统提示"},
+            {"role": "user", "content": "按我们刚才确定的来"},
+            {"role": "tool", "content": "工具返回"},
+        ]
+
+        self.assertEqual(extract_recent_turns(messages), [])
+
+    def test_keeps_incomplete_history_without_fabricating_pairs(self):
+        messages = [
+            {"role": "assistant", "content": "开场白"},
+            {"role": "user", "content": "刚才说的第二种方案"},
+        ]
+
+        self.assertEqual(extract_recent_turns(messages), [("assistant", "开场白")])
+
+    def test_multimodal_content_only_contributes_text_parts(self):
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "看看这张图"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,xxx"}},
+                ],
+            },
+            {"role": "assistant", "content": "好的"},
+            {"role": "user", "content": "你刚才提到的那个问题"},
+        ]
+
+        self.assertEqual(
+            extract_recent_turns(messages),
+            [("user", "看看这张图"), ("assistant", "好的")],
+        )
+
+    def test_caps_history_at_max_turns_times_two_messages(self):
+        messages = [
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "当前消息"},
+        ]
+
+        turns = extract_recent_turns(messages, max_turns=2)
+
+        self.assertEqual(
+            turns,
+            [("user", "u1"), ("assistant", "a1"), ("user", "u2"), ("assistant", "a2")],
+        )
+
+    def test_non_list_input_returns_empty(self):
+        self.assertEqual(extract_recent_turns(None), [])
+        self.assertEqual(extract_recent_turns("text"), [])
 
 
 if __name__ == "__main__":

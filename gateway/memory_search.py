@@ -17,6 +17,13 @@ MAX_CANDIDATES = 50
 MAX_INJECTION_CHARS = 2400
 MAX_KEYWORDS = 5
 MAX_KEYWORD_LENGTH = 64
+# 向量召回输入预算：与 embedding API 的 2000 字符上限保持一致，不扩大。
+MAX_VECTOR_QUERY_CHARS = 2000
+# 向量输入额外携带的普通对话历史轮数（每轮一条 user + 一条 assistant）。
+HISTORICAL_TURNS = 3
+# 角色标签（仅用于 embedding 输入，不会写入记忆或上游 messages）。
+_VECTOR_ROLE_LABELS = {"user": "用户", "assistant": "栖"}
+_TURN_LABELS = ("上一轮", "更早一轮", "更早两轮")
 MEMORY_CONTEXT_HEADER = (
     "[相关长期记忆]\n"
     "以下内容是经用户审核的辅助记忆；仅在与当前对话相关时自然参考，"
@@ -71,6 +78,61 @@ async def _get_embedding(text: str) -> Optional[list[float]]:
     except Exception as exc:
         log.warning("Embedding 请求失败: %s", exc)
         return None
+
+
+def build_vector_query(
+    current_text: str,
+    history_turns: Optional[list[tuple[str, str]]] = None,
+    *,
+    max_turns: int = HISTORICAL_TURNS,
+    max_chars: int = MAX_VECTOR_QUERY_CHARS,
+) -> str:
+    """Construct the embedding input with role labels and a current-first budget.
+
+    The latest user message always comes first and is never dropped in favour
+    of history; older turns are appended newest-first while they still fit.
+    """
+    current = " ".join(str(current_text or "").split())
+    if not current:
+        return ""
+    budget = max(1, int(max_chars))
+    label_cost = len("[当前用户]\n") + 1  # +1 for the joining newline.
+    current_block_limit = max(1, budget - label_cost)
+    if len(current) > current_block_limit:
+        current = current[:current_block_limit].rstrip()
+    blocks = [f"[当前用户]\n{current}"]
+    used = len(current) + label_cost
+
+    turns = [item for item in (history_turns or []) if item and item[1]]
+    # Group history into turns: scanning oldest→newest, a user message opens a
+    # new turn; assistant messages join the turn currently being built.
+    grouped: list[dict] = []
+    for role, text in turns:
+        compact = " ".join(str(text).split())
+        if not compact:
+            continue
+        if role == "user" or not grouped:
+            grouped.append({"user": None, "assistant": None})
+        grouped[-1][role] = compact
+
+    turn_labels = list(_TURN_LABELS)
+    for turn_index, turn in enumerate(reversed(grouped)):
+        if turn_index >= max_turns:
+            break
+        turn_label = turn_labels[turn_index] if turn_index < len(turn_labels) else f"更早{turn_index - 1}轮"
+        lines = []
+        for role in ("user", "assistant"):
+            text = turn.get(role)
+            if text:
+                lines.append(f"[{turn_label}{_VECTOR_ROLE_LABELS[role]}]\n{text}")
+        if not lines:
+            continue
+        block = "\n".join(lines)
+        if used + len(block) + 1 > budget:
+            break
+        blocks.append(block)
+        used += len(block) + 1
+    return "\n".join(blocks)
 
 
 def _extract_keywords(text: str) -> list[str]:
@@ -343,7 +405,11 @@ def _select_memories_for_injection(
     return selected
 
 
-async def search_memories(query: str, top_k: int = 8) -> list[dict]:
+async def search_memories(
+    query: str,
+    top_k: int = 8,
+    history_turns: Optional[list[tuple[str, str]]] = None,
+) -> list[dict]:
     if not query.strip():
         return []
 
@@ -351,7 +417,8 @@ async def search_memories(query: str, top_k: int = 8) -> list[dict]:
     keywords = _extract_keywords(query)[:MAX_KEYWORDS]
     candidate_limit = min(MAX_CANDIDATES, max(20, bounded_top_k * 5))
     keyword_results = _keyword_search(keywords, candidate_limit) or []
-    embedding = await _get_embedding(query)
+    vector_query = build_vector_query(query, history_turns)
+    embedding = await _get_embedding(vector_query)
     vector_results = (_vector_search_sync(embedding, candidate_limit) or []) if embedding else []
     ranked_candidates = _hybrid_rank(
         keyword_results,

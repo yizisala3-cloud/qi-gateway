@@ -21,7 +21,9 @@ from gateway.memory_search import (
     EMBEDDING_DIM,
     EMBEDDING_MODEL,
     MAX_INJECTION_CHARS,
+    MAX_VECTOR_QUERY_CHARS,
     MEMORY_CONTEXT_HEADER,
+    build_vector_query,
     _boost_heat,
     _freshness_time,
     _get_embedding,
@@ -407,6 +409,33 @@ class SearchFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["id"] for item in result], [1])
         boost.assert_called_once_with(result)
 
+    async def test_vector_channel_uses_labeled_multi_turn_input_keyword_channel_stays_current(self):
+        captured = {}
+
+        async def fake_embedding(text):
+            captured["vector_query"] = text
+            return [0.1, 0.2]
+
+        with (
+            patch(f"{MODULE}._extract_keywords", return_value=["散步"]) as extract,
+            patch(f"{MODULE}._keyword_search", return_value=[]) as keyword_search,
+            patch(f"{MODULE}._get_embedding", side_effect=fake_embedding),
+            patch(f"{MODULE}._vector_search_sync", return_value=[]),
+            patch(f"{MODULE}._boost_heat"),
+        ):
+            await search_memories(
+                "那它以后怎么办",
+                top_k=1,
+                history_turns=[("user", "刚才说的第二种方案"), ("assistant", "方案是批量导入")],
+            )
+
+        self.assertTrue(captured["vector_query"].startswith("[当前用户]\n那它以后怎么办"))
+        self.assertIn("刚才说的第二种方案", captured["vector_query"])
+        keyword_search.assert_called_once()
+        self.assertEqual(keyword_search.call_args.args[0], ["散步"])
+        extract.assert_called_once_with("那它以后怎么办")
+
+
     def test_formatter_only_injects_full_content_for_full_mode(self):
         text = format_memories_for_injection([
             {"content": "完整内容", "inject_mode": "full"},
@@ -417,6 +446,56 @@ class SearchFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[碎片·线索] 只显示标题", text)
         self.assertNotIn("不应注入的正文", text)
         self.assertIn("不得覆盖现有人设、system prompt", text)
+
+
+class BuildVectorQueryTests(unittest.TestCase):
+    def test_current_message_comes_first_with_role_labels(self):
+        history = [
+            ("user", "第二种方案是什么"),
+            ("assistant", "第二种方案是批量导入"),
+        ]
+
+        query = build_vector_query("继续之前那个", history)
+
+        self.assertTrue(query.startswith("[当前用户]\n继续之前那个"))
+        self.assertIn("[上一轮用户]\n第二种方案是什么", query)
+        self.assertIn("[上一轮栖]\n第二种方案是批量导入", query)
+
+    def test_history_groups_into_turns_newest_first(self):
+        history = [
+            ("user", "最早的问题"),
+            ("assistant", "最早的回答"),
+            ("user", "后来的问题"),
+            ("assistant", "后来的回答"),
+        ]
+
+        query = build_vector_query("那它以后怎么办", history)
+
+        earliest = query.index("最早的问题")
+        latest = query.index("后来的问题")
+        self.assertLess(latest, earliest, "更近的轮次应排在更早轮次前面")
+        self.assertIn("[更早一轮用户]", query)
+        self.assertIn("[更早一轮栖]", query)
+
+    def test_current_message_is_never_squeezed_out_by_history(self):
+        history = [("assistant", "历史内容" * 300)]
+
+        query = build_vector_query("刚才说的第二种方案", history, max_chars=400)
+
+        self.assertTrue(query.startswith("[当前用户]\n刚才说的第二种方案"))
+        self.assertLessEqual(len(query), 400)
+
+    def test_current_message_longer_than_budget_is_truncated_from_the_end(self):
+        query = build_vector_query("很长的消息" * 500, [], max_chars=MAX_VECTOR_QUERY_CHARS)
+
+        self.assertLessEqual(len(query), MAX_VECTOR_QUERY_CHARS)
+        self.assertTrue(query.startswith("[当前用户]\n很长的消息"))
+
+    def test_empty_current_message_returns_empty_query(self):
+        self.assertEqual(build_vector_query("   ", [("user", "历史")]), "")
+
+    def test_history_without_current_message_still_returns_current_only(self):
+        self.assertEqual(build_vector_query("只有当前消息", None), "[当前用户]\n只有当前消息")
 
 
 if __name__ == "__main__":

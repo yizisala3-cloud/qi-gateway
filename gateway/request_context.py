@@ -52,6 +52,42 @@ def extract_last_user_text(messages: Any) -> str:
     return ""
 
 
+def extract_recent_turns(messages: Any, max_turns: int = 3) -> list[tuple[str, str]]:
+    """Return ordinary conversation history before the latest user message.
+
+    Scans backwards over plain user/assistant messages only (never system,
+    tool, or control content), stops after max_turns*2 messages, and returns
+    them in chronological order. The latest user message itself is excluded;
+    incomplete pairs are kept as-is rather than fabricated or rejected.
+    """
+    if not isinstance(messages, list):
+        return []
+    latest_user_index = None
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if isinstance(message, dict) and message.get("role") == "user":
+            latest_user_index = index
+            break
+    if latest_user_index is None:
+        return []
+    collected: list[tuple[str, str]] = []
+    for index in range(latest_user_index - 1, -1, -1):
+        if len(collected) >= max_turns * 2:
+            break
+        message = messages[index]
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        text = message_text(message).strip()
+        if not text:
+            continue
+        collected.append((role, text))
+    collected.reverse()
+    return collected
+
+
 def is_orangechat_proactive_request(messages: Any) -> bool:
     """Recognize OrangeChat timer/device proactive requests conservatively.
 

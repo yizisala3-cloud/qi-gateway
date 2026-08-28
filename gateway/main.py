@@ -34,6 +34,7 @@ from .request_context import (
     append_gateway_context,
     build_todo_feedback_guidance,
     extract_last_user_text,
+    extract_recent_turns,
     is_orangechat_proactive_request,
     annotate_proactive_control_signal,
 )
@@ -156,9 +157,12 @@ async def chat_completions(request: Request):
         log.info("OrangeChat proactive request detected; preserving client system prompt")
     else:
         user_text = extract_last_user_text(messages)
+        history_turns = extract_recent_turns(messages)
 
     if not proactive_request:
-        full_context = await loop.run_in_executor(bg_executor, build_context, user_text)
+        full_context = await loop.run_in_executor(
+            bg_executor, build_context, user_text, history_turns
+        )
         todo_feedback = build_todo_feedback_guidance(user_text)
         if todo_feedback:
             full_context = full_context + "\n\n" + todo_feedback if full_context else todo_feedback
