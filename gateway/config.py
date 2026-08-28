@@ -23,10 +23,15 @@ class Config:
     SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "")
     PORT: int = int(os.getenv("PORT", "8000"))
     UPSTREAM_READ_TIMEOUT: float = float(os.getenv("UPSTREAM_READ_TIMEOUT", "180"))
-    # 记忆检索、提取与连续感分析（硅基流动）
+    # 记忆检索与旧版自动总结（硅基流动）：普通记忆提取与 embedding。
     ANALYSIS_BASE_URL: str = os.getenv("ANALYSIS_BASE_URL", "https://api.siliconflow.cn/v1")
     ANALYSIS_API_KEY: str = os.getenv("ANALYSIS_API_KEY", "")
     ANALYSIS_MODEL: str = os.getenv("ANALYSIS_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+    # 连续感总结与 Shadow Preview 的独立文本提取模型。默认留空表示未配置，
+    # 绝不回退复用 ANALYSIS_*；必须提供 OpenAI-compatible /chat/completions。
+    CONTINUITY_BASE_URL: str = os.getenv("CONTINUITY_BASE_URL", "")
+    CONTINUITY_API_KEY: str = os.getenv("CONTINUITY_API_KEY", "")
+    CONTINUITY_MODEL: str = os.getenv("CONTINUITY_MODEL", "")
     # 记忆总结。assistant_id 留空时从 chat_messages 最新有效记录自动发现。
     MEMORY_ASSISTANT_ID: str = os.getenv("MEMORY_ASSISTANT_ID", "")
     MEMORY_DIGEST_MAX_MESSAGES: int = int(os.getenv("MEMORY_DIGEST_MAX_MESSAGES", "60"))

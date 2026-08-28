@@ -16,8 +16,8 @@ from .db import get_client
 from .memory_continuity_shadow import (
     DEFAULT_MAX_CHARS,
     ShadowPreviewError,
-    _analysis_configured,
     _clean_content,
+    _continuity_analysis_configured,
     _format_conversation,
     _parse_time,
     _resolve_message_time,
@@ -150,8 +150,10 @@ def get_continuity_status() -> dict[str, Any]:
         "blocked_message_count": cursor.get("blocked_message_count"),
         "blocked_at": cursor.get("blocked_at"),
         "pause_reason": cursor.get("pause_reason"),
-        "analysis_model": cfg.ANALYSIS_MODEL,
-        "analysis_configured": _analysis_configured(),
+        "analysis_model": cfg.CONTINUITY_MODEL,
+        "analysis_configured": _continuity_analysis_configured(),
+        "continuity_model": cfg.CONTINUITY_MODEL,
+        "continuity_configured": _continuity_analysis_configured(),
         "recent_runs": list_continuity_runs(20, assistant_id),
     }
 
@@ -349,7 +351,7 @@ def _set_running_run(run_id: int, raw_rows: list[dict[str, Any]]) -> dict[str, A
         "source_first_message_id": int(raw_rows[0]["id"]),
         "source_last_message_id": int(raw_rows[-1]["id"]),
         "message_count": len(raw_rows),
-        "model_name": cfg.ANALYSIS_MODEL,
+        "model_name": cfg.CONTINUITY_MODEL,
     }
     _client().table("memory_digest_runs").update(update).eq("id", run_id).execute()
     _update_heartbeat(run_id)
@@ -412,10 +414,10 @@ def _enrich_candidates(candidates: list[dict[str, Any]], run_id: int) -> list[di
 
 
 def run_continuity_digest(*, automatic: bool = False) -> dict[str, Any]:
-    if not _analysis_configured():
+    if not _continuity_analysis_configured():
         raise ContinuityPipelineError(
             "analysis_not_configured",
-            "The analysis model provider is not fully configured",
+            "The continuity model provider is not fully configured",
             503,
         )
 
@@ -549,7 +551,7 @@ def run_continuity_digest(*, automatic: bool = False) -> dict[str, Any]:
 
 
 def run_continuity_digest_if_due() -> dict[str, Any] | None:
-    if not _analysis_configured():
+    if not _continuity_analysis_configured():
         return None
     try:
         return run_continuity_digest(automatic=True)

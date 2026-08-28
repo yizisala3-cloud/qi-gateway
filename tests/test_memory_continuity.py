@@ -143,7 +143,7 @@ class ContinuityExecutionTests(unittest.TestCase):
 
     def _patch_success(self, client, *, candidates=None):
         return (
-            patch("gateway.memory_continuity._analysis_configured", return_value=True),
+            patch("gateway.memory_continuity._continuity_analysis_configured", return_value=True),
             patch("gateway.memory_continuity.resolve_continuity_assistant_id", return_value="assistant-1"),
             patch("gateway.memory_continuity._get_cursor", return_value=dict(self.cursor)),
             patch("gateway.memory_continuity._fetch_rows_after", return_value=list(self.rows)),
@@ -158,7 +158,7 @@ class ContinuityExecutionTests(unittest.TestCase):
 
     def test_automatic_below_threshold_does_not_claim_or_call_model(self):
         with (
-            patch("gateway.memory_continuity._analysis_configured", return_value=True),
+            patch("gateway.memory_continuity._continuity_analysis_configured", return_value=True),
             patch("gateway.memory_continuity.resolve_continuity_assistant_id", return_value="assistant-1"),
             patch("gateway.memory_continuity._get_cursor", return_value=dict(self.cursor)),
             patch("gateway.memory_continuity._backlog_count", return_value=79),
@@ -194,7 +194,7 @@ class ContinuityExecutionTests(unittest.TestCase):
 
         self.cursor["auto_cooldown_until"] = None
         with (
-            patch("gateway.memory_continuity._analysis_configured", return_value=True),
+            patch("gateway.memory_continuity._continuity_analysis_configured", return_value=True),
             patch("gateway.memory_continuity.resolve_continuity_assistant_id", return_value="assistant-1"),
             patch("gateway.memory_continuity._get_cursor", return_value=dict(self.cursor)),
             patch("gateway.memory_continuity._backlog_count", return_value=80),
@@ -207,7 +207,7 @@ class ContinuityExecutionTests(unittest.TestCase):
     def test_manual_cooldown_rejects_repeat_before_model(self):
         self.cursor["manual_cooldown_until"] = (_now() + timedelta(seconds=10)).isoformat()
         with (
-            patch("gateway.memory_continuity._analysis_configured", return_value=True),
+            patch("gateway.memory_continuity._continuity_analysis_configured", return_value=True),
             patch("gateway.memory_continuity.resolve_continuity_assistant_id", return_value="assistant-1"),
             patch("gateway.memory_continuity._get_cursor", return_value=dict(self.cursor)),
             patch("gateway.memory_continuity.extract_continuity_candidates") as model,
@@ -284,7 +284,7 @@ class ContinuityExecutionTests(unittest.TestCase):
             "blocked_message_count": 2,
         })
         with (
-            patch("gateway.memory_continuity._analysis_configured", return_value=True),
+            patch("gateway.memory_continuity._continuity_analysis_configured", return_value=True),
             patch("gateway.memory_continuity.resolve_continuity_assistant_id", return_value="assistant-1"),
             patch("gateway.memory_continuity._get_cursor", return_value=dict(self.cursor)),
             patch("gateway.memory_continuity.extract_continuity_candidates") as model,
