@@ -1,5 +1,6 @@
 """Supabase 读写封装。"""
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .config import cfg
@@ -110,8 +111,68 @@ def safe_query(fn):
     return wrapper
 
 
-# ── Eventide 状态 ─────────────────────────────────────────────────
+# ── 聊天原文 ──────────────────────────────────────────────────────
 
+CHAT_MESSAGE_ROLES = ("user", "assistant")
+# OrangeChat 客户端以设备本地（Asia/Shanghai）挂钟写入 timestamp without time
+# zone 的 created_at。网关写入必须保持同一约定，否则现有按 created_at 排序的
+# 读取方（如短期上下文）会把网关行排错位置。带微秒保证同请求内 user 行先于
+# assistant 行。
+_CST = timezone(timedelta(hours=8))
+
+
+def save_chat_message(
+    role: str,
+    content: str,
+    assistant_id: str,
+    conversation_id: str | None = None,
+) -> bool:
+    """保存一条聊天原文到 public.chat_messages。
+
+    只做一次写入尝试：表上没有请求唯一 ID 可作幂等键，重试可能在首次实际
+    成功但响应丢失时造成重复行，因此失败不重试、只记日志、绝不抛出。
+    日志只含操作位置、role、身份字段是否存在与异常类型，不含任何密钥。
+    """
+    if role not in CHAT_MESSAGE_ROLES:
+        log.error("聊天原文保存拒绝: save_chat_message | 非法 role=%s", role)
+        return False
+    if not isinstance(content, str) or not content.strip():
+        log.error("聊天原文保存拒绝: save_chat_message | role=%s | 空内容", role)
+        return False
+    if not isinstance(assistant_id, str) or not assistant_id.strip():
+        log.error(
+            "聊天原文保存拒绝: save_chat_message | role=%s | assistant_id 缺失", role
+        )
+        return False
+
+    payload = {
+        "assistant_id": assistant_id,
+        "conversation_id": conversation_id if conversation_id else None,
+        "role": role,
+        "content": content,
+        "created_at": datetime.now(_CST).strftime("%Y-%m-%d %H:%M:%S.%f"),
+    }
+    try:
+        client = get_client()
+        if not client:
+            log.error(
+                "聊天原文保存失败: save_chat_message | role=%s | assistant_id=%s | "
+                "conversation_id=%s | Supabase 客户端不可用 | attempts=1",
+                role, bool(assistant_id), bool(conversation_id),
+            )
+            return False
+        client.table("chat_messages").insert(payload).execute()
+        return True
+    except Exception as exc:
+        log.error(
+            "聊天原文保存失败: save_chat_message | role=%s | assistant_id=%s | "
+            "conversation_id=%s | error=%s | attempts=1（无幂等键，不重试）",
+            role, bool(assistant_id), bool(conversation_id), type(exc).__name__,
+        )
+        return False
+
+
+# ── Eventide 状态 ─────────────────────────────────────────────────
 @safe_query
 def load_eventide_state() -> dict[str, Any] | None:
     """从 Supabase 读取 Eventide 身体状态。"""
