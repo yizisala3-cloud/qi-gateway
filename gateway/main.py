@@ -21,6 +21,7 @@ from starlette.staticfiles import StaticFiles
 from .config import cfg
 from .context import build_context
 from .memory_continuity import run_continuity_digest_if_due
+from .memory_extract import resolve_assistant_id
 from .memory_heat import run_heat_decay
 from .admin_api import admin_api_routes
 from .memory_digest_api import memory_digest_routes
@@ -36,6 +37,7 @@ from .request_context import (
     extract_last_user_text,
     extract_recent_turns,
     is_orangechat_proactive_request,
+    message_text,
     annotate_proactive_control_signal,
 )
 from . import db
@@ -69,6 +71,89 @@ def verify_token(request: Request) -> bool:
     auth = request.headers.get("authorization", "")
     token = auth.removeprefix("Bearer ").strip()
     return token == cfg.GATEWAY_TOKEN
+
+
+# ── 聊天原文保存（旁路） ──────────────────────────────────────────
+# 仅保存本次请求新产生的消息：普通请求取最后一条真实 user 消息与上游回复；
+# 主动请求的合成控制信号一律不作为 user 保存。历史消息不在这里重复落库，
+# 由客户端的常规请求流程维护。user 记录与 assistant 记录成对保存——只有
+# 上游成功产出有效 assistant 文本时才写两条；上游失败时不保留用户输入，
+# 这是有意的取舍，保证 chat_messages 里不出现没有回复的孤儿 user 行。
+
+def extract_assistant_reply_text(status_code: int, payload: bytes) -> str:
+    """从 OpenAI-compatible 响应中提取 assistant 文本；结构异常返回空串。"""
+    if status_code < 200 or status_code >= 300:
+        return ""
+    try:
+        data = json.loads(payload)
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    if not isinstance(choices[0], dict):
+        return ""
+    message = choices[0].get("message")
+    if not isinstance(message, dict):
+        return ""
+    return message_text(message).strip()
+
+
+def stream_delta_text(line: str) -> str:
+    """从单条 SSE 行提取 choices[0].delta.content 片段；其余返回空串。"""
+    stripped = line.strip()
+    if not stripped.startswith("data:"):
+        return ""
+    data = stripped[len("data:"):].strip()
+    if not data or data == "[DONE]":
+        return ""
+    try:
+        chunk = json.loads(data)
+    except Exception:
+        return ""
+    if not isinstance(chunk, dict):
+        return ""
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    if not isinstance(choices[0], dict):
+        return ""
+    delta = choices[0].get("delta")
+    if not isinstance(delta, dict):
+        return ""
+    content = delta.get("content")
+    return content if isinstance(content, str) else ""
+
+
+async def persist_chat_records(user_text: str, assistant_text: str):
+    """在独立任务中保存本次请求的 user/assistant 原文。
+
+    该协程经 track_task 调度，不挂在会被客户端下一条消息取消的当前请求
+    任务上；Supabase 写入失败只记日志，绝不影响聊天响应。
+    """
+
+    def _job():
+        try:
+            author = resolve_assistant_id()
+        except Exception as exc:
+            # assistant_id 取自现有协议（MEMORY_ASSISTANT_ID 或从 chat_messages
+            # 自动发现）。取不到时明确跳过并记日志，不伪造身份。
+            log.warning(
+                "聊天原文保存跳过: persist_chat_records | 无法确定 assistant_id | error=%s",
+                type(exc).__name__,
+            )
+            return
+        if user_text.strip():
+            db.save_chat_message("user", user_text, author)
+        if assistant_text:
+            db.save_chat_message("assistant", assistant_text, author)
+
+    try:
+        await asyncio.to_thread(_job)
+    except Exception as exc:
+        log.error("聊天原文保存异常: persist_chat_records | error=%s", type(exc).__name__)
 
 
 async def daily_task_loop():
@@ -189,14 +274,19 @@ async def chat_completions(request: Request):
                 upstream_url, headers=headers, json=body,
                 timeout=httpx.Timeout(cfg.UPSTREAM_READ_TIMEOUT, connect=10.0),
             )
-            return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
         except httpx.TimeoutException:
             return JSONResponse({"error": "upstream timeout"}, status_code=504)
         except Exception as e:
             log.error(f"upstream error: {e}")
             return JSONResponse({"error": "upstream error"}, status_code=502)
+        assistant_text = extract_assistant_reply_text(resp.status_code, resp.content)
+        if assistant_text:
+            track_task(persist_chat_records(user_text, assistant_text))
+        return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
 
     async def stream_generator():
+        collected: list[str] = []
+        completed = False
         try:
             async with http_client.stream(
                 "POST", upstream_url, headers=headers, json=body,
@@ -209,12 +299,20 @@ async def chat_completions(request: Request):
                 async for line in resp.aiter_lines():
                     if not line:
                         continue
+                    delta = stream_delta_text(line)
+                    if delta:
+                        collected.append(delta)
                     yield f"{line}\n\n"
+            completed = True
         except httpx.TimeoutException:
             yield f"data: {json.dumps({'error': 'upstream read timeout'})}\n\n"
         except Exception as e:
             log.error(f"stream error: {e}")
             yield f"data: {json.dumps({'error': str(e)[:200]})}\n\n"
+        if completed and collected:
+            assistant_text = "".join(collected).strip()
+            if assistant_text:
+                track_task(persist_chat_records(user_text, assistant_text))
 
     return StreamingResponse(
         stream_generator(),
