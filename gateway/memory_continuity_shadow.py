@@ -122,7 +122,22 @@ class ShadowPreviewError(RuntimeError):
         self.code = code
 
 
+def _continuity_analysis_configured() -> bool:
+    """Continuity extraction uses the independent CONTINUITY_* provider only."""
+    return bool(
+        cfg.CONTINUITY_BASE_URL.strip()
+        and cfg.CONTINUITY_API_KEY.strip()
+        and cfg.CONTINUITY_MODEL.strip()
+    )
+
+
 def _analysis_configured() -> bool:
+    """Legacy compatibility alias checking ANALYSIS_* only.
+
+    Kept because other modules still import it. The continuity extraction
+    paths must call :func:`_continuity_analysis_configured` instead; this
+    function never reports the independent continuity provider.
+    """
     return bool(
         cfg.ANALYSIS_BASE_URL.strip()
         and cfg.ANALYSIS_API_KEY.strip()
@@ -458,12 +473,12 @@ def extract_continuity_candidates(
 ) -> list[dict[str, Any]]:
     if not conversation.strip():
         return []
-    if not _analysis_configured():
-        raise ShadowPreviewError("analysis_not_configured", "The analysis model provider is not configured")
+    if not _continuity_analysis_configured():
+        raise ShadowPreviewError("analysis_not_configured", "The continuity model provider is not configured")
 
-    url = f"{cfg.ANALYSIS_BASE_URL.rstrip('/')}/chat/completions"
+    url = f"{cfg.CONTINUITY_BASE_URL.rstrip('/')}/chat/completions"
     request_body = {
-        "model": cfg.ANALYSIS_MODEL,
+        "model": cfg.CONTINUITY_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"<chat_log>\n{conversation}\n</chat_log>"},
@@ -473,7 +488,7 @@ def extract_continuity_candidates(
         "temperature": 0.1,
     }
     headers = {
-        "Authorization": f"Bearer {cfg.ANALYSIS_API_KEY}",
+        "Authorization": f"Bearer {cfg.CONTINUITY_API_KEY}",
         "Content-Type": "application/json",
     }
     try:
@@ -530,8 +545,8 @@ def run_shadow_preview(max_messages: int = DEFAULT_MAX_MESSAGES, max_chars: int 
             "warnings": warnings,
         }
 
-    if not _analysis_configured():
-        raise ShadowPreviewError("analysis_not_configured", "The analysis model provider is not configured")
+    if not _continuity_analysis_configured():
+        raise ShadowPreviewError("analysis_not_configured", "The continuity model provider is not configured")
     evidence_times = {message["id"]: message["source_time"] for message in messages}
     candidates = _extract_shadow_candidates(_format_conversation(messages), evidence_times)
     log.info(

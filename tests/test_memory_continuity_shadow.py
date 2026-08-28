@@ -344,7 +344,7 @@ class ShadowBoundaryTests(unittest.TestCase):
     def test_completely_empty_source_returns_success_without_configured_assistant(self):
         client = _ReadOnlyClient([])
         with (
-            patch.object(cfg, "ANALYSIS_API_KEY", ""),
+            patch.object(cfg, "CONTINUITY_API_KEY", ""),
             patch.object(cfg, "MEMORY_ASSISTANT_ID", ""),
             patch(f"{MODULE}._client", return_value=client),
         ):
@@ -357,7 +357,7 @@ class ShadowBoundaryTests(unittest.TestCase):
     def test_no_chat_returns_empty_success_without_model_call(self):
         client = _ReadOnlyClient([])
         with (
-            patch.object(cfg, "ANALYSIS_API_KEY", ""),
+            patch.object(cfg, "CONTINUITY_API_KEY", ""),
             patch.object(cfg, "MEMORY_ASSISTANT_ID", "assistant-1"),
             patch(f"{MODULE}._client", return_value=client),
             patch(f"{MODULE}._extract_shadow_candidates") as extract,
@@ -380,7 +380,9 @@ class ShadowBoundaryTests(unittest.TestCase):
             },
         ])
         with (
-            patch.object(cfg, "ANALYSIS_API_KEY", "configured"),
+            patch.object(cfg, "CONTINUITY_BASE_URL", "https://continuity.example/v1"),
+            patch.object(cfg, "CONTINUITY_API_KEY", "configured"),
+            patch.object(cfg, "CONTINUITY_MODEL", "continuity-model"),
             patch.object(cfg, "MEMORY_ASSISTANT_ID", "assistant-1"),
             patch(f"{MODULE}._client", return_value=client),
             patch(f"{MODULE}._extract_shadow_candidates", return_value=[]),
