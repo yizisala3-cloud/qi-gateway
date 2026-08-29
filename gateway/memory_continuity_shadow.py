@@ -466,6 +466,31 @@ def parse_shadow_output(
     return validated
 
 
+def _response_diagnostic(
+    status_code: int,
+    choice: Any,
+    message: Any,
+    payload: Any,
+) -> str:
+    """Privacy-safe shape summary of an unusable model response.
+
+    Reports only metadata (status, finish_reason, token usage). Never includes
+    reasoning_content itself, API keys, the request body, or chat text.
+    """
+    choice = choice if isinstance(choice, dict) else {}
+    message = message if isinstance(message, dict) else {}
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    usage = usage if isinstance(usage, dict) else {}
+    details = usage.get("completion_tokens_details")
+    details = details if isinstance(details, dict) else {}
+    return (
+        f"http={status_code} finish_reason={choice.get('finish_reason')!r} "
+        f"reasoning_content={'present' if message.get('reasoning_content') else 'absent'} "
+        f"completion_tokens={usage.get('completion_tokens')!r} "
+        f"reasoning_tokens={details.get('reasoning_tokens')!r}"
+    )
+
+
 def extract_continuity_candidates(
     conversation: str,
     evidence_times: dict[int, str | None],
@@ -484,7 +509,7 @@ def extract_continuity_candidates(
             {"role": "user", "content": f"<chat_log>\n{conversation}\n</chat_log>"},
         ],
         "response_format": {"type": "json_object"},
-        "max_tokens": 1800,
+        "max_tokens": cfg.CONTINUITY_MAX_TOKENS,
         "temperature": 0.1,
     }
     headers = {
@@ -507,11 +532,29 @@ def extract_continuity_candidates(
     if response.status_code != 200:
         raise ShadowPreviewError("model_http_error", f"Shadow model returned HTTP {response.status_code}")
     try:
-        output = response.json()["choices"][0]["message"]["content"]
-        if not isinstance(output, str) or not output.strip():
-            raise ValueError("empty model content")
+        payload = response.json()
+        choice = payload["choices"][0]
+        message = choice.get("message") if isinstance(choice, dict) else None
+        output = message.get("content") if isinstance(message, dict) else None
     except Exception as exc:
         raise ShadowPreviewError("model_response_error", "Shadow model response shape is invalid") from exc
+    if not isinstance(output, str) or not output.strip():
+        # Empty content with a 200 is a real failure (e.g. the provider spent
+        # the whole budget on reasoning_content). Never treat it as success,
+        # never parse reasoning_content as candidates, and keep the same
+        # error code while making the cause locatable in logs.
+        detail = _response_diagnostic(response.status_code, choice, message, payload)
+        if isinstance(choice, dict) and choice.get("finish_reason") == "length":
+            log.error("Continuity model output budget exhausted before final content: %s", detail)
+            raise ShadowPreviewError(
+                "model_response_error",
+                "Continuity output budget exhausted before final content; raise CONTINUITY_MAX_TOKENS or match the provider's maximum output limit",
+            )
+        log.error("Continuity model returned no final content: %s", detail)
+        raise ShadowPreviewError(
+            "model_response_error",
+            f"Shadow model response shape is invalid ({detail})",
+        )
     return parse_shadow_output(output, evidence_times)
 
 
