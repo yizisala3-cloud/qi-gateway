@@ -45,9 +45,9 @@ class Config:
     CONTINUITY_API_KEY: str = os.getenv("CONTINUITY_API_KEY", "")
     CONTINUITY_MODEL: str = os.getenv("CONTINUITY_MODEL", "")
     # 连续感文本提取最大输出 token 数。推理模型需要足够预算完成 reasoning 和
-    # JSON 输出；允许 1024-8192，越界按边界处理。只作用于连续感提取，
-    # 不影响旧版自动总结、普通聊天上游和 embedding。
-    CONTINUITY_MAX_TOKENS: int = _clamped_env_int("CONTINUITY_MAX_TOKENS", 8192, 1024, 8192)
+    # JSON 输出；允许 1024-120000，越界按边界处理。默认 8192。只作用于连续感
+    # 提取，不影响旧版自动总结、普通聊天上游和 embedding。
+    CONTINUITY_MAX_TOKENS: int = _clamped_env_int("CONTINUITY_MAX_TOKENS", 8192, 1024, 120000)
     # 记忆总结。assistant_id 留空时从 chat_messages 最新有效记录自动发现。
     MEMORY_ASSISTANT_ID: str = os.getenv("MEMORY_ASSISTANT_ID", "")
     MEMORY_DIGEST_MAX_MESSAGES: int = int(os.getenv("MEMORY_DIGEST_MAX_MESSAGES", "60"))
