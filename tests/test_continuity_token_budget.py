@@ -99,7 +99,7 @@ class ContinuityTokenBudgetConfigTests(unittest.TestCase):
             os.environ.pop("CONTINUITY_MAX_TOKENS", None)
             if raw is not None:
                 os.environ["CONTINUITY_MAX_TOKENS"] = raw
-            return _clamped_env_int("CONTINUITY_MAX_TOKENS", 8192, 1024, 8192)
+            return _clamped_env_int("CONTINUITY_MAX_TOKENS", 8192, 1024, 120000)
 
     def test_unset_uses_default_8192(self):
         self.assertEqual(self._parse(None), 8192)
@@ -112,8 +112,13 @@ class ContinuityTokenBudgetConfigTests(unittest.TestCase):
         self.assertEqual(self._parse("0"), 1024)
         self.assertEqual(self._parse("-100"), 1024)
 
-    def test_above_maximum_clamps_to_8192(self):
-        self.assertEqual(self._parse("99999"), 8192)
+    def test_above_maximum_clamps_to_120000(self):
+        self.assertEqual(self._parse("120001"), 120000)
+        self.assertEqual(self._parse("999999"), 120000)
+
+    def test_values_within_range_pass_through(self):
+        self.assertEqual(self._parse("99999"), 99999)
+        self.assertEqual(self._parse("120000"), 120000)
 
     def test_unparsable_value_uses_default(self):
         self.assertEqual(self._parse("abc"), 8192)
@@ -123,7 +128,7 @@ class ContinuityTokenBudgetConfigTests(unittest.TestCase):
     def test_module_config_is_an_integer_and_does_not_break_import(self):
         self.assertIsInstance(cfg.CONTINUITY_MAX_TOKENS, int)
         self.assertGreaterEqual(cfg.CONTINUITY_MAX_TOKENS, 1024)
-        self.assertLessEqual(cfg.CONTINUITY_MAX_TOKENS, 8192)
+        self.assertLessEqual(cfg.CONTINUITY_MAX_TOKENS, 120000)
 
 
 class ContinuityRequestBudgetTests(unittest.TestCase):
@@ -149,6 +154,10 @@ class ContinuityRequestBudgetTests(unittest.TestCase):
     def test_configured_budget_4096_is_sent(self):
         _, http = self._extract_with_budget(4096)
         self.assertEqual(http.calls[0]["json"]["max_tokens"], 4096)
+
+    def test_configured_budget_120000_is_sent(self):
+        _, http = self._extract_with_budget(120000)
+        self.assertEqual(http.calls[0]["json"]["max_tokens"], 120000)
 
     def test_request_shape_is_unchanged_except_max_tokens(self):
         _, http = self._extract_with_budget(8192)
