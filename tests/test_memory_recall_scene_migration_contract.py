@@ -134,6 +134,17 @@ class RecallSceneMigrationContractTests(unittest.TestCase):
         )
         self.assertIn("v_evidence_precision", body)
 
+    def test_continuity_auto_approve_requires_scene_and_vector(self):
+        writer = self.executable.split("create or replace function public.store_continuity_candidate", 1)[1]
+        body = function_body(writer.split("create or replace function public.commit_memory_digest_run", 1)[0])
+        # 自动通过必须"场景非空且召回向量非空"；缺任一项保留 pending。
+        self.assertIn(
+            "if v_delta = 1 and v_type in ('moment','thread','inside_joke')\n"
+            "       and v_recall_scene is not null\n"
+            "       and v_recall_embedding is not null then",
+            body,
+        )
+
     def test_metadata_trigger_copies_evidence_precision(self):
         trigger = function_body(
             self.executable.split("create or replace function public.sync_reviewed_memory_request_metadata", 1)[1]

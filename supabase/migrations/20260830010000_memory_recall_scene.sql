@@ -776,7 +776,11 @@ begin
     on conflict do nothing
     returning id into v_request_id;
     get diagnostics v_delta = row_count;
-    if v_delta = 1 and v_type in ('moment','thread','inside_joke') then
+    -- 自动通过必须"场景非空且召回向量非空"；缺任一项保留 pending，
+    -- 由叶子在审核表单补充召回场景后再通过。
+    if v_delta = 1 and v_type in ('moment','thread','inside_joke')
+       and v_recall_scene is not null
+       and v_recall_embedding is not null then
         v_review := public.review_memory_request_v5(
             v_request_id,'approve',v_content,nullif(left(trim(coalesce(p_item->>'title','')),100),''),
             array[v_type],least(greatest(coalesce((p_item->>'importance')::integer,5),1),10),v_content_hash,

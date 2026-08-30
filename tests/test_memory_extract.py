@@ -782,6 +782,36 @@ class AtomicCommitTests(unittest.TestCase):
 
         self.assertEqual(embedded_texts, ["User and qi finished the gateway deploy"])
 
+    def test_recall_embedding_failure_keeps_candidate_pending_without_failing_the_run(self):
+        payload = {
+            "memories": [{
+                "content": "User and qi finished the gateway deploy",
+                "recall_scene": "当网关部署被提起时",
+            }],
+        }
+        client = _DigestClient(dict(self.run, mode="execute"), commit_succeeds=True)
+        embedding = patch(
+            f"{MODULE}._get_embedding_sync",
+            side_effect=[[0.1, 0.2], DigestPipelineError("embedding_http_error", "boom")],
+        )
+        with self._pipeline_patches(
+            client,
+            extract=patch(
+                f"{MODULE}._extract_memories",
+                return_value=(_parse_model_output(json.dumps(payload)), '{"memories":[]}'),
+            ),
+            embedding=embedding,
+        ):
+            result = run_memory_digest("manual_execute", "execute")
+
+        self.assertEqual(result["status"], "succeeded")
+        committed_memory = client.rpc_calls[0][1]["p_memories"][0]
+        # 正文 embedding 成功；召回向量失败不失败整批，候选以 NULL 向量
+        # 进入 pending（SQL 端自动通过条件要求场景与向量同时非空）。
+        self.assertEqual(committed_memory["embedding"], [0.1, 0.2])
+        self.assertIsNone(committed_memory["recall_embedding"])
+        self.assertEqual(committed_memory["recall_scene"], "当网关部署被提起时")
+
     def test_atomic_commit_failure_records_error_and_preserves_cursor(self):
         client = _DigestClient(self.run)
 

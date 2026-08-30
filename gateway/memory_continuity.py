@@ -407,12 +407,20 @@ def _enrich_candidates(candidates: list[dict[str, Any]], run_id: int) -> list[di
         item["content_hash"] = hashlib.sha256(item["content"].casefold().encode("utf-8")).hexdigest()
         try:
             item["embedding"] = _get_embedding_sync(item["content"])
-            # The vector recall channel embeds the recall scene only; the
-            # content embedding above keeps its dedupe semantics unchanged.
-            recall_scene = str(item.get("recall_scene") or "").strip()
-            item["recall_embedding"] = _get_embedding_sync(recall_scene) if recall_scene else None
         except DigestPipelineError as exc:
             raise ContinuityPipelineError("embedding_error", str(exc), 422) from exc
+        # 正文 embedding 失败让整批失败；召回向量失败只影响该候选——
+        # 它以 recall_embedding=NULL 进入 pending，由叶子补场景后通过。
+        recall_scene = str(item.get("recall_scene") or "").strip()
+        try:
+            # 向量召回通道只嵌入召回场景；正文 embedding 保留去重用途。
+            item["recall_embedding"] = _get_embedding_sync(recall_scene) if recall_scene else None
+        except DigestPipelineError as exc:
+            log.warning(
+                "recall_scene embedding 生成失败，候选将以 pending 进入审核: %s",
+                exc.code,
+            )
+            item["recall_embedding"] = None
         enriched.append(item)
     return enriched
 

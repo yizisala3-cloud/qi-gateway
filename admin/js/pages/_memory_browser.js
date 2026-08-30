@@ -402,7 +402,7 @@ export function createMemoryBrowser({
         <div class="search-box">${icon('search')}<input type="search" id="req-search" placeholder="搜索当前结果内的标题 / 内容 / 编号…" value="${esc(state.reqSearch)}"></div>
         <button class="btn btn-secondary" data-act="refresh">${icon('refresh')}刷新</button>
       </div>
-      <p class="muted text-sm" style="margin:0 0 12px">episode、profile、interaction_rule 会进入审核队列；moment、thread、inside_joke 校验通过后直接写入正式记忆。搜索作用于最近 ${REQ_FETCH_LIMIT} 条申请。</p>
+      <p class="muted text-sm" style="margin:0 0 12px">episode、profile、interaction_rule 会进入审核队列；moment、thread、inside_joke 校验通过且召回场景与向量就绪后直接写入正式记忆，否则同样进入审核队列。搜索作用于最近 ${REQ_FETCH_LIMIT} 条申请。</p>
       <div id="req-list">${loading()}</div>
       <div id="req-pager"></div>`;
   }
@@ -747,6 +747,14 @@ export function createMemoryBrowser({
     if (updateMode === 'append' && memoryKey) {
       toast('新增独立记忆时请清空稳定主题键', 'err');
       return;
+    }
+    const recallScene = root.querySelector('#rv-recall-scene').value.trim();
+    if (!recallScene) {
+      const confirmed = await confirm(
+        '这条申请没有召回场景：通过后暂时不能进入向量召回，仍可通过关键词召回。确定直接通过吗？',
+        { title: '缺少召回场景', okText: '仍然通过' },
+      );
+      if (!confirmed) return;
     }
     const button = panel.el.querySelector('[data-act="req-approve-save"]');
     button.disabled = true;

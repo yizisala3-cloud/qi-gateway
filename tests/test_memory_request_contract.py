@@ -376,7 +376,15 @@ class MemoryReviewDashboardContractTests(unittest.TestCase):
 
     def test_banner_distinguishes_direct_writes_from_user_review(self):
         self.assertIn("episode、profile、interaction_rule 会进入审核队列", self.page)
-        self.assertIn("moment、thread、inside_joke 校验通过后直接写入正式记忆", self.page)
+        self.assertIn(
+            "moment、thread、inside_joke 校验通过且召回场景与向量就绪后直接写入正式记忆，否则同样进入审核队列",
+            self.page,
+        )
+
+    def test_empty_scene_approve_requires_confirmation(self):
+        self.assertIn("这条申请没有召回场景", self.page)
+        self.assertIn("仍可通过关键词召回", self.page)
+        self.assertIn("仍然通过", self.page)
 
     def test_static_asset_version_refreshed_for_plain_reload(self):
         index_html = INDEX_HTML.read_text(encoding="utf-8")

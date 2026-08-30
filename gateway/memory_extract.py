@@ -879,12 +879,20 @@ def run_memory_digest(trigger: str, mode: str, max_messages: int | None = None) 
         for memory in memories:
             _update_heartbeat(run_id)
             item = dict(memory)
+            # 正文 embedding 失败仍让整次执行失败（保持既有行为）。
             embedding = _get_embedding_sync(item["content"])
             item["embedding"] = embedding
-            # The recall vector embeds the recall scene only; the content
-            # embedding above keeps serving dedupe comparisons.
+            # 召回向量失败只影响该候选：以 recall_embedding=NULL 进入
+            # pending 审核，由叶子补充召回场景后再通过。
             recall_scene = str(item.get("recall_scene") or "").strip()
-            item["recall_embedding"] = _get_embedding_sync(recall_scene) if recall_scene else None
+            try:
+                item["recall_embedding"] = _get_embedding_sync(recall_scene) if recall_scene else None
+            except DigestPipelineError as exc:
+                log.warning(
+                    "recall_scene embedding 生成失败，候选将以 pending 进入审核: %s",
+                    exc.code,
+                )
+                item["recall_embedding"] = None
             enriched.append(item)
 
         commit_response = _client().rpc(
