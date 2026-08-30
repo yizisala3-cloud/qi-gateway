@@ -1,35 +1,71 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-theme="day">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>qi-dashboard</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x2728;</text></svg>">
-<link rel="stylesheet" href="/admin/css/style.css?v=20260802-memory-review1">
+<link rel="icon" href="/admin/assets/lily-medallion.png">
+<link rel="stylesheet" href="/admin/css/style.css?v=20260830-retro1">
 </head>
 <body>
 <div class="app" id="app">
+
+  <!-- 登录页 -->
   <div class="login-page" id="login-page" style="display:none">
     <div class="login-card">
-      <div class="login-logo">&#x2728;</div><h2>qi-dashboard</h2>
-      <p class="muted">Enter gateway token to continue</p>
-      <input type="password" id="login-input" placeholder="Token" autocomplete="off">
-      <button class="btn btn-primary" id="login-btn" style="width:100%;margin-top:12px">Enter</button>
-      <p class="login-error" id="login-error"></p>
+      <img class="login-medallion" src="/admin/assets/lily-medallion.png" alt="">
+      <h2>qi-dashboard</h2>
+      <p class="login-sub">记忆与陪伴管理后台</p>
+      <div class="orn-divider" aria-hidden="true"></div>
+      <input type="password" id="login-input" placeholder="请输入网关 Token" autocomplete="off">
+      <button class="btn btn-primary btn-block" id="login-btn">进入管理台</button>
+      <p class="login-error" id="login-error" role="alert"></p>
     </div>
   </div>
+
+  <!-- 主布局 -->
   <div class="layout" id="layout" style="display:none">
+
     <aside class="sidebar" id="sidebar">
-      <div class="sidebar-head"><span class="logo">&#x2728;</span><div><h1>qi-dashboard</h1><div class="sub">memory admin</div></div></div>
-      <nav class="sidebar-nav" id="sidebar-nav"></nav>
-      <div class="sidebar-foot"><span id="status-dot" class="badge badge-muted">offline</span><button class="btn btn-xs btn-ghost" id="theme-btn" title="Toggle theme">&#x1F319;</button></div>
+      <img class="sidebar-ornament" src="/admin/assets/ornaments/top-border-ornament.png" alt="" aria-hidden="true">
+      <div class="sidebar-identity">
+        <img class="medallion" src="/admin/assets/lily-medallion.png" alt="铃兰挂画">
+        <h1>qi-dashboard</h1>
+        <p class="sub">记忆与陪伴管理</p>
+      </div>
+      <img class="sidebar-orn-fancy" src="/admin/assets/ornaments/sidebar-divider-four-petal-transparent.png" alt="" aria-hidden="true">
+      <nav class="sidebar-nav" id="sidebar-nav" aria-label="主导航"></nav>
+      <div class="sidebar-art-viewport" aria-hidden="true">
+        <div class="candle-glow"></div>
+        <img src="/admin/assets/sidebar-stilllife-desk-user-version.png" alt="">
+      </div>
+      <img class="ornament-bottom" src="/admin/assets/ornaments/top-border-ornament.png" alt="" aria-hidden="true">
+      <div class="sidebar-foot">
+        <span id="status-dot" class="status-chip"><span class="dot dot-muted"></span>检测中</span>
+        <button class="icon-btn" id="theme-btn" title="切换日间 / 夜读" aria-label="切换主题"></button>
+      </div>
     </aside>
+    <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+
     <div class="main">
-      <header class="topbar"><div class="flex center gap8"><button class="btn btn-icon btn-ghost menu-btn" id="menu-btn">&#x2630;</button><div><div class="crumb" id="page-crumb">qi-dashboard</div><div class="title" id="page-title">Dashboard</div></div></div></header>
-      <main class="content" id="content"></main>
+      <main class="content" id="content">
+        <div class="page-head" id="page-head">
+          <button class="icon-btn menu-btn" id="menu-btn" aria-label="打开导航">
+            <svg viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+          </button>
+          <div class="page-head-text">
+            <div class="crumb" id="page-crumb"></div>
+            <h1 class="page-title" id="page-title"></h1>
+            <p class="page-desc" id="page-desc"></p>
+          </div>
+          <div class="page-head-actions" id="page-head-actions"></div>
+        </div>
+        <div class="orn-divider page-head-rule" aria-hidden="true"></div>
+        <div id="page-root"></div>
+      </main>
     </div>
   </div>
 </div>
-<script type="module" src="/admin/js/app.js?v=20260820-mcp-split1"></script>
+<script type="module" src="/admin/js/app.js?v=20260830-retro1"></script>
 </body>
 </html>
