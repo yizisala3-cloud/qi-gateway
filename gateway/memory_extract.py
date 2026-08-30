@@ -521,17 +521,10 @@ def _parse_model_output(
             "thread_state": thread_state,
             "continuity_schema_version": SCHEMA_VERSION,
             "continuity_data": continuity_data,
-            "subject": "shared",
             "source_type": "natural_chat",
-            "continuity_value": int(round(_clamp(raw.get("continuity_value"), 1, 10, raw.get("importance") or 5))),
-            "retention_class": "normal",
-            "participants": ["yezi", "qi"],
             "update_mode": update_mode,
             "memory_key": memory_key,
             "importance": int(round(_clamp(raw.get("importance"), 1, 10, 5))),
-            # Kept internally for compatibility with the current pending-memory
-            # commit RPC; the model no longer spends output tokens on this field.
-            "emotion_weight": 0.5,
             "confidence": round(_clamp(raw.get("confidence"), 0, 1, 0.6), 3),
             "tags": [CONTINUITY_TYPE_TAGS[continuity_type]],
             "recall_scene": recall_scene,

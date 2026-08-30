@@ -349,14 +349,14 @@ def list_reviewable_memory_requests(assistant_id: str, limit: int = 50) -> list[
     if not client:
         raise MemoryRequestError("database_unavailable", "Supabase is unavailable", 503)
     try:
-        response = (
-            client.table("memory_requests")
-            .select(
-                "id,content,title,tags,importance,reason,status,source,created_at,"
-                "memory_key,update_mode,continuity_type,thread_state,continuity_data,"
-                "subject,source_type,continuity_value,retention_class,participants,"
-                "recall_scene,recall_tags"
-            )
+            response = (
+                client.table("memory_requests")
+                .select(
+                    "id,content,title,tags,importance,reason,status,source,created_at,"
+                    "memory_key,update_mode,continuity_type,thread_state,continuity_data,"
+                    "source_type,"
+                    "recall_scene,recall_tags"
+                )
             .eq("assistant_id", assistant)
             .eq("status", "pending")
             .in_("continuity_type", list(AI_REVIEWABLE_TYPES))

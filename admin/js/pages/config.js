@@ -1,6 +1,6 @@
 // pages/config.js - 配置：真实状态展示，未接入功能仅占位
-import { gw, esc } from '../api.js?v=20260830-retro1';
-import { loading, errorBlock, tag, delegate, icon } from '../ui.js?v=20260830-retro1';
+import { gw, esc } from '../api.js?v=20260831-retire1';
+import { loading, errorBlock, tag, delegate, icon } from '../ui.js?v=20260831-retire1';
 
 function boolTag(value, yes = '已配置', no = '未配置') {
   return value ? tag(yes, 'green') : tag(no, 'red');

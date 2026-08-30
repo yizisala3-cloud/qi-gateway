@@ -88,13 +88,10 @@ class KeywordQueryTests(unittest.TestCase):
 
 
 class HeatBoostTests(unittest.TestCase):
-    def test_full_and_title_recollections_use_different_base_boosts(self):
+    def test_recollection_boost_uses_the_unified_full_content_amount(self):
         client = MagicMock()
         with patch(f"{MODULE}.get_client", return_value=client):
-            _boost_heat([
-                {"id": 1, "inject_mode": "full"},
-                {"id": 2, "inject_mode": "title_only"},
-            ])
+            _boost_heat([{"id": 1}, {"id": 2}])
 
         calls = client.rpc.call_args_list
         self.assertEqual(len(calls), 2)
@@ -102,7 +99,7 @@ class HeatBoostTests(unittest.TestCase):
         self.assertEqual(calls[0].args[1]["memory_id"], 1)
         self.assertEqual(calls[0].args[1]["boost_amount"], 8)
         self.assertEqual(calls[1].args[1]["memory_id"], 2)
-        self.assertEqual(calls[1].args[1]["boost_amount"], 3)
+        self.assertEqual(calls[1].args[1]["boost_amount"], 8)
 
 
 class HybridRankingTests(unittest.TestCase):
@@ -142,32 +139,24 @@ class HybridRankingTests(unittest.TestCase):
         keyword = _memory(
             1,
             "继续网关工作",
-            layer="场景",
             continuity_type="thread",
             thread_state="open",
-            continuity_value=8,
-            retention_class="normal",
-            subject="project",
+            source_type="natural_chat",
         )
         vector = dict(
             keyword,
-            layer=None,
             continuity_type=None,
             thread_state=None,
-            continuity_value=None,
-            retention_class=None,
-            subject=None,
+            source_type=None,
             similarity=0.82,
         )
 
         ranked = _hybrid_rank([keyword], [vector], ["网关"], 10, now=NOW)
 
         self.assertEqual(len(ranked), 1)
-        self.assertEqual(ranked[0]["layer"], "场景")
         self.assertEqual(ranked[0]["continuity_type"], "thread")
         self.assertEqual(ranked[0]["thread_state"], "open")
-        self.assertEqual(ranked[0]["continuity_value"], 8)
-        self.assertEqual(ranked[0]["subject"], "project")
+        self.assertEqual(ranked[0]["source_type"], "natural_chat")
         self.assertEqual(ranked[0]["similarity"], 0.82)
 
     def test_open_thread_bonus_requires_actual_relevance(self):
@@ -202,9 +191,9 @@ class HybridRankingTests(unittest.TestCase):
             by_id[4]["_retrieval_score"],
         )
 
-    def test_high_continuity_without_relevance_cannot_beat_related_memory(self):
-        unrelated = _memory(1, "完全无关", continuity_value=10, heat=100, importance=10)
-        related = _memory(2, "网关", continuity_value=1, heat=0, importance=0)
+    def test_high_importance_without_relevance_cannot_beat_related_memory(self):
+        unrelated = _memory(1, "完全无关", heat=100, importance=10)
+        related = _memory(2, "网关", heat=0, importance=1)
 
         ranked = _hybrid_rank([unrelated, related], [], ["网关"], 2, now=NOW)
 
@@ -227,21 +216,32 @@ class HybridRankingTests(unittest.TestCase):
             old,
         )
 
-    def test_legacy_null_continuity_fields_keep_original_score(self):
+    def test_missing_optional_metadata_keeps_original_score(self):
         memory = _memory(
             1,
             "清晨散步",
             heat=50,
             importance=5,
             continuity_type=None,
-            continuity_value=None,
             thread_state=None,
-            retention_class=None,
         )
         ranked = _hybrid_rank([memory], [], ["清晨", "散步"], 1, now=NOW)
         expected = 0.48 + 0.04 + 0.03 + 0.06
 
         self.assertAlmostEqual(ranked[0]["_retrieval_score"], expected)
+
+    def test_retired_metadata_fields_cannot_change_the_score(self):
+        # continuity_value 与 retention_class 已退役：即使旧调用方仍带值，
+        # 排序也必须与不带值时完全一致。
+        base = _memory(1, "清晨散步", heat=50, importance=5)
+        with_retired = dict(base, continuity_value=10, retention_class="core")
+
+        plain = _hybrid_rank([dict(base)], [], ["清晨", "散步"], 1, now=NOW)
+        retired = _hybrid_rank([with_retired], [], ["清晨", "散步"], 1, now=NOW)
+
+        self.assertAlmostEqual(
+            plain[0]["_retrieval_score"], retired[0]["_retrieval_score"]
+        )
 
 
 class RecallEventTimeTests(unittest.TestCase):
@@ -292,20 +292,19 @@ class RecallInjectionTests(unittest.TestCase):
             },
         ])
 
-        self.assertIn("[碎片] 时间：2026-08-29 19:21｜叶子和栖约好继续做网关。", text)
+        self.assertIn("时间：2026-08-29 19:21｜叶子和栖约好继续做网关。", text)
 
-    def test_title_only_mode_shows_the_same_event_time_rules(self):
+    def test_content_is_always_injected_without_a_title_clue_mode(self):
         text = format_memories_for_injection([
             {
                 "title": "网关计划",
-                "content": "不应注入的正文",
-                "inject_mode": "title_only",
+                "content": "统一注入的完整正文。",
                 "evidence_end_time": "2026-08-29T00:00:00+08:00",
             },
         ])
 
-        self.assertIn("[碎片·线索] 时间：2026-08-29 00:00｜网关计划", text)
-        self.assertNotIn("不应注入的正文", text)
+        self.assertIn("时间：2026-08-29 00:00｜统一注入的完整正文。", text)
+        self.assertNotIn("·线索", text)
 
     def test_memories_without_confirmable_event_time_keep_the_legacy_line(self):
         text = format_memories_for_injection([
@@ -313,8 +312,8 @@ class RecallInjectionTests(unittest.TestCase):
             {"title": "只有线索", "inject_mode": "title_only"},
         ])
 
-        self.assertIn("[碎片] 没有证据时间的旧记忆。", text)
-        self.assertIn("[碎片·线索] 只有线索", text)
+        self.assertIn("没有证据时间的旧记忆。", text)
+        self.assertNotIn("只有线索", text)
         self.assertNotIn("时间：", text)
 
     def test_created_at_is_never_used_as_event_time_fallback(self):
@@ -326,7 +325,7 @@ class RecallInjectionTests(unittest.TestCase):
             },
         ])
 
-        self.assertIn("[碎片] 只有创建时间的记忆。", text)
+        self.assertIn("只有创建时间的记忆。", text)
         self.assertNotIn("时间：", text)
 
     def test_source_time_serves_as_last_evidence_fallback(self):
@@ -338,7 +337,7 @@ class RecallInjectionTests(unittest.TestCase):
             },
         ])
 
-        self.assertIn("[碎片] 时间：2026-08-01 08:05｜早期总结记忆。", text)
+        self.assertIn("时间：2026-08-01 08:05｜早期总结记忆。", text)
 
     def test_minute_precision_shows_the_full_clock_time(self):
         text = format_memories_for_injection([
@@ -350,7 +349,7 @@ class RecallInjectionTests(unittest.TestCase):
             },
         ])
 
-        self.assertIn("[碎片] 时间：2026-08-29 19:21｜精确到分钟的记忆。", text)
+        self.assertIn("时间：2026-08-29 19:21｜精确到分钟的记忆。", text)
 
     def test_memory_time_day_precision_never_truncates_minute_evidence(self):
         text = format_memories_for_injection([
@@ -364,7 +363,7 @@ class RecallInjectionTests(unittest.TestCase):
             },
         ])
 
-        self.assertIn("[碎片] 时间：2026-08-29 19:21｜证据与记忆时间精度不一致的记忆。", text)
+        self.assertIn("时间：2026-08-29 19:21｜证据与记忆时间精度不一致的记忆。", text)
 
     def test_memory_time_hour_precision_never_truncates_minute_evidence(self):
         text = format_memories_for_injection([
@@ -378,43 +377,31 @@ class RecallInjectionTests(unittest.TestCase):
             },
         ])
 
-        self.assertIn("[碎片] 时间：2026-08-29 19:21｜证据为分钟、记忆时间为小时精度的记忆。", text)
+        self.assertIn("时间：2026-08-29 19:21｜证据为分钟、记忆时间为小时精度的记忆。", text)
 
     def test_evidence_hour_precision_never_fabricates_minutes(self):
-        for mode, expected_prefix in (
-            ("full", "[碎片] 时间：2026-08-29 19｜"),
-            ("title_only", "[碎片·线索] 时间：2026-08-29 19｜"),
-        ):
-            with self.subTest(mode=mode):
-                text = format_memories_for_injection([
-                    {
-                        "content": "只有小时的记忆正文。",
-                        "title": "只有小时的标题",
-                        "inject_mode": mode,
-                        "evidence_end_time": "2026-08-29T11:21:00+00:00",
-                        "evidence_time_precision": "hour",
-                    },
-                ])
-                self.assertIn(expected_prefix, text)
-                self.assertNotIn("19:21", text)
+        text = format_memories_for_injection([
+            {
+                "content": "只有小时的记忆正文。",
+                "title": "只有小时的标题",
+                "evidence_end_time": "2026-08-29T11:21:00+00:00",
+                "evidence_time_precision": "hour",
+            },
+        ])
+        self.assertIn("时间：2026-08-29 19｜只有小时的记忆正文。", text)
+        self.assertNotIn("19:21", text)
 
     def test_evidence_day_precision_hides_hours_and_minutes(self):
-        for mode, expected_prefix in (
-            ("full", "[碎片] 时间：2026-08-29｜"),
-            ("title_only", "[碎片·线索] 时间：2026-08-29｜"),
-        ):
-            with self.subTest(mode=mode):
-                text = format_memories_for_injection([
-                    {
-                        "content": "只有日期的记忆正文。",
-                        "title": "只有日期的标题",
-                        "inject_mode": mode,
-                        "evidence_end_time": "2026-08-29T11:21:00+00:00",
-                        "evidence_time_precision": "day",
-                    },
-                ])
-                self.assertIn(expected_prefix, text)
-                self.assertNotIn("19", text)
+        text = format_memories_for_injection([
+            {
+                "content": "只有日期的记忆正文。",
+                "title": "只有日期的标题",
+                "evidence_end_time": "2026-08-29T11:21:00+00:00",
+                "evidence_time_precision": "day",
+            },
+        ])
+        self.assertIn("时间：2026-08-29｜只有日期的记忆正文。", text)
+        self.assertNotIn("19", text)
 
     def test_evidence_approximate_precision_still_shows_the_stored_clock(self):
         text = format_memories_for_injection([
@@ -426,7 +413,7 @@ class RecallInjectionTests(unittest.TestCase):
             },
         ])
 
-        self.assertIn("[碎片] 时间：2026-08-29 19:21｜模糊时间记忆。", text)
+        self.assertIn("时间：2026-08-29 19:21｜模糊时间记忆。", text)
 
     def test_no_evidence_time_hides_time_even_with_memory_time_or_created_at(self):
         text = format_memories_for_injection([
@@ -440,95 +427,78 @@ class RecallInjectionTests(unittest.TestCase):
             },
         ])
 
-        self.assertIn("[碎片] 没有证据时间的记忆。", text)
+        self.assertIn("没有证据时间的记忆。", text)
         self.assertNotIn("时间：", text)
 
 
-class LayeredInjectionTests(unittest.TestCase):
-    def test_vector_only_core_keeps_core_layer(self):
-        ranked = _hybrid_rank(
-            [],
-            [_memory(1, "核心记忆", layer="核心", similarity=0.55)],
-            [],
-            5,
-            now=NOW,
-        )
-
-        selected = _select_memories_for_injection(ranked, 5)
-
-        self.assertEqual(selected[0]["layer"], "核心")
-        self.assertEqual(selected[0]["inject_mode"], "full")
-
-    def test_vector_only_scene_uses_scene_threshold_and_quota(self):
-        ranked = _hybrid_rank(
-            [],
-            [
-                _memory(i, f"场景 {i}", layer="场景", similarity=0.95)
-                for i in range(1, 6)
-            ],
-            [],
-            10,
-            now=NOW,
-        )
-
-        selected = _select_memories_for_injection(ranked, 10)
-
-        self.assertEqual([item["id"] for item in selected], [1, 2, 3])
-        self.assertTrue(all(item["layer"] == "场景" for item in selected))
-    def test_layers_apply_different_relevance_thresholds(self):
+class UnifiedInjectionTests(unittest.TestCase):
+    def test_rank_order_selects_every_memory_without_thresholds_or_quotas(self):
         ranked = [
-            _memory(1, "稳定的核心关系", layer="核心", _retrieval_score=0.20),
-            _memory(2, "相关场景", layer="场景", _retrieval_score=0.40),
-            _memory(3, "弱相关碎片", layer="碎片", _retrieval_score=0.40),
-            _memory(4, "强相关碎片", layer="碎片", _retrieval_score=0.72),
-        ]
-
-        selected = _select_memories_for_injection(ranked, 8)
-
-        self.assertEqual([item["id"] for item in selected], [1, 2, 4])
-        self.assertEqual(
-            [item["inject_mode"] for item in selected],
-            ["full", "title_only", "full"],
-        )
-
-    def test_per_layer_quotas_prevent_fragment_flooding(self):
-        ranked = [
-            _memory(i, f"碎片 {i}", layer="碎片", _retrieval_score=0.90)
+            _memory(i, f"记忆 {i}", _retrieval_score=0.90)
             for i in range(1, 7)
         ]
 
         selected = _select_memories_for_injection(ranked, 8)
 
-        self.assertEqual([item["id"] for item in selected], [1, 2])
+        self.assertEqual([item["id"] for item in selected], [1, 2, 3, 4, 5, 6])
+        self.assertTrue(all("inject_mode" not in item for item in selected))
+        self.assertTrue(all("layer" not in item for item in selected))
 
-    def test_budget_degrades_full_memory_to_title_before_dropping_it(self):
-        memory = _memory(
-            1,
-            "很长的场景内容" * 100,
-            title="场景标题",
-            layer="场景",
-            _retrieval_score=0.90,
-        )
-        title_line_cost = len("\n1. [场景·线索] 场景标题")
-        budget = len(MEMORY_CONTEXT_HEADER) + title_line_cost
+    def test_low_score_memories_are_no_longer_dropped(self):
+        ranked = [
+            _memory(1, "低分但被选中的记忆", _retrieval_score=0.05),
+        ]
+
+        selected = _select_memories_for_injection(ranked, 5)
+
+        self.assertEqual([item["id"] for item in selected], [1])
+
+    def test_top_k_bounds_the_selection(self):
+        ranked = [
+            _memory(i, f"记忆 {i}", _retrieval_score=0.90)
+            for i in range(1, 11)
+        ]
+
+        selected = _select_memories_for_injection(ranked, 3)
+
+        self.assertEqual([item["id"] for item in selected], [1, 2, 3])
+
+    def test_injection_output_has_no_layer_labels_or_title_clue_mode(self):
+        ranked = [
+            _memory(1, "统一注入的完整正文。", title="标题", _retrieval_score=0.90),
+        ]
+
+        rendered = format_memories_for_injection(_select_memories_for_injection(ranked, 5))
+
+        for forbidden in ("碎片", "场景", "核心", "·线索"):
+            with self.subTest(label=forbidden):
+                self.assertNotIn(forbidden, rendered)
+        self.assertIn("统一注入的完整正文。", rendered)
+
+    def test_last_memory_is_truncated_to_the_remaining_budget(self):
+        memory = _memory(1, "很长的记忆内容" * 100, title="标题", _retrieval_score=0.90)
+        budget = len(MEMORY_CONTEXT_HEADER) + len("\n1. ") + 12
 
         selected = _select_memories_for_injection([memory], 8, char_budget=budget)
 
         self.assertEqual(len(selected), 1)
-        self.assertEqual(selected[0]["inject_mode"], "title_only")
-        self.assertLessEqual(
-            len(format_memories_for_injection(selected)),
-            budget,
-        )
+        self.assertEqual(len(selected[0]["injection_text"]), 12)
+        self.assertLessEqual(len(format_memories_for_injection(selected)), budget)
+
+    def test_selection_stops_once_the_budget_is_exhausted(self):
+        ranked = [
+            _memory(1, "刚好放下的内容", _retrieval_score=0.90),
+            _memory(2, "放不下的后续内容", _retrieval_score=0.80),
+        ]
+        budget = len(MEMORY_CONTEXT_HEADER) + len("\n1. 刚好放下的内容")
+
+        selected = _select_memories_for_injection(ranked, 8, char_budget=budget)
+
+        self.assertEqual([item["id"] for item in selected], [1])
 
     def test_default_context_budget_is_a_hard_limit(self):
         ranked = [
-            _memory(
-                i,
-                "核心记忆内容" * 300,
-                layer="核心",
-                _retrieval_score=0.95,
-            )
+            _memory(i, "很长的记忆内容" * 300, _retrieval_score=0.95)
             for i in range(1, 10)
         ]
 
@@ -536,7 +506,7 @@ class LayeredInjectionTests(unittest.TestCase):
         rendered = format_memories_for_injection(selected)
 
         self.assertLessEqual(len(rendered), MAX_INJECTION_CHARS)
-        self.assertLessEqual(len(selected), 3)
+        self.assertGreater(len(selected), 1)
 
 
 class SearchFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -576,7 +546,7 @@ class SearchFlowTests(unittest.IsolatedAsyncioTestCase):
         vector_search.assert_not_called()
         boost.assert_called_once_with(result)
         self.assertEqual([item["id"] for item in result], [1])
-        self.assertEqual(result[0]["inject_mode"], "full")
+        self.assertIn("injection_text", result[0])
         self.assertFalse(any(key.startswith("_") for key in result[0]))
 
     async def test_empty_query_never_searches_or_boosts(self):
@@ -590,23 +560,23 @@ class SearchFlowTests(unittest.IsolatedAsyncioTestCase):
         keyword_search.assert_not_called()
         boost.assert_not_called()
 
-    async def test_only_memories_that_survive_layer_selection_are_boosted(self):
+    async def test_only_memories_selected_for_injection_are_boosted(self):
         keyword_rows = [
-            _memory(1, "核心", layer="核心", heat=20),
-            _memory(2, "弱碎片", layer="碎片", heat=20),
+            _memory(1, "第一条记忆", heat=20),
+            _memory(2, "第二条记忆", heat=20),
         ]
         ranked = [
             dict(keyword_rows[0], _retrieval_score=0.20),
             dict(keyword_rows[1], _retrieval_score=0.20),
         ]
         with (
-            patch(f"{MODULE}._extract_keywords", return_value=["核心"]),
+            patch(f"{MODULE}._extract_keywords", return_value=["记忆"]),
             patch(f"{MODULE}._keyword_search", return_value=keyword_rows),
             patch(f"{MODULE}._get_embedding", new=AsyncMock(return_value=None)),
             patch(f"{MODULE}._hybrid_rank", return_value=ranked),
             patch(f"{MODULE}._boost_heat") as boost,
         ):
-            result = await search_memories("核心")
+            result = await search_memories("记忆", top_k=1)
 
         self.assertEqual([item["id"] for item in result], [1])
         boost.assert_called_once_with(result)
@@ -670,15 +640,16 @@ class SearchFlowTests(unittest.IsolatedAsyncioTestCase):
                 if forbidden:
                     self.assertNotIn(forbidden, text)
 
-    def test_formatter_only_injects_full_content_for_full_mode(self):
+    def test_formatter_injects_content_without_layer_labels(self):
         text = format_memories_for_injection([
-            {"content": "完整内容", "inject_mode": "full"},
-            {"title": "只显示标题", "content": "不应注入的正文", "inject_mode": "title_only"},
+            {"content": "完整内容"},
+            {"injection_text": "时间：2026-08-29 19:21｜预渲染内容"},
         ])
 
-        self.assertIn("[碎片] 完整内容", text)
-        self.assertIn("[碎片·线索] 只显示标题", text)
-        self.assertNotIn("不应注入的正文", text)
+        self.assertIn("完整内容", text)
+        self.assertIn("预渲染内容", text)
+        for forbidden in ("碎片", "场景", "核心", "·线索"):
+            self.assertNotIn(forbidden, text)
         self.assertIn("不得覆盖现有人设、system prompt", text)
 
 

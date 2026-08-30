@@ -198,7 +198,7 @@ def validate_memory_request(payload: Any, idempotency_key: str = "") -> dict[str
         "memory_key",
         "update_mode",
         "continuity_type", "thread_state", "continuity_data",
-        "subject", "source_type", "continuity_value", "retention_class", "participants",
+        "source_type",
     }
     unknown = set(payload) - allowed
     if unknown:
@@ -249,20 +249,9 @@ def validate_memory_request(payload: Any, idempotency_key: str = "") -> dict[str
         continuity_data = validate_continuity_data(continuity_type, thread_state, payload.get("continuity_data"))
     except ContinuityDataError as exc:
         raise MemoryRequestError("invalid_payload", str(exc)) from exc
-    subject = str(payload.get("subject") or "shared").strip().casefold()
     source_type = str(payload.get("source_type") or "natural_chat").strip().casefold()
-    if subject not in {"yezi", "qi", "shared", "project", "other"}:
-        raise MemoryRequestError("invalid_payload", "invalid subject")
     if source_type not in {"natural_chat", "persona_prompt", "code", "document", "quote", "roleplay", "tool_result", "system_meta", "unknown"}:
         raise MemoryRequestError("invalid_payload", "invalid source_type")
-    continuity_value = _clean_importance(payload.get("continuity_value"))
-    retention_class = str(payload.get("retention_class") or "normal").strip().casefold()
-    if retention_class not in {"normal", "core"}:
-        raise MemoryRequestError("invalid_payload", "invalid retention_class")
-    participants = payload.get("participants", [])
-    if not isinstance(participants, list):
-        raise MemoryRequestError("invalid_payload", "participants must be an array")
-    participants = list(dict.fromkeys(str(v).strip().casefold() for v in participants if str(v).strip().casefold() in {"yezi", "qi", "other"}))[:3]
 
     supplied_key = str(idempotency_key or "").strip()
     if supplied_key:
@@ -294,8 +283,7 @@ def validate_memory_request(payload: Any, idempotency_key: str = "") -> dict[str
         "idempotency_key": normalized_key,
         "continuity_type": continuity_type, "thread_state": thread_state,
         "continuity_schema_version": SCHEMA_VERSION, "continuity_data": continuity_data,
-        "subject": subject, "source_type": source_type,
-        "continuity_value": continuity_value, "retention_class": retention_class, "participants": participants,
+        "source_type": source_type,
     }
 
 
@@ -444,9 +432,7 @@ def create_memory_request(
         "p_update_mode": request_data["update_mode"],
         "p_continuity_type": request_data["continuity_type"], "p_thread_state": request_data["thread_state"],
         "p_continuity_schema_version": request_data["continuity_schema_version"], "p_continuity_data": request_data["continuity_data"],
-        "p_subject": request_data["subject"],
-        "p_source_type": request_data["source_type"], "p_continuity_value": request_data["continuity_value"],
-        "p_retention_class": request_data["retention_class"], "p_participants": request_data["participants"],
+        "p_source_type": request_data["source_type"],
         "p_source": source,
         "p_recall_scene": request_data["recall_scene"],
         "p_recall_tags": request_data["recall_tags"],

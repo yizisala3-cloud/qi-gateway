@@ -35,6 +35,10 @@ class MCPToolContractTests(unittest.TestCase):
             with self.subTest(tool=name):
                 for forbidden in ("continuity_data", "continuity_type", "assistant_id", "proposed_relations"):
                     self.assertNotIn(forbidden, properties)
+                # 六个通用元数据字段退役：subject/participants/continuity_value/
+                # retention_class 不再是任何工具的公开参数。
+                for retired in ("subject", "participants", "continuity_value", "retention_class"):
+                    self.assertNotIn(retired, properties)
         self.assertIn("scene", self.tools["remember_moment"].input_schema["properties"])
         self.assertIn("event", self.tools["remember_moment"].input_schema["properties"])
         self.assertEqual(
@@ -171,8 +175,9 @@ class MCPToolContractTests(unittest.TestCase):
             captured["payload"]["continuity_data"],
             {"scene": "场景", "event": "事件", "moment_state": "linked"},
         )
-        self.assertEqual(captured["payload"]["participants"], ["yezi", "qi"])
-        self.assertEqual(captured["payload"]["continuity_value"], 5)
+        for retired in ("subject", "participants", "continuity_value", "retention_class"):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, captured["payload"])
 
     def test_recall_fields_pass_through_to_the_request_payload(self):
         captured = {}

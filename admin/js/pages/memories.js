@@ -1,5 +1,5 @@
 // pages/memories.js - 记忆管理：记忆库 + 审核申请
-import { createMemoryBrowser } from './_memory_browser.js?v=20260830-retro1';
+import { createMemoryBrowser } from './_memory_browser.js?v=20260831-retire1';
 
 export default {
   browser: null,

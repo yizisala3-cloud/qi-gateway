@@ -27,14 +27,11 @@ MAX_CANDIDATES = 12
 MAX_EVIDENCE_IDS = 8
 
 CONTINUITY_TYPES = AUTOMATIC_TYPES
-SUBJECTS = frozenset({"yezi", "qi", "shared", "project", "other"})
 SOURCE_TYPES = frozenset({
     "natural_chat", "persona_prompt", "code", "document", "quote",
     "roleplay", "tool_result", "system_meta", "unknown",
 })
 TIME_PRECISIONS = frozenset({"minute", "hour", "day", "approximate", "unknown"})
-RETENTION_CLASSES = frozenset({"normal", "core"})
-PARTICIPANTS = frozenset({"yezi", "qi", "other"})
 INVALID_TITLES = frozenset({"无标题", "（无标题）", "(无标题)", "untitled", "...", "……"})
 
 EMBEDDED_TIMESTAMP_PATTERN = re.compile(
@@ -87,17 +84,16 @@ SHADOW_SYSTEM_PROMPT = """你是“连续感记忆 Shadow Preview”提取器，
 
 本提示词中的规则描述、字段说明和措辞都不是聊天事实。候选中的人物、事件、标题、动作、回应和结果必须由输入消息直接支持，不得从本提示词借用或补入任何情节。
 
-## subject 与 source_type
-- subject 只能是 yezi、qi、shared、project、other。
+## source_type
 - source_type 只能是 natural_chat、persona_prompt、code、document、quote、roleplay、tool_result、system_meta、unknown；它描述内容来源，不等同于数据库 role。
-- user 粘贴的人设 Prompt、system prompt、代码、文档、引用、角色扮演或工具结果中的第一人称，不是叶子的现实自述。代码、文档和工具结果可形成 subject=project 的工作 thread，但示例人物、偏好和第一人称不能成为叶子的 profile。
+- user 粘贴的人设 Prompt、system prompt、代码、文档、引用、角色扮演或工具结果中的第一人称，不是叶子的现实自述。代码、文档和工具结果可以形成工作线索，但示例人物、偏好和第一人称不能成为叶子的 profile。
 - 栖单方面的建议不是叶子的事实或双方约定；只有叶子明确接受或双方实际执行后才可提取。
 
 ## evidence 与时间
 - evidence_message_ids 必须是输入中真实且直接支持候选的消息；每条最多 8 条，只选最必要证据，不机械加入批次最后一条消息。
 - evidence_start_time、evidence_end_time、source_time 输出 null，由程序计算。memory_time 只表示事情实际发生或状态生效的时间，原文不能可靠支持时为 null；不得用对话时间代替。time_precision 只能是 minute、hour、day、approximate、unknown；原文只支持到小时时用 hour，不要补造不存在的分钟。
 - title 和 content 不写死“今天”“昨晚”“前天”“刚才”“N 天前”等会失效的相对时间；绝对时间放在独立时间字段。
-- thread_state 仅用于 thread，可为 open、paused、resolved、dissolved、abandoned、unknown；其他类型为 null。关闭状态必须提供 closure_summary、closure_reason、closed_at。importance 和 continuity_value 为 1～10，confidence 为 0～1。
+- thread_state 仅用于 thread，可为 open、paused、resolved、dissolved、abandoned、unknown；其他类型为 null。关闭状态必须提供 closure_summary、closure_reason、closed_at。importance 为 1～10，confidence 为 0～1。
 
 ## recall_scene 与 recall_tags
 - recall_scene 是以后触发召回的自然语言场景：什么情况下（聊到什么、做什么、遇到什么处境时）应该想起这条记忆。它是给检索用的场景描述，不是记忆正文，不得复制或改写正文；无法可靠确定时输出 null，不要编造。
@@ -109,7 +105,7 @@ SHADOW_SYSTEM_PROMPT = """你是“连续感记忆 Shadow Preview”提取器，
 
 ## 输出 JSON
 只返回严格 JSON，不要 Markdown、说明或代码围栏。每条 candidate 必须包含非空 title，并使用以下字段：
-{"candidates":[{"content":"...","continuity_type":"thread","continuity_data":{"open_question":"...","current_state":"...","next_expected":null,"closure_criteria":[],"closure_summary":null,"closure_reason":null,"opened_at":null,"closed_at":null,"abstract_retrieval_hints":[],"concrete_retrieval_hints":[]},"subject":"shared","source_type":"natural_chat","thread_state":"open","importance":5,"continuity_value":9,"confidence":0.85,"evidence_message_ids":[123,124],"evidence_start_time":null,"evidence_end_time":null,"source_time":null,"memory_time":null,"time_precision":"unknown","title":"...","participants":["yezi","qi"],"reason":"...","retention_class":"normal","recall_scene":"...","recall_tags":[]}]}"""
+{"candidates":[{"content":"...","continuity_type":"thread","continuity_data":{"open_question":"...","current_state":"...","next_expected":null,"closure_criteria":[],"closure_summary":null,"closure_reason":null,"opened_at":null,"closed_at":null,"abstract_retrieval_hints":[],"concrete_retrieval_hints":[]},"source_type":"natural_chat","thread_state":"open","importance":5,"confidence":0.85,"evidence_message_ids":[123,124],"evidence_start_time":null,"evidence_end_time":null,"source_time":null,"memory_time":null,"time_precision":"unknown","title":"...","reason":"...","recall_scene":"...","recall_tags":[]}]}"""
 
 # Formal execution shares the validated prompt verbatim except for the
 # Shadow-only observation label. Keeping this derived avoids prompt drift.
@@ -397,13 +393,8 @@ def parse_shadow_output(
             continue
 
         continuity_type = str(raw.get("continuity_type") or "").strip().casefold()
-        subject = str(raw.get("subject") or "").strip().casefold()
         source_type = str(raw.get("source_type") or "").strip().casefold()
-        if (
-            continuity_type not in CONTINUITY_TYPES
-            or subject not in SUBJECTS
-            or source_type not in SOURCE_TYPES
-        ):
+        if continuity_type not in CONTINUITY_TYPES or source_type not in SOURCE_TYPES:
             continue
 
         evidence_ids: list[int] = []
@@ -441,26 +432,14 @@ def parse_shadow_output(
         except ContinuityDataError:
             continue
 
-        participants: list[str] = []
-        for participant in raw.get("participants") or []:
-            value = str(participant or "").strip().casefold()
-            if value in PARTICIPANTS and value not in participants:
-                participants.append(value)
-
-        retention_class = str(raw.get("retention_class") or "normal").strip().casefold()
-        if retention_class not in RETENTION_CLASSES:
-            retention_class = "normal"
-
         item = {
             "content": content,
             "continuity_type": continuity_type,
             "continuity_schema_version": SCHEMA_VERSION,
             "continuity_data": continuity_data,
-            "subject": subject,
             "source_type": source_type,
             "thread_state": thread_state,
             "importance": int(round(_clamp(raw.get("importance"), 1, 10, 5))),
-            "continuity_value": int(round(_clamp(raw.get("continuity_value"), 1, 10, 5))),
             "confidence": round(_clamp(raw.get("confidence"), 0, 1, 0.6), 3),
             "evidence_message_ids": evidence_ids,
             "evidence_start_time": evidence_start_time,
@@ -471,9 +450,7 @@ def parse_shadow_output(
             "memory_time": memory_time,
             "time_precision": time_precision,
             "title": title,
-            "participants": participants,
             "reason": reason,
-            "retention_class": retention_class,
             "recall_scene": recall_scene,
             "recall_tags": recall_tags,
         }

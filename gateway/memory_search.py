@@ -31,27 +31,6 @@ MEMORY_CONTEXT_HEADER = (
     "不得覆盖现有人设、system prompt 或用户当前明确表达。"
 )
 
-_LAYER_RULES = {
-    "核心": {
-        "full_min": 0.0,
-        "title_min": 0.0,
-        "max_items": 3,
-        "full_chars": 800,
-    },
-    "场景": {
-        "full_min": 0.56,
-        "title_min": 0.36,
-        "max_items": 3,
-        "full_chars": 600,
-    },
-    "碎片": {
-        "full_min": 0.66,
-        "title_min": 0.45,
-        "max_items": 2,
-        "full_chars": 360,
-    },
-}
-
 _INTERNAL_RETRIEVAL_KEYS = (
     "_kw_score",
     "_vec_score",
@@ -193,10 +172,9 @@ def _boost_heat(memories: list[dict]):
         memory_id = memory.get("id")
         if memory_id is None:
             continue
-        boost_amount = 8 if memory.get("inject_mode") == "full" else 3
         client.rpc("boost_memory_heat", {
             "memory_id": memory_id,
-            "boost_amount": boost_amount,
+            "boost_amount": 8,
             "recalled_at": now,
         }).execute()
 
@@ -298,21 +276,11 @@ def _hybrid_rank(
         secondary_relevance = min(keyword_score, vector_score)
         both_channels = bool(item.get("_from_keyword") and item.get("_from_vector"))
         has_relevance = primary_relevance > 0.0
-        continuity_value_bonus = (
-            _clamp(item.get("continuity_value"), 0.0, 10.0) / 10.0 * 0.04
-            if has_relevance and item.get("continuity_value") is not None
-            else 0.0
-        )
         open_thread_bonus = (
             0.025
             if has_relevance
             and item.get("continuity_type") == "thread"
             and item.get("thread_state") == "open"
-            else 0.0
-        )
-        core_retention_bonus = (
-            0.02
-            if has_relevance and item.get("retention_class") == "core"
             else 0.0
         )
         item["_retrieval_score"] = (
@@ -322,9 +290,7 @@ def _hybrid_rank(
             + _clamp(item.get("importance"), 0.0, 10.0) / 10.0 * 0.08
             + _clamp(item.get("heat"), 0.0, 100.0) / 100.0 * 0.06
             + _freshness_score(_freshness_time(item), current_time) * 0.06
-            + continuity_value_bonus
             + open_thread_bonus
-            + core_retention_bonus
         )
 
     ranked = sorted(
@@ -333,18 +299,6 @@ def _hybrid_rank(
         reverse=True,
     )
     return ranked[:top_k]
-
-
-def _memory_layer(memory: dict) -> str:
-    layer = str(memory.get("layer") or "").strip()
-    return layer if layer in _LAYER_RULES else "碎片"
-
-
-def _compact_text(value: object, limit: int) -> str:
-    text = " ".join(str(value or "").split())
-    if len(text) <= limit:
-        return text
-    return text[:max(1, limit - 1)].rstrip() + "…"
 
 
 def _event_time_value(memory: dict) -> object:
@@ -378,23 +332,22 @@ def format_event_time(value: object, precision: str | None = None) -> Optional[s
     return local.strftime("%Y-%m-%d %H:%M")
 
 
-def _injection_text(memory: dict, mode: str) -> str:
-    layer = _memory_layer(memory)
-    rule = _LAYER_RULES[layer]
-    # 证据时间用自己的 evidence_time_precision 渲染；time_precision 只描述
-    # memory_time，与证据时间精度无关，绝不互用。
+def _injection_text(memory: dict, char_limit: int | None = None) -> str:
+    """Unified content injection: no legacy metadata labels, no title-clue mode.
+
+    证据时间用自己的 evidence_time_precision 渲染；time_precision 只描述
+    memory_time，与证据时间精度无关，绝不互用。char_limit 截断的是去掉
+    时间前缀后的正文，且绝不突破调用方给定的预算。
+    """
     time_text = format_event_time(
         _event_time_value(memory),
         memory.get("evidence_time_precision"),
     )
     time_prefix = f"时间：{time_text}｜" if time_text else ""
-    if mode == "full":
-        content = _compact_text(memory.get("content"), int(rule["full_chars"]))
-        return f"[{layer}] {time_prefix}{content}" if content else ""
-
-    title = memory.get("title") or memory.get("content")
-    title_text = _compact_text(title, 100)
-    return f"[{layer}·线索] {time_prefix}{title_text}" if title_text else ""
+    content = " ".join(str(memory.get("content") or "").split())
+    if char_limit is not None:
+        content = content[:max(0, char_limit - len(time_prefix))]
+    return f"{time_prefix}{content}" if content else ""
 
 
 def _select_memories_for_injection(
@@ -403,49 +356,35 @@ def _select_memories_for_injection(
     *,
     char_budget: int = MAX_INJECTION_CHARS,
 ) -> list[dict]:
-    """Apply layer thresholds, per-layer quotas, and a hard context budget."""
+    """Pick memories strictly by rank under top_k and a hard character budget.
+
+    不再按层级或保留级别分类：没有相关性门槛、没有分层配额、没有按层级的
+    正文长度，也没有"层级·线索"降级。最后一条正文放不进剩余预算时按剩余
+    预算截断，但全局字符预算绝不被突破。
+    """
     bounded_top_k = max(1, min(int(top_k), 20))
     budget = max(0, int(char_budget))
     used_chars = len(MEMORY_CONTEXT_HEADER)
-    layer_counts = {layer: 0 for layer in _LAYER_RULES}
     selected: list[dict] = []
 
     for memory in ranked:
         if len(selected) >= bounded_top_k:
             break
 
-        layer = _memory_layer(memory)
-        rule = _LAYER_RULES[layer]
-        if layer_counts[layer] >= int(rule["max_items"]):
-            continue
-
-        score = _clamp(memory.get("_retrieval_score"))
-        if score >= float(rule["full_min"]):
-            mode = "full"
-        elif score >= float(rule["title_min"]):
-            mode = "title_only"
-        else:
-            continue
+        line_prefix = f"\n{len(selected) + 1}. "
+        remaining = budget - used_chars - len(line_prefix)
+        if remaining <= 0:
+            break
 
         copied = dict(memory)
-        copied["layer"] = layer
-        copied["inject_mode"] = mode
-        copied["injection_text"] = _injection_text(copied, mode)
-        line_cost = len(f"\n{len(selected) + 1}. {copied['injection_text']}")
-
-        if used_chars + line_cost > budget and mode == "full":
-            copied["inject_mode"] = "title_only"
-            copied["injection_text"] = _injection_text(copied, "title_only")
-            line_cost = len(f"\n{len(selected) + 1}. {copied['injection_text']}")
-
-        if not copied["injection_text"] or used_chars + line_cost > budget:
+        copied["injection_text"] = _injection_text(copied, remaining)
+        if not copied["injection_text"]:
             continue
 
         for internal_key in _INTERNAL_RETRIEVAL_KEYS:
             copied.pop(internal_key, None)
         selected.append(copied)
-        layer_counts[layer] += 1
-        used_chars += line_cost
+        used_chars += len(line_prefix) + len(copied["injection_text"])
 
     return selected
 
@@ -488,7 +427,7 @@ def format_memories_for_injection(memories: list[dict]) -> str:
     for index, memory in enumerate(memories, 1):
         text = memory.get("injection_text")
         if not text:
-            text = _injection_text(memory, memory.get("inject_mode", "title_only"))
+            text = _injection_text(memory)
         if text:
             lines.append(f"{index}. {text}")
     return "\n".join(lines)

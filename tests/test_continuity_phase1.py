@@ -217,23 +217,34 @@ class Phase1MigrationContractTests(unittest.TestCase):
             self.assertIn(contract, writer)
         self.assertIn("not (v_mode='replace' and v_key is not null and memory_key=v_key)", writer)
 
-    def test_python_rpc_payload_names_match_phase1_signatures(self):
+    def test_python_rpc_payload_names_match_current_signatures(self):
         source = (ROOT / "gateway" / "memory_requests.py").read_text(encoding="utf-8")
+        # 六个通用元数据字段退役后，写入路径的当前签名以最新的前向 migration
+        # 为准；subject/participants/continuity_value/retention_class 不再出现。
         create_expected = {
             "p_assistant_id", "p_conversation_id", "p_source_message_id", "p_content",
             "p_title", "p_tags", "p_importance", "p_reason", "p_content_hash",
             "p_idempotency_key", "p_rate_limit", "p_memory_key", "p_update_mode",
             "p_continuity_type", "p_thread_state", "p_continuity_schema_version",
-            "p_continuity_data", "p_subject", "p_source_type", "p_continuity_value",
-            "p_retention_class", "p_participants", "p_source",
+            "p_continuity_data", "p_source_type", "p_source",
+            "p_recall_scene", "p_recall_tags",
         }
-        signature = self.sql.split("create or replace function public.create_memory_request_v4(", 1)[1].split(") returns jsonb", 1)[0]
+        current = (
+            ROOT / "supabase" / "migrations"
+            / "20260831010000_retire_memory_metadata_fields.sql"
+        ).read_text(encoding="utf-8")
+        signature = current.split("create or replace function public.create_memory_request_v4(", 1)[1].split("returns jsonb", 1)[0]
         sql_names = set(re.findall(r"\b(p_[a-z_]+)\s+", signature))
         self.assertEqual(sql_names, create_expected)
         for name in create_expected:
             self.assertIn(f'"{name}"', source)
-        direct = self.sql.split("create or replace function public.write_memory_direct_v1(", 1)[1].split(") returns jsonb", 1)[0]
-        self.assertEqual(set(re.findall(r"\b(p_[a-z_]+)\s+", direct)), create_expected | {"p_reviewed_by"})
+        for retired in ("p_subject", "p_continuity_value", "p_retention_class", "p_participants"):
+            self.assertNotIn(f'"{retired}"', source)
+        direct = current.split("create or replace function public.write_memory_direct_v1(", 1)[1].split("returns jsonb", 1)[0]
+        self.assertEqual(
+            set(re.findall(r"\b(p_[a-z_]+)\s+", direct)),
+            create_expected | {"p_reviewed_by", "p_recall_embedding"},
+        )
 
     def test_sql_validator_rejects_unknown_keys_and_fractional_integers_safely(self):
         self.assertIn("continuity_object_keys_ok", self.sql)
