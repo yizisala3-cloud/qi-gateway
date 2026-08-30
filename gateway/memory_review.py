@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from typing import Any
 
@@ -10,6 +11,8 @@ from .config import cfg
 from .db import get_client
 from .memory_requests import MemoryRequestError
 from .memory_requests import _clean_memory_key
+
+log = logging.getLogger("gateway.memory_review")
 
 
 def _server_writes_allowed() -> bool:
@@ -220,6 +223,40 @@ def _result(data: Any) -> dict[str, Any]:
 AI_REVIEWABLE_TYPES = ("moment", "thread", "inside_joke")
 
 
+def _request_recall_embedding(client: Any, request_id: int) -> list[float] | None:
+    """Embed the request's own recall_scene for the vector recall channel.
+
+    The review flow never edits recall_scene, so the approved memory keeps the
+    scene the writing AI supplied. A failed embedding call degrades to no vector
+    recall; it must never block the review itself.
+    """
+    try:
+        response = (
+            client.table("memory_requests")
+            .select("recall_scene")
+            .eq("id", request_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        log.warning("recall_scene 读取失败，跳过召回向量生成: %s", type(exc).__name__)
+        return None
+    rows = response.data if isinstance(response.data, list) else []
+    scene = str((rows[0] if rows else {}).get("recall_scene") or "").strip()
+    if not scene:
+        return None
+    try:
+        from .memory_extract import _get_embedding_sync
+
+        return _get_embedding_sync(scene)
+    except Exception as exc:
+        log.warning(
+            "recall_scene embedding 生成失败，该条记忆降级为无向量召回: %s",
+            type(exc).__name__,
+        )
+        return None
+
+
 def list_reviewable_memory_requests(assistant_id: str, limit: int = 50) -> list[dict[str, Any]]:
     assistant = _text(assistant_id, "assistant_id", 160)
     if not assistant:
@@ -239,7 +276,8 @@ def list_reviewable_memory_requests(assistant_id: str, limit: int = 50) -> list[
             .select(
                 "id,content,title,tags,importance,reason,status,source,created_at,"
                 "memory_key,update_mode,continuity_type,thread_state,continuity_data,"
-                "subject,source_type,continuity_value,retention_class,participants"
+                "subject,source_type,continuity_value,retention_class,participants,"
+                "recall_scene,recall_tags"
             )
             .eq("assistant_id", assistant)
             .eq("status", "pending")
@@ -318,6 +356,11 @@ def review_memory_request(
         "p_memory_key": review["memory_key"],
         "p_update_mode": review["update_mode"],
         "p_related_memory_id": review["related_memory_id"],
+        "p_recall_embedding": (
+            _request_recall_embedding(client, review["request_id"])
+            if review["action"] in {"approve", "merge"}
+            else None
+        ),
     }
     try:
         response = client.rpc("review_memory_request_v5", rpc_payload).execute()

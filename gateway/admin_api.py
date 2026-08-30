@@ -28,6 +28,7 @@ _TABLES: dict[str, dict[str, Any]] = {
             "subject", "source_type", "thread_state", "continuity_value",
             "retention_class", "participants", "evidence_start_time", "evidence_end_time",
             "evidence_message_ids", "source_time", "memory_time", "time_precision",
+            "recall_scene", "recall_tags",
         },
         "write": {
             "content", "title", "tags", "heat", "importance", "layer", "source",
@@ -66,6 +67,7 @@ _TABLES: dict[str, dict[str, Any]] = {
             "retention_class", "participants", "evidence_start_time", "evidence_end_time", "confidence",
             "evidence_message_ids", "source_time", "memory_time",
             "time_precision", "digest_run_id", "dedupe_state",
+            "recall_scene", "recall_tags",
             "dedupe_reason", "related_request_id",
         },
         "write": set(),

@@ -99,13 +99,17 @@ SHADOW_SYSTEM_PROMPT = """你是“连续感记忆 Shadow Preview”提取器，
 - title 和 content 不写死“今天”“昨晚”“前天”“刚才”“N 天前”等会失效的相对时间；绝对时间放在独立时间字段。
 - thread_state 仅用于 thread，可为 open、paused、resolved、dissolved、abandoned、unknown；其他类型为 null。关闭状态必须提供 closure_summary、closure_reason、closed_at。importance 和 continuity_value 为 1～10，confidence 为 0～1。
 
+## recall_scene 与 recall_tags
+- recall_scene 是以后触发召回的自然语言场景：什么情况下（聊到什么、做什么、遇到什么处境时）应该想起这条记忆。它是给检索用的场景描述，不是记忆正文，不得复制或改写正文；无法可靠确定时输出 null，不要编造。
+- recall_tags 是自由填写的召回场景标签字符串数组：用于以后按场景归类检索，可以有任意数量的任意标签；标签必须来自对话的真实依据，无法可靠确定时输出空数组，不要编造。
+
 ## 防误提取与敏感信息
 - 证据不足时不得编造；不确定时降低 confidence、缩小表述或不提取。
-- 一般敏感内容不因敏感而排除；API Key、Token、service_role、密码、私钥、支付凭据及其他认证秘密绝对禁止输出。
+- 一般敏感内容不因敏感而排除；API Key、Token、service_role、密码、私钥、支付凭据及其他认证秘密绝对禁止输出（包括 recall_scene 和 recall_tags）。
 
 ## 输出 JSON
 只返回严格 JSON，不要 Markdown、说明或代码围栏。每条 candidate 必须包含非空 title，并使用以下字段：
-{"candidates":[{"content":"...","continuity_type":"thread","continuity_data":{"open_question":"...","current_state":"...","next_expected":null,"closure_criteria":[],"closure_summary":null,"closure_reason":null,"opened_at":null,"closed_at":null,"abstract_retrieval_hints":[],"concrete_retrieval_hints":[]},"subject":"shared","source_type":"natural_chat","thread_state":"open","importance":5,"continuity_value":9,"confidence":0.85,"evidence_message_ids":[123,124],"evidence_start_time":null,"evidence_end_time":null,"source_time":null,"memory_time":null,"time_precision":"unknown","title":"...","participants":["yezi","qi"],"reason":"...","retention_class":"normal"}]}"""
+{"candidates":[{"content":"...","continuity_type":"thread","continuity_data":{"open_question":"...","current_state":"...","next_expected":null,"closure_criteria":[],"closure_summary":null,"closure_reason":null,"opened_at":null,"closed_at":null,"abstract_retrieval_hints":[],"concrete_retrieval_hints":[]},"subject":"shared","source_type":"natural_chat","thread_state":"open","importance":5,"continuity_value":9,"confidence":0.85,"evidence_message_ids":[123,124],"evidence_start_time":null,"evidence_end_time":null,"source_time":null,"memory_time":null,"time_precision":"unknown","title":"...","participants":["yezi","qi"],"reason":"...","retention_class":"normal","recall_scene":"...","recall_tags":[]}]}"""
 
 # Formal execution shares the validated prompt verbatim except for the
 # Shadow-only observation label. Keeping this derived avoids prompt drift.
@@ -377,7 +381,15 @@ def parse_shadow_output(
             continue
         raw_title = re.sub(r"\s+", " ", str(raw.get("title") or "")).strip()[:120]
         reason = re.sub(r"\s+", " ", str(raw.get("reason") or "")).strip()[:400] or None
-        if _contains_secret(content, raw_title, reason):
+        recall_scene = re.sub(r"\s+", " ", str(raw.get("recall_scene") or "")).strip() or None
+        recall_tags: list[str] = []
+        raw_recall_tags = raw.get("recall_tags")
+        if isinstance(raw_recall_tags, list):
+            for candidate in raw_recall_tags:
+                tag = re.sub(r"\s+", " ", str(candidate or "")).strip()
+                if tag and tag not in recall_tags:
+                    recall_tags.append(tag)
+        if _contains_secret(content, raw_title, reason, recall_scene, *recall_tags):
             continue
         title = _normalize_title(raw_title, content)
         fingerprint = content.casefold()
@@ -460,6 +472,8 @@ def parse_shadow_output(
             "participants": participants,
             "reason": reason,
             "retention_class": retention_class,
+            "recall_scene": recall_scene,
+            "recall_tags": recall_tags,
         }
         validated.append(item)
         seen.add(fingerprint)

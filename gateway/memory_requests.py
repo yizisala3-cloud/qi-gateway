@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from typing import Any
 
 from .config import cfg
 from .db import get_client
 from .memory_continuity_schema import SCHEMA_VERSION, ContinuityDataError, validate_continuity_data
+from .memory_extract import _get_embedding_sync
+
+log = logging.getLogger("gateway.memory_requests")
 
 
 MAX_CONTENT_LENGTH = 600
@@ -104,6 +108,31 @@ def _clean_importance(value: Any) -> int:
     return importance
 
 
+def _clean_recall_scene(value: Any) -> str | None:
+    """Normalize the AI-supplied recall scene without business length limits."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise MemoryRequestError("invalid_payload", "recall_scene must be a string")
+    return re.sub(r"\s+", " ", value).strip() or None
+
+
+def _clean_recall_tags(value: Any) -> list[str] | None:
+    """Free-form recall tags: arrays only, no count, length, or value limits."""
+    if value is None or value == "":
+        return None
+    if not isinstance(value, list):
+        raise MemoryRequestError("invalid_payload", "recall_tags must be an array")
+    tags: list[str] = []
+    for candidate in value:
+        if not isinstance(candidate, str):
+            raise MemoryRequestError("invalid_payload", "recall_tags entries must be strings")
+        tag = re.sub(r"\s+", " ", candidate).strip()
+        if tag and tag not in tags:
+            tags.append(tag)
+    return tags or None
+
+
 def _clean_source_message_id(value: Any) -> int | None:
     if value in (None, ""):
         return None
@@ -161,6 +190,8 @@ def validate_memory_request(payload: Any, idempotency_key: str = "") -> dict[str
         "reason",
         "title",
         "tags",
+        "recall_scene",
+        "recall_tags",
         "importance",
         "memory_key",
         "update_mode",
@@ -252,6 +283,8 @@ def validate_memory_request(payload: Any, idempotency_key: str = "") -> dict[str
         "reason": reason,
         "title": title or None,
         "tags": _clean_tags(payload.get("tags")),
+        "recall_scene": _clean_recall_scene(payload.get("recall_scene")),
+        "recall_tags": _clean_recall_tags(payload.get("recall_tags")),
         "importance": _clean_importance(payload.get("importance")),
         "memory_key": memory_key,
         "update_mode": update_mode,
@@ -310,6 +343,24 @@ def _rpc_result(data: Any) -> dict[str, Any]:
     return data
 
 
+def _recall_embedding(scene: str | None) -> list[float] | None:
+    """Embed recall_scene for the vector recall channel.
+
+    Computed from recall_scene alone. A missing provider or failed call degrades
+    to no vector recall for this memory; the keyword channel is unaffected.
+    """
+    if not scene:
+        return None
+    try:
+        return _get_embedding_sync(scene)
+    except Exception as exc:
+        log.warning(
+            "recall_scene embedding 生成失败，该条记忆降级为无向量召回: %s",
+            type(exc).__name__,
+        )
+        return None
+
+
 def create_memory_request(
     payload: Any,
     idempotency_key: str = "",
@@ -362,11 +413,14 @@ def create_memory_request(
         "p_source_type": request_data["source_type"], "p_continuity_value": request_data["continuity_value"],
         "p_retention_class": request_data["retention_class"], "p_participants": request_data["participants"],
         "p_source": source,
+        "p_recall_scene": request_data["recall_scene"],
+        "p_recall_tags": request_data["recall_tags"],
     }
     automatic = request_data["continuity_type"] in {"moment", "thread", "inside_joke"}
     rpc_name = "write_memory_direct_v1" if automatic else "create_memory_request_v4"
     if automatic:
         rpc_payload["p_reviewed_by"] = "orangechat_ai"
+        rpc_payload["p_recall_embedding"] = _recall_embedding(request_data["recall_scene"])
     try:
         response = client.rpc(rpc_name, rpc_payload).execute()
     except Exception as exc:

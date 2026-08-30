@@ -47,6 +47,7 @@ EXTRACT_SYSTEM_PROMPT = """从带 id、北京时间 t 和 role 的聊天原文�
 {"memories":[{"content":"...","continuity_type":"moment","continuity_data":{"scene":"...","event":"...","moment_state":"standalone"},"thread_state":null,"update_mode":"append","memory_key":null,"importance":6,"confidence":0.9,"evidence_message_ids":[12,13],"memory_time":"2026-08-03","time_precision":"day"}]}"""
 EXTRACT_SYSTEM_PROMPT += """
 9. 如果原文明确显示该内容已通过记忆工具提交，或已通过待办工具创建，不要再提取。不能确定时仍可输出，由数据库保守去重和用户审核。
+10. recall_scene 是以后触发召回的自然语言场景：什么情况下（聊到什么、做什么时）应该想起这条记忆；它是检索用的场景描述，不是记忆正文，不得复制正文；无法可靠确定时填 null。recall_tags 是自由填写的召回场景标签字符串数组，必须来自原文真实依据，无法可靠确定时填 []。
 """
 
 # Sent as an extra user turn when the first model response parsed as JSON but
@@ -504,6 +505,15 @@ def _parse_model_output(
             continue
         seen_hashes.add(content_hash)
 
+        recall_scene = re.sub(r"\s+", " ", str(raw.get("recall_scene") or "")).strip() or None
+        recall_tags: list[str] = []
+        raw_recall_tags = raw.get("recall_tags")
+        if isinstance(raw_recall_tags, list):
+            for candidate in raw_recall_tags:
+                tag = re.sub(r"\s+", " ", str(candidate or "")).strip()
+                if tag and tag not in recall_tags:
+                    recall_tags.append(tag)
+
         validated.append({
             "content": content,
             "title": title,
@@ -524,6 +534,8 @@ def _parse_model_output(
             "emotion_weight": 0.5,
             "confidence": round(_clamp(raw.get("confidence"), 0, 1, 0.6), 3),
             "tags": [CONTINUITY_TYPE_TAGS[continuity_type]],
+            "recall_scene": recall_scene,
+            "recall_tags": recall_tags,
             "evidence_message_ids": evidence_ids,
             "source_time": source_time,
             "memory_time": memory_time,
@@ -740,7 +752,14 @@ def _create_run(
 
 
 def _public_memories(memories: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [{key: value for key, value in item.items() if key not in {"embedding", "content_hash"}} for item in memories]
+    return [
+        {
+            key: value
+            for key, value in item.items()
+            if key not in {"embedding", "content_hash", "recall_embedding"}
+        }
+        for item in memories
+    ]
 
 
 def _public_run(run: dict[str, Any]) -> dict[str, Any]:
@@ -859,6 +878,10 @@ def run_memory_digest(trigger: str, mode: str, max_messages: int | None = None) 
             item = dict(memory)
             embedding = _get_embedding_sync(item["content"])
             item["embedding"] = embedding
+            # The recall vector embeds the recall scene only; the content
+            # embedding above keeps serving dedupe comparisons.
+            recall_scene = str(item.get("recall_scene") or "").strip()
+            item["recall_embedding"] = _get_embedding_sync(recall_scene) if recall_scene else None
             enriched.append(item)
 
         commit_response = _client().rpc(

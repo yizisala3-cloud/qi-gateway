@@ -1,7 +1,7 @@
 """记忆搜索模块：关键词 + 向量双通道混合检索。"""
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -11,6 +11,8 @@ from .db import get_client, safe_query
 
 log = logging.getLogger("gateway.memory_search")
 
+# 聊天原文与证据时间统一按北京时间呈现。
+_CST = timezone(timedelta(hours=8))
 EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 EMBEDDING_DIM = 1024
 MAX_CANDIDATES = 50
@@ -168,6 +170,8 @@ def _keyword_search(keywords: list[str], limit: int = 20) -> list[dict]:
 
 @safe_query
 def _vector_search_sync(embedding: list[float], limit: int = 20) -> list[dict]:
+    """Query the recall-scene vector channel; match_memories compares against
+    memories.recall_embedding, so memories without a recall scene never appear."""
     client = get_client()
     if not client:
         return []
@@ -343,16 +347,49 @@ def _compact_text(value: object, limit: int) -> str:
     return text[:max(1, limit - 1)].rstrip() + "…"
 
 
+def _event_time_value(memory: dict) -> object:
+    """事件最后证据时间；created_at 绝不作为事件时间兜底。"""
+    return memory.get("evidence_end_time") or memory.get("source_time")
+
+
+def format_event_time(value: object, precision: str | None = None) -> Optional[str]:
+    """按数据实际精度渲染事件时间，无法确认时返回 None。
+
+    precision 反映存储时间精度：'day' 只显示日期，'hour' 显示到小时，
+    其余显示到分钟；不补零猜测缺失的时分。
+    """
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    # 与记忆链路约定一致：无时区的墙上时间按北京时间解读。
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_CST)
+    local = parsed.astimezone(_CST)
+    if precision == "day":
+        return local.strftime("%Y-%m-%d")
+    if precision == "hour":
+        return local.strftime("%Y-%m-%d %H")
+    return local.strftime("%Y-%m-%d %H:%M")
+
+
 def _injection_text(memory: dict, mode: str) -> str:
     layer = _memory_layer(memory)
     rule = _LAYER_RULES[layer]
+    time_text = format_event_time(_event_time_value(memory))
+    time_prefix = f"时间：{time_text}｜" if time_text else ""
     if mode == "full":
         content = _compact_text(memory.get("content"), int(rule["full_chars"]))
-        return f"[{layer}] {content}" if content else ""
+        return f"[{layer}] {time_prefix}{content}" if content else ""
 
     title = memory.get("title") or memory.get("content")
     title_text = _compact_text(title, 100)
-    return f"[{layer}·线索] {title_text}" if title_text else ""
+    return f"[{layer}·线索] {time_prefix}{title_text}" if title_text else ""
 
 
 def _select_memories_for_injection(

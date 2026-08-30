@@ -28,12 +28,37 @@ class _RpcQuery:
         return SimpleNamespace(data=self.client.result)
 
 
+class _RequestRowQuery:
+    def __init__(self, client):
+        self.client = client
+
+    def select(self, fields):
+        self.client.request_select = fields
+        return self
+
+    def eq(self, *_args):
+        return self
+
+    def limit(self, *_args):
+        return self
+
+    def execute(self):
+        return SimpleNamespace(data=self.client.request_rows)
+
+
 class _Client:
-    def __init__(self, result=None, error=None):
+    def __init__(self, result=None, error=None, request_rows=None):
         self.result = result
         self.error = error
+        self.request_rows = request_rows or []
+        self.request_select = ""
         self.rpc_name = None
         self.rpc_payload = None
+
+    def table(self, name):
+        if name != "memory_requests":
+            raise AssertionError(f"unexpected table access: {name}")
+        return _RequestRowQuery(self)
 
     def rpc(self, name, payload):
         self.rpc_name = name
@@ -211,6 +236,81 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(result["status"], "rejected")
         self.assertIsNone(client.rpc_payload["p_content"])
         self.assertIsNone(client.rpc_payload["p_content_hash"])
+        self.assertIsNone(client.rpc_payload["p_recall_embedding"])
+
+    def test_approve_embeds_the_request_recall_scene_for_vector_recall(self):
+        client = _Client(
+            {
+                "changed": True,
+                "request": {"id": 42, "status": "approved", "memory_id": 77, "reviewed_at": "now"},
+            },
+            request_rows=[{"recall_scene": "当叶子再问部署进度时"}],
+        )
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+            patch("gateway.memory_extract._get_embedding_sync", return_value=[0.3, 0.4]) as embed,
+        ):
+            result = review_memory_request(42, {"action": "approve", "content": "用户喜欢清晨散步。"})
+
+        embed.assert_called_once_with("当叶子再问部署进度时")
+        self.assertEqual(client.rpc_payload["p_recall_embedding"], [0.3, 0.4])
+        self.assertEqual(result["memory_id"], 77)
+
+    def test_scene_less_request_keeps_null_recall_embedding(self):
+        client = _Client(
+            {
+                "changed": True,
+                "request": {"id": 43, "status": "approved", "memory_id": 78, "reviewed_at": "now"},
+            },
+            request_rows=[{"recall_scene": None}],
+        )
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+            patch("gateway.memory_extract._get_embedding_sync") as embed,
+        ):
+            review_memory_request(43, {"action": "approve", "content": "有效记忆内容。"})
+
+        embed.assert_not_called()
+        self.assertIsNone(client.rpc_payload["p_recall_embedding"])
+
+    def test_merge_also_embeds_the_request_recall_scene(self):
+        client = _Client(
+            {
+                "changed": True,
+                "related_memory_id": 18,
+                "request": {"id": 44, "status": "merged", "memory_id": 94, "reviewed_at": "now"},
+            },
+            request_rows=[{"recall_scene": "当旅行计划被提起时"}],
+        )
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+            patch("gateway.memory_extract._get_embedding_sync", return_value=[0.5]) as embed,
+        ):
+            review_memory_request(44, {
+                "action": "merge",
+                "related_memory_id": 18,
+                "content": "合并后的旅行计划内容。",
+            })
+
+        embed.assert_called_once_with("当旅行计划被提起时")
+        self.assertEqual(client.rpc_payload["p_recall_embedding"], [0.5])
+
+    def test_recall_scene_read_failure_does_not_block_the_review(self):
+        client = _Client({
+            "changed": True,
+            "request": {"id": 45, "status": "approved", "memory_id": 79, "reviewed_at": "now"},
+        })
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+        ):
+            result = review_memory_request(45, {"action": "approve", "content": "有效记忆内容。"})
+
+        self.assertEqual(result["memory_id"], 79)
+        self.assertIsNone(client.rpc_payload["p_recall_embedding"])
 
     def test_duplicate_calls_v4_with_selected_memory(self):
         client = _Client({

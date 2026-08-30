@@ -53,6 +53,10 @@ _COMMON_RULES = (
     "避免“刚才”“这个”“上面说的”等失去上下文后无法理解的指代；"
     "不把结构化字段机械重复成正文；不编造用户没有表达的信息。\n"
     "【reason】说明为什么该信息以后值得召回，不要只写“用户要求保存”。\n"
+    "【recall_scene】以后触发召回的自然语言场景：什么情况下应该想起这条记忆；"
+    "它是检索用的场景描述，不是记忆正文，不要复制正文；有可靠依据时填写，没有就省略，不要编造。\n"
+    "【recall_tags】自由填写的召回场景标签数组，帮助以后按场景归类检索；"
+    "不限制数量和内容，但必须来自对话中的真实依据，没有可靠依据时省略。\n"
     "【通用元数据】importance 为 1-10 整数，默认 5；continuity_value 未提供时沿用 importance；"
     "subject 合法值为 yezi/qi/shared/project/other；"
     "source_type 合法值为 natural_chat/persona_prompt/code/document/quote/roleplay/tool_result/system_meta/unknown；"
@@ -99,6 +103,14 @@ _REASON = Annotated[str, Field(
 )]
 _TITLE = Annotated[str | None, Field(description="可选标题，最长 100 字符；没有证据时省略", max_length=100)]
 _TAGS = Annotated[list[str] | None, Field(description="可选标签，最多 5 个；没有证据时省略", max_length=5)]
+_RECALL_SCENE = Annotated[str | None, Field(
+    description="可选召回场景：以后什么情况下应该想起这条记忆的自然语言描述；"
+                "是检索场景，不是记忆正文；没有可靠依据时省略，不要编造",
+)]
+_RECALL_TAGS = Annotated[list[str] | None, Field(
+    description="可选召回场景标签数组，自由填写，不限制数量和内容；"
+                "必须来自对话真实依据，没有可靠依据时省略",
+)]
 _IMPORTANCE = Annotated[int, Field(description="重要性 1-10 整数，默认 5", ge=1, le=10)]
 _CONTINUITY_VALUE = Annotated[int | None, Field(
     description="连续感价值 1-10 整数；未提供时沿用 importance", ge=1, le=10,
@@ -138,6 +150,8 @@ async def _submit_typed_memory(
     thread_state: str | None,
     title: str | None,
     tags: list[str] | None,
+    recall_scene: str | None,
+    recall_tags: list[str] | None,
     importance: int,
     continuity_value: int | None,
     subject: str,
@@ -163,6 +177,8 @@ async def _submit_typed_memory(
         "thread_state": thread_state,
         "title": title,
         "tags": tags or [],
+        "recall_scene": recall_scene,
+        "recall_tags": recall_tags or [],
         "importance": importance,
         "continuity_value": importance if continuity_value is None else continuity_value,
         "subject": subject,
@@ -208,6 +224,8 @@ async def remember_moment(
     salience_reason: Annotated[str | None, Field(description="可选：为什么这个瞬间值得记住", max_length=600)] = None,
     title: _TITLE = None,
     tags: _TAGS = None,
+    recall_scene: _RECALL_SCENE = None,
+    recall_tags: _RECALL_TAGS = None,
     importance: _IMPORTANCE = 5,
     continuity_value: _CONTINUITY_VALUE = None,
     subject: _SUBJECT = "shared",
@@ -234,6 +252,8 @@ async def remember_moment(
         },
         title=title,
         tags=tags,
+        recall_scene=recall_scene,
+        recall_tags=recall_tags,
         importance=importance,
         continuity_value=continuity_value,
         subject=subject,
@@ -286,6 +306,8 @@ async def remember_thread(
     concrete_retrieval_hints: _OPT_STR_LIST = None,
     title: _TITLE = None,
     tags: _TAGS = None,
+    recall_scene: _RECALL_SCENE = None,
+    recall_tags: _RECALL_TAGS = None,
     importance: _IMPORTANCE = 5,
     continuity_value: _CONTINUITY_VALUE = None,
     subject: _SUBJECT = "shared",
@@ -316,6 +338,8 @@ async def remember_thread(
         },
         title=title,
         tags=tags,
+        recall_scene=recall_scene,
+        recall_tags=recall_tags,
         importance=importance,
         continuity_value=continuity_value,
         subject=subject,
@@ -357,6 +381,8 @@ async def remember_inside_joke(
     reinforcement_count: Annotated[int, Field(description="加强次数，非负整数，默认 0", ge=0)] = 0,
     title: _TITLE = None,
     tags: _TAGS = None,
+    recall_scene: _RECALL_SCENE = None,
+    recall_tags: _RECALL_TAGS = None,
     importance: _IMPORTANCE = 5,
     continuity_value: _CONTINUITY_VALUE = None,
     subject: _SUBJECT = "shared",
@@ -386,6 +412,8 @@ async def remember_inside_joke(
         },
         title=title,
         tags=tags,
+        recall_scene=recall_scene,
+        recall_tags=recall_tags,
         importance=importance,
         continuity_value=continuity_value,
         subject=subject,
@@ -424,6 +452,8 @@ async def propose_episode(
     episode_end_time: _OPT_TIME = None,
     title: _TITLE = None,
     tags: _TAGS = None,
+    recall_scene: _RECALL_SCENE = None,
+    recall_tags: _RECALL_TAGS = None,
     importance: _IMPORTANCE = 5,
     continuity_value: _CONTINUITY_VALUE = None,
     subject: _SUBJECT = "shared",
@@ -452,6 +482,8 @@ async def propose_episode(
         },
         title=title,
         tags=tags,
+        recall_scene=recall_scene,
+        recall_tags=recall_tags,
         importance=importance,
         continuity_value=continuity_value,
         subject=subject,
@@ -493,6 +525,8 @@ async def propose_profile(
     exceptions: _OPT_STR_LIST = None,
     title: _TITLE = None,
     tags: _TAGS = None,
+    recall_scene: _RECALL_SCENE = None,
+    recall_tags: _RECALL_TAGS = None,
     importance: _IMPORTANCE = 5,
     continuity_value: _CONTINUITY_VALUE = None,
     subject: _SUBJECT = "shared",
@@ -521,6 +555,8 @@ async def propose_profile(
         },
         title=title,
         tags=tags,
+        recall_scene=recall_scene,
+        recall_tags=recall_tags,
         importance=importance,
         continuity_value=continuity_value,
         subject=subject,
@@ -572,6 +608,8 @@ async def propose_interaction_rule(
     exceptions: _OPT_STR_LIST = None,
     title: _TITLE = None,
     tags: _TAGS = None,
+    recall_scene: _RECALL_SCENE = None,
+    recall_tags: _RECALL_TAGS = None,
     importance: _IMPORTANCE = 5,
     continuity_value: _CONTINUITY_VALUE = None,
     subject: _SUBJECT = "shared",
@@ -600,6 +638,8 @@ async def propose_interaction_rule(
         },
         title=title,
         tags=tags,
+        recall_scene=recall_scene,
+        recall_tags=recall_tags,
         importance=importance,
         continuity_value=continuity_value,
         subject=subject,

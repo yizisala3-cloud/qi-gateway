@@ -17,8 +17,8 @@ export const CONTINUITY_TYPE_LABELS = {
 const TIME_PRECISION_LABELS = {
   minute: '精确到分钟', day: '精确到日期', approximate: '大概时间', unknown: '时间未知',
 };
-const MEMORY_FIELDS = 'id,title,content,tags,heat,importance,layer,source,verified,is_active,last_recalled_at,recall_count,emotion_weight,created_at,memory_key,supersedes_memory_id,superseded_by_memory_id,superseded_at,continuity_id,continuity_type,continuity_schema_version,continuity_data,subject,source_type,thread_state,continuity_value,retention_class,participants,evidence_start_time,evidence_end_time,evidence_message_ids,source_time,memory_time,time_precision';
-const REQUEST_FIELDS = 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,memory_key,update_mode,related_memory_id,related_request_id,continuity_id,continuity_type,continuity_schema_version,continuity_data,thread_state,confidence,evidence_message_ids,source_time,memory_time,time_precision,digest_run_id,dedupe_state,dedupe_reason,created_at,reviewed_at,reviewed_by,review_note';
+const MEMORY_FIELDS = 'id,title,content,tags,heat,importance,layer,source,verified,is_active,last_recalled_at,recall_count,emotion_weight,created_at,memory_key,supersedes_memory_id,superseded_by_memory_id,superseded_at,continuity_id,continuity_type,continuity_schema_version,continuity_data,subject,source_type,thread_state,continuity_value,retention_class,participants,evidence_start_time,evidence_end_time,evidence_message_ids,source_time,memory_time,time_precision,recall_scene,recall_tags';
+const REQUEST_FIELDS = 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,memory_key,update_mode,related_memory_id,related_request_id,continuity_id,continuity_type,continuity_schema_version,continuity_data,thread_state,confidence,evidence_message_ids,source_time,memory_time,time_precision,digest_run_id,dedupe_state,dedupe_reason,recall_scene,recall_tags,created_at,reviewed_at,reviewed_by,review_note';
 
 export function continuityTypeLabel(value) {
   return CONTINUITY_TYPE_LABELS[value] || value || '未分类历史数据';
@@ -82,6 +82,8 @@ function memoryKvRows(m) {
     ${m.continuity_value != null ? `<div class="kv"><span class="k">承接价值</span><span class="v">${esc(m.continuity_value)}</span></div>` : ''}
     <div class="kv"><span class="k">证据时间</span><span class="v">${evidenceRange(m)}</span></div>
     <div class="kv"><span class="k">记忆时间</span><span class="v">${esc(m.memory_time ? fmtDate(m.memory_time) : '-')}（${TIME_PRECISION_LABELS[m.time_precision] || TIME_PRECISION_LABELS.unknown}）</span></div>
+    ${m.recall_scene ? `<div class="kv"><span class="k">召回场景</span></div><div class="kv-block"><span class="v">${esc(m.recall_scene)}</span></div>` : ''}
+    ${(m.recall_tags || []).length ? `<div class="kv"><span class="k">召回标签</span><span class="v">${m.recall_tags.map(t => esc(t)).join('、')}</span></div>` : ''}
     <div class="kv"><span class="k">创建时间</span><span class="v">${esc(fmtDate(m.created_at))}</span></div>
     <div class="kv"><span class="k">最近召回</span><span class="v">${esc(fmtDate(m.last_recalled_at))} · ${esc(m.recall_count ?? 0)} 次</span></div>
   `;
@@ -105,6 +107,8 @@ function requestKvRows(r) {
     <div class="kv"><span class="k">原文证据</span><span class="v">${(r.evidence_message_ids || []).map(id => `#${esc(id)}`).join('、') || '-'}</span></div>
     <div class="kv"><span class="k">证据时间</span><span class="v">${evidenceRange(r)}</span></div>
     <div class="kv"><span class="k">记忆时间</span><span class="v">${esc(r.memory_time ? fmtDate(r.memory_time) : '-')}（${TIME_PRECISION_LABELS[r.time_precision] || TIME_PRECISION_LABELS.unknown}）</span></div>
+    ${r.recall_scene ? `<div class="kv"><span class="k">召回场景</span></div><div class="kv-block"><span class="v">${esc(r.recall_scene)}</span></div>` : ''}
+    ${(r.recall_tags || []).length ? `<div class="kv"><span class="k">召回标签</span><span class="v">${r.recall_tags.map(t => esc(t)).join('、')}</span></div>` : ''}
     <div class="kv"><span class="k">来源消息</span><span class="v">#${esc(r.source_message_id ?? '-')} · 会话 ${esc(r.conversation_id || '-')}</span></div>
     ${r.digest_run_id ? `<div class="kv"><span class="k">来源总结</span><span class="v">#${esc(r.digest_run_id)}</span></div>` : ''}
     <div class="kv"><span class="k">申请时间</span><span class="v">${esc(fmtDate(r.created_at))}</span></div>

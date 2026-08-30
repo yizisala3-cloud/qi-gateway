@@ -16,13 +16,13 @@ IDEMPOTENT_SIMILARITY_REVIEW_MIGRATION = ROOT / "supabase" / "migrations" / "202
 AUTO_DIGEST_REQUEST_MIGRATION = ROOT / "supabase" / "migrations" / "20260804020000_auto_digest_memory_requests.sql"
 MANIFEST = ROOT / "orangechat_plugins" / "memory-request" / "manifest.json"
 MAIN_JS = ROOT / "orangechat_plugins" / "memory-request" / "main.js"
-REVIEW_PAGE = ROOT / "admin" / "js" / "pages" / "memory_requests.js"
+REVIEW_PAGE = ROOT / "admin" / "js" / "pages" / "_memory_browser.js"
 ROUTES_JS = ROOT / "admin" / "js" / "routes.js"
 INDEX_HTML = ROOT / "admin" / "index.html"
 APP_JS = ROOT / "admin" / "js" / "app.js"
 ADMIN_API = ROOT / "gateway" / "admin_api.py"
 MEMORY_EXTRACT = ROOT / "gateway" / "memory_extract.py"
-ASSET_VERSION = "20260820-mcp-split1"
+ASSET_VERSION = "20260830-retro1"
 
 
 class MemoryRequestMigrationContractTests(unittest.TestCase):
@@ -312,22 +312,27 @@ class OrangeChatPluginContractTests(unittest.TestCase):
 
 
 class MemoryReviewDashboardContractTests(unittest.TestCase):
+    """Contract tests for the redesigned shared memory/request browser page.
+
+    The 20260830 dashboard redesign (commit b5c1b33) merged the review queue
+    into admin/js/pages/_memory_browser.js; these assertions track that file.
+    """
+
     @classmethod
     def setUpClass(cls):
         cls.page = REVIEW_PAGE.read_text(encoding="utf-8")
         cls.routes = ROUTES_JS.read_text(encoding="utf-8")
 
     def test_dashboard_exposes_review_queue_and_purpose_built_endpoint(self):
-        self.assertIn("key: 'memory_requests'", self.routes)
+        self.assertIn("key: 'memories'", self.routes)
         self.assertIn("/admin/api/memory-requests/", self.page)
         self.assertIn("action: 'approve'", self.page)
         self.assertIn("action: 'reject'", self.page)
-        self.assertIn("review-update-mode", self.page)
-        self.assertIn("review-memory-key", self.page)
+        self.assertIn("rv-update-mode", self.page)
+        self.assertIn("rv-memory-key", self.page)
         self.assertIn("openRelation(el.dataset.id, 'merge')", self.page)
         self.assertIn("openRelation(el.dataset.id, 'duplicate')", self.page)
         self.assertIn("openRelation(el.dataset.id, 'conflict')", self.page)
-        self.assertIn("request-continuity-type", self.page)
         self.assertIn("evidence_message_ids", self.page)
         self.assertIn("time_precision", self.page)
         self.assertIn("dedupe_state", self.page)
@@ -346,10 +351,8 @@ class MemoryReviewDashboardContractTests(unittest.TestCase):
         self.assertNotIn("proposed_relations", _TABLES["memory_requests"]["read"])
 
     def test_banner_distinguishes_direct_writes_from_user_review(self):
-        self.assertIn("episode、profile 和 interaction_rule", self.page)
-        self.assertIn("moment、thread 和 inside_joke", self.page)
-        self.assertIn("直接写入正式记忆", self.page)
-        self.assertIn("叶子审核", self.page)
+        self.assertIn("episode、profile、interaction_rule 会进入审核队列", self.page)
+        self.assertIn("moment、thread、inside_joke 校验通过后直接写入正式记忆", self.page)
 
     def test_static_asset_version_refreshed_for_plain_reload(self):
         index_html = INDEX_HTML.read_text(encoding="utf-8")
@@ -359,8 +362,18 @@ class MemoryReviewDashboardContractTests(unittest.TestCase):
 
     def test_dashboard_select_fields_covered_by_admin_whitelist(self):
         allowed = _TABLES["memory_requests"]["read"]
-        match = re.search(r"select:\s*'([^']+)'", self.page)
+        match = re.search(r"const REQUEST_FIELDS = '([^']+)'", self.page)
         self.assertIsNotNone(match, "memory_requests select list not found")
+        fields = [field.strip() for field in match.group(1).split(",") if field.strip()]
+        self.assertTrue(fields)
+        for field in fields:
+            with self.subTest(field=field):
+                self.assertIn(field, allowed)
+
+    def test_memory_select_fields_covered_by_admin_whitelist(self):
+        allowed = _TABLES["memories"]["read"]
+        match = re.search(r"const MEMORY_FIELDS = '([^']+)'", self.page)
+        self.assertIsNotNone(match, "memories select list not found")
         fields = [field.strip() for field in match.group(1).split(",") if field.strip()]
         self.assertTrue(fields)
         for field in fields:

@@ -277,6 +277,52 @@ class ShadowParserTests(unittest.TestCase):
                 )
 
 
+    def test_recall_scene_and_tags_are_preserved_without_limits(self):
+        scene = "当叶子再次聊到旅行、签证或任何出行计划时" * 10
+        tags = [f"场景标签{index}" for index in range(30)]
+        result = self._parse_candidate(recall_scene=f"  {scene}  ", recall_tags=tags)
+
+        self.assertEqual(result["recall_scene"], scene)
+        self.assertEqual(result["recall_tags"], tags)
+
+    def test_recall_fields_default_to_null_and_empty_array(self):
+        result = self._parse_candidate()
+        self.assertIsNone(result["recall_scene"])
+        self.assertEqual(result["recall_tags"], [])
+
+        result = self._parse_candidate(recall_scene="   ", recall_tags=["", "  ", "网关"])
+        self.assertIsNone(result["recall_scene"])
+        self.assertEqual(result["recall_tags"], ["网关"])
+
+        result = self._parse_candidate(recall_tags="不是数组")
+        self.assertIsNone(result["recall_scene"])
+        self.assertEqual(result["recall_tags"], [])
+
+    def test_secret_in_recall_fields_drops_the_whole_candidate(self):
+        payload = {"candidates": [_candidate(
+            recall_scene="保存这个 Token: abcdefghijklmnop",
+            recall_tags=["网关"],
+        )]}
+        self.assertEqual(
+            parse_shadow_output(
+                json.dumps(payload, ensure_ascii=False),
+                {11: None, 12: None},
+            ),
+            [],
+        )
+
+    def test_prompt_defines_recall_scene_as_retrieval_context_not_content(self):
+        for requirement in (
+            "recall_scene 是以后触发召回的自然语言场景",
+            "不是记忆正文，不得复制或改写正文",
+            "recall_tags 是自由填写的召回场景标签字符串数组",
+            "无法可靠确定时输出空数组，不要编造",
+            "包括 recall_scene 和 recall_tags",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, SHADOW_SYSTEM_PROMPT)
+
+
 class ShadowSamplingTests(unittest.TestCase):
     def test_assistant_retries_fold_only_within_same_conversation(self):
         messages, _ = _normalize_messages([

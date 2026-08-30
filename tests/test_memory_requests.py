@@ -146,6 +146,32 @@ class ValidationTests(unittest.TestCase):
                 memory_key="包含中文的键",
             ))
 
+    def test_recall_scene_and_tags_normalize_without_business_limits(self):
+        long_scene = "当叶子再次聊到网关部署" * 100
+        many_tags = [f"场景{index}" for index in range(50)]
+        result = validate_memory_request(_payload(
+            recall_scene=f"  {long_scene}  ",
+            recall_tags=[" 当", "当", "网关", "", many_tags[0], *many_tags],
+        ))
+
+        self.assertEqual(result["recall_scene"], long_scene)
+        self.assertEqual(result["recall_tags"], ["当", "网关", *many_tags])
+
+        self.assertIsNone(validate_memory_request(_payload())["recall_scene"])
+        self.assertIsNone(validate_memory_request(_payload())["recall_tags"])
+        self.assertIsNone(validate_memory_request(_payload(recall_scene="   "))["recall_scene"])
+        self.assertIsNone(validate_memory_request(_payload(recall_tags=[]))["recall_tags"])
+
+        with self.assertRaises(MemoryRequestError) as scene_type:
+            validate_memory_request(_payload(recall_scene=123))
+        self.assertEqual(scene_type.exception.code, "invalid_payload")
+        with self.assertRaises(MemoryRequestError) as tags_type:
+            validate_memory_request(_payload(recall_tags="网关,部署"))
+        self.assertEqual(tags_type.exception.code, "invalid_payload")
+        with self.assertRaises(MemoryRequestError) as tag_entry:
+            validate_memory_request(_payload(recall_tags=[42]))
+        self.assertEqual(tag_entry.exception.code, "invalid_payload")
+
 
 class PersistenceTests(unittest.TestCase):
     def test_creates_pending_request_through_atomic_rpc(self):
@@ -242,6 +268,81 @@ class PersistenceTests(unittest.TestCase):
         with self.assertRaises(MemoryRequestError) as raised:
             create_memory_request(_payload(), source="mcp_memory", assistant_id="server-assistant")
         self.assertEqual(raised.exception.code, "invalid_payload")
+
+    def test_recall_fields_reach_the_pending_request_rpc_without_embedding(self):
+        client = _Client(rpc_result={
+            "created": True,
+            "request": {"id": 45, "status": "pending", "created_at": "now"},
+        })
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+        ):
+            create_memory_request(_payload(
+                recall_scene="当叶子再问部署进度时",
+                recall_tags=["网关", "部署"],
+            ))
+
+        self.assertEqual(client.rpc_payload["p_recall_scene"], "当叶子再问部署进度时")
+        self.assertEqual(client.rpc_payload["p_recall_tags"], ["网关", "部署"])
+        self.assertNotIn("p_recall_embedding", client.rpc_payload)
+
+    def test_direct_writer_embeds_recall_scene_for_the_vector_channel(self):
+        client = _Client(rpc_result={
+            "created": True,
+            "request": {"id": 46, "status": "approved", "memory_id": 91, "continuity_type": "moment"},
+        })
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+            patch(f"{MODULE}._get_embedding_sync", return_value=[0.1, 0.2]) as embed,
+        ):
+            create_memory_request(_payload(
+                continuity_type="moment",
+                continuity_data={"scene": "聊天", "event": "确认", "moment_state": "standalone"},
+                recall_scene="当叶子提到那天的约定时",
+                recall_tags=["约定"],
+            ), source="mcp_memory")
+
+        embed.assert_called_once_with("当叶子提到那天的约定时")
+        self.assertEqual(client.rpc_payload["p_recall_embedding"], [0.1, 0.2])
+
+    def test_blank_recall_scene_never_generates_a_recall_embedding(self):
+        client = _Client(rpc_result={
+            "created": True,
+            "request": {"id": 47, "status": "approved", "memory_id": 92, "continuity_type": "moment"},
+        })
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+            patch(f"{MODULE}._get_embedding_sync") as embed,
+        ):
+            create_memory_request(_payload(
+                continuity_type="moment",
+                continuity_data={"scene": "聊天", "event": "确认", "moment_state": "standalone"},
+            ), source="mcp_memory")
+
+        embed.assert_not_called()
+        self.assertIsNone(client.rpc_payload["p_recall_embedding"])
+
+    def test_recall_embedding_failure_degrades_without_failing_the_request(self):
+        client = _Client(rpc_result={
+            "created": True,
+            "request": {"id": 48, "status": "approved", "memory_id": 93, "continuity_type": "moment"},
+        })
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+            patch(f"{MODULE}._get_embedding_sync", side_effect=RuntimeError("provider down")),
+        ):
+            result = create_memory_request(_payload(
+                continuity_type="moment",
+                continuity_data={"scene": "聊天", "event": "确认", "moment_state": "standalone"},
+                recall_scene="当叶子提到那天的约定时",
+            ), source="mcp_memory")
+
+        self.assertEqual(result["memory_id"], 93)
+        self.assertIsNone(client.rpc_payload["p_recall_embedding"])
 
     def test_duplicate_request_returns_existing_pending_application(self):
         client = _Client(rpc_result={

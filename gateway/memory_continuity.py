@@ -407,6 +407,10 @@ def _enrich_candidates(candidates: list[dict[str, Any]], run_id: int) -> list[di
         item["content_hash"] = hashlib.sha256(item["content"].casefold().encode("utf-8")).hexdigest()
         try:
             item["embedding"] = _get_embedding_sync(item["content"])
+            # The vector recall channel embeds the recall scene only; the
+            # content embedding above keeps its dedupe semantics unchanged.
+            recall_scene = str(item.get("recall_scene") or "").strip()
+            item["recall_embedding"] = _get_embedding_sync(recall_scene) if recall_scene else None
         except DigestPipelineError as exc:
             raise ContinuityPipelineError("embedding_error", str(exc), 422) from exc
         enriched.append(item)
