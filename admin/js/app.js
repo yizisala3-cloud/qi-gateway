@@ -1,19 +1,20 @@
-// app.js - router shell, theme, sidebar, auth
-import { NAV, ROUTE_INDEX } from './routes.js?v=20260817-retired-runtime1';
-import { loading, errorBlock } from './ui.js?v=20260802-memory-review3';
-import { gw, getToken, setToken, clearToken } from './api.js?v=20260802-memory-review3';
+// app.js - shell: login, sidebar, routing, theme, mobile drawers
+import { NAV, ROUTE_INDEX } from './routes.js?v=20260830-retro1';
+import { loading, errorBlock, icon, esc } from './ui.js?v=20260830-retro1';
+import { gw, getToken, setToken, clearToken } from './api.js?v=20260830-retro1';
 
-const DEFAULT_ROUTE = 'dashboard';
-const ASSET_VERSION = '20260820-mcp-split1';
+const DEFAULT_ROUTE = 'memories';
+const ASSET_VERSION = '20260830-retro1';
 
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);
   localStorage.setItem('qi-theme', t);
   const btn = document.getElementById('theme-btn');
-  if (btn) btn.textContent = t === 'dark' ? '\u2600\uFE0F' : '\uD83C\uDF19';
+  if (btn) btn.innerHTML = icon(t === 'night' ? 'sun' : 'moon');
 }
-function initTheme() { applyTheme(localStorage.getItem('qi-theme') || 'dark'); }
+function initTheme() { applyTheme(localStorage.getItem('qi-theme') === 'night' ? 'night' : 'day'); }
 function isAuthed() { return !!getToken(); }
+
 function showLogin(message = '') {
   document.getElementById('login-page').style.display = 'flex';
   document.getElementById('layout').style.display = 'none';
@@ -23,6 +24,7 @@ function showApp() {
   document.getElementById('login-page').style.display = 'none';
   document.getElementById('layout').style.display = 'flex';
 }
+
 async function tryLogin(token) {
   setToken(token);
   try {
@@ -31,64 +33,92 @@ async function tryLogin(token) {
     if (!location.hash) location.hash = '#/' + DEFAULT_ROUTE;
     await route(); refreshStatus();
   } catch (e) {
-    clearToken(); showLogin(`Login failed: ${e.message}`);
+    clearToken(); showLogin(`登录失败：${e.message}`);
   }
 }
+
 function renderSidebar() {
   const nav = document.getElementById('sidebar-nav');
   nav.innerHTML = NAV.map(grp => `
-    ${grp.title ? `<div class="nav-group-title">${grp.title}</div>` : ''}
+    ${grp.title ? `<div class="nav-group-title">${esc(grp.title)}</div>` : ''}
     <div class="nav-group">${grp.items.map(it => `
       <a class="nav-item" href="#/${it.key}" data-key="${it.key}">
-        <span class="ico">${it.icon}</span><span class="nav-label">${it.label}</span>
+        ${icon(it.icon)}<span class="nav-label">${esc(it.label)}</span>
       </a>`).join('')}</div>`).join('');
+  nav.querySelectorAll('.nav-item').forEach(a => {
+    a.addEventListener('click', () => closeSidebar());
+  });
 }
+
 function highlight(key) {
   document.querySelectorAll('.nav-item').forEach(a => a.classList.toggle('active', a.dataset.key === key));
 }
+
 let currentMod = null;
+let routeSeq = 0;
 async function route() {
-  const key = (location.hash.replace(/^#\/?/, '') || DEFAULT_ROUTE).split('?')[0];
+  const seq = ++routeSeq;
+  const raw = location.hash.replace(/^#\/?/, '');
+  const [key, qs] = raw.split('?');
+  const params = Object.fromEntries(new URLSearchParams(qs || ''));
   const meta = ROUTE_INDEX[key];
   const content = document.getElementById('content');
+  const root = document.getElementById('page-root');
   if (!meta) { location.hash = '#/' + DEFAULT_ROUTE; return; }
   highlight(key);
-  document.getElementById('page-title').textContent = `${meta.icon} ${meta.label}`;
   document.getElementById('page-crumb').textContent = meta.group || 'qi-dashboard';
+  document.getElementById('page-title').textContent = meta.label;
+  document.getElementById('page-desc').textContent = meta.desc || '';
   document.title = `${meta.label} - qi-dashboard`;
   content.scrollTop = 0;
-  content.innerHTML = loading();
+  root.innerHTML = loading();
   try { currentMod?.unmount?.(); } catch {}
   currentMod = null;
   try {
     const mod = (await import(`./pages/${key}.js?v=${ASSET_VERSION}`)).default;
+    if (seq !== routeSeq) return;
     currentMod = mod;
-    content.innerHTML = '';
+    root.innerHTML = '';
     const wrap = document.createElement('div');
     wrap.className = 'fade-in';
-    content.appendChild(wrap);
-    await mod.mount(wrap);
+    root.appendChild(wrap);
+    await mod.mount(wrap, params);
   } catch (e) {
+    if (seq !== routeSeq) return;
+    if (String(e.message).startsWith('401')) {
+      clearToken(); showLogin('登录已过期，请重新输入网关 Token。');
+      return;
+    }
     console.error(e);
-    content.innerHTML = errorBlock(`Page load failed: ${e.message}`);
+    root.innerHTML = errorBlock(`页面加载失败：${esc(e.message)}`);
   }
 }
+
 async function refreshStatus() {
   const dot = document.getElementById('status-dot');
+  if (!dot) return;
   try {
     await gw('/status');
-    if (dot) { dot.textContent = 'online'; dot.className = 'badge badge-accent'; }
+    dot.innerHTML = '<span class="dot dot-green"></span>在线';
+    dot.className = 'status-chip online';
   } catch (e) {
-    if (dot) { dot.textContent = 'unauthorized'; dot.className = 'badge badge-danger'; }
+    dot.innerHTML = '<span class="dot dot-red"></span>未授权';
+    dot.className = 'status-chip offline';
     if (e.message.startsWith('401')) {
-      clearToken(); showLogin('Session expired. Please enter the gateway token again.');
+      clearToken(); showLogin('登录已过期，请重新输入网关 Token。');
     }
   }
 }
+
+function closeSidebar() {
+  document.getElementById('sidebar')?.classList.remove('open');
+  document.getElementById('sidebar-backdrop')?.classList.remove('show');
+}
+
 async function boot() {
   initTheme();
   document.getElementById('theme-btn')?.addEventListener('click', () => {
-    applyTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+    applyTheme(document.documentElement.getAttribute('data-theme') === 'night' ? 'day' : 'night');
   });
   document.getElementById('login-btn')?.addEventListener('click', () => {
     const val = document.getElementById('login-input').value.trim(); if (val) tryLogin(val);
@@ -96,7 +126,11 @@ async function boot() {
   document.getElementById('login-input')?.addEventListener('keydown', e => {
     if (e.key === 'Enter') { const val = e.target.value.trim(); if (val) tryLogin(val); }
   });
-  document.getElementById('menu-btn')?.addEventListener('click', () => document.getElementById('sidebar')?.classList.toggle('open'));
+  document.getElementById('menu-btn')?.addEventListener('click', () => {
+    document.getElementById('sidebar')?.classList.add('open');
+    document.getElementById('sidebar-backdrop')?.classList.add('show');
+  });
+  document.getElementById('sidebar-backdrop')?.addEventListener('click', closeSidebar);
   window.addEventListener('hashchange', route);
   if (isAuthed()) {
     try {
@@ -104,7 +138,7 @@ async function boot() {
       if (!location.hash) location.hash = '#/' + DEFAULT_ROUTE;
       await route(); refreshStatus();
     } catch (e) {
-      clearToken(); showLogin(`Saved token rejected: ${e.message}`);
+      clearToken(); showLogin(`已保存的 Token 被拒绝：${e.message}`);
     }
   } else showLogin();
 }
