@@ -465,6 +465,8 @@ def parse_shadow_output(
             "evidence_message_ids": evidence_ids,
             "evidence_start_time": evidence_start_time,
             "evidence_end_time": evidence_end_time,
+            # 证据时间来自消息时钟（精确到分钟），精度独立于 memory_time。
+            "evidence_time_precision": "minute" if evidence_end_time else None,
             "source_time": evidence_end_time,
             "memory_time": memory_time,
             "time_precision": time_precision,

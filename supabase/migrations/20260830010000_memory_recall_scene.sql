@@ -8,12 +8,29 @@ begin;
 
 alter table public.memory_requests
     add column if not exists recall_scene text,
-    add column if not exists recall_tags text[];
+    add column if not exists recall_tags text[],
+    add column if not exists evidence_time_precision text;
 
 alter table public.memories
     add column if not exists recall_scene text,
     add column if not exists recall_tags text[],
+    add column if not exists evidence_time_precision text,
     add column if not exists recall_embedding extensions.vector;
+
+-- Evidence times keep their own precision, separate from the memory_time
+-- time_precision column: evidence_end_time/source_time come from real message
+-- clocks, while time_precision keeps describing memory_time only.
+alter table public.memory_requests
+    drop constraint if exists memory_requests_evidence_time_precision_values;
+alter table public.memory_requests
+    add constraint memory_requests_evidence_time_precision_values
+        check (evidence_time_precision in ('minute', 'hour', 'day', 'approximate', 'unknown'));
+
+alter table public.memories
+    drop constraint if exists memories_evidence_time_precision_values;
+alter table public.memories
+    add constraint memories_evidence_time_precision_values
+        check (evidence_time_precision in ('minute', 'hour', 'day', 'approximate', 'unknown'));
 
 -- recall_embedding is derived only from recall_scene. A blank scene can never
 -- carry an embedding; no enum, length, count, or content limits apply to the
@@ -51,6 +68,10 @@ comment on column public.memories.recall_tags is
     'Free-form recall scene tags; no enum, count, or length limits.';
 comment on column public.memories.recall_embedding is
     'Vector embedding of recall_scene only; null when recall_scene is blank. Powers vector recall; embedding keeps its dedupe semantics.';
+comment on column public.memory_requests.evidence_time_precision is
+    'Precision of evidence_start_time/evidence_end_time/source_time as supported by the actual evidence; null for legacy rows means unknown, never guessed.';
+comment on column public.memories.evidence_time_precision is
+    'Precision of the stored evidence times; independent of time_precision, which describes memory_time only.';
 
 -- PostgreSQL cannot replace a function while changing its RETURNS TABLE row
 -- type. Drop only the exact existing signature, without CASCADE, then rebuild
@@ -90,6 +111,7 @@ returns table(
     evidence_end_time timestamptz,
     source_time timestamptz,
     time_precision text,
+    evidence_time_precision text,
     recall_scene text,
     recall_tags text[]
 )
@@ -123,6 +145,7 @@ as $function$
         memory.evidence_end_time,
         memory.source_time,
         memory.time_precision,
+        memory.evidence_time_precision,
         memory.recall_scene,
         memory.recall_tags
     from public.memories as memory
@@ -171,6 +194,7 @@ declare
     v_recall_scene text;
     v_recall_tags text[];
     v_evidence_time timestamptz;
+    v_evidence_precision text;
 begin
     if p_continuity_schema_version <> 1
        or not public.validate_continuity_data(p_continuity_type,p_thread_state,p_continuity_data) then
@@ -201,6 +225,8 @@ begin
 
     -- Event time is the cited source message's own clock from the immutable
     -- chat log. A missing or mismatched message leaves it null, never guessed.
+    -- The chat client stores wall-clock timestamps down to the minute, so the
+    -- evidence precision is 'minute' whenever the evidence time exists.
     if p_source_message_id is not null then
         select message.created_at at time zone 'Asia/Shanghai'
         into v_evidence_time
@@ -212,6 +238,7 @@ begin
               or message.conversation_id = nullif(trim(coalesce(p_conversation_id,'')),'')
           );
     end if;
+    v_evidence_precision := case when v_evidence_time is null then null else 'minute' end;
 
     perform pg_advisory_xact_lock(hashtextextended(p_assistant_id,0));
     select * into v_request
@@ -248,14 +275,14 @@ begin
         idempotency_key,status,source,memory_key,update_mode,evidence_message_ids,
         continuity_type,thread_state,continuity_id,continuity_schema_version,continuity_data,
         subject,source_type,continuity_value,retention_class,participants,
-        recall_scene,recall_tags,evidence_start_time,evidence_end_time,source_time
+        recall_scene,recall_tags,evidence_start_time,evidence_end_time,source_time,evidence_time_precision
     ) values (
         p_assistant_id,nullif(trim(p_conversation_id),''),p_source_message_id,p_content,p_title,p_tags,p_importance,p_reason,p_content_hash,
         p_idempotency_key,'pending',p_source,p_memory_key,p_update_mode,
         case when p_source_message_id is null then '{}'::bigint[] else array[p_source_message_id] end,
         p_continuity_type,p_thread_state,null,1,p_continuity_data,
         p_subject,p_source_type,p_continuity_value,p_retention_class,p_participants,
-        v_recall_scene,v_recall_tags,v_evidence_time,v_evidence_time,v_evidence_time
+        v_recall_scene,v_recall_tags,v_evidence_time,v_evidence_time,v_evidence_time,v_evidence_precision
     )
     returning * into v_request;
     return jsonb_build_object('created',true,'request',to_jsonb(v_request));
@@ -458,6 +485,7 @@ declare
     v_recall_scene text;
     v_recall_tags text[];
     v_recall_embedding extensions.vector;
+    v_evidence_precision text;
     v_related_request bigint;
     v_related_memory integer;
     v_dedupe text := 'none';
@@ -499,6 +527,14 @@ begin
     v_recall_embedding := case
         when v_recall_scene is null then null
         else (p_item->>'recall_embedding')::extensions.vector
+    end;
+    -- Evidence precision describes the evidence clock itself, never the model
+    -- output's memory_time precision; the gateway only emits values that are
+    -- actually supported by the evidence messages.
+    v_evidence_precision := case
+        when p_item->>'evidence_time_precision' in ('minute','hour','day','approximate','unknown')
+        then p_item->>'evidence_time_precision'
+        else null
     end;
 
     select count(distinct value::bigint)
@@ -623,6 +659,7 @@ begin
         status,source,memory_key,update_mode,confidence,evidence_message_ids,source_time,memory_time,time_precision,digest_run_id,embedding,
         dedupe_state,dedupe_reason,related_request_id,related_memory_id,
         continuity_type,subject,source_type,thread_state,continuity_value,retention_class,participants,evidence_start_time,evidence_end_time,
+        evidence_time_precision,
         continuity_id,continuity_schema_version,continuity_data,
         recall_scene,recall_tags
     ) values (
@@ -641,6 +678,7 @@ begin
         least(greatest(coalesce((p_item->>'continuity_value')::integer,5),1),10),coalesce(p_item->>'retention_class','normal'),
         array(select value from jsonb_array_elements_text(coalesce(p_item->'participants','[]'::jsonb)) limit 3),
         nullif(p_item->>'evidence_start_time','')::timestamptz,nullif(p_item->>'evidence_end_time','')::timestamptz,
+        v_evidence_precision,
         null,1,p_item->'continuity_data',
         v_recall_scene,v_recall_tags
     )
@@ -839,6 +877,7 @@ begin
                 else memory.participants end,
             evidence_start_time = coalesce(new.evidence_start_time,memory.evidence_start_time),
             evidence_end_time = coalesce(new.evidence_end_time,memory.evidence_end_time),
+            evidence_time_precision = coalesce(new.evidence_time_precision,memory.evidence_time_precision),
             source = case when new.source = 'daily_digest' then 'daily_digest' else memory.source end
         where memory.id = new.memory_id;
         update public.memory_continuity_objects

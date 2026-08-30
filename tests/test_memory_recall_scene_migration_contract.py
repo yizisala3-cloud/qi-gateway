@@ -47,13 +47,15 @@ class RecallSceneMigrationContractTests(unittest.TestCase):
         self.assertIn(
             "alter table public.memory_requests\n"
             "    add column if not exists recall_scene text,\n"
-            "    add column if not exists recall_tags text[];",
+            "    add column if not exists recall_tags text[],\n"
+            "    add column if not exists evidence_time_precision text;",
             self.sql,
         )
         self.assertIn(
             "alter table public.memories\n"
             "    add column if not exists recall_scene text,\n"
             "    add column if not exists recall_tags text[],\n"
+            "    add column if not exists evidence_time_precision text,\n"
             "    add column if not exists recall_embedding extensions.vector;",
             self.sql,
         )
@@ -86,6 +88,60 @@ class RecallSceneMigrationContractTests(unittest.TestCase):
                 )
         # The widened enum is additive; nothing rewrites historical rows.
         self.assertNotIn("update public.memories set time_precision", self.executable)
+
+    def test_evidence_time_precision_is_a_separate_stored_field(self):
+        for table in ("memory_requests", "memories"):
+            with self.subTest(table=table):
+                self.assertIn(
+                    f"alter table public.{table}\n"
+                    "    drop constraint if exists "
+                    f"{table}_evidence_time_precision_values;",
+                    self.sql,
+                )
+                self.assertIn(
+                    f"alter table public.{table}\n"
+                    f"    add constraint {table}_evidence_time_precision_values\n"
+                    "        check (evidence_time_precision in ('minute', 'hour', 'day', 'approximate', 'unknown'));",
+                    self.sql,
+                )
+        # The evidence precision is stored independently; no historical rows
+        # are backfilled and no precision is guessed from existing columns.
+        self.assertNotIn("update public.memories set evidence_time_precision", self.executable)
+        self.assertNotRegex(
+            self.executable,
+            r"evidence_time_precision[\s\S]{0,120}coalesce\(new\.time_precision",
+        )
+
+    def test_vector_channel_returns_evidence_precision(self):
+        vector = function_body(
+            self.executable.split("create function public.match_memories", 1)[1]
+        )
+        self.assertIn("memory.evidence_time_precision", vector)
+
+    def test_direct_writer_records_minute_precision_for_message_evidence(self):
+        create = self.executable.split("create or replace function public.create_memory_request_v4", 1)[1]
+        section = create.split("create or replace function public.write_memory_direct_v1", 1)[0]
+        body = function_body(section)
+        self.assertIn("v_evidence_precision := case when v_evidence_time is null then null else 'minute' end", body)
+        self.assertIn("v_evidence_time,v_evidence_time,v_evidence_time,v_evidence_precision", body)
+
+    def test_continuity_writer_stages_evidence_precision_from_candidates(self):
+        writer = self.executable.split("create or replace function public.store_continuity_candidate", 1)[1]
+        body = function_body(writer.split("create or replace function public.commit_memory_digest_run", 1)[0])
+        self.assertIn(
+            "when p_item->>'evidence_time_precision' in ('minute','hour','day','approximate','unknown')",
+            body,
+        )
+        self.assertIn("v_evidence_precision", body)
+
+    def test_metadata_trigger_copies_evidence_precision(self):
+        trigger = function_body(
+            self.executable.split("create or replace function public.sync_reviewed_memory_request_metadata", 1)[1]
+        )
+        self.assertIn(
+            "evidence_time_precision = coalesce(new.evidence_time_precision,memory.evidence_time_precision)",
+            trigger,
+        )
 
     def test_chat_messages_remains_select_only(self):
         self.assertIn("from public.chat_messages", self.executable)

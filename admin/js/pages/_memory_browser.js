@@ -15,10 +15,10 @@ export const CONTINUITY_TYPE_LABELS = {
   profile: '用户资料', interaction_rule: '互动规则',
 };
 const TIME_PRECISION_LABELS = {
-  minute: '精确到分钟', day: '精确到日期', approximate: '大概时间', unknown: '时间未知',
+  minute: '精确到分钟', hour: '精确到小时', day: '精确到日期', approximate: '大概时间', unknown: '时间未知',
 };
-const MEMORY_FIELDS = 'id,title,content,tags,heat,importance,layer,source,verified,is_active,last_recalled_at,recall_count,emotion_weight,created_at,memory_key,supersedes_memory_id,superseded_by_memory_id,superseded_at,continuity_id,continuity_type,continuity_schema_version,continuity_data,subject,source_type,thread_state,continuity_value,retention_class,participants,evidence_start_time,evidence_end_time,evidence_message_ids,source_time,memory_time,time_precision,recall_scene,recall_tags';
-const REQUEST_FIELDS = 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,memory_key,update_mode,related_memory_id,related_request_id,continuity_id,continuity_type,continuity_schema_version,continuity_data,thread_state,confidence,evidence_message_ids,source_time,memory_time,time_precision,digest_run_id,dedupe_state,dedupe_reason,recall_scene,recall_tags,created_at,reviewed_at,reviewed_by,review_note';
+const MEMORY_FIELDS = 'id,title,content,tags,heat,importance,layer,source,verified,is_active,last_recalled_at,recall_count,emotion_weight,created_at,memory_key,supersedes_memory_id,superseded_by_memory_id,superseded_at,continuity_id,continuity_type,continuity_schema_version,continuity_data,subject,source_type,thread_state,continuity_value,retention_class,participants,evidence_start_time,evidence_end_time,evidence_message_ids,source_time,memory_time,time_precision,evidence_time_precision,recall_scene,recall_tags';
+const REQUEST_FIELDS = 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,memory_key,update_mode,related_memory_id,related_request_id,continuity_id,continuity_type,continuity_schema_version,continuity_data,thread_state,confidence,evidence_message_ids,source_time,memory_time,time_precision,digest_run_id,dedupe_state,dedupe_reason,evidence_time_precision,recall_scene,recall_tags,created_at,reviewed_at,reviewed_by,review_note';
 
 export function continuityTypeLabel(value) {
   return CONTINUITY_TYPE_LABELS[value] || value || '未分类历史数据';
@@ -59,7 +59,9 @@ function evidenceRange(memory) {
   const start = memory.evidence_start_time || memory.source_time;
   const end = memory.evidence_end_time || memory.source_time;
   if (!start && !end) return '-';
-  return `${esc(fmtDate(start))} ～ ${esc(fmtDate(end || start))}`;
+  const range = `${esc(fmtDate(start))} ～ ${esc(fmtDate(end || start))}`;
+  const label = TIME_PRECISION_LABELS[memory.evidence_time_precision];
+  return label ? `${range}（${esc(label)}）` : range;
 }
 
 function memoryKvRows(m) {

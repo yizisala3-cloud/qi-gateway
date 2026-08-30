@@ -342,6 +342,13 @@ class MemoryReviewDashboardContractTests(unittest.TestCase):
         self.assertNotIn("update('memory_requests'", self.page)
         self.assertNotIn("insert('memory_requests'", self.page)
 
+    def test_evidence_time_precision_is_readable_with_hour_label(self):
+        self.assertIn("hour: '精确到小时'", self.page)
+        self.assertIn("evidence_time_precision", self.page)
+        for table in ("memories", "memory_requests"):
+            with self.subTest(table=table):
+                self.assertIn("evidence_time_precision", _TABLES[table]["read"])
+
     def test_dashboard_select_no_longer_queries_retired_relation_field(self):
         self.assertNotIn("proposed_relations", self.page)
 

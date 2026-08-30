@@ -366,6 +366,35 @@ class ModelBoundaryTests(unittest.TestCase):
 
         self.assertEqual(memory["time_precision"], "hour")
 
+    def test_parser_records_minute_evidence_precision_from_source_times(self):
+        payload = {
+            "memories": [{
+                "content": "User and qi finished the gateway deploy",
+                "evidence_message_ids": [11, 12],
+            }],
+        }
+        source_times = {11: "2026-08-29T19:21+08:00", 12: "2026-08-29T19:25+08:00"}
+
+        memory = _parse_model_output(json.dumps(payload), source_times)[0]
+
+        self.assertEqual(memory["source_time"], "2026-08-29T19:25+08:00")
+        # 证据时间精度独立于 memory_time 精度，来自证据消息时钟本身。
+        self.assertEqual(memory["evidence_time_precision"], "minute")
+
+    def test_parser_leaves_evidence_precision_null_without_valid_evidence_time(self):
+        payload = {
+            "memories": [{
+                "content": "User prefers quiet mornings",
+                "evidence_message_ids": [11],
+            }],
+        }
+        source_times = {11: None}
+
+        memory = _parse_model_output(json.dumps(payload), source_times)[0]
+
+        self.assertIsNone(memory["source_time"])
+        self.assertIsNone(memory["evidence_time_precision"])
+
     def test_public_preview_strips_both_embeddings_and_hash(self):
         from gateway.memory_extract import _public_memories
 

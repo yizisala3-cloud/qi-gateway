@@ -538,6 +538,9 @@ def _parse_model_output(
             "recall_tags": recall_tags,
             "evidence_message_ids": evidence_ids,
             "source_time": source_time,
+            # 证据时间来自消息时钟（精确到分钟）；time_precision 只描述
+            # memory_time，两者精度互不替代。
+            "evidence_time_precision": "minute" if source_time else None,
             "memory_time": memory_time,
             "time_precision": time_precision,
             "content_hash": content_hash,

@@ -249,6 +249,8 @@ class ShadowParserTests(unittest.TestCase):
         self.assertEqual(result[0]["evidence_start_time"], "2026-08-13T20:00+08:00")
         self.assertEqual(result[0]["evidence_end_time"], "2026-08-13T20:05+08:00")
         self.assertEqual(result[0]["source_time"], "2026-08-13T20:05+08:00")
+        # 证据时间精度取自证据消息时钟本身，与 memory_time 精度无关。
+        self.assertEqual(result[0]["evidence_time_precision"], "minute")
 
     def test_unreliable_evidence_times_produce_null_time_fields(self):
         result = parse_shadow_output(
@@ -259,6 +261,7 @@ class ShadowParserTests(unittest.TestCase):
         self.assertIsNone(result[0]["evidence_start_time"])
         self.assertIsNone(result[0]["evidence_end_time"])
         self.assertIsNone(result[0]["source_time"])
+        self.assertIsNone(result[0]["evidence_time_precision"])
 
     def test_parser_keeps_hour_time_precision(self):
         result = self._parse_candidate(memory_time="2026-08-13 20:00", time_precision="hour")
