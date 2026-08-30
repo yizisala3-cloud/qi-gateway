@@ -634,12 +634,26 @@ export function createMemoryBrowser({
           <div class="field"><label>重要性（1-10）</label><input type="number" id="ed-imp" min="1" max="10" value="${esc(m.importance ?? 5)}"></div>
           <div class="field"><label>层级</label><select id="ed-layer"><option value="碎片">碎片</option><option value="场景">场景</option><option value="核心">核心</option></select></div>
           <div class="field"><label>情感权重（0-1）</label><input type="number" id="ed-emo" min="0" max="1" step="0.1" value="${esc(m.emotion_weight ?? 0.5)}"></div>
+        </div>
+        <div class="field"><label>召回场景（可空；保存后由服务端重新生成召回向量）</label><textarea id="ed-recall-scene" rows="2">${esc(m.recall_scene || '')}</textarea></div>
+        <div class="field"><label>召回标签（逗号分隔，自由填写）</label><input type="text" id="ed-recall-tags" value="${esc((m.recall_tags || []).join(', '))}"></div>
+        <div class="grid grid-2">
+          <div class="field"><label>最后证据时间（可空，ISO 格式）</label><input type="text" id="ed-evidence-time" maxlength="40" value="${esc(m.evidence_end_time || '')}"></div>
+          <div class="field"><label>证据时间精度</label><select id="ed-evidence-precision">
+            <option value="">未指定</option>
+            <option value="minute">精确到分钟</option>
+            <option value="hour">精确到小时</option>
+            <option value="day">精确到日期</option>
+            <option value="approximate">大概时间</option>
+            <option value="unknown">时间未知</option>
+          </select></div>
         </div>`,
       actions: `
         <button class="btn btn-primary btn-sm" data-act="mem-edit-save" data-id="${m.id}">${icon('check')}保存</button>
         <button class="btn btn-secondary btn-sm" data-act="mem-edit-cancel" data-id="${m.id}">取消</button>`,
     });
     panel.el.querySelector('#ed-layer').value = m.layer || '碎片';
+    panel.el.querySelector('#ed-evidence-precision').value = m.evidence_time_precision || '';
   }
 
   async function saveMemoryEdit(id) {
@@ -658,7 +672,20 @@ export function createMemoryBrowser({
       toast('重要性必须是 1 到 10 的整数', 'err');
       return;
     }
+    // 召回字段走专用原子端点：服务端在同一写入里重算召回向量，
+    // 场景与向量不可能出现新旧不一致。
+    const recallPayload = {
+      recall_scene: root.querySelector('#ed-recall-scene').value.trim(),
+      recall_tags: root.querySelector('#ed-recall-tags').value.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
+      evidence_end_time: root.querySelector('#ed-evidence-time').value.trim() || null,
+      evidence_time_precision: root.querySelector('#ed-evidence-precision').value || null,
+    };
     try {
+      await gw(`/admin/api/memories/${encodeURIComponent(id)}/recall`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(recallPayload),
+      });
       await update('memories', id, row);
       toast('记忆已更新');
       await Promise.all([loadCurrentList(), showMemory(id)]);
@@ -682,6 +709,19 @@ export function createMemoryBrowser({
         </select></div>
         <div class="field"><label>稳定主题键（替换时必填）</label><input type="text" id="rv-memory-key" maxlength="120" value="${esc(r.memory_key || '')}" placeholder="例如 project.qi-gateway.progress">
           <div class="disabled-note" style="margin-top:4px">同一进度、状态或位置的后续更新必须使用完全相同的键；普通相似内容不要使用替换。</div></div>
+        <div class="field"><label>召回场景（可空；保存后由服务端生成召回向量）</label><textarea id="rv-recall-scene" rows="2">${esc(r.recall_scene || '')}</textarea></div>
+        <div class="field"><label>召回标签（逗号分隔，自由填写）</label><input type="text" id="rv-recall-tags" value="${esc((r.recall_tags || []).join(', '))}"></div>
+        <div class="grid grid-2">
+          <div class="field"><label>最后证据时间（可空，ISO 格式）</label><input type="text" id="rv-evidence-time" maxlength="40" value="${esc(r.evidence_end_time || '')}"></div>
+          <div class="field"><label>证据时间精度</label><select id="rv-evidence-precision">
+            <option value="">未指定</option>
+            <option value="minute">精确到分钟</option>
+            <option value="hour">精确到小时</option>
+            <option value="day">精确到日期</option>
+            <option value="approximate">大概时间</option>
+            <option value="unknown">时间未知</option>
+          </select></div>
+        </div>
         <div class="field"><label>审核备注（可选）</label><textarea id="rv-note" rows="3" maxlength="500"></textarea></div>`,
       actions: `
         <button class="btn btn-primary btn-sm" data-act="req-approve-save" data-id="${r.id}">${icon('check')}通过并写入记忆</button>
@@ -719,6 +759,10 @@ export function createMemoryBrowser({
         importance,
         update_mode: updateMode,
         memory_key: memoryKey || null,
+        recall_scene: root.querySelector('#rv-recall-scene').value.trim(),
+        recall_tags: root.querySelector('#rv-recall-tags').value.split(/[,，]/).map((t) => t.trim()).filter(Boolean),
+        evidence_end_time: root.querySelector('#rv-evidence-time').value.trim() || null,
+        evidence_time_precision: root.querySelector('#rv-evidence-precision').value || null,
         review_note: root.querySelector('#rv-note').value.trim(),
       });
       toast('申请已通过，正式记忆已写入');

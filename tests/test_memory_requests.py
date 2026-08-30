@@ -204,25 +204,25 @@ class PersistenceTests(unittest.TestCase):
         self.assertNotIn("service_role", " ".join(client.rpc_payload))
         self.assertEqual(client.table_names, [])
 
-    def test_low_risk_type_uses_atomic_direct_writer(self):
+    def test_low_risk_type_without_recall_scene_goes_pending(self):
         client = _Client(rpc_result={
             "created": True,
-            "request": {"id": 44, "status": "approved", "memory_id": 88, "continuity_type": "moment"},
+            "request": {"id": 44, "status": "pending", "continuity_type": "moment"},
         })
         payload = _payload(
             continuity_type="moment",
-            continuity_data={"scene": "聊天窗口", "event": "确认计划", "moment_state": "standalone"},
+            continuity_data={"scene": "聊天", "event": "确认", "moment_state": "standalone"},
         )
         with (
             patch(f"{MODULE}._server_writes_allowed", return_value=True),
             patch(f"{MODULE}.get_client", return_value=client),
+            patch(f"{MODULE}._get_embedding_sync") as embed,
         ):
             result = create_memory_request(payload, source="mcp_memory")
-        self.assertEqual(client.rpc_name, "write_memory_direct_v1")
-        self.assertEqual(client.rpc_payload["p_source"], "mcp_memory")
-        self.assertEqual(client.rpc_payload["p_reviewed_by"], "orangechat_ai")
-        self.assertFalse(result["requires_user_review"])
-        self.assertEqual(result["memory_id"], 88)
+        self.assertEqual(client.rpc_name, "create_memory_request_v4")
+        self.assertEqual(result["requires_user_review"], True)
+        self.assertEqual(result["status"], "pending")
+        embed.assert_not_called()
 
     def test_all_six_types_follow_server_controlled_business_split(self):
         payloads = {
@@ -245,12 +245,13 @@ class PersistenceTests(unittest.TestCase):
                         "continuity_type": kind,
                     },
                 })
-                extra = {}
+                extra = {"recall_scene": "当叶子再次提到相关话题时"}
                 if kind == "interaction_rule":
-                    extra = {"update_mode": "replace", "memory_key": "rule.reply-order"}
+                    extra.update({"update_mode": "replace", "memory_key": "rule.reply-order"})
                 with (
                     patch(f"{MODULE}._server_writes_allowed", return_value=True),
                     patch(f"{MODULE}.get_client", return_value=client),
+                    patch(f"{MODULE}._get_embedding_sync", return_value=[0.1, 0.2]),
                 ):
                     result = create_memory_request(_payload(
                         continuity_type=kind,
@@ -264,6 +265,26 @@ class PersistenceTests(unittest.TestCase):
                 )
                 self.assertEqual(result["requires_user_review"], not automatic)
                 self.assertNotIn("p_proposed_relations", client.rpc_payload)
+
+    def test_low_risk_type_with_failed_embedding_goes_pending(self):
+        client = _Client(rpc_result={
+            "created": True,
+            "request": {"id": 52, "status": "pending", "continuity_type": "moment"},
+        })
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+            patch(f"{MODULE}._get_embedding_sync", side_effect=RuntimeError("provider down")),
+        ):
+            result = create_memory_request(_payload(
+                continuity_type="moment",
+                continuity_data={"scene": "聊天", "event": "确认", "moment_state": "standalone"},
+                recall_scene="当叶子提到那天的约定时",
+            ), source="mcp_memory")
+
+        self.assertEqual(client.rpc_name, "create_memory_request_v4")
+        self.assertNotIn("p_recall_embedding", client.rpc_payload)
+        self.assertEqual(result["requires_user_review"], True)
 
     def test_server_controlled_assistant_cannot_be_overridden(self):
         with self.assertRaises(MemoryRequestError) as raised:
@@ -311,55 +332,60 @@ class PersistenceTests(unittest.TestCase):
     def test_blank_recall_scene_never_generates_a_recall_embedding(self):
         client = _Client(rpc_result={
             "created": True,
-            "request": {"id": 47, "status": "approved", "memory_id": 92, "continuity_type": "moment"},
+            "request": {"id": 47, "status": "pending", "continuity_type": "moment"},
         })
         with (
             patch(f"{MODULE}._server_writes_allowed", return_value=True),
             patch(f"{MODULE}.get_client", return_value=client),
             patch(f"{MODULE}._get_embedding_sync") as embed,
         ):
-            create_memory_request(_payload(
+            result = create_memory_request(_payload(
                 continuity_type="moment",
                 continuity_data={"scene": "聊天", "event": "确认", "moment_state": "standalone"},
             ), source="mcp_memory")
 
         embed.assert_not_called()
-        self.assertIsNone(client.rpc_payload["p_recall_embedding"])
+        self.assertEqual(client.rpc_name, "create_memory_request_v4")
+        self.assertEqual(result["requires_user_review"], True)
 
-    def test_recall_embedding_failure_blocks_the_direct_write(self):
-        client = _Client()
+    def test_recall_embedding_failure_sends_the_request_to_pending(self):
+        client = _Client(rpc_result={
+            "created": True,
+            "request": {"id": 48, "status": "pending", "continuity_type": "moment"},
+        })
         with (
             patch(f"{MODULE}._server_writes_allowed", return_value=True),
             patch(f"{MODULE}.get_client", return_value=client),
             patch(f"{MODULE}._get_embedding_sync", side_effect=RuntimeError("provider down")),
         ):
-            with self.assertRaises(MemoryRequestError) as raised:
-                create_memory_request(_payload(
-                    continuity_type="moment",
-                    continuity_data={"scene": "聊天", "event": "确认", "moment_state": "standalone"},
-                    recall_scene="当叶子提到那天的约定时",
-                ), source="mcp_memory")
+            result = create_memory_request(_payload(
+                continuity_type="moment",
+                continuity_data={"scene": "聊天", "event": "确认", "moment_state": "standalone"},
+                recall_scene="当叶子提到那天的约定时",
+            ), source="mcp_memory")
 
-        self.assertEqual(raised.exception.code, "recall_embedding_failed")
-        self.assertEqual(raised.exception.status_code, 503)
-        self.assertEqual(client.rpc_name, "")
+        self.assertEqual(client.rpc_name, "create_memory_request_v4")
+        self.assertNotIn("p_recall_embedding", client.rpc_payload)
+        self.assertEqual(result["requires_user_review"], True)
 
-    def test_recall_embedding_invalid_response_blocks_the_direct_write(self):
-        client = _Client()
+    def test_recall_embedding_invalid_response_sends_the_request_to_pending(self):
+        client = _Client(rpc_result={
+            "created": True,
+            "request": {"id": 49, "status": "pending", "continuity_type": "moment"},
+        })
         with (
             patch(f"{MODULE}._server_writes_allowed", return_value=True),
             patch(f"{MODULE}.get_client", return_value=client),
             patch(f"{MODULE}._get_embedding_sync", return_value=[]),
         ):
-            with self.assertRaises(MemoryRequestError) as raised:
-                create_memory_request(_payload(
-                    continuity_type="moment",
-                    continuity_data={"scene": "聊天", "event": "确认", "moment_state": "standalone"},
-                    recall_scene="当叶子提到那天的约定时",
-                ), source="mcp_memory")
+            result = create_memory_request(_payload(
+                continuity_type="moment",
+                continuity_data={"scene": "聊天", "event": "确认", "moment_state": "standalone"},
+                recall_scene="当叶子提到那天的约定时",
+            ), source="mcp_memory")
 
-        self.assertEqual(raised.exception.code, "recall_embedding_failed")
-        self.assertEqual(client.rpc_name, "")
+        self.assertEqual(client.rpc_name, "create_memory_request_v4")
+        self.assertEqual(result["requires_user_review"], True)
 
     def test_duplicate_request_returns_existing_pending_application(self):
         client = _Client(rpc_result={

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from typing import Any
 
@@ -16,6 +17,8 @@ from .config import cfg
 from .db import get_client
 from .memory_continuity_schema import SCHEMA_VERSION, ContinuityDataError, validate_continuity_data
 from .memory_extract import _get_embedding_sync
+
+log = logging.getLogger("gateway.memory_requests")
 
 
 MAX_CONTENT_LENGTH = 600
@@ -423,10 +426,23 @@ def create_memory_request(
         "p_recall_tags": request_data["recall_tags"],
     }
     automatic = request_data["continuity_type"] in {"moment", "thread", "inside_joke"}
-    rpc_name = "write_memory_direct_v1" if automatic else "create_memory_request_v4"
-    if automatic:
+    # 直接写入要求"场景非空且召回向量生成成功"；场景缺失或向量失败时改为
+    # pending 审核，等待叶子补充召回场景，绝不写入没有向量的场景记忆。
+    direct_writable = False
+    if automatic and request_data["recall_scene"]:
+        try:
+            recall_embedding = _recall_embedding(request_data["recall_scene"])
+            direct_writable = True
+        except MemoryRequestError as exc:
+            log.warning(
+                "recall_scene embedding 生成失败，改为 pending 审核: %s", exc.code,
+            )
+    if automatic and direct_writable:
+        rpc_name = "write_memory_direct_v1"
         rpc_payload["p_reviewed_by"] = "orangechat_ai"
-        rpc_payload["p_recall_embedding"] = _recall_embedding(request_data["recall_scene"])
+        rpc_payload["p_recall_embedding"] = recall_embedding
+    else:
+        rpc_name = "create_memory_request_v4"
     try:
         response = client.rpc(rpc_name, rpc_payload).execute()
     except Exception as exc:
@@ -456,6 +472,6 @@ def create_memory_request(
         "continuity_type": request_row.get("continuity_type"),
         "memory_id": request_row.get("memory_id"),
         "updated": bool(result.get("updated")),
-        "requires_user_review": not automatic,
+        "requires_user_review": rpc_name == "create_memory_request_v4",
     }
 

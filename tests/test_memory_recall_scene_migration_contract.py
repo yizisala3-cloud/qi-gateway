@@ -20,7 +20,7 @@ OLD_REVIEW_V5 = (
 )
 NEW_CREATE_V4 = OLD_CREATE_V4[:-1] + ",text,text[])"
 NEW_WRITE_V1 = OLD_WRITE_V1[:-1] + ",text,text[],extensions.vector)"
-NEW_REVIEW_V5 = OLD_REVIEW_V5[:-1] + ",extensions.vector)"
+NEW_REVIEW_V5 = OLD_REVIEW_V5[:-1] + ",extensions.vector,text,text[],timestamptz,text)"
 
 
 def squeezed(text: str) -> str:
@@ -203,12 +203,22 @@ class RecallSceneMigrationContractTests(unittest.TestCase):
         self.assertIn("p_recall_embedding extensions.vector", section)
         self.assertIn("p_participants,p_source,p_recall_scene,p_recall_tags", body)
 
-    def test_review_wrapper_applies_embedding_after_metadata_copy(self):
+    def test_review_wrapper_applies_final_recall_values_after_metadata_copy(self):
         review = self.executable.split("create or replace function public.review_memory_request_v5", 1)[1]
         section = review.split("create or replace function public.store_continuity_candidate", 1)[0]
         body = function_body(section)
         self.assertIn("p_recall_embedding extensions.vector default null", section)
-        self.assertIn("update public.memories\n            set recall_embedding = p_recall_embedding", body)
+        self.assertIn("p_recall_scene text default null", section)
+        self.assertIn("p_recall_tags text[] default null", section)
+        self.assertIn("p_evidence_end_time timestamptz default null", section)
+        self.assertIn("p_evidence_time_precision text default null", section)
+        # approve/merge 用最终值原子覆盖正式记忆：清空场景必然同步清空向量。
+        self.assertIn("if lower(trim(p_action)) in ('approve','merge') then", body)
+        self.assertIn("set recall_scene = p_recall_scene,", body)
+        self.assertIn("recall_tags = coalesce(p_recall_tags, '{}'::text[]),", body)
+        self.assertIn("evidence_end_time = p_evidence_end_time,", body)
+        self.assertIn("evidence_time_precision = p_evidence_time_precision,", body)
+        self.assertIn("recall_embedding = p_recall_embedding", body)
 
     def test_continuity_writer_stages_recall_fields_and_blocks_blank_scene_embedding(self):
         writer = self.executable.split("create or replace function public.store_continuity_candidate", 1)[1]

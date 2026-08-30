@@ -12,7 +12,12 @@ if "dotenv" not in sys.modules and importlib.util.find_spec("dotenv") is None:
     sys.modules["dotenv"] = dotenv
 
 from gateway.memory_requests import MemoryRequestError
-from gateway.memory_review import review_ai_memory_request, review_memory_request, validate_review
+from gateway.memory_review import (
+    edit_memory_recall,
+    review_ai_memory_request,
+    review_memory_request,
+    validate_review,
+)
 
 
 MODULE = "gateway.memory_review"
@@ -190,15 +195,23 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "request_not_reviewable")
 
     def test_approve_calls_atomic_rpc_and_returns_memory(self):
-        client = _Client({
-            "changed": True,
-            "request": {
-                "id": 42,
-                "status": "approved",
-                "memory_id": 77,
-                "reviewed_at": "2026-08-02T02:00:00+00:00",
+        client = _Client(
+            {
+                "changed": True,
+                "request": {
+                    "id": 42,
+                    "status": "approved",
+                    "memory_id": 77,
+                    "reviewed_at": "2026-08-02T02:00:00+00:00",
+                },
             },
-        })
+            request_rows=[{
+                "recall_scene": None,
+                "recall_tags": [],
+                "evidence_end_time": None,
+                "evidence_time_precision": None,
+            }],
+        )
         with (
             patch(f"{MODULE}._server_writes_allowed", return_value=True),
             patch(f"{MODULE}.get_client", return_value=client),
@@ -221,6 +234,9 @@ class PersistenceTests(unittest.TestCase):
         self.assertIsNone(client.rpc_payload["p_update_mode"])
         self.assertIsNone(client.rpc_payload["p_memory_key"])
         self.assertIsNone(client.rpc_payload["p_related_memory_id"])
+        # 申请无召回场景：审核放行，召回向量保持 NULL。
+        self.assertIsNone(client.rpc_payload["p_recall_embedding"])
+        self.assertIsNone(client.rpc_payload["p_recall_scene"])
 
     def test_reject_calls_same_atomic_rpc_without_memory_fields(self):
         client = _Client({
@@ -414,7 +430,15 @@ class PersistenceTests(unittest.TestCase):
                 self.assertEqual(raised.exception.status_code, status)
 
     def test_maps_stale_mutable_fact_update_to_conflict(self):
-        client = _Client(error=RuntimeError("memory_request_stale_update"))
+        client = _Client(
+            error=RuntimeError("memory_request_stale_update"),
+            request_rows=[{
+                "recall_scene": None,
+                "recall_tags": [],
+                "evidence_end_time": None,
+                "evidence_time_precision": None,
+            }],
+        )
         with (
             patch(f"{MODULE}._server_writes_allowed", return_value=True),
             patch(f"{MODULE}.get_client", return_value=client),
@@ -430,6 +454,282 @@ class PersistenceTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "stale_update")
         self.assertEqual(raised.exception.status_code, 409)
+
+
+class ReviewRecallEditTests(unittest.TestCase):
+    """审核表单编辑召回字段：最终值解析、向量生成与成对校验。"""
+
+    def _client(self, recall_scene=None, recall_tags=(), evidence_end_time=None, evidence_time_precision=None):
+        return _Client(
+            {
+                "changed": True,
+                "request": {"id": 60, "status": "approved", "memory_id": 120, "reviewed_at": "now"},
+            },
+            request_rows=[{
+                "recall_scene": recall_scene,
+                "recall_tags": list(recall_tags),
+                "evidence_end_time": evidence_end_time,
+                "evidence_time_precision": evidence_time_precision,
+            }],
+        )
+
+    def test_approve_uses_edited_recall_scene_for_the_embedding(self):
+        client = self._client()
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+            patch("gateway.memory_requests._get_embedding_sync", return_value=[0.7]) as embed,
+        ):
+            review_memory_request(60, {
+                "action": "approve",
+                "content": "有效记忆内容。",
+                "recall_scene": "  叶子补充的召回场景  ",
+                "recall_tags": ["补充", "补充", "网关"],
+                "evidence_end_time": "2026-08-29T19:21:00+08:00",
+                "evidence_time_precision": "minute",
+            })
+
+        embed.assert_called_once_with("叶子补充的召回场景")
+        self.assertEqual(client.rpc_payload["p_recall_scene"], "叶子补充的召回场景")
+        self.assertEqual(client.rpc_payload["p_recall_tags"], ["补充", "网关"])
+        self.assertEqual(client.rpc_payload["p_evidence_end_time"], "2026-08-29T19:21:00+08:00")
+        self.assertEqual(client.rpc_payload["p_evidence_time_precision"], "minute")
+        self.assertEqual(client.rpc_payload["p_recall_embedding"], [0.7])
+
+    def test_approve_without_edits_keeps_the_request_original_values(self):
+        client = self._client(
+            recall_scene="申请自带场景",
+            recall_tags=["原始"],
+            evidence_end_time="2026-08-01T08:00:00+08:00",
+            evidence_time_precision="minute",
+        )
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+            patch("gateway.memory_requests._get_embedding_sync", return_value=[0.2]) as embed,
+        ):
+            review_memory_request(60, {"action": "approve", "content": "有效记忆内容。"})
+
+        embed.assert_called_once_with("申请自带场景")
+        self.assertEqual(client.rpc_payload["p_recall_scene"], "申请自带场景")
+        self.assertEqual(client.rpc_payload["p_recall_tags"], ["原始"])
+        self.assertEqual(client.rpc_payload["p_evidence_end_time"], "2026-08-01T08:00:00+08:00")
+
+    def test_approve_with_cleared_scene_clears_the_vector(self):
+        client = self._client(recall_scene="申请自带场景")
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+            patch("gateway.memory_requests._get_embedding_sync") as embed,
+        ):
+            review_memory_request(60, {
+                "action": "approve",
+                "content": "有效记忆内容。",
+                "recall_scene": "   ",
+                "recall_tags": [],
+            })
+
+        embed.assert_not_called()
+        self.assertIsNone(client.rpc_payload["p_recall_scene"])
+        # 清空的标签归一为 NULL，SQL 端 coalesce 为空数组。
+        self.assertIsNone(client.rpc_payload["p_recall_tags"])
+        self.assertIsNone(client.rpc_payload["p_recall_embedding"])
+
+    def test_merge_uses_edited_recall_values(self):
+        client = self._client()
+        client.result = {
+            "changed": True,
+            "related_memory_id": 18,
+            "request": {"id": 60, "status": "merged", "memory_id": 130, "reviewed_at": "now"},
+        }
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+            patch("gateway.memory_requests._get_embedding_sync", return_value=[0.6]),
+        ):
+            review_memory_request(60, {
+                "action": "merge",
+                "related_memory_id": 18,
+                "content": "合并后的内容。",
+                "recall_scene": "合并后的召回场景",
+            })
+
+        self.assertEqual(client.rpc_payload["p_recall_scene"], "合并后的召回场景")
+        self.assertEqual(client.rpc_payload["p_recall_embedding"], [0.6])
+
+    def test_evidence_precision_without_time_is_rejected(self):
+        client = self._client()
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+        ):
+            with self.assertRaises(MemoryRequestError) as raised:
+                review_memory_request(60, {
+                    "action": "approve",
+                    "content": "有效记忆内容。",
+                    "evidence_time_precision": "minute",
+                })
+
+        self.assertEqual(raised.exception.code, "invalid_review")
+        self.assertIsNone(client.rpc_name)
+
+    def test_evidence_precision_unknown_without_time_is_allowed(self):
+        client = self._client()
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+        ):
+            review_memory_request(60, {
+                "action": "approve",
+                "content": "有效记忆内容。",
+                "evidence_time_precision": "unknown",
+            })
+
+        self.assertIsNone(client.rpc_payload["p_evidence_end_time"])
+        self.assertEqual(client.rpc_payload["p_evidence_time_precision"], "unknown")
+
+    def test_recall_edit_fields_are_rejected_for_relational_reviews(self):
+        for action in ("reject", "duplicate", "conflict"):
+            with self.subTest(action=action):
+                payload = {"action": action, "recall_scene": "不该出现"}
+                if action != "reject":
+                    payload["related_memory_id"] = 18
+                with self.assertRaises(MemoryRequestError) as raised:
+                    validate_review(9, payload)
+                self.assertEqual(raised.exception.code, "invalid_review")
+
+
+class _MemoryEditClient:
+    def __init__(self, rows):
+        self.rows = rows
+        self.updates = []
+        self.selects = []
+
+    def table(self, name):
+        if name != "memories":
+            raise AssertionError(f"unexpected table access: {name}")
+        return self
+
+    def select(self, fields):
+        self.selects.append(fields)
+        return self
+
+    def eq(self, *_args):
+        return self
+
+    def limit(self, *_args):
+        return self
+
+    def update(self, payload):
+        self.updates.append(payload)
+        return self
+
+    def execute(self):
+        if self.updates:
+            return SimpleNamespace(data=[{**self.updates[-1], "id": 5}])
+        return SimpleNamespace(data=self.rows)
+
+
+class MemoryRecallEditTests(unittest.TestCase):
+    """正式记忆召回编辑：单条原子写入，场景与向量同生同灭。"""
+
+    def _client(self, **row):
+        base = {"recall_scene": None, "recall_tags": [], "evidence_end_time": None, "evidence_time_precision": None}
+        base.update(row)
+        return _MemoryEditClient([base])
+
+    def test_edit_regenerates_vector_from_the_final_scene(self):
+        client = self._client()
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+            patch("gateway.memory_requests._get_embedding_sync", return_value=[0.9]) as embed,
+        ):
+            result = edit_memory_recall(5, {"recall_scene": "正式页新场景"})
+
+        embed.assert_called_once_with("正式页新场景")
+        self.assertEqual(len(client.updates), 1)
+        self.assertEqual(client.updates[0]["recall_scene"], "正式页新场景")
+        self.assertEqual(client.updates[0]["recall_embedding"], [0.9])
+        self.assertEqual(result["memory_id"], 5)
+
+    def test_edit_cleared_scene_clears_the_vector(self):
+        client = self._client(recall_scene="旧场景")
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+            patch("gateway.memory_requests._get_embedding_sync") as embed,
+        ):
+            edit_memory_recall(5, {"recall_scene": "", "recall_tags": []})
+
+        embed.assert_not_called()
+        self.assertEqual(len(client.updates), 1)
+        self.assertIsNone(client.updates[0]["recall_scene"])
+        self.assertIsNone(client.updates[0]["recall_embedding"])
+
+    def test_edit_without_scene_changes_keeps_existing_values(self):
+        client = self._client(
+            recall_scene="原场景",
+            recall_tags=["原有"],
+            evidence_end_time="2026-08-01T08:00:00+08:00",
+            evidence_time_precision="minute",
+        )
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+            patch("gateway.memory_requests._get_embedding_sync", return_value=[0.3]) as embed,
+        ):
+            edit_memory_recall(5, {"evidence_end_time": "2026-08-02T09:00:00+08:00"})
+
+        embed.assert_called_once_with("原场景")
+        self.assertEqual(client.updates[0]["recall_scene"], "原场景")
+        self.assertEqual(client.updates[0]["evidence_end_time"], "2026-08-02T09:00:00+08:00")
+
+    def test_edit_embedding_failure_leaves_the_row_untouched(self):
+        client = self._client()
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+            patch("gateway.memory_requests._get_embedding_sync", side_effect=RuntimeError("provider down")),
+        ):
+            with self.assertRaises(MemoryRequestError) as raised:
+                edit_memory_recall(5, {"recall_scene": "新场景"})
+
+        self.assertEqual(raised.exception.code, "recall_embedding_failed")
+        self.assertEqual(client.updates, [])
+
+    def test_edit_rejects_precision_without_time(self):
+        client = self._client()
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+        ):
+            with self.assertRaises(MemoryRequestError) as raised:
+                edit_memory_recall(5, {"evidence_time_precision": "hour"})
+
+        self.assertEqual(raised.exception.code, "invalid_review")
+        self.assertEqual(client.updates, [])
+
+    def test_edit_missing_memory_is_not_found(self):
+        client = _MemoryEditClient([])
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+        ):
+            with self.assertRaises(MemoryRequestError) as raised:
+                edit_memory_recall(5, {"recall_scene": "任意"})
+
+        self.assertEqual(raised.exception.code, "memory_not_found")
+        self.assertEqual(raised.exception.status_code, 404)
+
+    def test_edit_rejects_unknown_fields(self):
+        client = self._client()
+        with patch(f"{MODULE}._server_writes_allowed", return_value=True):
+            with self.assertRaises(MemoryRequestError) as raised:
+                edit_memory_recall(5, {"embedding": [0.1]})
+
+        self.assertEqual(raised.exception.code, "invalid_memory_edit")
+        self.assertEqual(client.updates, [])
 
 
 if __name__ == "__main__":

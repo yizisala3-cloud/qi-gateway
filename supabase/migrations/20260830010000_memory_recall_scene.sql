@@ -420,7 +420,9 @@ begin
     v_review := public.review_memory_request_v5(
         (v_request->>'id')::bigint,'approve',p_content,p_title,p_tags,p_importance,p_content_hash,
         left(coalesce(nullif(trim(p_reviewed_by),''),'orangechat_ai'),120),null,p_memory_key,p_update_mode,null,
-        p_recall_embedding
+        p_recall_embedding,p_recall_scene,p_recall_tags,
+        nullif(v_request->>'evidence_end_time','')::timestamptz,
+        nullif(v_request->>'evidence_time_precision','')
     );
     select to_jsonb(request_row) into v_request
     from public.memory_requests as request_row
@@ -449,7 +451,11 @@ create or replace function public.review_memory_request_v5(
     p_memory_key text default null,
     p_update_mode text default null,
     p_related_memory_id integer default null,
-    p_recall_embedding extensions.vector default null
+    p_recall_embedding extensions.vector default null,
+    p_recall_scene text default null,
+    p_recall_tags text[] default null,
+    p_evidence_end_time timestamptz default null,
+    p_evidence_time_precision text default null
 )
 returns jsonb
 language plpgsql
@@ -525,14 +531,20 @@ begin
         p_reviewed_by,p_review_note,p_memory_key,p_update_mode,p_related_memory_id
     );
 
-    -- The gateway derives this embedding from recall_scene only; the database
-    -- never guesses one. Runs after the metadata trigger so the copy of
-    -- recall_scene is already in place for the scene-presence constraint.
-    if p_recall_embedding is not null then
+    -- The caller resolves the final recall values (review edits win, otherwise
+    -- the request's own values) and derives the embedding from the final
+    -- recall_scene only; the database never guesses one. Applied after the
+    -- metadata trigger so the scene-presence constraint sees consistent final
+    -- values in a single statement: a cleared scene always clears the vector.
+    if lower(trim(p_action)) in ('approve','merge') then
         v_memory_id := nullif(v_result->'request'->>'memory_id','')::integer;
         if v_memory_id is not null then
             update public.memories
-            set recall_embedding = p_recall_embedding
+            set recall_scene = p_recall_scene,
+                recall_tags = coalesce(p_recall_tags, '{}'::text[]),
+                evidence_end_time = p_evidence_end_time,
+                evidence_time_precision = p_evidence_time_precision,
+                recall_embedding = p_recall_embedding
             where id = v_memory_id;
         end if;
     end if;
@@ -769,7 +781,8 @@ begin
             v_request_id,'approve',v_content,nullif(left(trim(coalesce(p_item->>'title','')),100),''),
             array[v_type],least(greatest(coalesce((p_item->>'importance')::integer,5),1),10),v_content_hash,
             'daily_digest_ai','automatic low-risk continuity memory',v_key,v_mode,null,
-            v_recall_embedding
+            v_recall_embedding,v_recall_scene,v_recall_tags,
+            nullif(p_item->>'evidence_end_time','')::timestamptz,v_evidence_precision
         );
     end if;
     return v_delta;
@@ -969,14 +982,14 @@ $function$;
 
 revoke all on function public.create_memory_request_v4(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,integer,text,text[],text,text,text[]) from public,anon,authenticated;
 revoke all on function public.write_memory_direct_v1(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,integer,text,text[],text,text,text,text[],extensions.vector) from public,anon,authenticated;
-revoke all on function public.review_memory_request_v5(bigint,text,text,text,text[],integer,text,text,text,text,text,integer,extensions.vector) from public,anon,authenticated;
+revoke all on function public.review_memory_request_v5(bigint,text,text,text,text[],integer,text,text,text,text,text,integer,extensions.vector,text,text[],timestamptz,text) from public,anon,authenticated;
 revoke all on function public.store_continuity_candidate(public.memory_digest_runs,jsonb) from public,anon,authenticated;
 revoke all on function public.commit_memory_digest_run(bigint,jsonb),public.commit_memory_continuity_run(bigint,jsonb) from public,anon,authenticated;
 revoke all on function public.sync_reviewed_memory_request_metadata() from public,anon,authenticated;
 
 grant execute on function public.create_memory_request_v4(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,integer,text,text[],text,text,text[]) to service_role;
 grant execute on function public.write_memory_direct_v1(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,integer,text,text[],text,text,text,text[],extensions.vector) to service_role;
-grant execute on function public.review_memory_request_v5(bigint,text,text,text,text[],integer,text,text,text,text,text,integer,extensions.vector) to service_role;
+grant execute on function public.review_memory_request_v5(bigint,text,text,text,text[],integer,text,text,text,text,text,integer,extensions.vector,text,text[],timestamptz,text) to service_role;
 grant execute on function public.store_continuity_candidate(public.memory_digest_runs,jsonb) to service_role;
 grant execute on function public.commit_memory_digest_run(bigint,jsonb),public.commit_memory_continuity_run(bigint,jsonb) to service_role;
 

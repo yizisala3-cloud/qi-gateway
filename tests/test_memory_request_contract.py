@@ -349,6 +349,23 @@ class MemoryReviewDashboardContractTests(unittest.TestCase):
             with self.subTest(table=table):
                 self.assertIn("evidence_time_precision", _TABLES[table]["read"])
 
+    def test_review_and_memory_edit_forms_expose_recall_editing(self):
+        for field in (
+            "rv-recall-scene", "rv-recall-tags", "rv-evidence-time", "rv-evidence-precision",
+            "ed-recall-scene", "ed-recall-tags", "ed-evidence-time", "ed-evidence-precision",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, self.page)
+        # 正式记忆召回编辑走专用原子端点，不是 generic PATCH。
+        self.assertIn("/admin/api/memories/", self.page)
+
+    def test_admin_api_memories_write_whitelist_excludes_recall_fields(self):
+        # 召回字段只能经专用端点原子更新，禁止 generic PATCH 直接改写。
+        for field in ("recall_scene", "recall_tags", "recall_embedding",
+                      "evidence_time_precision", "evidence_end_time"):
+            with self.subTest(field=field):
+                self.assertNotIn(field, _TABLES["memories"]["write"])
+
     def test_dashboard_select_no_longer_queries_retired_relation_field(self):
         self.assertNotIn("proposed_relations", self.page)
 
