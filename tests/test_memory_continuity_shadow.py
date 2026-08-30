@@ -249,6 +249,8 @@ class ShadowParserTests(unittest.TestCase):
         self.assertEqual(result[0]["evidence_start_time"], "2026-08-13T20:00+08:00")
         self.assertEqual(result[0]["evidence_end_time"], "2026-08-13T20:05+08:00")
         self.assertEqual(result[0]["source_time"], "2026-08-13T20:05+08:00")
+        # 证据时间精度取自证据消息时钟本身，与 memory_time 精度无关。
+        self.assertEqual(result[0]["evidence_time_precision"], "minute")
 
     def test_unreliable_evidence_times_produce_null_time_fields(self):
         result = parse_shadow_output(
@@ -259,6 +261,11 @@ class ShadowParserTests(unittest.TestCase):
         self.assertIsNone(result[0]["evidence_start_time"])
         self.assertIsNone(result[0]["evidence_end_time"])
         self.assertIsNone(result[0]["source_time"])
+        self.assertIsNone(result[0]["evidence_time_precision"])
+
+    def test_parser_keeps_hour_time_precision(self):
+        result = self._parse_candidate(memory_time="2026-08-13 20:00", time_precision="hour")
+        self.assertEqual(result["time_precision"], "hour")
 
     def test_obvious_credentials_drop_entire_candidate(self):
         for secret in (
@@ -275,6 +282,52 @@ class ShadowParserTests(unittest.TestCase):
                     ),
                     [],
                 )
+
+
+    def test_recall_scene_and_tags_are_preserved_without_limits(self):
+        scene = "当叶子再次聊到旅行、签证或任何出行计划时" * 10
+        tags = [f"场景标签{index}" for index in range(30)]
+        result = self._parse_candidate(recall_scene=f"  {scene}  ", recall_tags=tags)
+
+        self.assertEqual(result["recall_scene"], scene)
+        self.assertEqual(result["recall_tags"], tags)
+
+    def test_recall_fields_default_to_null_and_empty_array(self):
+        result = self._parse_candidate()
+        self.assertIsNone(result["recall_scene"])
+        self.assertEqual(result["recall_tags"], [])
+
+        result = self._parse_candidate(recall_scene="   ", recall_tags=["", "  ", "网关"])
+        self.assertIsNone(result["recall_scene"])
+        self.assertEqual(result["recall_tags"], ["网关"])
+
+        result = self._parse_candidate(recall_tags="不是数组")
+        self.assertIsNone(result["recall_scene"])
+        self.assertEqual(result["recall_tags"], [])
+
+    def test_secret_in_recall_fields_drops_the_whole_candidate(self):
+        payload = {"candidates": [_candidate(
+            recall_scene="保存这个 Token: abcdefghijklmnop",
+            recall_tags=["网关"],
+        )]}
+        self.assertEqual(
+            parse_shadow_output(
+                json.dumps(payload, ensure_ascii=False),
+                {11: None, 12: None},
+            ),
+            [],
+        )
+
+    def test_prompt_defines_recall_scene_as_retrieval_context_not_content(self):
+        for requirement in (
+            "recall_scene 是以后触发召回的自然语言场景",
+            "不是记忆正文，不得复制或改写正文",
+            "recall_tags 是自由填写的召回场景标签字符串数组",
+            "无法可靠确定时输出空数组，不要编造",
+            "包括 recall_scene 和 recall_tags",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, SHADOW_SYSTEM_PROMPT)
 
 
 class ShadowSamplingTests(unittest.TestCase):

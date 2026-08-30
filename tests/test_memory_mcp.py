@@ -104,6 +104,23 @@ class MCPToolContractTests(unittest.TestCase):
         self.assertIn("不能审核", review_description)
         self.assertIn("memory_relations", review_description)
 
+    def test_all_write_tools_expose_recall_scene_and_tags(self):
+        for name in TYPED_TOOLS:
+            properties = self.tools[name].input_schema["properties"]
+            with self.subTest(tool=name):
+                self.assertIn("recall_scene", properties)
+                self.assertIn("recall_tags", properties)
+                # 召回场景不设业务长度/数量限制。
+                self.assertNotIn("maxLength", properties["recall_scene"])
+                self.assertNotIn("maxItems", properties["recall_tags"])
+
+    def test_tool_descriptions_explain_recall_scene_semantics(self):
+        description = self.tools["remember_moment"].description
+        self.assertIn("【recall_scene】", description)
+        self.assertIn("不是记忆正文", description)
+        self.assertIn("【recall_tags】", description)
+        self.assertIn("不要编造", description)
+
     def test_mcp_request_injects_server_assistant_and_source(self):
         captured = {}
 
@@ -156,6 +173,70 @@ class MCPToolContractTests(unittest.TestCase):
         )
         self.assertEqual(captured["payload"]["participants"], ["yezi", "qi"])
         self.assertEqual(captured["payload"]["continuity_value"], 5)
+
+    def test_recall_fields_pass_through_to_the_request_payload(self):
+        captured = {}
+
+        def fake_create(payload, idempotency_key, **kwargs):
+            captured.update({"payload": payload, **kwargs})
+            return {"status": "approved", "memory_id": 12, "request_id": 12}
+
+        with (
+            patch.object(cfg, "MEMORY_ASSISTANT_ID", "server-assistant"),
+            patch("gateway.memory_mcp.create_memory_request", side_effect=fake_create),
+        ):
+            asyncio.run(remember_moment(
+                content="叶子希望记住这次确认。",
+                reason="以后继续这个话题时有用。",
+                scene="聊天",
+                event="确认",
+                moment_state="standalone",
+                recall_scene="当叶子再提起这次约定时",
+                recall_tags=["约定", "网关"],
+            ))
+        self.assertEqual(captured["payload"]["recall_scene"], "当叶子再提起这次约定时")
+        self.assertEqual(captured["payload"]["recall_tags"], ["约定", "网关"])
+
+        captured.clear()
+        with (
+            patch.object(cfg, "MEMORY_ASSISTANT_ID", "server-assistant"),
+            patch("gateway.memory_mcp.create_memory_request", side_effect=fake_create),
+        ):
+            asyncio.run(remember_moment(
+                content="一条没有召回场景的片段。",
+                reason="验证召回字段可省略。",
+                scene="场景",
+                event="事件",
+                moment_state="standalone",
+            ))
+        self.assertIsNone(captured["payload"]["recall_scene"])
+        self.assertEqual(captured["payload"]["recall_tags"], [])
+
+    def test_recall_embedding_failure_maps_to_tool_error(self):
+        from gateway.memory_requests import MemoryRequestError
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        with (
+            patch.object(cfg, "MEMORY_ASSISTANT_ID", "server-assistant"),
+            patch(
+                "gateway.memory_mcp.create_memory_request",
+                side_effect=MemoryRequestError(
+                    "recall_embedding_failed",
+                    "recall scene embedding failed: RuntimeError",
+                    503,
+                ),
+            ),
+        ):
+            with self.assertRaises(ToolError) as raised:
+                asyncio.run(remember_moment(
+                    content="叶子希望记住这次确认。",
+                    reason="以后继续这个话题时有用。",
+                    scene="聊天",
+                    event="确认",
+                    moment_state="standalone",
+                    recall_scene="当叶子再提起这次约定时",
+                ))
+        self.assertIn("recall_embedding_failed", str(raised.exception))
 
     def test_interaction_rule_fixes_replace_and_requires_memory_key(self):
         captured = {}

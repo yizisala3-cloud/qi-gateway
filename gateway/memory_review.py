@@ -8,8 +8,16 @@ from typing import Any
 
 from .config import cfg
 from .db import get_client
-from .memory_requests import MemoryRequestError
-from .memory_requests import _clean_memory_key
+from .memory_requests import (
+    MemoryRequestError,
+    _clean_memory_key,
+    _clean_recall_scene,
+    _clean_recall_tags,
+    _recall_embedding,
+)
+
+_EVIDENCE_PRECISIONS = frozenset({"minute", "hour", "day", "approximate", "unknown"})
+_EVIDENCE_TIME_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}([T ][0-9:.+-]+Z?)?$")
 
 
 def _server_writes_allowed() -> bool:
@@ -70,6 +78,42 @@ def _related_memory_id(value: Any) -> int:
     return result
 
 
+def _clean_evidence_time(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise MemoryRequestError("invalid_review", "evidence_end_time must be a string")
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) > 40 or not _EVIDENCE_TIME_PATTERN.fullmatch(text):
+        raise MemoryRequestError("invalid_review", "evidence_end_time must be an ISO date/time")
+    return text
+
+
+def _clean_evidence_precision(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise MemoryRequestError("invalid_review", "evidence_time_precision must be a string")
+    text = value.strip().casefold()
+    if not text:
+        return None
+    if text not in _EVIDENCE_PRECISIONS:
+        raise MemoryRequestError("invalid_review", "invalid evidence_time_precision")
+    return text
+
+
+def _clean_evidence_pair(evidence_time: str | None, precision: str | None) -> None:
+    """证据时间与精度成对校验：没有时间时精度只能为空或 unknown。"""
+    if not evidence_time and precision not in (None, "unknown"):
+        raise MemoryRequestError(
+            "invalid_review",
+            "evidence_time_precision requires an evidence_end_time",
+            400,
+        )
+
+
 def validate_review(request_id: Any, payload: Any) -> dict[str, Any]:
     try:
         normalized_id = int(request_id)
@@ -83,6 +127,7 @@ def validate_review(request_id: Any, payload: Any) -> dict[str, Any]:
     allowed = {
         "action", "content", "title", "tags", "importance", "review_note",
         "memory_key", "update_mode", "related_memory_id",
+        "recall_scene", "recall_tags", "evidence_end_time", "evidence_time_precision",
     }
     unknown = set(payload) - allowed
     if unknown:
@@ -101,6 +146,7 @@ def validate_review(request_id: Any, payload: Any) -> dict[str, Any]:
     if action == "reject":
         if any(key in payload for key in (
             "content", "title", "tags", "importance", "memory_key", "update_mode",
+            "recall_scene", "recall_tags", "evidence_end_time", "evidence_time_precision",
         )):
             raise MemoryRequestError(
                 "invalid_review",
@@ -123,6 +169,7 @@ def validate_review(request_id: Any, payload: Any) -> dict[str, Any]:
     if action in {"duplicate", "conflict"}:
         disallowed = {
             "content", "title", "tags", "importance", "memory_key", "update_mode",
+            "recall_scene", "recall_tags", "evidence_end_time", "evidence_time_precision",
         }
         if disallowed.intersection(payload):
             raise MemoryRequestError(
@@ -189,6 +236,18 @@ def validate_review(request_id: Any, payload: Any) -> dict[str, Any]:
                 "invalid_review",
                 "memory_key is only allowed when update_mode is replace",
             )
+    # 召回编辑字段：仅在 payload 显式提供时存在，表示叶子改过该项；
+    # 未提供的键沿用申请原值（由服务层解析）。清空 = 显式置空。
+    recall_edits = {}
+    if "recall_scene" in payload:
+        recall_edits["recall_scene"] = _clean_recall_scene(payload.get("recall_scene"))
+    if "recall_tags" in payload:
+        recall_edits["recall_tags"] = _clean_recall_tags(payload.get("recall_tags"))
+    if "evidence_end_time" in payload:
+        recall_edits["evidence_end_time"] = _clean_evidence_time(payload.get("evidence_end_time"))
+    if "evidence_time_precision" in payload:
+        recall_edits["evidence_time_precision"] = _clean_evidence_precision(payload.get("evidence_time_precision"))
+
     return {
         "request_id": normalized_id,
         "action": action,
@@ -201,6 +260,7 @@ def validate_review(request_id: Any, payload: Any) -> dict[str, Any]:
         "memory_key": memory_key,
         "update_mode": update_mode,
         "related_memory_id": related_memory_id,
+        **recall_edits,
     }
 
 
@@ -218,6 +278,61 @@ def _result(data: Any) -> dict[str, Any]:
 
 
 AI_REVIEWABLE_TYPES = ("moment", "thread", "inside_joke")
+
+
+def _fetch_request_recall_meta(client: Any, request_id: int) -> dict[str, Any]:
+    try:
+        response = (
+            client.table("memory_requests")
+            .select("recall_scene,recall_tags,evidence_end_time,evidence_time_precision")
+            .eq("id", request_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        raise MemoryRequestError(
+            "recall_embedding_failed",
+            f"failed to read recall fields for review: {type(exc).__name__}",
+            500,
+        ) from exc
+    rows = response.data if isinstance(response.data, list) else []
+    if not rows:
+        raise MemoryRequestError("request_not_found", "memory application was not found", 404)
+    row = rows[0] or {}
+    return {
+        "recall_scene": str(row.get("recall_scene") or "").strip() or None,
+        "recall_tags": row.get("recall_tags") or [],
+        "evidence_end_time": row.get("evidence_end_time"),
+        "evidence_time_precision": row.get("evidence_time_precision"),
+    }
+
+
+def _resolve_review_recall(client: Any, request_id: int, review: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the final recall values and derive the embedding from the final scene.
+
+    Edited fields win over the request's own values; the embedding must succeed
+    before the review RPC runs so a failed save never flips the request out of
+    pending and never leaves a scene without its vector.
+    """
+    meta = _fetch_request_recall_meta(client, request_id)
+    scene = review["recall_scene"] if "recall_scene" in review else meta["recall_scene"]
+    tags = review["recall_tags"] if "recall_tags" in review else meta["recall_tags"]
+    evidence_time = (
+        review["evidence_end_time"] if "evidence_end_time" in review else meta["evidence_end_time"]
+    )
+    precision = (
+        review["evidence_time_precision"]
+        if "evidence_time_precision" in review
+        else meta["evidence_time_precision"]
+    )
+    _clean_evidence_pair(evidence_time, precision)
+    return {
+        "recall_scene": scene,
+        "recall_tags": tags,
+        "evidence_end_time": evidence_time,
+        "evidence_time_precision": precision,
+        "recall_embedding": _recall_embedding(scene),
+    }
 
 
 def list_reviewable_memory_requests(assistant_id: str, limit: int = 50) -> list[dict[str, Any]]:
@@ -239,7 +354,8 @@ def list_reviewable_memory_requests(assistant_id: str, limit: int = 50) -> list[
             .select(
                 "id,content,title,tags,importance,reason,status,source,created_at,"
                 "memory_key,update_mode,continuity_type,thread_state,continuity_data,"
-                "subject,source_type,continuity_value,retention_class,participants"
+                "subject,source_type,continuity_value,retention_class,participants,"
+                "recall_scene,recall_tags"
             )
             .eq("assistant_id", assistant)
             .eq("status", "pending")
@@ -305,6 +421,11 @@ def review_memory_request(
             allowed_types or AI_REVIEWABLE_TYPES,
         )
 
+    recall_final = (
+        _resolve_review_recall(client, review["request_id"], review)
+        if review["action"] in {"approve", "merge"}
+        else None
+    )
     rpc_payload = {
         "p_request_id": review["request_id"],
         "p_action": review["action"],
@@ -318,6 +439,11 @@ def review_memory_request(
         "p_memory_key": review["memory_key"],
         "p_update_mode": review["update_mode"],
         "p_related_memory_id": review["related_memory_id"],
+        "p_recall_embedding": recall_final["recall_embedding"] if recall_final else None,
+        "p_recall_scene": recall_final["recall_scene"] if recall_final else None,
+        "p_recall_tags": recall_final["recall_tags"] if recall_final else None,
+        "p_evidence_end_time": recall_final["evidence_end_time"] if recall_final else None,
+        "p_evidence_time_precision": recall_final["evidence_time_precision"] if recall_final else None,
     }
     try:
         response = client.rpc("review_memory_request_v5", rpc_payload).execute()
@@ -422,4 +548,109 @@ def review_ai_memory_request(assistant_id: str, request_id: Any, payload: Any) -
         reviewed_by="orangechat_ai",
         allowed_types=AI_REVIEWABLE_TYPES,
     )
+
+
+def edit_memory_recall(memory_id: Any, payload: Any) -> dict[str, Any]:
+    """Atomically update a formal memory's recall fields and its vector.
+
+    The recall embedding is re-derived server-side from the final recall_scene
+    inside the same write, so a saved scene can never keep a stale vector and
+    a failed embedding leaves both the scene and the vector untouched.
+    """
+    try:
+        normalized_id = int(memory_id)
+    except (TypeError, ValueError) as exc:
+        raise MemoryRequestError("invalid_memory_edit", "memory_id must be an integer", 400) from exc
+    if normalized_id <= 0:
+        raise MemoryRequestError("invalid_memory_edit", "memory_id must be positive", 400)
+    if not isinstance(payload, dict):
+        raise MemoryRequestError("invalid_memory_edit", "JSON body must be an object", 400)
+    allowed = {"recall_scene", "recall_tags", "evidence_end_time", "evidence_time_precision"}
+    unknown = set(payload) - allowed
+    if unknown:
+        raise MemoryRequestError(
+            "invalid_memory_edit",
+            f"unsupported fields: {', '.join(sorted(unknown))}",
+            400,
+        )
+    if not _server_writes_allowed():
+        raise MemoryRequestError(
+            "database_permissions_unavailable",
+            "an elevated Supabase server key is required",
+            503,
+        )
+    client = get_client()
+    if not client:
+        raise MemoryRequestError("database_unavailable", "Supabase is unavailable", 503)
+
+    try:
+        response = (
+            client.table("memories")
+            .select("recall_scene,recall_tags,evidence_end_time,evidence_time_precision")
+            .eq("id", normalized_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        raise MemoryRequestError(
+            "memory_recall_edit_failed",
+            f"failed to read memory recall fields: {type(exc).__name__}",
+            500,
+        ) from exc
+    rows = response.data if isinstance(response.data, list) else []
+    if not rows:
+        raise MemoryRequestError("memory_not_found", "memory was not found", 404)
+    row = rows[0] or {}
+
+    scene = (
+        _clean_recall_scene(payload.get("recall_scene"))
+        if "recall_scene" in payload
+        else str(row.get("recall_scene") or "").strip() or None
+    )
+    tags = _clean_recall_tags(payload.get("recall_tags")) if "recall_tags" in payload else row.get("recall_tags")
+    evidence_time = (
+        _clean_evidence_time(payload.get("evidence_end_time"))
+        if "evidence_end_time" in payload
+        else row.get("evidence_end_time")
+    )
+    precision = (
+        _clean_evidence_precision(payload.get("evidence_time_precision"))
+        if "evidence_time_precision" in payload
+        else row.get("evidence_time_precision")
+    )
+    _clean_evidence_pair(evidence_time, precision)
+
+    # 场景非空必须成功生成向量；失败在此抛出，下面的写入不会发生。
+    embedding = _recall_embedding(scene)
+
+    update = {
+        "recall_scene": scene,
+        "recall_tags": tags if tags is not None else [],
+        "evidence_end_time": evidence_time,
+        "evidence_time_precision": precision,
+        "recall_embedding": embedding,
+    }
+    try:
+        updated = (
+            client.table("memories")
+            .update(update)
+            .eq("id", normalized_id)
+            .execute()
+        )
+    except Exception as exc:
+        raise MemoryRequestError(
+            "memory_recall_edit_failed",
+            f"failed to update memory recall fields: {type(exc).__name__}",
+            500,
+        ) from exc
+    saved = updated.data if isinstance(updated.data, list) else []
+    if not saved:
+        raise MemoryRequestError("memory_not_found", "memory was not found", 404)
+    return {
+        "memory_id": normalized_id,
+        "recall_scene": scene,
+        "recall_tags": tags if tags is not None else [],
+        "evidence_end_time": evidence_time,
+        "evidence_time_precision": precision,
+    }
 

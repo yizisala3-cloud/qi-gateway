@@ -25,12 +25,14 @@ from gateway.memory_search import (
     MEMORY_CONTEXT_HEADER,
     build_vector_query,
     _boost_heat,
+    _event_time_value,
     _freshness_time,
     _get_embedding,
     _hybrid_rank,
     _keyword_relevance,
     _keyword_search,
     _select_memories_for_injection,
+    format_event_time,
     format_memories_for_injection,
     search_memories,
 )
@@ -242,6 +244,206 @@ class HybridRankingTests(unittest.TestCase):
         self.assertAlmostEqual(ranked[0]["_retrieval_score"], expected)
 
 
+class RecallEventTimeTests(unittest.TestCase):
+    def test_event_time_prefers_last_evidence_and_never_created_at(self):
+        self.assertEqual(
+            _event_time_value({"evidence_end_time": "e", "source_time": "s", "created_at": "c"}),
+            "e",
+        )
+        self.assertEqual(
+            _event_time_value({"source_time": "s", "created_at": "c"}),
+            "s",
+        )
+        self.assertEqual(_event_time_value({"created_at": "c"}), None)
+        self.assertEqual(_event_time_value({}), None)
+
+    def test_event_time_formats_to_minutes_in_beijing_time(self):
+        self.assertEqual(
+            format_event_time("2026-08-29T11:21:00+00:00"),
+            "2026-08-29 19:21",
+        )
+        self.assertEqual(
+            format_event_time("2026-08-29T19:21:00+08:00"),
+            "2026-08-29 19:21",
+        )
+
+    def test_event_time_matches_stored_precision(self):
+        value = "2026-08-29T11:21:00+00:00"
+        self.assertEqual(format_event_time(value, "day"), "2026-08-29")
+        self.assertEqual(format_event_time(value, "hour"), "2026-08-29 19")
+        self.assertEqual(format_event_time(value, "minute"), "2026-08-29 19:21")
+
+    def test_event_time_stays_empty_when_no_date_is_confirmable(self):
+        for value in (None, "", "not-a-time", 0):
+            with self.subTest(value=value):
+                self.assertIsNone(format_event_time(value))
+
+    def test_naive_event_time_is_read_as_beijing_wall_clock(self):
+        self.assertEqual(format_event_time("2026-08-29 19:21:00"), "2026-08-29 19:21")
+
+
+class RecallInjectionTests(unittest.TestCase):
+    def test_full_mode_shows_last_evidence_time_before_content(self):
+        text = format_memories_for_injection([
+            {
+                "content": "叶子和栖约好继续做网关。",
+                "inject_mode": "full",
+                "evidence_end_time": "2026-08-29T11:21:00+00:00",
+            },
+        ])
+
+        self.assertIn("[碎片] 时间：2026-08-29 19:21｜叶子和栖约好继续做网关。", text)
+
+    def test_title_only_mode_shows_the_same_event_time_rules(self):
+        text = format_memories_for_injection([
+            {
+                "title": "网关计划",
+                "content": "不应注入的正文",
+                "inject_mode": "title_only",
+                "evidence_end_time": "2026-08-29T00:00:00+08:00",
+            },
+        ])
+
+        self.assertIn("[碎片·线索] 时间：2026-08-29 00:00｜网关计划", text)
+        self.assertNotIn("不应注入的正文", text)
+
+    def test_memories_without_confirmable_event_time_keep_the_legacy_line(self):
+        text = format_memories_for_injection([
+            {"content": "没有证据时间的旧记忆。", "inject_mode": "full"},
+            {"title": "只有线索", "inject_mode": "title_only"},
+        ])
+
+        self.assertIn("[碎片] 没有证据时间的旧记忆。", text)
+        self.assertIn("[碎片·线索] 只有线索", text)
+        self.assertNotIn("时间：", text)
+
+    def test_created_at_is_never_used_as_event_time_fallback(self):
+        text = format_memories_for_injection([
+            {
+                "content": "只有创建时间的记忆。",
+                "inject_mode": "full",
+                "created_at": "2026-08-29T11:21:00+00:00",
+            },
+        ])
+
+        self.assertIn("[碎片] 只有创建时间的记忆。", text)
+        self.assertNotIn("时间：", text)
+
+    def test_source_time_serves_as_last_evidence_fallback(self):
+        text = format_memories_for_injection([
+            {
+                "content": "早期总结记忆。",
+                "inject_mode": "full",
+                "source_time": "2026-08-01T08:05:00+08:00",
+            },
+        ])
+
+        self.assertIn("[碎片] 时间：2026-08-01 08:05｜早期总结记忆。", text)
+
+    def test_minute_precision_shows_the_full_clock_time(self):
+        text = format_memories_for_injection([
+            {
+                "content": "精确到分钟的记忆。",
+                "inject_mode": "full",
+                "evidence_end_time": "2026-08-29T11:21:00+00:00",
+                "evidence_time_precision": "minute",
+            },
+        ])
+
+        self.assertIn("[碎片] 时间：2026-08-29 19:21｜精确到分钟的记忆。", text)
+
+    def test_memory_time_day_precision_never_truncates_minute_evidence(self):
+        text = format_memories_for_injection([
+            {
+                "content": "证据与记忆时间精度不一致的记忆。",
+                "inject_mode": "full",
+                "evidence_end_time": "2026-08-29T11:21:00+00:00",
+                "evidence_time_precision": "minute",
+                "memory_time": "2026-08-29T00:00:00+08:00",
+                "time_precision": "day",
+            },
+        ])
+
+        self.assertIn("[碎片] 时间：2026-08-29 19:21｜证据与记忆时间精度不一致的记忆。", text)
+
+    def test_memory_time_hour_precision_never_truncates_minute_evidence(self):
+        text = format_memories_for_injection([
+            {
+                "content": "证据为分钟、记忆时间为小时精度的记忆。",
+                "inject_mode": "full",
+                "evidence_end_time": "2026-08-29T11:21:00+00:00",
+                "evidence_time_precision": "minute",
+                "memory_time": "2026-08-29T19:00:00+08:00",
+                "time_precision": "hour",
+            },
+        ])
+
+        self.assertIn("[碎片] 时间：2026-08-29 19:21｜证据为分钟、记忆时间为小时精度的记忆。", text)
+
+    def test_evidence_hour_precision_never_fabricates_minutes(self):
+        for mode, expected_prefix in (
+            ("full", "[碎片] 时间：2026-08-29 19｜"),
+            ("title_only", "[碎片·线索] 时间：2026-08-29 19｜"),
+        ):
+            with self.subTest(mode=mode):
+                text = format_memories_for_injection([
+                    {
+                        "content": "只有小时的记忆正文。",
+                        "title": "只有小时的标题",
+                        "inject_mode": mode,
+                        "evidence_end_time": "2026-08-29T11:21:00+00:00",
+                        "evidence_time_precision": "hour",
+                    },
+                ])
+                self.assertIn(expected_prefix, text)
+                self.assertNotIn("19:21", text)
+
+    def test_evidence_day_precision_hides_hours_and_minutes(self):
+        for mode, expected_prefix in (
+            ("full", "[碎片] 时间：2026-08-29｜"),
+            ("title_only", "[碎片·线索] 时间：2026-08-29｜"),
+        ):
+            with self.subTest(mode=mode):
+                text = format_memories_for_injection([
+                    {
+                        "content": "只有日期的记忆正文。",
+                        "title": "只有日期的标题",
+                        "inject_mode": mode,
+                        "evidence_end_time": "2026-08-29T11:21:00+00:00",
+                        "evidence_time_precision": "day",
+                    },
+                ])
+                self.assertIn(expected_prefix, text)
+                self.assertNotIn("19", text)
+
+    def test_evidence_approximate_precision_still_shows_the_stored_clock(self):
+        text = format_memories_for_injection([
+            {
+                "content": "模糊时间记忆。",
+                "inject_mode": "full",
+                "evidence_end_time": "2026-08-29T11:21:00+00:00",
+                "evidence_time_precision": "approximate",
+            },
+        ])
+
+        self.assertIn("[碎片] 时间：2026-08-29 19:21｜模糊时间记忆。", text)
+
+    def test_no_evidence_time_hides_time_even_with_memory_time_or_created_at(self):
+        text = format_memories_for_injection([
+            {
+                "content": "没有证据时间的记忆。",
+                "inject_mode": "full",
+                "memory_time": "2026-08-29T00:00:00+08:00",
+                "time_precision": "minute",
+                "evidence_time_precision": "minute",
+                "created_at": "2026-08-29T11:21:00+00:00",
+            },
+        ])
+
+        self.assertIn("[碎片] 没有证据时间的记忆。", text)
+        self.assertNotIn("时间：", text)
+
+
 class LayeredInjectionTests(unittest.TestCase):
     def test_vector_only_core_keeps_core_layer(self):
         ranked = _hybrid_rank(
@@ -435,6 +637,38 @@ class SearchFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(keyword_search.call_args.args[0], ["散步"])
         extract.assert_called_once_with("那它以后怎么办")
 
+
+    async def test_keyword_only_channel_honours_evidence_time_precision(self):
+        for precision, expected, forbidden in (
+            ("hour", "时间：2026-08-29 19｜", "19:21"),
+            ("day", "时间：2026-08-29｜", "19"),
+            ("minute", "时间：2026-08-29 19:21｜", None),
+        ):
+            with self.subTest(precision=precision):
+                keyword_rows = [
+                    _memory(
+                        1,
+                        "用户喜欢清晨散步",
+                        title="清晨偏好",
+                        heat=55,
+                        evidence_end_time="2026-08-29T11:21:00+00:00",
+                        evidence_time_precision=precision,
+                    ),
+                ]
+                with (
+                    patch(f"{MODULE}._extract_keywords", return_value=["清晨"]),
+                    patch(f"{MODULE}._keyword_search", return_value=keyword_rows),
+                    patch(f"{MODULE}._get_embedding", new=AsyncMock(return_value=None)),
+                    patch(f"{MODULE}._vector_search_sync") as vector_search,
+                    patch(f"{MODULE}._boost_heat"),
+                ):
+                    result = await search_memories("用户喜欢清晨散步", top_k=1)
+
+                vector_search.assert_not_called()
+                text = format_memories_for_injection(result)
+                self.assertIn(expected, text)
+                if forbidden:
+                    self.assertNotIn(forbidden, text)
 
     def test_formatter_only_injects_full_content_for_full_mode(self):
         text = format_memories_for_injection([

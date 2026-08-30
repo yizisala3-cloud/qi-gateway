@@ -15,10 +15,10 @@ export const CONTINUITY_TYPE_LABELS = {
   profile: '用户资料', interaction_rule: '互动规则',
 };
 const TIME_PRECISION_LABELS = {
-  minute: '精确到分钟', day: '精确到日期', approximate: '大概时间', unknown: '时间未知',
+  minute: '精确到分钟', hour: '精确到小时', day: '精确到日期', approximate: '大概时间', unknown: '时间未知',
 };
-const MEMORY_FIELDS = 'id,title,content,tags,heat,importance,layer,source,verified,is_active,last_recalled_at,recall_count,emotion_weight,created_at,memory_key,supersedes_memory_id,superseded_by_memory_id,superseded_at,continuity_id,continuity_type,continuity_schema_version,continuity_data,subject,source_type,thread_state,continuity_value,retention_class,participants,evidence_start_time,evidence_end_time,evidence_message_ids,source_time,memory_time,time_precision';
-const REQUEST_FIELDS = 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,memory_key,update_mode,related_memory_id,related_request_id,continuity_id,continuity_type,continuity_schema_version,continuity_data,thread_state,confidence,evidence_message_ids,source_time,memory_time,time_precision,digest_run_id,dedupe_state,dedupe_reason,created_at,reviewed_at,reviewed_by,review_note';
+const MEMORY_FIELDS = 'id,title,content,tags,heat,importance,layer,source,verified,is_active,last_recalled_at,recall_count,emotion_weight,created_at,memory_key,supersedes_memory_id,superseded_by_memory_id,superseded_at,continuity_id,continuity_type,continuity_schema_version,continuity_data,subject,source_type,thread_state,continuity_value,retention_class,participants,evidence_start_time,evidence_end_time,evidence_message_ids,source_time,memory_time,time_precision,evidence_time_precision,recall_scene,recall_tags';
+const REQUEST_FIELDS = 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,memory_key,update_mode,related_memory_id,related_request_id,continuity_id,continuity_type,continuity_schema_version,continuity_data,thread_state,confidence,evidence_message_ids,source_time,memory_time,time_precision,digest_run_id,dedupe_state,dedupe_reason,evidence_time_precision,recall_scene,recall_tags,created_at,reviewed_at,reviewed_by,review_note';
 
 export function continuityTypeLabel(value) {
   return CONTINUITY_TYPE_LABELS[value] || value || '未分类历史数据';
@@ -59,7 +59,9 @@ function evidenceRange(memory) {
   const start = memory.evidence_start_time || memory.source_time;
   const end = memory.evidence_end_time || memory.source_time;
   if (!start && !end) return '-';
-  return `${esc(fmtDate(start))} ～ ${esc(fmtDate(end || start))}`;
+  const range = `${esc(fmtDate(start))} ～ ${esc(fmtDate(end || start))}`;
+  const label = TIME_PRECISION_LABELS[memory.evidence_time_precision];
+  return label ? `${range}（${esc(label)}）` : range;
 }
 
 function memoryKvRows(m) {
@@ -82,6 +84,8 @@ function memoryKvRows(m) {
     ${m.continuity_value != null ? `<div class="kv"><span class="k">承接价值</span><span class="v">${esc(m.continuity_value)}</span></div>` : ''}
     <div class="kv"><span class="k">证据时间</span><span class="v">${evidenceRange(m)}</span></div>
     <div class="kv"><span class="k">记忆时间</span><span class="v">${esc(m.memory_time ? fmtDate(m.memory_time) : '-')}（${TIME_PRECISION_LABELS[m.time_precision] || TIME_PRECISION_LABELS.unknown}）</span></div>
+    ${m.recall_scene ? `<div class="kv"><span class="k">召回场景</span></div><div class="kv-block"><span class="v">${esc(m.recall_scene)}</span></div>` : ''}
+    ${(m.recall_tags || []).length ? `<div class="kv"><span class="k">召回标签</span><span class="v">${m.recall_tags.map(t => esc(t)).join('、')}</span></div>` : ''}
     <div class="kv"><span class="k">创建时间</span><span class="v">${esc(fmtDate(m.created_at))}</span></div>
     <div class="kv"><span class="k">最近召回</span><span class="v">${esc(fmtDate(m.last_recalled_at))} · ${esc(m.recall_count ?? 0)} 次</span></div>
   `;
@@ -105,6 +109,8 @@ function requestKvRows(r) {
     <div class="kv"><span class="k">原文证据</span><span class="v">${(r.evidence_message_ids || []).map(id => `#${esc(id)}`).join('、') || '-'}</span></div>
     <div class="kv"><span class="k">证据时间</span><span class="v">${evidenceRange(r)}</span></div>
     <div class="kv"><span class="k">记忆时间</span><span class="v">${esc(r.memory_time ? fmtDate(r.memory_time) : '-')}（${TIME_PRECISION_LABELS[r.time_precision] || TIME_PRECISION_LABELS.unknown}）</span></div>
+    ${r.recall_scene ? `<div class="kv"><span class="k">召回场景</span></div><div class="kv-block"><span class="v">${esc(r.recall_scene)}</span></div>` : ''}
+    ${(r.recall_tags || []).length ? `<div class="kv"><span class="k">召回标签</span><span class="v">${r.recall_tags.map(t => esc(t)).join('、')}</span></div>` : ''}
     <div class="kv"><span class="k">来源消息</span><span class="v">#${esc(r.source_message_id ?? '-')} · 会话 ${esc(r.conversation_id || '-')}</span></div>
     ${r.digest_run_id ? `<div class="kv"><span class="k">来源总结</span><span class="v">#${esc(r.digest_run_id)}</span></div>` : ''}
     <div class="kv"><span class="k">申请时间</span><span class="v">${esc(fmtDate(r.created_at))}</span></div>
@@ -396,7 +402,7 @@ export function createMemoryBrowser({
         <div class="search-box">${icon('search')}<input type="search" id="req-search" placeholder="搜索当前结果内的标题 / 内容 / 编号…" value="${esc(state.reqSearch)}"></div>
         <button class="btn btn-secondary" data-act="refresh">${icon('refresh')}刷新</button>
       </div>
-      <p class="muted text-sm" style="margin:0 0 12px">episode、profile、interaction_rule 会进入审核队列；moment、thread、inside_joke 校验通过后直接写入正式记忆。搜索作用于最近 ${REQ_FETCH_LIMIT} 条申请。</p>
+      <p class="muted text-sm" style="margin:0 0 12px">episode、profile、interaction_rule 会进入审核队列；moment、thread、inside_joke 校验通过且召回场景与向量就绪后直接写入正式记忆，否则同样进入审核队列。搜索作用于最近 ${REQ_FETCH_LIMIT} 条申请。</p>
       <div id="req-list">${loading()}</div>
       <div id="req-pager"></div>`;
   }
@@ -628,12 +634,26 @@ export function createMemoryBrowser({
           <div class="field"><label>重要性（1-10）</label><input type="number" id="ed-imp" min="1" max="10" value="${esc(m.importance ?? 5)}"></div>
           <div class="field"><label>层级</label><select id="ed-layer"><option value="碎片">碎片</option><option value="场景">场景</option><option value="核心">核心</option></select></div>
           <div class="field"><label>情感权重（0-1）</label><input type="number" id="ed-emo" min="0" max="1" step="0.1" value="${esc(m.emotion_weight ?? 0.5)}"></div>
+        </div>
+        <div class="field"><label>召回场景（可空；保存后由服务端重新生成召回向量）</label><textarea id="ed-recall-scene" rows="2">${esc(m.recall_scene || '')}</textarea></div>
+        <div class="field"><label>召回标签（逗号分隔，自由填写）</label><input type="text" id="ed-recall-tags" value="${esc((m.recall_tags || []).join(', '))}"></div>
+        <div class="grid grid-2">
+          <div class="field"><label>最后证据时间（可空，ISO 格式）</label><input type="text" id="ed-evidence-time" maxlength="40" value="${esc(m.evidence_end_time || '')}"></div>
+          <div class="field"><label>证据时间精度</label><select id="ed-evidence-precision">
+            <option value="">未指定</option>
+            <option value="minute">精确到分钟</option>
+            <option value="hour">精确到小时</option>
+            <option value="day">精确到日期</option>
+            <option value="approximate">大概时间</option>
+            <option value="unknown">时间未知</option>
+          </select></div>
         </div>`,
       actions: `
         <button class="btn btn-primary btn-sm" data-act="mem-edit-save" data-id="${m.id}">${icon('check')}保存</button>
         <button class="btn btn-secondary btn-sm" data-act="mem-edit-cancel" data-id="${m.id}">取消</button>`,
     });
     panel.el.querySelector('#ed-layer').value = m.layer || '碎片';
+    panel.el.querySelector('#ed-evidence-precision').value = m.evidence_time_precision || '';
   }
 
   async function saveMemoryEdit(id) {
@@ -652,7 +672,20 @@ export function createMemoryBrowser({
       toast('重要性必须是 1 到 10 的整数', 'err');
       return;
     }
+    // 召回字段走专用原子端点：服务端在同一写入里重算召回向量，
+    // 场景与向量不可能出现新旧不一致。
+    const recallPayload = {
+      recall_scene: root.querySelector('#ed-recall-scene').value.trim(),
+      recall_tags: root.querySelector('#ed-recall-tags').value.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
+      evidence_end_time: root.querySelector('#ed-evidence-time').value.trim() || null,
+      evidence_time_precision: root.querySelector('#ed-evidence-precision').value || null,
+    };
     try {
+      await gw(`/admin/api/memories/${encodeURIComponent(id)}/recall`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(recallPayload),
+      });
       await update('memories', id, row);
       toast('记忆已更新');
       await Promise.all([loadCurrentList(), showMemory(id)]);
@@ -676,6 +709,19 @@ export function createMemoryBrowser({
         </select></div>
         <div class="field"><label>稳定主题键（替换时必填）</label><input type="text" id="rv-memory-key" maxlength="120" value="${esc(r.memory_key || '')}" placeholder="例如 project.qi-gateway.progress">
           <div class="disabled-note" style="margin-top:4px">同一进度、状态或位置的后续更新必须使用完全相同的键；普通相似内容不要使用替换。</div></div>
+        <div class="field"><label>召回场景（可空；保存后由服务端生成召回向量）</label><textarea id="rv-recall-scene" rows="2">${esc(r.recall_scene || '')}</textarea></div>
+        <div class="field"><label>召回标签（逗号分隔，自由填写）</label><input type="text" id="rv-recall-tags" value="${esc((r.recall_tags || []).join(', '))}"></div>
+        <div class="grid grid-2">
+          <div class="field"><label>最后证据时间（可空，ISO 格式）</label><input type="text" id="rv-evidence-time" maxlength="40" value="${esc(r.evidence_end_time || '')}"></div>
+          <div class="field"><label>证据时间精度</label><select id="rv-evidence-precision">
+            <option value="">未指定</option>
+            <option value="minute">精确到分钟</option>
+            <option value="hour">精确到小时</option>
+            <option value="day">精确到日期</option>
+            <option value="approximate">大概时间</option>
+            <option value="unknown">时间未知</option>
+          </select></div>
+        </div>
         <div class="field"><label>审核备注（可选）</label><textarea id="rv-note" rows="3" maxlength="500"></textarea></div>`,
       actions: `
         <button class="btn btn-primary btn-sm" data-act="req-approve-save" data-id="${r.id}">${icon('check')}通过并写入记忆</button>
@@ -702,6 +748,14 @@ export function createMemoryBrowser({
       toast('新增独立记忆时请清空稳定主题键', 'err');
       return;
     }
+    const recallScene = root.querySelector('#rv-recall-scene').value.trim();
+    if (!recallScene) {
+      const confirmed = await confirm(
+        '这条申请没有召回场景：通过后暂时不能进入向量召回，仍可通过关键词召回。确定直接通过吗？',
+        { title: '缺少召回场景', okText: '仍然通过' },
+      );
+      if (!confirmed) return;
+    }
     const button = panel.el.querySelector('[data-act="req-approve-save"]');
     button.disabled = true;
     try {
@@ -713,6 +767,10 @@ export function createMemoryBrowser({
         importance,
         update_mode: updateMode,
         memory_key: memoryKey || null,
+        recall_scene: root.querySelector('#rv-recall-scene').value.trim(),
+        recall_tags: root.querySelector('#rv-recall-tags').value.split(/[,，]/).map((t) => t.trim()).filter(Boolean),
+        evidence_end_time: root.querySelector('#rv-evidence-time').value.trim() || null,
+        evidence_time_precision: root.querySelector('#rv-evidence-precision').value || null,
         review_note: root.querySelector('#rv-note').value.trim(),
       });
       toast('申请已通过，正式记忆已写入');

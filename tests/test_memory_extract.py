@@ -327,6 +327,90 @@ class ModelBoundaryTests(unittest.TestCase):
         self.assertEqual(memory["memory_key"], "relationship.a.state")
         self.assertEqual(memory["tags"], ["未完线索"])
 
+    def test_parser_preserves_recall_scene_and_tags_without_limits(self):
+        scene = "当对话再次回到部署与运维话题时" * 20
+        tags = [f"标签{index}" for index in range(30)]
+        payload = {
+            "memories": [{
+                "content": "User and qi finished the gateway deploy",
+                "recall_scene": f"  {scene}  ",
+                "recall_tags": ["", "网关", "网关", *tags],
+            }],
+        }
+
+        memory = _parse_model_output(json.dumps(payload))[0]
+
+        self.assertEqual(memory["recall_scene"], scene)
+        self.assertEqual(memory["recall_tags"], ["网关", *tags])
+
+    def test_parser_defaults_recall_fields_when_model_omits_them(self):
+        payload = {
+            "memories": [{"content": "User prefers quiet mornings"}],
+        }
+
+        memory = _parse_model_output(json.dumps(payload))[0]
+
+        self.assertIsNone(memory["recall_scene"])
+        self.assertEqual(memory["recall_tags"], [])
+
+    def test_parser_keeps_hour_time_precision(self):
+        payload = {
+            "memories": [{
+                "content": "User and qi finished the gateway deploy",
+                "memory_time": "2026-08-29 19:00",
+                "time_precision": "hour",
+            }],
+        }
+
+        memory = _parse_model_output(json.dumps(payload))[0]
+
+        self.assertEqual(memory["time_precision"], "hour")
+
+    def test_parser_records_minute_evidence_precision_from_source_times(self):
+        payload = {
+            "memories": [{
+                "content": "User and qi finished the gateway deploy",
+                "evidence_message_ids": [11, 12],
+            }],
+        }
+        source_times = {11: "2026-08-29T19:21+08:00", 12: "2026-08-29T19:25+08:00"}
+
+        memory = _parse_model_output(json.dumps(payload), source_times)[0]
+
+        self.assertEqual(memory["source_time"], "2026-08-29T19:25+08:00")
+        # 证据时间精度独立于 memory_time 精度，来自证据消息时钟本身。
+        self.assertEqual(memory["evidence_time_precision"], "minute")
+
+    def test_parser_leaves_evidence_precision_null_without_valid_evidence_time(self):
+        payload = {
+            "memories": [{
+                "content": "User prefers quiet mornings",
+                "evidence_message_ids": [11],
+            }],
+        }
+        source_times = {11: None}
+
+        memory = _parse_model_output(json.dumps(payload), source_times)[0]
+
+        self.assertIsNone(memory["source_time"])
+        self.assertIsNone(memory["evidence_time_precision"])
+
+    def test_public_preview_strips_both_embeddings_and_hash(self):
+        from gateway.memory_extract import _public_memories
+
+        public = _public_memories([{
+            "content": "一条记忆",
+            "embedding": [0.1],
+            "recall_embedding": [0.2],
+            "content_hash": "a" * 64,
+            "recall_scene": "当网关被提起时",
+        }])[0]
+
+        self.assertNotIn("embedding", public)
+        self.assertNotIn("recall_embedding", public)
+        self.assertNotIn("content_hash", public)
+        self.assertEqual(public["recall_scene"], "当网关被提起时")
+
     def test_invalid_replace_key_is_safely_downgraded_to_append(self):
         payload = {
             "memories": [{
@@ -644,6 +728,89 @@ class AtomicCommitTests(unittest.TestCase):
         committed_memory = client.rpc_calls[0][1]["p_memories"][0]
         self.assertEqual(committed_memory["content_hash"], self.memory["content_hash"])
         self.assertEqual(committed_memory["embedding"], [0.1, 0.2])
+
+    def test_execute_mode_also_embeds_recall_scene_when_present(self):
+        payload = {
+            "memories": [{
+                "content": "User and qi finished the gateway deploy",
+                "recall_scene": "当网关部署被提起时",
+            }],
+        }
+        embedded_texts = []
+
+        def fake_embedding(text):
+            embedded_texts.append(text)
+            return [0.1, 0.2]
+
+        client = _DigestClient(dict(self.run, mode="execute"), commit_succeeds=True)
+        with self._pipeline_patches(
+            client,
+            extract=patch(
+                f"{MODULE}._extract_memories",
+                return_value=(_parse_model_output(json.dumps(payload)), '{"memories":[]}'),
+            ),
+            embedding=patch(f"{MODULE}._get_embedding_sync", side_effect=fake_embedding),
+        ):
+            result = run_memory_digest("manual_execute", "execute")
+
+        self.assertEqual(
+            embedded_texts,
+            ["User and qi finished the gateway deploy", "当网关部署被提起时"],
+        )
+        self.assertEqual(result["inserted_count"], 1)
+
+    def test_execute_mode_skips_recall_embedding_for_blank_scene(self):
+        payload = {
+            "memories": [{"content": "User and qi finished the gateway deploy"}],
+        }
+        embedded_texts = []
+
+        def fake_embedding(text):
+            embedded_texts.append(text)
+            return [0.1, 0.2]
+
+        client = _DigestClient(dict(self.run, mode="execute"), commit_succeeds=True)
+        with self._pipeline_patches(
+            client,
+            extract=patch(
+                f"{MODULE}._extract_memories",
+                return_value=(_parse_model_output(json.dumps(payload)), '{"memories":[]}'),
+            ),
+            embedding=patch(f"{MODULE}._get_embedding_sync", side_effect=fake_embedding),
+        ):
+            run_memory_digest("manual_execute", "execute")
+
+        self.assertEqual(embedded_texts, ["User and qi finished the gateway deploy"])
+
+    def test_recall_embedding_failure_keeps_candidate_pending_without_failing_the_run(self):
+        payload = {
+            "memories": [{
+                "content": "User and qi finished the gateway deploy",
+                "recall_scene": "当网关部署被提起时",
+            }],
+        }
+        client = _DigestClient(dict(self.run, mode="execute"), commit_succeeds=True)
+        embedding = patch(
+            f"{MODULE}._get_embedding_sync",
+            side_effect=[[0.1, 0.2], DigestPipelineError("embedding_http_error", "boom")],
+        )
+        with self._pipeline_patches(
+            client,
+            extract=patch(
+                f"{MODULE}._extract_memories",
+                return_value=(_parse_model_output(json.dumps(payload)), '{"memories":[]}'),
+            ),
+            embedding=embedding,
+        ):
+            result = run_memory_digest("manual_execute", "execute")
+
+        self.assertEqual(result["status"], "succeeded")
+        committed_memory = client.rpc_calls[0][1]["p_memories"][0]
+        # 正文 embedding 成功；召回向量失败不失败整批，候选以 NULL 向量
+        # 进入 pending（SQL 端自动通过条件要求场景与向量同时非空）。
+        self.assertEqual(committed_memory["embedding"], [0.1, 0.2])
+        self.assertIsNone(committed_memory["recall_embedding"])
+        self.assertEqual(committed_memory["recall_scene"], "当网关部署被提起时")
 
     def test_atomic_commit_failure_records_error_and_preserves_cursor(self):
         client = _DigestClient(self.run)

@@ -11,6 +11,7 @@ from gateway.memory_continuity import (
     AUTO_THRESHOLD,
     INITIAL_CURSOR,
     ContinuityPipelineError,
+    _enrich_candidates,
     prepare_continuity_batch,
     run_continuity_digest,
     run_continuity_digest_if_due,
@@ -22,6 +23,7 @@ from gateway.memory_digest_api import (
     continuity_skip_blocked,
     continuity_status,
 )
+from gateway.memory_extract import DigestPipelineError
 
 
 def _row(message_id: int, role: str = "user", content: str = "消息", conversation: str = "c1"):
@@ -301,6 +303,64 @@ class ContinuityExecutionTests(unittest.TestCase):
             result = skip_blocked_continuity_batch()
         self.assertEqual(result["inserted_count"], 0)
         model.assert_not_called()
+
+
+class ContinuityRecallEmbeddingTests(unittest.TestCase):
+    def test_enrich_candidates_embed_recall_scene_only_and_skip_blank_scene(self):
+        sceneful = {
+            **_candidate(),
+            "recall_scene": "当下次继续处理网关问题时",
+            "recall_tags": ["网关", "待续"],
+        }
+        sceneless = dict(_candidate())
+        embedded_texts = []
+
+        def fake_embedding(text):
+            embedded_texts.append(text)
+            return [0.1, 0.2]
+
+        with (
+            patch("gateway.memory_continuity._update_heartbeat"),
+            patch("gateway.memory_continuity._get_embedding_sync", side_effect=fake_embedding),
+        ):
+            enriched = _enrich_candidates([sceneful, sceneless], 91)
+
+        self.assertEqual(
+            embedded_texts,
+            [
+                "叶子和栖约好下次继续处理网关问题。",  # 正文 embedding（去重用）
+                "当下次继续处理网关问题时",  # 召回场景 embedding
+                "叶子和栖约好下次继续处理网关问题。",  # 无场景候选仅正文
+            ],
+        )
+        self.assertEqual(enriched[0]["recall_embedding"], [0.1, 0.2])
+        self.assertIsNone(enriched[1]["recall_embedding"])
+        # 正文 embedding 仍按原文计算，供去重使用。
+        self.assertEqual(enriched[0]["embedding"], [0.1, 0.2])
+
+    def test_recall_embedding_failure_sends_candidate_to_pending(self):
+        sceneful = {
+            **_candidate(),
+            "recall_scene": "当下次继续处理网关问题时",
+            "recall_tags": ["网关", "待续"],
+        }
+
+        def fake_embedding(text):
+            if text == "当下次继续处理网关问题时":
+                raise DigestPipelineError("embedding_http_error", "boom")
+            return [0.1, 0.2]
+
+        with (
+            patch("gateway.memory_continuity._update_heartbeat"),
+            patch("gateway.memory_continuity._get_embedding_sync", side_effect=fake_embedding),
+        ):
+            enriched = _enrich_candidates([sceneful], 91)
+
+        # 正文 embedding 成功；召回向量失败不让整批失败，该候选以
+        # NULL 向量进入 pending，由叶子补场景后再通过。
+        self.assertEqual(enriched[0]["embedding"], [0.1, 0.2])
+        self.assertEqual(enriched[0]["recall_scene"], "当下次继续处理网关问题时")
+        self.assertIsNone(enriched[0]["recall_embedding"])
 
 
 class _Request:

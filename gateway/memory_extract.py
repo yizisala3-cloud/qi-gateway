@@ -39,7 +39,7 @@ EXTRACT_SYSTEM_PROMPT = """从带 id、北京时间 t 和 role 的聊天原文�
 4. 独立对象用 append 且 memory_key=null；只有原文明示同一对象的当前状态变化时才用 replace，并给稳定主题键。
 5. 不要把关系模式改名为 interaction_rule；自动总结绝对不能推断互动规则。
 6. evidence_message_ids 必须列出直接支持该记忆的原文 id。importance 为 1-10，confidence 为 0-1。
-7. memory_time 是事情实际发生或状态生效的北京时间 ISO 8601；无法从原文明示时间或相对时间可靠确定时填 null。time_precision 只允许 minute、day、approximate、unknown。
+7. memory_time 是事情实际发生或状态生效的北京时间 ISO 8601；无法从原文明示时间或相对时间可靠确定时填 null。time_precision 只允许 minute、hour、day、approximate、unknown；原文只支持到小时时用 hour，不要补造不存在的分钟。
 8. content 用一到两句话独立说明记忆。没有合格内容时返回空数组。
 
 每条必须提供符合分类结构的 continuity_data；thread_state 允许 open、paused、resolved、dissolved、abandoned、unknown。
@@ -47,6 +47,7 @@ EXTRACT_SYSTEM_PROMPT = """从带 id、北京时间 t 和 role 的聊天原文�
 {"memories":[{"content":"...","continuity_type":"moment","continuity_data":{"scene":"...","event":"...","moment_state":"standalone"},"thread_state":null,"update_mode":"append","memory_key":null,"importance":6,"confidence":0.9,"evidence_message_ids":[12,13],"memory_time":"2026-08-03","time_precision":"day"}]}"""
 EXTRACT_SYSTEM_PROMPT += """
 9. 如果原文明确显示该内容已通过记忆工具提交，或已通过待办工具创建，不要再提取。不能确定时仍可输出，由数据库保守去重和用户审核。
+10. recall_scene 是以后触发召回的自然语言场景：什么情况下（聊到什么、做什么时）应该想起这条记忆；它是检索用的场景描述，不是记忆正文，不得复制正文；无法可靠确定时填 null。recall_tags 是自由填写的召回场景标签字符串数组，必须来自原文真实依据，无法可靠确定时填 []。
 """
 
 # Sent as an extra user turn when the first model response parsed as JSON but
@@ -62,7 +63,7 @@ EXTRACT_REPAIR_PROMPT = (
 CONTINUITY_TYPES = AUTOMATIC_TYPES
 UPDATE_MODES = frozenset({"append", "replace"})
 MEMORY_KEY_PATTERN = re.compile(r"[a-z0-9][a-z0-9._:/-]{2,119}")
-TIME_PRECISIONS = frozenset({"minute", "day", "approximate", "unknown"})
+TIME_PRECISIONS = frozenset({"minute", "hour", "day", "approximate", "unknown"})
 CONTINUITY_TYPE_TAGS = {"moment": "近期片段", "thread": "未完线索", "episode": "共同经历", "inside_joke": "内部梗"}
 EMBEDDED_TIMESTAMP_PATTERN = re.compile(
     r"(?m)^\s*(?P<year>\d{2}|\d{4})[.\-/](?P<month>\d{1,2})[.\-/](?P<day>\d{1,2})"
@@ -504,6 +505,15 @@ def _parse_model_output(
             continue
         seen_hashes.add(content_hash)
 
+        recall_scene = re.sub(r"\s+", " ", str(raw.get("recall_scene") or "")).strip() or None
+        recall_tags: list[str] = []
+        raw_recall_tags = raw.get("recall_tags")
+        if isinstance(raw_recall_tags, list):
+            for candidate in raw_recall_tags:
+                tag = re.sub(r"\s+", " ", str(candidate or "")).strip()
+                if tag and tag not in recall_tags:
+                    recall_tags.append(tag)
+
         validated.append({
             "content": content,
             "title": title,
@@ -524,8 +534,13 @@ def _parse_model_output(
             "emotion_weight": 0.5,
             "confidence": round(_clamp(raw.get("confidence"), 0, 1, 0.6), 3),
             "tags": [CONTINUITY_TYPE_TAGS[continuity_type]],
+            "recall_scene": recall_scene,
+            "recall_tags": recall_tags,
             "evidence_message_ids": evidence_ids,
             "source_time": source_time,
+            # 证据时间来自消息时钟（精确到分钟）；time_precision 只描述
+            # memory_time，两者精度互不替代。
+            "evidence_time_precision": "minute" if source_time else None,
             "memory_time": memory_time,
             "time_precision": time_precision,
             "content_hash": content_hash,
@@ -740,7 +755,14 @@ def _create_run(
 
 
 def _public_memories(memories: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [{key: value for key, value in item.items() if key not in {"embedding", "content_hash"}} for item in memories]
+    return [
+        {
+            key: value
+            for key, value in item.items()
+            if key not in {"embedding", "content_hash", "recall_embedding"}
+        }
+        for item in memories
+    ]
 
 
 def _public_run(run: dict[str, Any]) -> dict[str, Any]:
@@ -857,8 +879,20 @@ def run_memory_digest(trigger: str, mode: str, max_messages: int | None = None) 
         for memory in memories:
             _update_heartbeat(run_id)
             item = dict(memory)
+            # 正文 embedding 失败仍让整次执行失败（保持既有行为）。
             embedding = _get_embedding_sync(item["content"])
             item["embedding"] = embedding
+            # 召回向量失败只影响该候选：以 recall_embedding=NULL 进入
+            # pending 审核，由叶子补充召回场景后再通过。
+            recall_scene = str(item.get("recall_scene") or "").strip()
+            try:
+                item["recall_embedding"] = _get_embedding_sync(recall_scene) if recall_scene else None
+            except DigestPipelineError as exc:
+                log.warning(
+                    "recall_scene embedding 生成失败，候选将以 pending 进入审核: %s",
+                    exc.code,
+                )
+                item["recall_embedding"] = None
             enriched.append(item)
 
         commit_response = _client().rpc(
