@@ -11,7 +11,9 @@ import hashlib
 import json
 import logging
 import re
+import time
 from typing import Any
+from urllib.parse import urlsplit
 
 from .config import cfg
 from .db import get_client
@@ -343,6 +345,14 @@ def _rpc_result(data: Any) -> dict[str, Any]:
     return data
 
 
+def _embedding_host() -> str:
+    """Return only the configured embedding endpoint host for diagnostics."""
+    try:
+        return urlsplit(cfg.ANALYSIS_BASE_URL.strip()).netloc or "unconfigured"
+    except ValueError:
+        return "invalid-url"
+
+
 def _recall_embedding(scene: str | None) -> list[float] | None:
     """Embed recall_scene for the vector recall channel.
 
@@ -353,14 +363,30 @@ def _recall_embedding(scene: str | None) -> list[float] | None:
     """
     if not scene:
         return None
+    # 定位日志：只含耗时、主机名和异常类型/错误码，不含密钥与内容。
+    host = _embedding_host()
+    started = time.monotonic()
+    log.info("recall_embedding_start host=%s chars=%d", host, len(scene))
     try:
         embedding = _get_embedding_sync(scene)
     except Exception as exc:
+        detail = getattr(exc, "code", None) or type(exc).__name__
+        log.warning(
+            "recall_embedding_failed duration_ms=%d host=%s detail=%s",
+            int((time.monotonic() - started) * 1000),
+            host,
+            detail,
+        )
         raise MemoryRequestError(
             "recall_embedding_failed",
             f"recall scene embedding failed: {type(exc).__name__}",
             503,
         ) from exc
+    log.info(
+        "recall_embedding_success duration_ms=%d host=%s",
+        int((time.monotonic() - started) * 1000),
+        host,
+    )
     if not isinstance(embedding, list) or not embedding:
         raise MemoryRequestError(
             "recall_embedding_failed",
