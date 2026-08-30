@@ -381,7 +381,11 @@ def format_event_time(value: object, precision: str | None = None) -> Optional[s
 def _injection_text(memory: dict, mode: str) -> str:
     layer = _memory_layer(memory)
     rule = _LAYER_RULES[layer]
-    time_text = format_event_time(_event_time_value(memory))
+    # 显示精度跟随记忆自身记录的 time_precision，而不是统一截到分钟。
+    time_text = format_event_time(
+        _event_time_value(memory),
+        memory.get("time_precision"),
+    )
     time_prefix = f"时间：{time_text}｜" if time_text else ""
     if mode == "full":
         content = _compact_text(memory.get("content"), int(rule["full_chars"]))

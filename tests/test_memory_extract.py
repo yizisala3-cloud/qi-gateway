@@ -353,6 +353,19 @@ class ModelBoundaryTests(unittest.TestCase):
         self.assertIsNone(memory["recall_scene"])
         self.assertEqual(memory["recall_tags"], [])
 
+    def test_parser_keeps_hour_time_precision(self):
+        payload = {
+            "memories": [{
+                "content": "User and qi finished the gateway deploy",
+                "memory_time": "2026-08-29 19:00",
+                "time_precision": "hour",
+            }],
+        }
+
+        memory = _parse_model_output(json.dumps(payload))[0]
+
+        self.assertEqual(memory["time_precision"], "hour")
+
     def test_public_preview_strips_both_embeddings_and_hash(self):
         from gateway.memory_extract import _public_memories
 

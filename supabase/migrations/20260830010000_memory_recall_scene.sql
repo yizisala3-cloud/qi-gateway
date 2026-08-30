@@ -26,6 +26,21 @@ alter table public.memories
         or nullif(btrim(coalesce(recall_scene, '')), '') is not null
     );
 
+-- The injection layer now honours hour-level precision; widen the existing
+-- time_precision checks so stored precision can say 'hour' without padding a
+-- fabricated minute. No historical rows are rewritten.
+alter table public.memory_requests
+    drop constraint if exists memory_requests_time_precision_values;
+alter table public.memory_requests
+    add constraint memory_requests_time_precision_values
+        check (time_precision in ('minute', 'hour', 'day', 'approximate', 'unknown'));
+
+alter table public.memories
+    drop constraint if exists memories_time_precision_values;
+alter table public.memories
+    add constraint memories_time_precision_values
+        check (time_precision in ('minute', 'hour', 'day', 'approximate', 'unknown'));
+
 comment on column public.memory_requests.recall_scene is
     'Natural-language recall scene supplied by the writing AI; null when it has no reliable basis.';
 comment on column public.memory_requests.recall_tags is

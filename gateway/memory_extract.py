@@ -39,7 +39,7 @@ EXTRACT_SYSTEM_PROMPT = """从带 id、北京时间 t 和 role 的聊天原文�
 4. 独立对象用 append 且 memory_key=null；只有原文明示同一对象的当前状态变化时才用 replace，并给稳定主题键。
 5. 不要把关系模式改名为 interaction_rule；自动总结绝对不能推断互动规则。
 6. evidence_message_ids 必须列出直接支持该记忆的原文 id。importance 为 1-10，confidence 为 0-1。
-7. memory_time 是事情实际发生或状态生效的北京时间 ISO 8601；无法从原文明示时间或相对时间可靠确定时填 null。time_precision 只允许 minute、day、approximate、unknown。
+7. memory_time 是事情实际发生或状态生效的北京时间 ISO 8601；无法从原文明示时间或相对时间可靠确定时填 null。time_precision 只允许 minute、hour、day、approximate、unknown；原文只支持到小时时用 hour，不要补造不存在的分钟。
 8. content 用一到两句话独立说明记忆。没有合格内容时返回空数组。
 
 每条必须提供符合分类结构的 continuity_data；thread_state 允许 open、paused、resolved、dissolved、abandoned、unknown。
@@ -63,7 +63,7 @@ EXTRACT_REPAIR_PROMPT = (
 CONTINUITY_TYPES = AUTOMATIC_TYPES
 UPDATE_MODES = frozenset({"append", "replace"})
 MEMORY_KEY_PATTERN = re.compile(r"[a-z0-9][a-z0-9._:/-]{2,119}")
-TIME_PRECISIONS = frozenset({"minute", "day", "approximate", "unknown"})
+TIME_PRECISIONS = frozenset({"minute", "hour", "day", "approximate", "unknown"})
 CONTINUITY_TYPE_TAGS = {"moment": "近期片段", "thread": "未完线索", "episode": "共同经历", "inside_joke": "内部梗"}
 EMBEDDED_TIMESTAMP_PATTERN = re.compile(
     r"(?m)^\s*(?P<year>\d{2}|\d{4})[.\-/](?P<month>\d{1,2})[.\-/](?P<day>\d{1,2})"

@@ -260,6 +260,10 @@ class ShadowParserTests(unittest.TestCase):
         self.assertIsNone(result[0]["evidence_end_time"])
         self.assertIsNone(result[0]["source_time"])
 
+    def test_parser_keeps_hour_time_precision(self):
+        result = self._parse_candidate(memory_time="2026-08-13 20:00", time_precision="hour")
+        self.assertEqual(result["time_precision"], "hour")
+
     def test_obvious_credentials_drop_entire_candidate(self):
         for secret in (
             "API Key: sk-live_1234567890123456",

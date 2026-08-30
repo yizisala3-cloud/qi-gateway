@@ -340,6 +340,67 @@ class RecallInjectionTests(unittest.TestCase):
 
         self.assertIn("[碎片] 时间：2026-08-01 08:05｜早期总结记忆。", text)
 
+    def test_minute_precision_shows_the_full_clock_time(self):
+        text = format_memories_for_injection([
+            {
+                "content": "精确到分钟的记忆。",
+                "inject_mode": "full",
+                "evidence_end_time": "2026-08-29T11:21:00+00:00",
+                "time_precision": "minute",
+            },
+        ])
+
+        self.assertIn("[碎片] 时间：2026-08-29 19:21｜精确到分钟的记忆。", text)
+
+    def test_hour_precision_never_fabricates_minutes(self):
+        for mode, expected_prefix in (
+            ("full", "[碎片] 时间：2026-08-29 19｜"),
+            ("title_only", "[碎片·线索] 时间：2026-08-29 19｜"),
+        ):
+            with self.subTest(mode=mode):
+                text = format_memories_for_injection([
+                    {
+                        "content": "只有小时的记忆正文。",
+                        "title": "只有小时的标题",
+                        "inject_mode": mode,
+                        "evidence_end_time": "2026-08-29T11:21:00+00:00",
+                        "time_precision": "hour",
+                    },
+                ])
+                self.assertIn(expected_prefix, text)
+                self.assertNotIn("19:21", text)
+
+    def test_day_precision_hides_hours_and_minutes(self):
+        for mode, expected_prefix in (
+            ("full", "[碎片] 时间：2026-08-29｜"),
+            ("title_only", "[碎片·线索] 时间：2026-08-29｜"),
+        ):
+            with self.subTest(mode=mode):
+                text = format_memories_for_injection([
+                    {
+                        "content": "只有日期的记忆正文。",
+                        "title": "只有日期的标题",
+                        "inject_mode": mode,
+                        "evidence_end_time": "2026-08-29T11:21:00+00:00",
+                        "time_precision": "day",
+                    },
+                ])
+                self.assertIn(expected_prefix, text)
+                self.assertNotIn("19", text.split("｜", 1)[1])
+                self.assertNotIn("19:21", text)
+
+    def test_approximate_precision_still_shows_the_stored_clock(self):
+        text = format_memories_for_injection([
+            {
+                "content": "模糊时间记忆。",
+                "inject_mode": "full",
+                "evidence_end_time": "2026-08-29T11:21:00+00:00",
+                "time_precision": "approximate",
+            },
+        ])
+
+        self.assertIn("[碎片] 时间：2026-08-29 19:21｜模糊时间记忆。", text)
+
 
 class LayeredInjectionTests(unittest.TestCase):
     def test_vector_only_core_keeps_core_layer(self):

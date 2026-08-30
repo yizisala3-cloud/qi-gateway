@@ -69,6 +69,24 @@ class RecallSceneMigrationContractTests(unittest.TestCase):
         self.assertIn("memories_recall_embedding_scene_check", self.sql)
         self.assertIn("recall_embedding is null", self.sql)
 
+    def test_time_precision_checks_allow_hour_on_both_tables(self):
+        for table in ("memory_requests", "memories"):
+            with self.subTest(table=table):
+                self.assertIn(
+                    f"alter table public.{table}\n"
+                    "    drop constraint if exists "
+                    f"{table}_time_precision_values;",
+                    self.sql,
+                )
+                self.assertIn(
+                    f"alter table public.{table}\n"
+                    f"    add constraint {table}_time_precision_values\n"
+                    "        check (time_precision in ('minute', 'hour', 'day', 'approximate', 'unknown'));",
+                    self.sql,
+                )
+        # The widened enum is additive; nothing rewrites historical rows.
+        self.assertNotIn("update public.memories set time_precision", self.executable)
+
     def test_chat_messages_remains_select_only(self):
         self.assertIn("from public.chat_messages", self.executable)
         self.assertNotRegex(

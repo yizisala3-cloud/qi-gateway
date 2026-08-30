@@ -32,7 +32,7 @@ SOURCE_TYPES = frozenset({
     "natural_chat", "persona_prompt", "code", "document", "quote",
     "roleplay", "tool_result", "system_meta", "unknown",
 })
-TIME_PRECISIONS = frozenset({"minute", "day", "approximate", "unknown"})
+TIME_PRECISIONS = frozenset({"minute", "hour", "day", "approximate", "unknown"})
 RETENTION_CLASSES = frozenset({"normal", "core"})
 PARTICIPANTS = frozenset({"yezi", "qi", "other"})
 INVALID_TITLES = frozenset({"无标题", "（无标题）", "(无标题)", "untitled", "...", "……"})
@@ -95,7 +95,7 @@ SHADOW_SYSTEM_PROMPT = """你是“连续感记忆 Shadow Preview”提取器，
 
 ## evidence 与时间
 - evidence_message_ids 必须是输入中真实且直接支持候选的消息；每条最多 8 条，只选最必要证据，不机械加入批次最后一条消息。
-- evidence_start_time、evidence_end_time、source_time 输出 null，由程序计算。memory_time 只表示事情实际发生或状态生效的时间，原文不能可靠支持时为 null；不得用对话时间代替。time_precision 只能是 minute、day、approximate、unknown。
+- evidence_start_time、evidence_end_time、source_time 输出 null，由程序计算。memory_time 只表示事情实际发生或状态生效的时间，原文不能可靠支持时为 null；不得用对话时间代替。time_precision 只能是 minute、hour、day、approximate、unknown；原文只支持到小时时用 hour，不要补造不存在的分钟。
 - title 和 content 不写死“今天”“昨晚”“前天”“刚才”“N 天前”等会失效的相对时间；绝对时间放在独立时间字段。
 - thread_state 仅用于 thread，可为 open、paused、resolved、dissolved、abandoned、unknown；其他类型为 null。关闭状态必须提供 closure_summary、closure_reason、closed_at。importance 和 continuity_value 为 1～10，confidence 为 0～1。
 
