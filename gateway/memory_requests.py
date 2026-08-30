@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import re
 from typing import Any
 
@@ -17,8 +16,6 @@ from .config import cfg
 from .db import get_client
 from .memory_continuity_schema import SCHEMA_VERSION, ContinuityDataError, validate_continuity_data
 from .memory_extract import _get_embedding_sync
-
-log = logging.getLogger("gateway.memory_requests")
 
 
 MAX_CONTENT_LENGTH = 600
@@ -346,19 +343,28 @@ def _rpc_result(data: Any) -> dict[str, Any]:
 def _recall_embedding(scene: str | None) -> list[float] | None:
     """Embed recall_scene for the vector recall channel.
 
-    Computed from recall_scene alone. A missing provider or failed call degrades
-    to no vector recall for this memory; the keyword channel is unaffected.
+    Scene-less requests skip the provider entirely and keep a NULL recall
+    embedding. A scene-carrying request must embed successfully: provider or
+    response failures raise here so the caller never reaches the formal-write
+    or review RPC with a scene that could never be vector-recalled.
     """
     if not scene:
         return None
     try:
-        return _get_embedding_sync(scene)
+        embedding = _get_embedding_sync(scene)
     except Exception as exc:
-        log.warning(
-            "recall_scene embedding 生成失败，该条记忆降级为无向量召回: %s",
-            type(exc).__name__,
+        raise MemoryRequestError(
+            "recall_embedding_failed",
+            f"recall scene embedding failed: {type(exc).__name__}",
+            503,
+        ) from exc
+    if not isinstance(embedding, list) or not embedding:
+        raise MemoryRequestError(
+            "recall_embedding_failed",
+            "recall scene embedding response is empty or malformed",
+            502,
         )
-        return None
+    return embedding
 
 
 def create_memory_request(

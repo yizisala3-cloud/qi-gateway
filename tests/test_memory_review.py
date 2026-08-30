@@ -249,7 +249,7 @@ class PersistenceTests(unittest.TestCase):
         with (
             patch(f"{MODULE}._server_writes_allowed", return_value=True),
             patch(f"{MODULE}.get_client", return_value=client),
-            patch("gateway.memory_extract._get_embedding_sync", return_value=[0.3, 0.4]) as embed,
+            patch("gateway.memory_requests._get_embedding_sync", return_value=[0.3, 0.4]) as embed,
         ):
             result = review_memory_request(42, {"action": "approve", "content": "用户喜欢清晨散步。"})
 
@@ -287,7 +287,7 @@ class PersistenceTests(unittest.TestCase):
         with (
             patch(f"{MODULE}._server_writes_allowed", return_value=True),
             patch(f"{MODULE}.get_client", return_value=client),
-            patch("gateway.memory_extract._get_embedding_sync", return_value=[0.5]) as embed,
+            patch("gateway.memory_requests._get_embedding_sync", return_value=[0.5]) as embed,
         ):
             review_memory_request(44, {
                 "action": "merge",
@@ -298,8 +298,12 @@ class PersistenceTests(unittest.TestCase):
         embed.assert_called_once_with("当旅行计划被提起时")
         self.assertEqual(client.rpc_payload["p_recall_embedding"], [0.5])
 
-    def test_recall_scene_read_failure_does_not_block_the_review(self):
-        client = _Client({
+    def test_recall_scene_read_failure_blocks_the_review(self):
+        class _BrokenRequestClient(_Client):
+            def table(self, name):
+                raise RuntimeError("db down")
+
+        client = _BrokenRequestClient({
             "changed": True,
             "request": {"id": 45, "status": "approved", "memory_id": 79, "reviewed_at": "now"},
         })
@@ -307,10 +311,61 @@ class PersistenceTests(unittest.TestCase):
             patch(f"{MODULE}._server_writes_allowed", return_value=True),
             patch(f"{MODULE}.get_client", return_value=client),
         ):
-            result = review_memory_request(45, {"action": "approve", "content": "有效记忆内容。"})
+            with self.assertRaises(MemoryRequestError) as raised:
+                review_memory_request(45, {"action": "approve", "content": "有效记忆内容。"})
 
-        self.assertEqual(result["memory_id"], 79)
-        self.assertIsNone(client.rpc_payload["p_recall_embedding"])
+        self.assertEqual(raised.exception.code, "recall_embedding_failed")
+        # 审核 RPC 未被调用，申请保持原状态。
+        self.assertIsNone(client.rpc_name)
+
+    def test_recall_embedding_failure_blocks_the_approve(self):
+        client = _Client(
+            {
+                "changed": True,
+                "request": {"id": 46, "status": "approved", "memory_id": 81, "reviewed_at": "now"},
+            },
+            request_rows=[{"recall_scene": "当叶子再问部署进度时"}],
+        )
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+            patch(
+                "gateway.memory_requests._get_embedding_sync",
+                side_effect=RuntimeError("provider down"),
+            ),
+        ):
+            with self.assertRaises(MemoryRequestError) as raised:
+                review_memory_request(46, {"action": "approve", "content": "有效记忆内容。"})
+
+        self.assertEqual(raised.exception.code, "recall_embedding_failed")
+        self.assertEqual(client.rpc_name, None)
+
+    def test_recall_embedding_failure_blocks_the_merge(self):
+        client = _Client(
+            {
+                "changed": True,
+                "related_memory_id": 18,
+                "request": {"id": 47, "status": "merged", "memory_id": 95, "reviewed_at": "now"},
+            },
+            request_rows=[{"recall_scene": "当旅行计划被提起时"}],
+        )
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+            patch(
+                "gateway.memory_requests._get_embedding_sync",
+                side_effect=RuntimeError("provider down"),
+            ),
+        ):
+            with self.assertRaises(MemoryRequestError) as raised:
+                review_memory_request(47, {
+                    "action": "merge",
+                    "related_memory_id": 18,
+                    "content": "合并后的旅行计划内容。",
+                })
+
+        self.assertEqual(raised.exception.code, "recall_embedding_failed")
+        self.assertEqual(client.rpc_name, None)
 
     def test_duplicate_calls_v4_with_selected_memory(self):
         client = _Client({

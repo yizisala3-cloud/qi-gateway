@@ -233,8 +233,31 @@ class RecallSceneMigrationContractTests(unittest.TestCase):
         self.assertIn("recall_scene = coalesce(new.recall_scene,memory.recall_scene)", trigger)
         self.assertIn("recall_tags = coalesce(new.recall_tags,memory.recall_tags)", trigger)
 
-    def test_keyword_channel_is_left_untouched(self):
-        self.assertNotIn("search_memories_by_keywords", self.executable)
+    def test_keyword_channel_rebuild_only_extends_return_metadata(self):
+        self.assertIn(
+            "dropfunctionifexistspublic.search_memories_by_keywords(text[],integer);",
+            self.flat,
+        )
+        keyword_section = self.executable.split("create function public.search_memories_by_keywords", 1)[1]
+        keyword_section = keyword_section.split("revoke all on function public.search_memories_by_keywords", 1)[0]
+        keyword_body = function_body(keyword_section)
+
+        # 匹配字段与限制保持原样：只匹配 content/title/tags，输入与数量上限不变。
+        self.assertIn("input.position <= 5", keyword_body)
+        self.assertIn("char_length(btrim(input.keyword)) between 1 and 64", keyword_body)
+        self.assertIn("position(lower(candidate.keyword) in lower(coalesce(memory.content,'')))", keyword_body)
+        self.assertIn("position(lower(candidate.keyword) in lower(coalesce(memory.title,'')))", keyword_body)
+        self.assertIn("unnest(coalesce(memory.tags,'{}'::text[]))", keyword_body)
+        self.assertIn("memory.is_active = true", keyword_body)
+        self.assertIn("memory.verified = 'verified'", keyword_body)
+        self.assertIn("order by relevance.keyword_matches desc, memory.created_at desc", keyword_body)
+        self.assertIn("limit least(greatest(coalesce(result_limit,20),1),50)", keyword_body)
+        self.assertNotIn("recall_scene", keyword_section)
+        self.assertNotIn("recall_tags", keyword_section)
+        # 仅补齐注入所需元数据。
+        self.assertIn("memory.source_time", keyword_body)
+        self.assertIn("memory.evidence_time_precision", keyword_body)
+        self.assertIn("set search_path to 'public'", keyword_section)
 
     def test_recall_entry_points_stay_service_role_only(self):
         for signature in (NEW_CREATE_V4, NEW_WRITE_V1, NEW_REVIEW_V5):
@@ -250,6 +273,7 @@ class RecallSceneMigrationContractTests(unittest.TestCase):
         for signature in (
             "store_continuity_candidate(public.memory_digest_runs,jsonb)",
             "match_memories(extensions.vector, double precision, integer)",
+            "search_memories_by_keywords(text[], integer)",
         ):
             with self.subTest(signature=signature.split("(")[0]):
                 self.assertIn(

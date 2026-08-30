@@ -3,16 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import re
 from typing import Any
 
 from .config import cfg
 from .db import get_client
-from .memory_requests import MemoryRequestError
-from .memory_requests import _clean_memory_key
-
-log = logging.getLogger("gateway.memory_review")
+from .memory_requests import MemoryRequestError, _clean_memory_key, _recall_embedding
 
 
 def _server_writes_allowed() -> bool:
@@ -227,8 +223,10 @@ def _request_recall_embedding(client: Any, request_id: int) -> list[float] | Non
     """Embed the request's own recall_scene for the vector recall channel.
 
     The review flow never edits recall_scene, so the approved memory keeps the
-    scene the writing AI supplied. A failed embedding call degrades to no vector
-    recall; it must never block the review itself.
+    scene the writing AI supplied. A scene-carrying request must embed
+    successfully before the review RPC runs: read or embedding failures raise
+    here so the request keeps its original status instead of producing a formal
+    memory that could never be vector-recalled.
     """
     try:
         response = (
@@ -239,22 +237,14 @@ def _request_recall_embedding(client: Any, request_id: int) -> list[float] | Non
             .execute()
         )
     except Exception as exc:
-        log.warning("recall_scene 读取失败，跳过召回向量生成: %s", type(exc).__name__)
-        return None
+        raise MemoryRequestError(
+            "recall_embedding_failed",
+            f"failed to read recall_scene for embedding: {type(exc).__name__}",
+            500,
+        ) from exc
     rows = response.data if isinstance(response.data, list) else []
     scene = str((rows[0] if rows else {}).get("recall_scene") or "").strip()
-    if not scene:
-        return None
-    try:
-        from .memory_extract import _get_embedding_sync
-
-        return _get_embedding_sync(scene)
-    except Exception as exc:
-        log.warning(
-            "recall_scene embedding 生成失败，该条记忆降级为无向量召回: %s",
-            type(exc).__name__,
-        )
-        return None
+    return _recall_embedding(scene)
 
 
 def list_reviewable_memory_requests(assistant_id: str, limit: int = 50) -> list[dict[str, Any]]:

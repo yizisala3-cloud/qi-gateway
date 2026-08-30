@@ -1,10 +1,11 @@
+import asyncio
 import importlib.util
+import json
 import sys
 import types
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
-
+from unittest.mock import AsyncMock, patch
 
 if "dotenv" not in sys.modules and importlib.util.find_spec("dotenv") is None:
     dotenv = types.ModuleType("dotenv")
@@ -325,24 +326,40 @@ class PersistenceTests(unittest.TestCase):
         embed.assert_not_called()
         self.assertIsNone(client.rpc_payload["p_recall_embedding"])
 
-    def test_recall_embedding_failure_degrades_without_failing_the_request(self):
-        client = _Client(rpc_result={
-            "created": True,
-            "request": {"id": 48, "status": "approved", "memory_id": 93, "continuity_type": "moment"},
-        })
+    def test_recall_embedding_failure_blocks_the_direct_write(self):
+        client = _Client()
         with (
             patch(f"{MODULE}._server_writes_allowed", return_value=True),
             patch(f"{MODULE}.get_client", return_value=client),
             patch(f"{MODULE}._get_embedding_sync", side_effect=RuntimeError("provider down")),
         ):
-            result = create_memory_request(_payload(
-                continuity_type="moment",
-                continuity_data={"scene": "聊天", "event": "确认", "moment_state": "standalone"},
-                recall_scene="当叶子提到那天的约定时",
-            ), source="mcp_memory")
+            with self.assertRaises(MemoryRequestError) as raised:
+                create_memory_request(_payload(
+                    continuity_type="moment",
+                    continuity_data={"scene": "聊天", "event": "确认", "moment_state": "standalone"},
+                    recall_scene="当叶子提到那天的约定时",
+                ), source="mcp_memory")
 
-        self.assertEqual(result["memory_id"], 93)
-        self.assertIsNone(client.rpc_payload["p_recall_embedding"])
+        self.assertEqual(raised.exception.code, "recall_embedding_failed")
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertEqual(client.rpc_name, "")
+
+    def test_recall_embedding_invalid_response_blocks_the_direct_write(self):
+        client = _Client()
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+            patch(f"{MODULE}._get_embedding_sync", return_value=[]),
+        ):
+            with self.assertRaises(MemoryRequestError) as raised:
+                create_memory_request(_payload(
+                    continuity_type="moment",
+                    continuity_data={"scene": "聊天", "event": "确认", "moment_state": "standalone"},
+                    recall_scene="当叶子提到那天的约定时",
+                ), source="mcp_memory")
+
+        self.assertEqual(raised.exception.code, "recall_embedding_failed")
+        self.assertEqual(client.rpc_name, "")
 
     def test_duplicate_request_returns_existing_pending_application(self):
         client = _Client(rpc_result={
@@ -422,6 +439,45 @@ class PersistenceTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "rate_limited")
         self.assertEqual(raised.exception.status_code, 429)
+
+
+class RecallEmbeddingApiErrorTests(unittest.TestCase):
+    def _request(self, token="plugin-token"):
+        return SimpleNamespace(
+            headers={"authorization": f"Bearer {token}"},
+            json=AsyncMock(return_value={
+                "assistant_id": "assistant-1",
+                "content": "用户希望以后尽量安排安静的清晨活动。",
+                "reason": "这是长期稳定的生活偏好。",
+                "continuity_type": "moment",
+                "continuity_data": {"scene": "聊天", "event": "确认", "moment_state": "standalone"},
+                "recall_scene": "当叶子提到清晨安排时",
+            }),
+        )
+
+    def test_recall_embedding_failure_returns_503_without_leaking_provider_error(self):
+        from gateway.memory_request_api import submit_memory_request
+
+        request = self._request()
+        with (
+            patch.object(cfg, "MEMORY_PLUGIN_TOKEN", "plugin-token"),
+            patch(
+                "gateway.memory_request_api.create_memory_request",
+                side_effect=MemoryRequestError(
+                    "recall_embedding_failed",
+                    "recall scene embedding failed: RuntimeError",
+                    503,
+                ),
+            ) as create,
+        ):
+            response = asyncio.run(submit_memory_request(request))
+
+        self.assertEqual(response.status_code, 503)
+        body = json.loads(response.body)
+        self.assertEqual(body["error_code"], "recall_embedding_failed")
+        # 提供方异常消息只保留异常类型，不得泄露 Token 或正文。
+        self.assertNotIn("super-secret-provider-token", body["error"])
+        create.assert_called_once()
 
 
 if __name__ == "__main__":

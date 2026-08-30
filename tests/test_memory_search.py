@@ -638,6 +638,38 @@ class SearchFlowTests(unittest.IsolatedAsyncioTestCase):
         extract.assert_called_once_with("那它以后怎么办")
 
 
+    async def test_keyword_only_channel_honours_evidence_time_precision(self):
+        for precision, expected, forbidden in (
+            ("hour", "时间：2026-08-29 19｜", "19:21"),
+            ("day", "时间：2026-08-29｜", "19"),
+            ("minute", "时间：2026-08-29 19:21｜", None),
+        ):
+            with self.subTest(precision=precision):
+                keyword_rows = [
+                    _memory(
+                        1,
+                        "用户喜欢清晨散步",
+                        title="清晨偏好",
+                        heat=55,
+                        evidence_end_time="2026-08-29T11:21:00+00:00",
+                        evidence_time_precision=precision,
+                    ),
+                ]
+                with (
+                    patch(f"{MODULE}._extract_keywords", return_value=["清晨"]),
+                    patch(f"{MODULE}._keyword_search", return_value=keyword_rows),
+                    patch(f"{MODULE}._get_embedding", new=AsyncMock(return_value=None)),
+                    patch(f"{MODULE}._vector_search_sync") as vector_search,
+                    patch(f"{MODULE}._boost_heat"),
+                ):
+                    result = await search_memories("用户喜欢清晨散步", top_k=1)
+
+                vector_search.assert_not_called()
+                text = format_memories_for_injection(result)
+                self.assertIn(expected, text)
+                if forbidden:
+                    self.assertNotIn(forbidden, text)
+
     def test_formatter_only_injects_full_content_for_full_mode(self):
         text = format_memories_for_injection([
             {"content": "完整内容", "inject_mode": "full"},

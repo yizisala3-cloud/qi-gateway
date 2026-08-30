@@ -212,6 +212,32 @@ class MCPToolContractTests(unittest.TestCase):
         self.assertIsNone(captured["payload"]["recall_scene"])
         self.assertEqual(captured["payload"]["recall_tags"], [])
 
+    def test_recall_embedding_failure_maps_to_tool_error(self):
+        from gateway.memory_requests import MemoryRequestError
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        with (
+            patch.object(cfg, "MEMORY_ASSISTANT_ID", "server-assistant"),
+            patch(
+                "gateway.memory_mcp.create_memory_request",
+                side_effect=MemoryRequestError(
+                    "recall_embedding_failed",
+                    "recall scene embedding failed: RuntimeError",
+                    503,
+                ),
+            ),
+        ):
+            with self.assertRaises(ToolError) as raised:
+                asyncio.run(remember_moment(
+                    content="叶子希望记住这次确认。",
+                    reason="以后继续这个话题时有用。",
+                    scene="聊天",
+                    event="确认",
+                    moment_state="standalone",
+                    recall_scene="当叶子再提起这次约定时",
+                ))
+        self.assertIn("recall_embedding_failed", str(raised.exception))
+
     def test_interaction_rule_fixes_replace_and_requires_memory_key(self):
         captured = {}
 
