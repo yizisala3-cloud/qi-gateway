@@ -17,12 +17,13 @@ AUTO_DIGEST_REQUEST_MIGRATION = ROOT / "supabase" / "migrations" / "202608040200
 MANIFEST = ROOT / "orangechat_plugins" / "memory-request" / "manifest.json"
 MAIN_JS = ROOT / "orangechat_plugins" / "memory-request" / "main.js"
 REVIEW_PAGE = ROOT / "admin" / "js" / "pages" / "_memory_browser.js"
+MEMORY_FORM = ROOT / "admin" / "js" / "pages" / "_memory_form.js"
 ROUTES_JS = ROOT / "admin" / "js" / "routes.js"
 INDEX_HTML = ROOT / "admin" / "index.html"
 APP_JS = ROOT / "admin" / "js" / "app.js"
 ADMIN_API = ROOT / "gateway" / "admin_api.py"
 MEMORY_EXTRACT = ROOT / "gateway" / "memory_extract.py"
-ASSET_VERSION = "20260831-retire1"
+ASSET_VERSION = "20260902-adminmem1"
 
 
 class MemoryRequestMigrationContractTests(unittest.TestCase):
@@ -352,11 +353,16 @@ class MemoryReviewDashboardContractTests(unittest.TestCase):
     def test_review_and_memory_edit_forms_expose_recall_editing(self):
         for field in (
             "rv-recall-scene", "rv-recall-tags", "rv-evidence-time", "rv-evidence-precision",
-            "ed-recall-scene", "ed-recall-tags", "ed-evidence-time", "ed-evidence-precision",
         ):
             with self.subTest(field=field):
                 self.assertIn(field, self.page)
-        # 正式记忆召回编辑走专用原子端点，不是 generic PATCH。
+        # 记忆编辑表单由 _memory_form.js 的动态表单接管：召回场景与召回标签
+        # 仍是两套独立控件，证据时间改由服务端按证据消息 ID 推导。
+        form_page = MEMORY_FORM.read_text(encoding="utf-8")
+        for field in ("mf-recall-scene", "mf-recall-tags", "mf-evidence"):
+            with self.subTest(field=field):
+                self.assertIn(field, form_page)
+        # 正式记忆召回编辑走专用端点，不是 generic PATCH。
         self.assertIn("/admin/api/memories/", self.page)
 
     def test_admin_api_memories_write_whitelist_excludes_recall_fields(self):

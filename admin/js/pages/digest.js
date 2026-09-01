@@ -1,6 +1,6 @@
 // pages/digest.js - 记忆总结：仅连续感总结
-import { gw, esc } from '../api.js?v=20260831-retire1';
-import { loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, fmtDate } from '../ui.js?v=20260831-retire1';
+import { gw, esc } from '../api.js?v=20260902-adminmem1';
+import { loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, fmtDate } from '../ui.js?v=20260902-adminmem1';
 
 const TIME_PRECISION_LABELS = {
   minute: '精确到分钟', day: '精确到日期', approximate: '大概时间', unknown: '时间未知',

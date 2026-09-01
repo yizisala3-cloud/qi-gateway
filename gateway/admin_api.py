@@ -31,8 +31,11 @@ _TABLES: dict[str, dict[str, Any]] = {
             "recall_scene", "recall_tags",
         },
         "write": {
-            "content", "title", "tags", "heat", "importance", "source",
-            "verified", "is_active", "last_recalled_at",
+            # Operational fields only. Content, title, tags, importance, and
+            # source go through the purpose-built lifecycle endpoints so the
+            # content hash, embeddings, and continuity validation can never
+            # be bypassed with a generic PATCH.
+            "heat", "verified", "is_active", "last_recalled_at",
         },
         "insert": False,
         "update": True,

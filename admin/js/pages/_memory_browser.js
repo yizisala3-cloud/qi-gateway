@@ -1,11 +1,12 @@
 // pages/_memory_browser.js - shared library/requests browser with detail panel
-import { gw, query, update, count, esc } from '../api.js?v=20260831-retire1';
+import { gw, query, update, count, esc } from '../api.js?v=20260902-adminmem1';
 import {
   loading, empty, errorBlock, banner, tag, heatTag, impTag, pagerHtml,
   toast, modal, confirm, delegate, icon, fmtDate, createDetailPanel,
-} from '../ui.js?v=20260831-retire1';
+} from '../ui.js?v=20260902-adminmem1';
+import { openMemoryForm } from './_memory_form.js?v=20260902-adminmem1';
 
-export const ASSET_VERSION = '20260831-retire1';
+export const ASSET_VERSION = '20260902-adminmem1';
 
 const PAGE_SIZE = 20;
 const REQ_FETCH_LIMIT = 100;
@@ -22,6 +23,17 @@ const REQUEST_FIELDS = 'id,assistant_id,conversation_id,source_message_id,conten
 
 export function continuityTypeLabel(value) {
   return CONTINUITY_TYPE_LABELS[value] || value || '未分类历史数据';
+}
+
+const SOURCE_LABELS = {
+  manual: '用户手工写入',
+  ai_tool_request: 'AI 工具申请',
+  daily_digest: '自动总结',
+  orangechat_plugin: 'OrangeChat 插件',
+  mcp_memory: 'MCP 记忆写入',
+};
+export function sourceLabel(value) {
+  return SOURCE_LABELS[value] || value || '-';
 }
 
 export function reqStatusMeta(status) {
@@ -72,7 +84,7 @@ function memoryKvRows(m) {
     <div class="kv"><span class="k">连续感类型</span><span class="v">${esc(continuityTypeLabel(m.continuity_type))}</span></div>
     <div class="kv"><span class="k">热度 / 重要性</span><span class="v">${Number(m.heat ?? 0).toFixed(1)} / ${esc(m.importance ?? '-')}</span></div>
     <div class="kv"><span class="k">标签</span><span class="v">${(m.tags || []).length ? (m.tags || []).map(t => esc(t)).join('、') : '-'}</span></div>
-    <div class="kv"><span class="k">来源</span><span class="v">${esc(m.source || '-')}</span></div>
+    <div class="kv"><span class="k">来源</span><span class="v">${esc(sourceLabel(m.source))}</span></div>
     ${m.memory_key ? `<div class="kv"><span class="k">主题键</span><span class="v mono text-sm">${esc(m.memory_key)}</span></div>` : ''}
     ${m.continuity_id ? `<div class="kv"><span class="k">连续感 ID</span><span class="v mono text-sm">${esc(m.continuity_id)}</span></div>` : ''}
     ${m.thread_state ? `<div class="kv"><span class="k">线索状态</span><span class="v">${esc(m.thread_state)}</span></div>` : ''}
@@ -178,36 +190,20 @@ export async function showVersionModal(memoryId) {
   try {
     const memory = (await fetchOne(memoryId));
     if (!memory) { box.innerHTML = empty('记忆不存在或已被删除'); return; }
+    // 版本区域只显示当前版本与直接上一版本，不提供完整历史链。
     const prev = memory.supersedes_memory_id ? await fetchOne(memory.supersedes_memory_id) : null;
     const next = memory.superseded_by_memory_id ? await fetchOne(memory.superseded_by_memory_id) : null;
-    let chain = [];
-    if (memory.memory_key) {
-      try {
-        chain = await query('memories', {
-          select: 'id,title,created_at,superseded_at,is_active',
-          eq: { memory_key: memory.memory_key },
-          order: { col: 'created_at', asc: true },
-          limit: 100,
-        });
-      } catch { chain = []; }
-    }
     const card = (m, note) => `
       <div class="mem-card" style="cursor:default">
         <div class="mem-title">memory #${esc(m.id)} · ${esc(m.title || '(未命名)')}</div>
         <div class="mem-snippet">${esc((m.content || '').slice(0, 160))}</div>
         <div class="card-meta">${note ? `${esc(note)} · ` : ''}创建于 ${esc(fmtDate(m.created_at))}${m.superseded_at ? ` · 于 ${esc(fmtDate(m.superseded_at))} 被取代` : ''}</div>
       </div>`;
-    const chainHtml = chain.length > 1 ? `
-      <div class="section-title">同主题键版本链（${esc(memory.memory_key)}）</div>
-      ${chain.map((m) => `
-        <div class="kv"><span class="k">memory #${esc(m.id)}${m.id === memory.id ? '（当前）' : ''}</span>
-        <span class="v">${esc(m.title || '(未命名)')} · ${esc(fmtDate(m.created_at))}${m.is_active ? '' : ' · 已失效'}</span></div>`).join('')}` : '';
     box.innerHTML = `
-      ${prev ? `<div class="section-title">上游（被本记忆取代）</div>${card(prev, '上游版本')}` : ''}
+      ${prev ? `<div class="section-title">直接上一版本（被本记忆取代）</div>${card(prev, '上一版本')}` : ''}
       <div class="section-title">当前记忆</div>${card(memory, verifiedMeta(memory).label)}
       ${next ? `<div class="section-title">下游（取代本记忆）</div>${card(next, '下游版本')}` : ''}
-      ${!prev && !next && chain.length <= 1 ? `<p class="muted">这条记忆没有登记版本替换关系。</p>` : ''}
-      ${chainHtml}`;
+      ${!prev && !next ? `<p class="muted">这条记忆没有登记版本替换关系。</p>` : ''}`;
   } catch (error) {
     box.innerHTML = errorBlock(`读取版本关系失败：${esc(error.message)}`);
   }
@@ -376,6 +372,7 @@ export function createMemoryBrowser({
           <option value="heat" ${state.sort === 'heat' ? 'selected' : ''}>按热度</option>
           <option value="importance" ${state.sort === 'importance' ? 'selected' : ''}>按重要性</option>
         </select>
+        <button class="btn btn-primary" data-act="mem-create">${icon('plus')}新增记忆</button>
         <button class="btn btn-secondary" data-act="refresh">${icon('refresh')}刷新</button>
       </div>
       <div id="lib-list">${loading()}</div>
@@ -572,22 +569,42 @@ export function createMemoryBrowser({
   function renderMemoryDetail(m) {
     const vm = verifiedMeta(m);
     const evidence = m.evidence_message_ids || [];
-    const hasVersions = m.memory_key || m.supersedes_memory_id || m.superseded_by_memory_id;
+    const hasVersions = m.supersedes_memory_id || m.superseded_by_memory_id;
+    const isCurrent = m.is_active && m.verified === 'verified' && !m.superseded_by_memory_id;
+    const isArchived = !m.is_active && !m.superseded_by_memory_id;
+    const isSuperseded = Boolean(m.superseded_by_memory_id);
+    // 只有"修改连续感类型生成的新版本"才有撤销入口：manual 来源且存在
+    // 直接上一版本。普通编辑不产生版本，因此永远不会出现撤销。
+    const canUndo = m.is_active && m.source === 'manual' && m.supersedes_memory_id;
+    let actions = '';
+    if (isCurrent) {
+      actions += `
+        <button class="btn btn-secondary btn-sm" data-act="mem-edit" data-id="${m.id}">${icon('edit')}编辑</button>
+        <button class="btn btn-secondary btn-sm" data-act="mem-change-type" data-id="${m.id}">${icon('layers')}修改类型</button>
+        ${canUndo ? `<button class="btn btn-danger-line btn-sm" data-act="mem-undo" data-id="${m.id}">${icon('refresh')}撤销最近一次类型修改</button>` : ''}`;
+    }
+    if (m.verified === 'pending' && m.is_active && !isSuperseded) {
+      actions += `
+        <button class="btn btn-primary btn-sm" data-act="mem-verify" data-id="${m.id}">${icon('check')}通过</button>
+        <button class="btn btn-danger-line btn-sm" data-act="mem-reject" data-id="${m.id}">${icon('x')}驳回</button>`;
+    }
+    if (isCurrent) {
+      actions += `<button class="btn btn-danger-line btn-sm" data-act="mem-archive" data-id="${m.id}">${icon('archive')}归档</button>`;
+    }
+    if (isArchived) {
+      // 自然归档：隐藏编辑与修改类型，只保留恢复。
+      actions += `<button class="btn btn-primary btn-sm" data-act="mem-restore" data-id="${m.id}">${icon('refresh')}恢复</button>`;
+    }
+    if (evidence.length) actions += `<button class="btn btn-quiet btn-sm" data-act="mem-evidence" data-id="${m.id}">${icon('message')}查看原文证据</button>`;
+    if (hasVersions) actions += `<button class="btn btn-quiet btn-sm" data-act="mem-versions" data-id="${m.id}">${icon('layers')}查看版本关系</button>`;
+    actions += `<button class="btn btn-quiet btn-sm" data-act="mem-trail" data-id="${m.id}">${icon('clock')}查看审核记录</button>`;
     panel.render({
       title: `#${m.id} · ${esc(m.title || '(未命名)')}`,
-      badges: tag(vm.label, vm.tone) + typeTag(m.continuity_type),
-      html: memoryKvRows(m),
-      actions: `
-        <button class="btn btn-secondary btn-sm" data-act="mem-edit" data-id="${m.id}">${icon('edit')}编辑</button>
-        ${m.verified === 'pending' ? `
-          <button class="btn btn-primary btn-sm" data-act="mem-verify" data-id="${m.id}">${icon('check')}通过</button>
-          <button class="btn btn-danger-line btn-sm" data-act="mem-reject" data-id="${m.id}">${icon('x')}驳回</button>` : ''}
-        ${m.is_active
-          ? `<button class="btn btn-danger-line btn-sm" data-act="mem-archive" data-id="${m.id}">${icon('archive')}归档</button>`
-          : `<button class="btn btn-secondary btn-sm" data-act="mem-restore" data-id="${m.id}">${icon('refresh')}恢复</button>`}
-        ${evidence.length ? `<button class="btn btn-quiet btn-sm" data-act="mem-evidence" data-id="${m.id}">${icon('message')}查看原文证据</button>` : ''}
-        ${hasVersions ? `<button class="btn btn-quiet btn-sm" data-act="mem-versions" data-id="${m.id}">${icon('layers')}查看版本关系</button>` : ''}
-        <button class="btn btn-quiet btn-sm" data-act="mem-trail" data-id="${m.id}">${icon('clock')}查看审核记录</button>`,
+      badges: tag(vm.label, vm.tone) + typeTag(m.continuity_type) + (isSuperseded ? tag('历史版本', 'muted') : ''),
+      html: memoryKvRows(m) + (isSuperseded
+        ? `<div class="kv"><span class="k">说明</span><span class="v muted">这条记忆已被新版本替代：可以查看，但不能编辑、恢复或参与召回。</span></div>`
+        : (isArchived ? `<div class="kv"><span class="k">说明</span><span class="v muted">自然归档记忆：可查看与恢复，不能直接编辑或修改类型。</span></div>` : '')),
+      actions,
     });
   }
 
@@ -614,70 +631,7 @@ export function createMemoryBrowser({
     });
   }
 
-  /* ----- 面板内编辑表单 ----- */
-  function renderMemoryEdit(m) {
-    panel.render({
-      title: `编辑 memory #${m.id}`,
-      badges: tag('编辑模式', 'gold'),
-      html: `
-        <div class="field"><label>标题</label><input type="text" id="ed-title" maxlength="100" value="${esc(m.title || '')}"></div>
-        <div class="field"><label>内容</label><textarea id="ed-content" rows="7" maxlength="600">${esc(m.content || '')}</textarea></div>
-        <div class="field"><label>标签（逗号分隔，最多 5 个）</label><input type="text" id="ed-tags" value="${esc((m.tags || []).join(', '))}"></div>
-        <div class="field"><label>重要性（1-10）</label><input type="number" id="ed-imp" min="1" max="10" value="${esc(m.importance ?? 5)}"></div>
-        <div class="field"><label>召回场景（可空；保存后由服务端重新生成召回向量）</label><textarea id="ed-recall-scene" rows="2">${esc(m.recall_scene || '')}</textarea></div>
-        <div class="field"><label>召回标签（逗号分隔，自由填写）</label><input type="text" id="ed-recall-tags" value="${esc((m.recall_tags || []).join(', '))}"></div>
-        <div class="grid grid-2">
-          <div class="field"><label>最后证据时间（可空，ISO 格式）</label><input type="text" id="ed-evidence-time" maxlength="40" value="${esc(m.evidence_end_time || '')}"></div>
-          <div class="field"><label>证据时间精度</label><select id="ed-evidence-precision">
-            <option value="">未指定</option>
-            <option value="minute">精确到分钟</option>
-            <option value="hour">精确到小时</option>
-            <option value="day">精确到日期</option>
-            <option value="approximate">大概时间</option>
-            <option value="unknown">时间未知</option>
-          </select></div>
-        </div>`,
-      actions: `
-        <button class="btn btn-primary btn-sm" data-act="mem-edit-save" data-id="${m.id}">${icon('check')}保存</button>
-        <button class="btn btn-secondary btn-sm" data-act="mem-edit-cancel" data-id="${m.id}">取消</button>`,
-    });
-    panel.el.querySelector('#ed-evidence-precision').value = m.evidence_time_precision || '';
-  }
-
-  async function saveMemoryEdit(id) {
-    const root = panel.el;
-    const row = {
-      title: root.querySelector('#ed-title').value.trim(),
-      content: root.querySelector('#ed-content').value.trim(),
-      tags: root.querySelector('#ed-tags').value.split(/[,，]/).map((s) => s.trim()).filter(Boolean).slice(0, 5),
-      importance: Number(root.querySelector('#ed-imp').value) || 5,
-    };
-    if (!row.content) { toast('内容不能为空', 'err'); return; }
-    if (!Number.isInteger(row.importance) || row.importance < 1 || row.importance > 10) {
-      toast('重要性必须是 1 到 10 的整数', 'err');
-      return;
-    }
-    // 召回字段走专用原子端点：服务端在同一写入里重算召回向量，
-    // 场景与向量不可能出现新旧不一致。
-    const recallPayload = {
-      recall_scene: root.querySelector('#ed-recall-scene').value.trim(),
-      recall_tags: root.querySelector('#ed-recall-tags').value.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
-      evidence_end_time: root.querySelector('#ed-evidence-time').value.trim() || null,
-      evidence_time_precision: root.querySelector('#ed-evidence-precision').value || null,
-    };
-    try {
-      await gw(`/admin/api/memories/${encodeURIComponent(id)}/recall`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(recallPayload),
-      });
-      await update('memories', id, row);
-      toast('记忆已更新');
-      await Promise.all([loadCurrentList(), showMemory(id)]);
-    } catch (error) {
-      toast(`保存失败：${error.message}`, 'err');
-    }
-  }
+  /* ----- 面板内编辑表单已由 _memory_form.js 的动态表单接管 ----- */
 
   function renderRequestApprove(r) {
     panel.render({
@@ -981,6 +935,101 @@ export function createMemoryBrowser({
     await renderShell();
   }
 
+  /* ----- 生命周期操作（新增 / 编辑 / 类型修改 / 撤销 / 恢复） ----- */
+
+  async function refreshAfterWrite(result) {
+    // 写操作完成后刷新列表、计数，并按返回结果重新打开对应详情。
+    await loadCurrentList();
+    const targetId = result && (result.memory_id || result.restored_memory_id);
+    if (targetId) await showMemory(targetId);
+    else {
+      state.selected = null;
+      panel.render({ title: '', html: '', actions: '' });
+    }
+  }
+
+  async function undoTypeChange(el) {
+    const id = el.dataset.id;
+    let memory;
+    try {
+      memory = await fetchMemory(id);
+    } catch (error) {
+      toast(error.message, 'err');
+      return;
+    }
+    let previous = null;
+    if (memory.supersedes_memory_id) {
+      try { previous = await fetchMemory(memory.supersedes_memory_id); } catch { previous = null; }
+    }
+    const prevText = previous
+      ? `将恢复为 memory #${previous.id} · ${previous.title || '(未命名)'}`
+      : '将恢复为直接上一版本';
+    const ok = await confirm(
+      `${esc(prevText)}，当前版本（memory #${esc(id)}）会被删除。只撤销最近一次类型修改，确认继续吗？`,
+      { title: '撤销最近一次类型修改', okText: '撤销' },
+    );
+    if (!ok) return;
+    el.disabled = true;
+    try {
+      const result = await gw(`/admin/api/memories/${encodeURIComponent(id)}/undo-type-change`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      toast(result.undo_deleted === false
+        ? '当前版本无法物理删除，已转为归档；上一版本已恢复'
+        : '已撤销最近一次类型修改');
+      await refreshAfterWrite(result);
+    } catch (error) {
+      el.disabled = false;
+      const raw = String(error.message || '');
+      const detail = raw.includes(': ') ? raw.split(': ').slice(1).join(': ') : raw;
+      if (/\b409\b/.test(raw)) {
+        const errModal = modal({
+          title: '当前无法撤销',
+          body: `<p class="confirm-text">${esc(detail || '恢复会造成两个版本同时生效，当前无法撤销')}</p>`,
+          footer: '<button class="btn btn-primary" data-ok>知道了</button>',
+        });
+        errModal.root.querySelector('[data-ok]').onclick = errModal.close;
+      } else {
+        toast(`撤销失败：${detail}`, 'err');
+      }
+    }
+  }
+
+  async function restoreArchived(el) {
+    const id = el.dataset.id;
+    const ok = await confirm(
+      '恢复这条自然归档记忆？恢复后热度将重置为 50，其余数据保持不变，并重新允许编辑和参与召回。',
+      { title: '恢复归档记忆', okText: '恢复', danger: false },
+    );
+    if (!ok) return;
+    el.disabled = true;
+    try {
+      const result = await gw(`/admin/api/memories/${encodeURIComponent(id)}/restore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      toast('已恢复');
+      await refreshAfterWrite(result);
+    } catch (error) {
+      el.disabled = false;
+      const raw = String(error.message || '');
+      const detail = raw.includes(': ') ? raw.split(': ').slice(1).join(': ') : raw;
+      if (/\b409\b|\b404\b/.test(raw)) {
+        const errModal = modal({
+          title: '当前无法恢复',
+          body: `<p class="confirm-text">${esc(detail)}</p>`,
+          footer: '<button class="btn btn-primary" data-ok>知道了</button>',
+        });
+        errModal.root.querySelector('[data-ok]').onclick = errModal.close;
+      } else {
+        toast(`恢复失败：${detail}`, 'err');
+      }
+    }
+  }
+
   /* ----- 事件绑定 ----- */
   delegate(host, {
     view: (el) => setView(el.dataset.view),
@@ -997,37 +1046,54 @@ export function createMemoryBrowser({
     },
     'open-mem': (el) => showMemory(el.dataset.id),
     'open-req': (el) => showRequest(el.dataset.id),
-    'mem-edit': (el) => fetchMemory(el.dataset.id).then(renderMemoryEdit).catch((e) => toast(e.message, 'err')),
-    'mem-edit-cancel': (el) => showMemory(el.dataset.id),
-    'mem-edit-save': (el) => saveMemoryEdit(el.dataset.id),
+    'mem-create': () => openMemoryForm({ mode: 'create', onSaved: refreshAfterWrite }),
+    'mem-edit': async (el) => {
+      try {
+        const memory = await fetchMemory(el.dataset.id);
+        await openMemoryForm({ mode: 'edit', memory, onSaved: refreshAfterWrite });
+      } catch (error) { toast(error.message, 'err'); }
+    },
+    'mem-change-type': async (el) => {
+      try {
+        const memory = await fetchMemory(el.dataset.id);
+        await openMemoryForm({ mode: 'change', memory, onSaved: refreshAfterWrite });
+      } catch (error) { toast(error.message, 'err'); }
+    },
+    'mem-undo': (el) => undoTypeChange(el),
+    'mem-restore': (el) => restoreArchived(el),
     'mem-archive': async (el) => {
       if (!(await confirm('归档这条记忆？归档后不再参与召回，但仍保留在数据库中。', { okText: '归档' }))) return;
+      el.disabled = true;
       try {
         await update('memories', el.dataset.id, { is_active: false });
         toast('已归档');
-        await Promise.all([loadCurrentList(), showMemory(el.dataset.id)]);
-      } catch (error) { toast(`操作失败：${error.message}`, 'err'); }
-    },
-    'mem-restore': async (el) => {
-      try {
-        await update('memories', el.dataset.id, { is_active: true });
-        toast('已恢复');
-        await Promise.all([loadCurrentList(), showMemory(el.dataset.id)]);
-      } catch (error) { toast(`操作失败：${error.message}`, 'err'); }
+        await refreshAfterWrite({ memory_id: el.dataset.id });
+      } catch (error) {
+        toast(`操作失败：${error.message}`, 'err');
+        el.disabled = false;
+      }
     },
     'mem-verify': async (el) => {
+      el.disabled = true;
       try {
         await update('memories', el.dataset.id, { verified: 'verified' });
         toast('已标记为已确认');
-        await Promise.all([loadCurrentList(), showMemory(el.dataset.id)]);
-      } catch (error) { toast(`操作失败：${error.message}`, 'err'); }
+        await refreshAfterWrite({ memory_id: el.dataset.id });
+      } catch (error) {
+        toast(`操作失败：${error.message}`, 'err');
+        el.disabled = false;
+      }
     },
     'mem-reject': async (el) => {
+      el.disabled = true;
       try {
         await update('memories', el.dataset.id, { verified: 'rejected' });
         toast('已驳回该记忆');
-        await Promise.all([loadCurrentList(), showMemory(el.dataset.id)]);
-      } catch (error) { toast(`操作失败：${error.message}`, 'err'); }
+        await refreshAfterWrite({ memory_id: el.dataset.id });
+      } catch (error) {
+        toast(`操作失败：${error.message}`, 'err');
+        el.disabled = false;
+      }
     },
     'mem-evidence': async (el) => {
       try {

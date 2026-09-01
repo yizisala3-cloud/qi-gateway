@@ -590,8 +590,8 @@ class RuntimeRetirementTests(unittest.TestCase):
         app_js = (ROOT / "admin" / "js" / "app.js").read_text(encoding="utf-8")
         self.assertNotIn("20260830-retro1", index_html)
         self.assertNotIn("20260830-retro1", app_js)
-        self.assertIn("20260831-retire1", index_html)
-        self.assertIn("20260831-retire1", app_js)
+        self.assertIn("20260902-adminmem1", index_html)
+        self.assertIn("20260902-adminmem1", app_js)
 
 
 class ContinuitySchemaStillValidTests(unittest.TestCase):
