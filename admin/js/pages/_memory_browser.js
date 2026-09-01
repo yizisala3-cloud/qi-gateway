@@ -1,11 +1,11 @@
 // pages/_memory_browser.js - shared library/requests browser with detail panel
-import { gw, query, update, count, esc } from '../api.js?v=20260830-retro1';
+import { gw, query, update, count, esc } from '../api.js?v=20260831-retire1';
 import {
   loading, empty, errorBlock, banner, tag, heatTag, impTag, pagerHtml,
   toast, modal, confirm, delegate, icon, fmtDate, createDetailPanel,
-} from '../ui.js?v=20260830-retro1';
+} from '../ui.js?v=20260831-retire1';
 
-export const ASSET_VERSION = '20260830-retro1';
+export const ASSET_VERSION = '20260831-retire1';
 
 const PAGE_SIZE = 20;
 const REQ_FETCH_LIMIT = 100;
@@ -17,7 +17,7 @@ export const CONTINUITY_TYPE_LABELS = {
 const TIME_PRECISION_LABELS = {
   minute: '精确到分钟', hour: '精确到小时', day: '精确到日期', approximate: '大概时间', unknown: '时间未知',
 };
-const MEMORY_FIELDS = 'id,title,content,tags,heat,importance,layer,source,verified,is_active,last_recalled_at,recall_count,emotion_weight,created_at,memory_key,supersedes_memory_id,superseded_by_memory_id,superseded_at,continuity_id,continuity_type,continuity_schema_version,continuity_data,subject,source_type,thread_state,continuity_value,retention_class,participants,evidence_start_time,evidence_end_time,evidence_message_ids,source_time,memory_time,time_precision,evidence_time_precision,recall_scene,recall_tags';
+const MEMORY_FIELDS = 'id,title,content,tags,heat,importance,source,verified,is_active,last_recalled_at,recall_count,created_at,memory_key,supersedes_memory_id,superseded_by_memory_id,superseded_at,continuity_id,continuity_type,continuity_schema_version,continuity_data,source_type,thread_state,evidence_start_time,evidence_end_time,evidence_message_ids,source_time,memory_time,time_precision,evidence_time_precision,recall_scene,recall_tags';
 const REQUEST_FIELDS = 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,memory_key,update_mode,related_memory_id,related_request_id,continuity_id,continuity_type,continuity_schema_version,continuity_data,thread_state,confidence,evidence_message_ids,source_time,memory_time,time_precision,digest_run_id,dedupe_state,dedupe_reason,evidence_time_precision,recall_scene,recall_tags,created_at,reviewed_at,reviewed_by,review_note';
 
 export function continuityTypeLabel(value) {
@@ -71,17 +71,11 @@ function memoryKvRows(m) {
     <div class="kv"><span class="k">状态</span><span class="v">${esc(verifiedMeta(m).label)}</span></div>
     <div class="kv"><span class="k">连续感类型</span><span class="v">${esc(continuityTypeLabel(m.continuity_type))}</span></div>
     <div class="kv"><span class="k">热度 / 重要性</span><span class="v">${Number(m.heat ?? 0).toFixed(1)} / ${esc(m.importance ?? '-')}</span></div>
-    <div class="kv"><span class="k">层级</span><span class="v">${esc(m.layer || '-')}</span></div>
-    <div class="kv"><span class="k">情感权重</span><span class="v">${esc(m.emotion_weight ?? '-')}</span></div>
     <div class="kv"><span class="k">标签</span><span class="v">${(m.tags || []).length ? (m.tags || []).map(t => esc(t)).join('、') : '-'}</span></div>
     <div class="kv"><span class="k">来源</span><span class="v">${esc(m.source || '-')}</span></div>
     ${m.memory_key ? `<div class="kv"><span class="k">主题键</span><span class="v mono text-sm">${esc(m.memory_key)}</span></div>` : ''}
     ${m.continuity_id ? `<div class="kv"><span class="k">连续感 ID</span><span class="v mono text-sm">${esc(m.continuity_id)}</span></div>` : ''}
     ${m.thread_state ? `<div class="kv"><span class="k">线索状态</span><span class="v">${esc(m.thread_state)}</span></div>` : ''}
-    ${m.subject ? `<div class="kv"><span class="k">主体</span><span class="v">${esc(m.subject)}</span></div>` : ''}
-    ${m.participants?.length ? `<div class="kv"><span class="k">参与者</span><span class="v">${m.participants.map(p => esc(p)).join('、')}</span></div>` : ''}
-    ${m.retention_class ? `<div class="kv"><span class="k">保留级别</span><span class="v">${esc(m.retention_class)}</span></div>` : ''}
-    ${m.continuity_value != null ? `<div class="kv"><span class="k">承接价值</span><span class="v">${esc(m.continuity_value)}</span></div>` : ''}
     <div class="kv"><span class="k">证据时间</span><span class="v">${evidenceRange(m)}</span></div>
     <div class="kv"><span class="k">记忆时间</span><span class="v">${esc(m.memory_time ? fmtDate(m.memory_time) : '-')}（${TIME_PRECISION_LABELS[m.time_precision] || TIME_PRECISION_LABELS.unknown}）</span></div>
     ${m.recall_scene ? `<div class="kv"><span class="k">召回场景</span></div><div class="kv-block"><span class="v">${esc(m.recall_scene)}</span></div>` : ''}
@@ -469,7 +463,6 @@ export function createMemoryBrowser({
               ${heatTag(m.heat)}
               ${impTag(m.importance)}
               ${typeTag(m.continuity_type)}
-              ${m.layer ? tag(esc(m.layer), 'muted') : ''}
               ${(m.tags || []).slice(0, 3).map((t) => tag(esc(t), 'slate')).join('')}
               ${m.memory_key ? tag(`<span class="mono">${esc(m.memory_key)}</span>`, 'slate') : ''}
             </div>
@@ -582,7 +575,7 @@ export function createMemoryBrowser({
     const hasVersions = m.memory_key || m.supersedes_memory_id || m.superseded_by_memory_id;
     panel.render({
       title: `#${m.id} · ${esc(m.title || '(未命名)')}`,
-      badges: tag(vm.label, vm.tone) + typeTag(m.continuity_type) + (m.layer ? tag(esc(m.layer), 'muted') : ''),
+      badges: tag(vm.label, vm.tone) + typeTag(m.continuity_type),
       html: memoryKvRows(m),
       actions: `
         <button class="btn btn-secondary btn-sm" data-act="mem-edit" data-id="${m.id}">${icon('edit')}编辑</button>
@@ -630,11 +623,7 @@ export function createMemoryBrowser({
         <div class="field"><label>标题</label><input type="text" id="ed-title" maxlength="100" value="${esc(m.title || '')}"></div>
         <div class="field"><label>内容</label><textarea id="ed-content" rows="7" maxlength="600">${esc(m.content || '')}</textarea></div>
         <div class="field"><label>标签（逗号分隔，最多 5 个）</label><input type="text" id="ed-tags" value="${esc((m.tags || []).join(', '))}"></div>
-        <div class="grid grid-3">
-          <div class="field"><label>重要性（1-10）</label><input type="number" id="ed-imp" min="1" max="10" value="${esc(m.importance ?? 5)}"></div>
-          <div class="field"><label>层级</label><select id="ed-layer"><option value="碎片">碎片</option><option value="场景">场景</option><option value="核心">核心</option></select></div>
-          <div class="field"><label>情感权重（0-1）</label><input type="number" id="ed-emo" min="0" max="1" step="0.1" value="${esc(m.emotion_weight ?? 0.5)}"></div>
-        </div>
+        <div class="field"><label>重要性（1-10）</label><input type="number" id="ed-imp" min="1" max="10" value="${esc(m.importance ?? 5)}"></div>
         <div class="field"><label>召回场景（可空；保存后由服务端重新生成召回向量）</label><textarea id="ed-recall-scene" rows="2">${esc(m.recall_scene || '')}</textarea></div>
         <div class="field"><label>召回标签（逗号分隔，自由填写）</label><input type="text" id="ed-recall-tags" value="${esc((m.recall_tags || []).join(', '))}"></div>
         <div class="grid grid-2">
@@ -652,20 +641,16 @@ export function createMemoryBrowser({
         <button class="btn btn-primary btn-sm" data-act="mem-edit-save" data-id="${m.id}">${icon('check')}保存</button>
         <button class="btn btn-secondary btn-sm" data-act="mem-edit-cancel" data-id="${m.id}">取消</button>`,
     });
-    panel.el.querySelector('#ed-layer').value = m.layer || '碎片';
     panel.el.querySelector('#ed-evidence-precision').value = m.evidence_time_precision || '';
   }
 
   async function saveMemoryEdit(id) {
     const root = panel.el;
-    const emotionWeight = Number(root.querySelector('#ed-emo').value);
     const row = {
       title: root.querySelector('#ed-title').value.trim(),
       content: root.querySelector('#ed-content').value.trim(),
       tags: root.querySelector('#ed-tags').value.split(/[,，]/).map((s) => s.trim()).filter(Boolean).slice(0, 5),
       importance: Number(root.querySelector('#ed-imp').value) || 5,
-      layer: root.querySelector('#ed-layer').value,
-      emotion_weight: Number.isFinite(emotionWeight) ? emotionWeight : 0.5,
     };
     if (!row.content) { toast('内容不能为空', 'err'); return; }
     if (!Number.isInteger(row.importance) || row.importance < 1 || row.importance > 10) {
@@ -868,7 +853,7 @@ export function createMemoryBrowser({
       results.innerHTML = loading();
       try {
         const rows = await query('memories', {
-          select: 'id,title,content,tags,importance,layer,created_at',
+          select: 'id,title,content,tags,importance,created_at',
           order: { col: 'created_at', asc: false },
           limit: 20,
           eq: { is_active: true, verified: 'verified' },
@@ -879,7 +864,7 @@ export function createMemoryBrowser({
           <button type="button" class="mem-card relation-target" data-memory-id="${memory.id}">
             <div class="mem-title">memory #${memory.id} · ${esc(memory.title || '未命名')}</div>
             <div class="mem-snippet">${esc((memory.content || '').slice(0, 220))}</div>
-            <div class="tag-row mt8">${impTag(memory.importance)}${memory.layer ? tag(esc(memory.layer), 'slate') : ''}</div>
+            <div class="tag-row mt8">${impTag(memory.importance)}</div>
           </button>`).join('');
         for (const button of results.querySelectorAll('.relation-target')) {
           button.onclick = () => {

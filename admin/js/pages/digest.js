@@ -1,6 +1,6 @@
 // pages/digest.js - 记忆总结：仅连续感总结
-import { gw, esc } from '../api.js?v=20260830-retro1';
-import { loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, fmtDate } from '../ui.js?v=20260830-retro1';
+import { gw, esc } from '../api.js?v=20260831-retire1';
+import { loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, fmtDate } from '../ui.js?v=20260831-retire1';
 
 const TIME_PRECISION_LABELS = {
   minute: '精确到分钟', day: '精确到日期', approximate: '大概时间', unknown: '时间未知',
@@ -53,24 +53,19 @@ function candidateCards(candidates) {
   if (!candidates?.length) return '<p class="muted">本批聊天没有提取到连续感候选。</p>';
   return candidates.map((candidate) => {
     const evidence = (candidate.evidence_message_ids || []).map((id) => `#${esc(id)}`).join('、') || '-';
-    const participants = (candidate.participants || []).map((item) => esc(item)).join('、') || '-';
     return `
       <div class="mem-card" style="cursor:default">
         <div class="mem-title">${esc(candidate.title || '(无标题)')}</div>
         <div class="mem-snippet">${esc(candidate.content || '')}</div>
         <div class="mt8">
           <div class="kv"><span class="k">连续感类型</span><span class="v">${esc(candidate.continuity_type || '-')}</span></div>
-          <div class="kv"><span class="k">主体</span><span class="v">${esc(candidate.subject || '-')}</span></div>
           <div class="kv"><span class="k">来源类型</span><span class="v">${esc(candidate.source_type || '-')}</span></div>
           ${candidate.thread_state ? `<div class="kv"><span class="k">Thread 状态</span><span class="v">${esc(candidate.thread_state)}</span></div>` : ''}
           <div class="kv"><span class="k">重要性</span><span class="v">${esc(candidate.importance ?? '-')}</span></div>
-          <div class="kv"><span class="k">承接价值</span><span class="v">${esc(candidate.continuity_value ?? '-')}</span></div>
           <div class="kv"><span class="k">置信度</span><span class="v">${esc(candidate.confidence ?? '-')}</span></div>
           <div class="kv"><span class="k">证据消息</span><span class="v">${evidence}</span></div>
           <div class="kv"><span class="k">对话时间</span><span class="v">${esc(fmtTimeRange(candidate.evidence_start_time, candidate.evidence_end_time))}</span></div>
           <div class="kv"><span class="k">记忆时间</span><span class="v">${esc(fmtMinute(candidate.memory_time))}</span></div>
-          <div class="kv"><span class="k">参与者</span><span class="v">${participants}</span></div>
-          <div class="kv"><span class="k">保留级别</span><span class="v">${esc(candidate.retention_class || '-')}</span></div>
           <div class="kv"><span class="k">提取理由</span><span class="v">${esc(candidate.reason || '-')}</span></div>
         </div>
         <div class="tag-row mt8">
