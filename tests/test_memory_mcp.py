@@ -217,6 +217,42 @@ class MCPToolContractTests(unittest.TestCase):
         self.assertIsNone(captured["payload"]["recall_scene"])
         self.assertEqual(captured["payload"]["recall_tags"], [])
 
+    def test_source_type_is_optional_and_never_defaulted_in_mcp(self):
+        captured = {}
+
+        def fake_create(payload, idempotency_key, **kwargs):
+            captured.update({"payload": payload, **kwargs})
+            return {"status": "pending", "request_id": 15}
+
+        with (
+            patch.object(cfg, "MEMORY_ASSISTANT_ID", "server-assistant"),
+            patch("gateway.memory_mcp.create_memory_request", side_effect=fake_create),
+        ):
+            asyncio.run(remember_moment(
+                content="叶子希望记住这次确认。",
+                reason="验证来源类型可选。",
+                scene="场景",
+                event="确认",
+                moment_state="standalone",
+            ))
+        # 省略 source_type：payload 不自动补 natural_chat / unknown。
+        self.assertIsNone(captured["payload"]["source_type"])
+
+        captured.clear()
+        with (
+            patch.object(cfg, "MEMORY_ASSISTANT_ID", "server-assistant"),
+            patch("gateway.memory_mcp.create_memory_request", side_effect=fake_create),
+        ):
+            asyncio.run(remember_moment(
+                content="叶子希望记住这次确认。",
+                reason="验证来源类型透传。",
+                scene="场景",
+                event="确认",
+                moment_state="standalone",
+                source_type="quote",
+            ))
+        self.assertEqual(captured["payload"]["source_type"], "quote")
+
     def test_recall_embedding_failure_maps_to_tool_error(self):
         from gateway.memory_requests import MemoryRequestError
         from mcp.server.mcpserver.exceptions import ToolError

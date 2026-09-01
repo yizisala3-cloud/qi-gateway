@@ -10,6 +10,7 @@ Retained and untouched:
     recall_tags, recall_embedding. public.chat_messages stays select-only.
 """
 import asyncio
+import json
 import re
 import unittest
 from pathlib import Path
@@ -145,7 +146,7 @@ class RetirementMigrationContractTests(unittest.TestCase):
             "    text, text[], text, text, text[]\n)",
             "write_memory_direct_v1(\n    text, text, bigint, text, text, text[], integer, text, text, text,\n"
             "    integer, text, text, text, text, smallint, jsonb, text, text, integer,\n"
-            "    text, text[], text, text, text[], extensions.vector\n)",
+            "    text, text[], text, text, text, text[], extensions.vector\n)",
         ):
             with self.subTest(signature=squeezed(signature)[:60]):
                 self.assertIn(
@@ -199,6 +200,39 @@ class RetirementMigrationContractTests(unittest.TestCase):
         self.assertIn("recall_scene,recall_tags", create)
         self.assertIn("v_recall_scene,v_recall_tags", store)
 
+    def test_source_type_is_optional_and_null_safe_in_sql(self):
+        create = self.executable.split(
+            "create or replace function public.create_memory_request_v4(", 1
+        )[1].split("create or replace function public.write_memory_direct_v1", 1)[0]
+        store = self.executable.split(
+            "create or replace function public.store_continuity_candidate(", 1
+        )[1].split("create or replace function public.sync_reviewed_memory_request_metadata", 1)[0]
+        # 空串统一为 NULL，绝不补 natural_chat / unknown。
+        self.assertIn("nullif(btrim(coalesce(p_source_type,'')),'')", create)
+        self.assertIn("nullif(btrim(coalesce(p_item->>'source_type','')),'')", store)
+        for section in (create, store):
+            self.assertNotIn("'natural_chat'", section)
+            # 'unknown' 允许出现在 time_precision 等无关位置，但 source_type
+            # 的取值表达式不得回落到任何字面量默认值。
+            self.assertNotRegex(
+                section,
+                r"coalesce\([^()]*source_type[^()]*,\s*'(?:natural_chat|unknown)'\)",
+            )
+        # 不为 source_type 新增默认值、NOT NULL 或任何 DDL 改动。
+        self.assertNotRegex(self.executable, r"alter\s+table[^;]*\bsource_type\b")
+        self.assertNotIn("default 'natural_chat'", self.executable)
+        self.assertNotIn("default 'unknown'", self.executable)
+
+    def test_metadata_trigger_preserves_existing_source_type(self):
+        trigger = self.executable.split(
+            "create or replace function public.sync_reviewed_memory_request_metadata", 1
+        )[1].split("$function$;", 1)[0]
+        # 新申请 NULL → 新记忆保持 NULL；合法值正常复制；空申请值不清空
+        # 目标记忆已有来源类型（coalesce 回落的是记忆自身的值）。
+        self.assertIn("source_type = case when v_replace_continuity", trigger)
+        self.assertIn("then coalesce(new.source_type,memory.source_type)", trigger)
+        self.assertIn("else memory.source_type end", trigger)
+
     def test_rebuilt_metadata_trigger_no_longer_copies_retired_fields(self):
         trigger = self.executable.split(
             "create or replace function public.sync_reviewed_memory_request_metadata", 1
@@ -211,17 +245,31 @@ class RetirementMigrationContractTests(unittest.TestCase):
         self.assertIn("recall_scene = coalesce(new.recall_scene,memory.recall_scene)", trigger)
         self.assertIn("recall_tags = coalesce(new.recall_tags,memory.recall_tags)", trigger)
 
-    def test_rebuilt_heat_decay_has_no_retired_field_logic(self):
+    def test_rebuilt_heat_decay_only_decays_heat_and_never_archives(self):
         decay = self.executable.split(
             "create or replace function public.run_memory_heat_decay(", 1
         )[1].split("$function$;", 1)[0]
         for token in ("emotion_weight", "layer", "碎片", "核心"):
             with self.subTest(token=token):
                 self.assertNotIn(token, decay)
-        self.assertIn("memory.importance <= 3", decay)
-        self.assertIn("candidate.new_heat < 5.0", decay)
-        self.assertIn("interval '30 days'", decay)
+        # 只衰减热度：候选筛选只读 is_active，不出现任何 is_active 写入或替代归档规则。
+        self.assertNotIn("is_active = false", decay)
+        self.assertNotRegex(decay, r"\bset\s+is_active\b")
+        self.assertNotIn("importance <= 3", decay)
+        self.assertNotIn("interval '30 days'", decay)
+        # importance 仍参与衰减速度。
+        self.assertIn("coalesce(memory.importance, 5)", decay)
+        self.assertIn("power(", decay)
+        # 输出与运行记录中的 archived_count 固定为 0。
+        self.assertEqual(decay.count("'archived_count', 0"), 2)
+        self.assertIn("archived_count = 0,", decay)
         self.assertIn("memory.is_active = true", decay)
+        self.assertIn("memory.verified = 'verified'", decay)
+        self.assertIn("abs(candidate.new_heat - memory.heat) >= 0.005", decay)
+        # 与 digest/continuity 提交等内部维护 RPC 一样以 security definer 执行：
+        # memories 的 CHECK 约束用调用者权限求值 validate_continuity_data，
+        # 而 service_role 对它没有 EXECUTE。
+        self.assertIn("security definer", decay)
 
     def test_rebuilt_review_functions_preserve_supersession_rules(self):
         v2 = self.executable.split(
@@ -241,8 +289,8 @@ class RetirementMigrationContractTests(unittest.TestCase):
         for signature in (
             "match_memories(extensions.vector,doubleprecision,integer)",
             "search_memories_by_keywords(text[],integer)",
-            "create_memory_request_v4(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,text,text,text[])",
-            "write_memory_direct_v1(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,text,text,text,text[],extensions.vector)",
+            "create_memory_request_v4(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,text,text[])",
+            "write_memory_direct_v1(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,text,text,text[],extensions.vector)",
         ):
             with self.subTest(signature=signature[:48]):
                 self.assertIn(
@@ -252,6 +300,83 @@ class RetirementMigrationContractTests(unittest.TestCase):
                 self.assertIn(
                     f"grantexecuteonfunctionpublic.{signature}toservice_role;",
                     self.flat,
+                )
+
+    def test_grant_signatures_match_created_function_signatures(self):
+        # 权限语句的类型列表必须与本次 CREATE 的参数类型逐一吻合：
+        # REVOKE 指向不存在的签名会在真实库上直接报错并回滚整个迁移。
+        created = {}
+        for match in re.finditer(
+            r"create(?:\s+or\s+replace)?\s+function\s+public\.(\w+)\s*\(([\s\S]*?)\)\s*returns",
+            self.executable,
+        ):
+            types = []
+            for part in match.group(2).split(","):
+                tokens = part.split()
+                if not tokens:
+                    continue
+                if "default" in tokens:
+                    tokens = tokens[: tokens.index("default")]
+                types.append(squeezed(" ".join(tokens[1:])))
+            created[match.group(1)] = ",".join(types)
+        self.assertIn("create_memory_request_v4", created)
+        self.assertEqual(created["create_memory_request_v4"].count(",") + 1, 21)
+        self.assertIn("write_memory_direct_v1", created)
+        self.assertEqual(created["write_memory_direct_v1"].count(",") + 1, 23)
+
+        statements = re.findall(
+            r"(?:revoke\s+all|grant\s+execute)\s+on\s+function\s+"
+            r"public\.(\w+)\s*\(([^)]*)\)",
+            self.executable,
+        )
+        self.assertGreaterEqual(len(statements), 6)
+        for name, arg_types in statements:
+            if name not in created:
+                continue
+            with self.subTest(function=name):
+                self.assertEqual(
+                    squeezed(arg_types),
+                    created[name],
+                    f"grant/revoke signature for {name} must match its CREATE parameters",
+                )
+
+    def test_dropped_signatures_match_latest_historical_creates(self):
+        # DROP IF EXISTS 指向不存在的签名只会静默跳过，旧函数残留成重载。
+        # 因此被 DROP 的签名必须与历史迁移中最后一次 CREATE 的参数类型一致。
+        history = [
+            path for path in sorted((ROOT / "supabase" / "migrations").glob("*.sql"))
+            if path.name < MIGRATION.name
+        ]
+        self.assertGreaterEqual(len(history), 10)
+        for function in (
+            "match_memories",
+            "search_memories_by_keywords",
+            "create_memory_request_v4",
+            "write_memory_direct_v1",
+        ):
+            latest = None
+            for path in history:
+                text = executable_sql(path.read_text(encoding="utf-8"))
+                for match in re.finditer(
+                    rf"create(?:\s+or\s+replace)?\s+function\s+public\.{function}\s*\(([\s\S]*?)\)\s*returns",
+                    text,
+                ):
+                    latest = match.group(1)
+            self.assertIsNotNone(latest, function)
+            types = []
+            for part in latest.split(","):
+                tokens = part.split()
+                if not tokens:
+                    continue
+                if "default" in tokens:
+                    tokens = tokens[: tokens.index("default")]
+                types.append(squeezed(" ".join(tokens[1:])))
+            expected = f"{function}({','.join(types)})"
+            with self.subTest(function=function):
+                self.assertIn(
+                    f"dropfunctionifexistspublic.{expected};",
+                    self.flat,
+                    f"must drop the exact latest historical signature of {function}",
                 )
 
 
@@ -276,21 +401,131 @@ class RuntimeRetirementTests(unittest.TestCase):
                 with self.subTest(tool=name, token=token):
                     self.assertNotIn(token, properties)
 
-    def test_orangechat_plugin_manifest_excludes_retired_parameters(self):
-        manifest = (
-            ROOT / "orangechat_plugins" / "memory-request" / "manifest.json"
-        ).read_text(encoding="utf-8")
-        for token in RETIRED_CONTINUITY_GENERIC:
-            with self.subTest(token=token):
-                self.assertNotRegex(manifest, rf'"name":\s*"{token}"')
+    def test_mcp_source_type_is_optional_with_enum_or_none(self):
+        from gateway.memory_mcp import memory_mcp
 
-    def test_orangechat_plugin_payload_excludes_retired_fields(self):
-        source = (
-            ROOT / "orangechat_plugins" / "memory-request" / "main.js"
-        ).read_text(encoding="utf-8")
-        for token in RETIRED_CONTINUITY_GENERIC:
-            with self.subTest(token=token):
-                self.assertNotRegex(source, rf"{token}:")
+        tools = {tool.name: tool for tool in asyncio.run(memory_mcp.list_tools())}
+        for name, tool in tools.items():
+            if name not in {"remember_moment", "remember_thread", "remember_inside_joke",
+                            "propose_episode", "propose_profile", "propose_interaction_rule"}:
+                continue
+            schema = tool.input_schema["properties"]["source_type"]
+            with self.subTest(tool=name):
+                # 参数可省略：source_type 不在任何工具的 required 列表中。
+                self.assertNotIn("source_type", tool.input_schema.get("required", []))
+                # 类型允许固定枚举或 None。
+                variants = schema.get("anyOf") or [schema]
+                kinds = {variant.get("type") for variant in variants}
+                self.assertIn("null", kinds)
+                self.assertTrue(
+                    any("enum" in variant for variant in variants),
+                    "source_type 必须暴露固定枚举",
+                )
+
+    def test_gateway_source_type_normalizes_blank_to_none(self):
+        from gateway.memory_requests import validate_memory_request
+
+        base = {
+            "assistant_id": "a",
+            "content": "一条用于校验来源类型的记忆内容。",
+            "reason": "校验 source_type 归一化。",
+            "continuity_type": "moment",
+            "continuity_data": {"scene": "窗口", "event": "确认", "moment_state": "standalone"},
+        }
+        for variant in (
+            {},
+            {"source_type": None},
+            {"source_type": ""},
+            {"source_type": "   "},
+        ):
+            with self.subTest(variant=variant):
+                normalized = validate_memory_request({**base, **variant})
+                self.assertIsNone(normalized["source_type"])
+
+        normalized = validate_memory_request({**base, "source_type": "PERSONA_PROMPT"})
+        self.assertEqual(normalized["source_type"], "persona_prompt")
+
+        for variant in (
+            {"source_type": "guess"},
+            {"source_type": 123},
+            {"source_type": ["natural_chat"]},
+        ):
+            with self.subTest(variant=variant):
+                with self.assertRaises(Exception):
+                    validate_memory_request({**base, **variant})
+
+    def test_continuity_pipeline_accepts_null_source_type(self):
+        # 自动总结/连续感候选缺少或为 null 的 source_type 不得丢弃整条候选；
+        # 非空非法值仍然拒绝。
+        from gateway.memory_continuity_shadow import parse_shadow_output
+
+        candidate = {
+            "content": "叶子和栖约好下次继续讨论旅行计划。",
+            "continuity_type": "thread",
+            "continuity_data": {
+                "open_question": "旅行计划", "current_state": "讨论中",
+                "closure_criteria": [], "abstract_retrieval_hints": [],
+                "concrete_retrieval_hints": [],
+            },
+            "thread_state": "open",
+            "importance": 5,
+            "confidence": 0.9,
+            "evidence_message_ids": [11],
+            "memory_time": None,
+            "time_precision": "unknown",
+            "title": "旅行计划待续",
+            "reason": "下个窗口需要继续。",
+        }
+        parsed = parse_shadow_output(
+            "```json\n" + json.dumps({"candidates": [candidate]}, ensure_ascii=False) + "\n```",
+            {11: None},
+        )
+        self.assertEqual(len(parsed), 1)
+        self.assertIsNone(parsed[0]["source_type"])
+
+        invalid = dict(candidate, source_type="made_up", evidence_message_ids=[12])
+        parsed_invalid = parse_shadow_output(
+            "```json\n" + json.dumps({"candidates": [invalid]}, ensure_ascii=False) + "\n```",
+            {12: None},
+        )
+        self.assertEqual(parsed_invalid, [])
+
+        legal = dict(candidate, source_type="quote", evidence_message_ids=[13])
+        parsed_legal = parse_shadow_output(
+            "```json\n" + json.dumps({"candidates": [legal]}, ensure_ascii=False) + "\n```",
+            {13: None},
+        )
+        self.assertEqual(len(parsed_legal), 1)
+        self.assertEqual(parsed_legal[0]["source_type"], "quote")
+
+    def test_extract_pipeline_accepts_null_source_type(self):
+        from gateway.memory_extract import _parse_model_output
+
+        raw = json.dumps({"memories": [{
+            "content": "叶子和栖确认了网关上线时间。",
+            "continuity_type": "moment",
+            "continuity_data": {"scene": "窗口", "event": "确认", "moment_state": "standalone"},
+            "thread_state": None,
+            "update_mode": "append",
+            "memory_key": None,
+            "importance": 6,
+            "confidence": 0.9,
+            "evidence_message_ids": [12, 13],
+            "memory_time": None,
+            "time_precision": "unknown",
+        }]}, ensure_ascii=False)
+
+        parsed = _parse_model_output(raw, source_times={12: None, 13: None})
+        self.assertEqual(len(parsed), 1)
+        self.assertIsNone(parsed[0]["source_type"])
+
+        invalid = json.dumps({"memories": [{
+            "content": "叶子和栖确认了网关上线时间。",
+            "continuity_type": "moment",
+            "continuity_data": {"scene": "窗口", "event": "确认", "moment_state": "standalone"},
+            "source_type": "not_a_type",
+        }]}, ensure_ascii=False)
+        self.assertEqual(_parse_model_output(invalid, source_times={}), [])
 
     def test_continuity_prompt_and_output_schema_exclude_retired_fields(self):
         for token in RETIRED_CONTINUITY_GENERIC:

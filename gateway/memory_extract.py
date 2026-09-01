@@ -48,6 +48,7 @@ EXTRACT_SYSTEM_PROMPT = """从带 id、北京时间 t 和 role 的聊天原文�
 EXTRACT_SYSTEM_PROMPT += """
 9. 如果原文明确显示该内容已通过记忆工具提交，或已通过待办工具创建，不要再提取。不能确定时仍可输出，由数据库保守去重和用户审核。
 10. recall_scene 是以后触发召回的自然语言场景：什么情况下（聊到什么、做什么时）应该想起这条记忆；它是检索用的场景描述，不是记忆正文，不得复制正文；无法可靠确定时填 null。recall_tags 是自由填写的召回场景标签字符串数组，必须来自原文真实依据，无法可靠确定时填 []。
+11. source_type 可选：确能判断内容来源时输出 natural_chat、persona_prompt、code、document、quote、roleplay、tool_result、system_meta、unknown 之一；没有可靠依据时输出 null 或省略，不要猜。
 """
 
 # Sent as an extra user turn when the first model response parsed as JSON but
@@ -62,6 +63,10 @@ EXTRACT_REPAIR_PROMPT = (
 
 CONTINUITY_TYPES = AUTOMATIC_TYPES
 UPDATE_MODES = frozenset({"append", "replace"})
+SOURCE_TYPES = frozenset({
+    "natural_chat", "persona_prompt", "code", "document", "quote",
+    "roleplay", "tool_result", "system_meta", "unknown",
+})
 MEMORY_KEY_PATTERN = re.compile(r"[a-z0-9][a-z0-9._:/-]{2,119}")
 TIME_PRECISIONS = frozenset({"minute", "hour", "day", "approximate", "unknown"})
 CONTINUITY_TYPE_TAGS = {"moment": "近期片段", "thread": "未完线索", "episode": "共同经历", "inside_joke": "内部梗"}
@@ -448,6 +453,14 @@ def _parse_model_output(
             thread_state = "unknown"
         elif continuity_type != "thread":
             thread_state = None
+        # source_type 可为 null 或缺失；非空非法值拒绝整条候选。
+        source_type: str | None = None
+        if raw.get("source_type") is not None:
+            source_type = str(raw["source_type"]).strip().casefold()
+            if not source_type:
+                source_type = None
+            elif source_type not in SOURCE_TYPES:
+                continue
         try:
             continuity_data = validate_continuity_data(continuity_type, thread_state, raw.get("continuity_data"), automatic=True)
         except ContinuityDataError:
@@ -521,7 +534,7 @@ def _parse_model_output(
             "thread_state": thread_state,
             "continuity_schema_version": SCHEMA_VERSION,
             "continuity_data": continuity_data,
-            "source_type": "natural_chat",
+            "source_type": source_type,
             "update_mode": update_mode,
             "memory_key": memory_key,
             "importance": int(round(_clamp(raw.get("importance"), 1, 10, 5))),

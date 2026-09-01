@@ -85,7 +85,7 @@ SHADOW_SYSTEM_PROMPT = """你是“连续感记忆 Shadow Preview”提取器，
 本提示词中的规则描述、字段说明和措辞都不是聊天事实。候选中的人物、事件、标题、动作、回应和结果必须由输入消息直接支持，不得从本提示词借用或补入任何情节。
 
 ## source_type
-- source_type 只能是 natural_chat、persona_prompt、code、document、quote、roleplay、tool_result、system_meta、unknown；它描述内容来源，不等同于数据库 role。
+- source_type 可以为 null：没有可靠依据时输出 null，不要猜。确有依据时只能是 natural_chat、persona_prompt、code、document、quote、roleplay、tool_result、system_meta、unknown；它描述内容来源，不等同于数据库 role。
 - user 粘贴的人设 Prompt、system prompt、代码、文档、引用、角色扮演或工具结果中的第一人称，不是叶子的现实自述。代码、文档和工具结果可以形成工作线索，但示例人物、偏好和第一人称不能成为叶子的 profile。
 - 栖单方面的建议不是叶子的事实或双方约定；只有叶子明确接受或双方实际执行后才可提取。
 
@@ -105,7 +105,7 @@ SHADOW_SYSTEM_PROMPT = """你是“连续感记忆 Shadow Preview”提取器，
 
 ## 输出 JSON
 只返回严格 JSON，不要 Markdown、说明或代码围栏。每条 candidate 必须包含非空 title，并使用以下字段：
-{"candidates":[{"content":"...","continuity_type":"thread","continuity_data":{"open_question":"...","current_state":"...","next_expected":null,"closure_criteria":[],"closure_summary":null,"closure_reason":null,"opened_at":null,"closed_at":null,"abstract_retrieval_hints":[],"concrete_retrieval_hints":[]},"source_type":"natural_chat","thread_state":"open","importance":5,"confidence":0.85,"evidence_message_ids":[123,124],"evidence_start_time":null,"evidence_end_time":null,"source_time":null,"memory_time":null,"time_precision":"unknown","title":"...","reason":"...","recall_scene":"...","recall_tags":[]}]}"""
+{"candidates":[{"content":"...","continuity_type":"thread","continuity_data":{"open_question":"...","current_state":"...","next_expected":null,"closure_criteria":[],"closure_summary":null,"closure_reason":null,"opened_at":null,"closed_at":null,"abstract_retrieval_hints":[],"concrete_retrieval_hints":[]},"source_type":null,"thread_state":"open","importance":5,"confidence":0.85,"evidence_message_ids":[123,124],"evidence_start_time":null,"evidence_end_time":null,"source_time":null,"memory_time":null,"time_precision":"unknown","title":"...","reason":"...","recall_scene":"...","recall_tags":[]}]}"""
 
 # Formal execution shares the validated prompt verbatim except for the
 # Shadow-only observation label. Keeping this derived avoids prompt drift.
@@ -393,9 +393,17 @@ def parse_shadow_output(
             continue
 
         continuity_type = str(raw.get("continuity_type") or "").strip().casefold()
-        source_type = str(raw.get("source_type") or "").strip().casefold()
-        if continuity_type not in CONTINUITY_TYPES or source_type not in SOURCE_TYPES:
+        if continuity_type not in CONTINUITY_TYPES:
             continue
+        # source_type 可为 null 或缺失：不再因此丢弃整条合法候选；
+        # 非空非法值仍然拒绝该候选。
+        source_type: str | None = None
+        if raw.get("source_type") is not None:
+            source_type = str(raw["source_type"]).strip().casefold()
+            if not source_type:
+                source_type = None
+            elif source_type not in SOURCE_TYPES:
+                continue
 
         evidence_ids: list[int] = []
         for candidate in raw.get("evidence_message_ids") or []:

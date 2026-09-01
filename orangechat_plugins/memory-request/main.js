@@ -155,8 +155,9 @@ function cleanMemoryPayload(params) {
   }
 
   const importance = integer(input.importance, 5);
-  if (importance === null || importance < 1 || importance > 10) {
-    return failure('importance 必须是 1-10 的整数', 'invalid_importance');
+  const continuityValue = integer(input.continuity_value, importance);
+  if (importance === null || importance < 1 || importance > 10 || continuityValue === null || continuityValue < 1 || continuityValue > 10) {
+    return failure('importance 和 continuity_value 必须是 1-10 的整数', 'invalid_importance');
   }
 
   const mode = text(input.update_mode).toLowerCase() || 'append';
@@ -174,11 +175,20 @@ function cleanMemoryPayload(params) {
     return failure('interaction_rule 必须使用 replace 和稳定 memory_key', 'invalid_interaction_rule_mode');
   }
 
+  const subject = text(input.subject).toLowerCase() || 'shared';
+  if (['yezi', 'qi', 'shared', 'project', 'other'].indexOf(subject) < 0) {
+    return failure('subject 无效', 'invalid_subject');
+  }
   const sourceType = text(input.source_type).toLowerCase() || 'natural_chat';
   const sourceTypes = ['natural_chat', 'persona_prompt', 'code', 'document', 'quote', 'roleplay', 'tool_result', 'system_meta', 'unknown'];
   if (sourceTypes.indexOf(sourceType) < 0) {
     return failure('source_type 无效', 'invalid_source_type');
   }
+  const retentionClass = text(input.retention_class).toLowerCase() || 'normal';
+  if (['normal', 'core'].indexOf(retentionClass) < 0) {
+    return failure('retention_class 必须是 normal 或 core', 'invalid_retention_class');
+  }
+
   const cfg = getConfig();
   const payload = {
     assistant_id: cfg.assistantId,
@@ -188,7 +198,11 @@ function cleanMemoryPayload(params) {
     thread_state: kind === 'thread' ? threadState : null,
     continuity_data: data,
     importance: importance,
+    continuity_value: continuityValue,
+    subject: subject,
     source_type: sourceType,
+    retention_class: retentionClass,
+    participants: stringList(input.participants, ['yezi', 'qi', 'other'], ['yezi', 'qi']).slice(0, 3),
     update_mode: mode,
   };
   if (key) payload.memory_key = key;

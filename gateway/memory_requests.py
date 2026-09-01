@@ -110,6 +110,29 @@ def _clean_importance(value: Any) -> int:
     return importance
 
 
+_SOURCE_TYPES = frozenset({
+    "natural_chat", "persona_prompt", "code", "document", "quote",
+    "roleplay", "tool_result", "system_meta", "unknown",
+})
+
+
+def _clean_source_type(value: Any) -> str | None:
+    """source_type is optional: missing/null/blank normalize to NULL.
+
+    非空时只接受固定枚举；绝不自动补 natural_chat 或 unknown。
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise MemoryRequestError("invalid_payload", "source_type must be a string")
+    source_type = value.strip().casefold()
+    if not source_type:
+        return None
+    if source_type not in _SOURCE_TYPES:
+        raise MemoryRequestError("invalid_payload", "invalid source_type")
+    return source_type
+
+
 def _clean_recall_scene(value: Any) -> str | None:
     """Normalize the AI-supplied recall scene without business length limits."""
     if value is None:
@@ -249,9 +272,7 @@ def validate_memory_request(payload: Any, idempotency_key: str = "") -> dict[str
         continuity_data = validate_continuity_data(continuity_type, thread_state, payload.get("continuity_data"))
     except ContinuityDataError as exc:
         raise MemoryRequestError("invalid_payload", str(exc)) from exc
-    source_type = str(payload.get("source_type") or "natural_chat").strip().casefold()
-    if source_type not in {"natural_chat", "persona_prompt", "code", "document", "quote", "roleplay", "tool_result", "system_meta", "unknown"}:
-        raise MemoryRequestError("invalid_payload", "invalid source_type")
+    source_type = _clean_source_type(payload.get("source_type"))
 
     supplied_key = str(idempotency_key or "").strip()
     if supplied_key:

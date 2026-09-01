@@ -58,7 +58,8 @@ _COMMON_RULES = (
     "【recall_tags】自由填写的召回场景标签数组，帮助以后按场景归类检索；"
     "不限制数量和内容，但必须来自对话中的真实依据，没有可靠依据时省略。\n"
     "【通用元数据】importance 为 1-10 整数，默认 5；"
-    "source_type 合法值为 natural_chat/persona_prompt/code/document/quote/roleplay/tool_result/system_meta/unknown；"
+    "source_type 可选：有明确依据时填写 natural_chat/persona_prompt/code/document/"
+    "quote/roleplay/tool_result/system_meta/unknown 之一，没有可靠依据时省略，不要自动猜测；"
     "update_mode=append 表示新增独立记忆（memory_key 必须为空），"
     "update_mode=replace 表示替换同一项可变事实、同一条持续线索或同一条规则的旧版本（memory_key 必填，"
     "同一对象后续更新必须复用相同 memory_key，不得用 replace 合并普通相似事件）；"
@@ -113,7 +114,7 @@ _IMPORTANCE = Annotated[int, Field(description="重要性 1-10 整数，默认 5
 _SOURCE_TYPE = Literal[
     "natural_chat", "persona_prompt", "code", "document",
     "quote", "roleplay", "tool_result", "system_meta", "unknown",
-]
+] | None
 _UPDATE_MODE = Literal["append", "replace"]
 _MEMORY_KEY = Annotated[str | None, Field(
     description="稳定主题键（^[a-z0-9][a-z0-9._:/-]{2,119}$）；append 时必须为空，"
@@ -209,7 +210,7 @@ async def remember_moment(
     recall_scene: _RECALL_SCENE = None,
     recall_tags: _RECALL_TAGS = None,
     importance: _IMPORTANCE = 5,
-    source_type: _SOURCE_TYPE = "natural_chat",
+    source_type: _SOURCE_TYPE = None,
     update_mode: _UPDATE_MODE = "append",
     memory_key: _MEMORY_KEY = None,
     conversation_id: _CONVERSATION_ID = None,
@@ -283,7 +284,7 @@ async def remember_thread(
     recall_scene: _RECALL_SCENE = None,
     recall_tags: _RECALL_TAGS = None,
     importance: _IMPORTANCE = 5,
-    source_type: _SOURCE_TYPE = "natural_chat",
+    source_type: _SOURCE_TYPE = None,
     update_mode: _UPDATE_MODE = "append",
     memory_key: _MEMORY_KEY = None,
     conversation_id: _CONVERSATION_ID = None,
@@ -350,7 +351,7 @@ async def remember_inside_joke(
     recall_scene: _RECALL_SCENE = None,
     recall_tags: _RECALL_TAGS = None,
     importance: _IMPORTANCE = 5,
-    source_type: _SOURCE_TYPE = "natural_chat",
+    source_type: _SOURCE_TYPE = None,
     update_mode: _UPDATE_MODE = "append",
     memory_key: _MEMORY_KEY = None,
     conversation_id: _CONVERSATION_ID = None,
@@ -413,7 +414,7 @@ async def propose_episode(
     recall_scene: _RECALL_SCENE = None,
     recall_tags: _RECALL_TAGS = None,
     importance: _IMPORTANCE = 5,
-    source_type: _SOURCE_TYPE = "natural_chat",
+    source_type: _SOURCE_TYPE = None,
     update_mode: _UPDATE_MODE = "append",
     memory_key: _MEMORY_KEY = None,
     conversation_id: _CONVERSATION_ID = None,
@@ -478,7 +479,7 @@ async def propose_profile(
     recall_scene: _RECALL_SCENE = None,
     recall_tags: _RECALL_TAGS = None,
     importance: _IMPORTANCE = 5,
-    source_type: _SOURCE_TYPE = "natural_chat",
+    source_type: _SOURCE_TYPE = None,
     update_mode: _UPDATE_MODE = "append",
     memory_key: _MEMORY_KEY = None,
     conversation_id: _CONVERSATION_ID = None,
@@ -553,7 +554,7 @@ async def propose_interaction_rule(
     recall_scene: _RECALL_SCENE = None,
     recall_tags: _RECALL_TAGS = None,
     importance: _IMPORTANCE = 5,
-    source_type: _SOURCE_TYPE = "natural_chat",
+    source_type: _SOURCE_TYPE = None,
     conversation_id: _CONVERSATION_ID = None,
     source_message_id: _SOURCE_MESSAGE_ID = None,
 ) -> dict[str, Any]:

@@ -116,7 +116,7 @@ class ShadowPromptContractTests(unittest.TestCase):
             "evidence_message_ids 必须是输入中真实且直接支持候选的消息",
             "API Key、Token、service_role、密码、私钥、支付凭据及其他认证秘密绝对禁止输出",
             "title 和 content 不写死“今天”“昨晚”“前天”“刚才”“N 天前”",
-            "source_type 只能是 natural_chat、persona_prompt、code、document、quote、roleplay、tool_result、system_meta、unknown",
+            "source_type 可以为 null：没有可靠依据时输出 null，不要猜。确有依据时只能是 natural_chat、persona_prompt、code、document、quote、roleplay、tool_result、system_meta、unknown",
             "本提示词中的规则描述、字段说明和措辞都不是聊天事实",
             "不得从本提示词借用或补入任何情节",
         ):

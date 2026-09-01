@@ -177,13 +177,20 @@ grant execute on function public.search_memories_by_keywords(text[], integer) to
 --    replace keeps their grants and the metadata trigger attachment intact.
 -- ---------------------------------------------------------------------------
 
--- Same signature; the decay divisor keeps only the retained importance term
--- and the fragment-only auto-archive gate disappears with the layer column.
+-- Same signature; with the layer column retired the heat task decays heat
+-- only. It never flips is_active: automatic archiving is suspended, the
+-- archived_count outputs stay 0 for compatibility, and already-archived rows
+-- are neither archived further nor reactivated.
+-- SECURITY DEFINER like the other internal maintenance RPCs (digest commit,
+-- continuity commit): service_role is the only caller, and the memories CHECK
+-- constraints evaluate validate_continuity_data with the caller's privileges,
+-- which service_role does not hold.
 create or replace function public.run_memory_heat_decay(
     run_at timestamptz default now()
 )
 returns jsonb
 language plpgsql
+security definer
 set search_path to 'public'
 as $function$
 declare
@@ -191,7 +198,6 @@ declare
     v_run_date date;
     v_elapsed_days integer;
     v_updated_count integer := 0;
-    v_archived_count integer := 0;
 begin
     v_run_date := timezone('Asia/Shanghai', v_run_at)::date;
 
@@ -235,45 +241,27 @@ begin
                         )
                     )
                 )
-            ) as new_heat,
-            coalesce(memory.last_recalled_at, memory.created_at, v_run_at) as reference_at
+            ) as new_heat
         from public.memories as memory
         where memory.is_active = true
           and memory.verified = 'verified'
     ),
     changed as (
         update public.memories as memory
-        set
-            heat = round(candidate.new_heat::numeric, 2)::double precision,
-            is_active = case
-                when memory.importance <= 3
-                 and candidate.new_heat < 5.0
-                 and candidate.reference_at < v_run_at - interval '30 days'
-                then false
-                else true
-            end
+        set heat = round(candidate.new_heat::numeric, 2)::double precision
         from candidates as candidate
         where memory.id = candidate.id
-          and (
-              abs(candidate.new_heat - memory.heat) >= 0.005
-              or (
-                  memory.importance <= 3
-                  and candidate.new_heat < 5.0
-                  and candidate.reference_at < v_run_at - interval '30 days'
-              )
-          )
-        returning not memory.is_active as archived
+          and abs(candidate.new_heat - memory.heat) >= 0.005
+        returning memory.id
     )
-    select
-        count(*)::integer,
-        count(*) filter (where changed.archived)::integer
-    into v_updated_count, v_archived_count
+    select count(*)::integer
+    into v_updated_count
     from changed;
 
     update public.memory_heat_runs
     set
         updated_count = v_updated_count,
-        archived_count = v_archived_count,
+        archived_count = 0,
         executed_at = v_run_at
     where run_date = v_run_date;
 
@@ -282,7 +270,7 @@ begin
         'run_date', v_run_date,
         'elapsed_days', v_elapsed_days,
         'updated_count', v_updated_count,
-        'archived_count', v_archived_count
+        'archived_count', 0
     );
 end;
 $function$;
@@ -1093,7 +1081,9 @@ begin
         p_idempotency_key,'pending',p_source,p_memory_key,p_update_mode,
         case when p_source_message_id is null then '{}'::bigint[] else array[p_source_message_id] end,
         p_continuity_type,p_thread_state,null,1,p_continuity_data,
-        p_source_type,
+        -- source_type is optional and stays NULL when unprovided; a blank
+        -- string is normalized to NULL and never guessed into a real value.
+        nullif(btrim(coalesce(p_source_type,'')),''),
         v_recall_scene,v_recall_tags,v_evidence_time,v_evidence_time,v_evidence_time,v_evidence_precision
     )
     returning * into v_request;
@@ -1104,7 +1094,7 @@ $function$;
 drop function if exists public.write_memory_direct_v1(
     text, text, bigint, text, text, text[], integer, text, text, text,
     integer, text, text, text, text, smallint, jsonb, text, text, integer,
-    text, text[], text, text, text[], extensions.vector
+    text, text[], text, text, text, text[], extensions.vector
 );
 
 create or replace function public.write_memory_direct_v1(
@@ -1380,7 +1370,9 @@ begin
             else nullif(p_item->>'memory_time','')::timestamptz
         end,
         coalesce(p_item->>'time_precision','unknown'),p_run.id,v_embedding,v_dedupe,v_dedupe_reason,v_related_request,v_related_memory,
-        v_type,p_item->>'source_type',p_item->>'thread_state',
+        v_type,
+        nullif(btrim(coalesce(p_item->>'source_type','')),''),
+        p_item->>'thread_state',
         nullif(p_item->>'evidence_start_time','')::timestamptz,nullif(p_item->>'evidence_end_time','')::timestamptz,
         v_evidence_precision,
         null,1,p_item->'continuity_data',
@@ -1508,9 +1500,9 @@ alter table public.memory_requests
 -- 5. Grants: the two RPCs whose signatures changed need fresh grants; the
 --    rebuilt same-signature functions keep theirs from earlier migrations.
 -- ---------------------------------------------------------------------------
-revoke all on function public.create_memory_request_v4(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,text,text,text[]) from public,anon,authenticated;
-revoke all on function public.write_memory_direct_v1(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,text,text,text,text[],extensions.vector) from public,anon,authenticated;
-grant execute on function public.create_memory_request_v4(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,text,text,text[]) to service_role;
-grant execute on function public.write_memory_direct_v1(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,text,text,text,text[],extensions.vector) to service_role;
+revoke all on function public.create_memory_request_v4(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,text,text[]) from public,anon,authenticated;
+revoke all on function public.write_memory_direct_v1(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,text,text,text[],extensions.vector) from public,anon,authenticated;
+grant execute on function public.create_memory_request_v4(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,text,text[]) to service_role;
+grant execute on function public.write_memory_direct_v1(text,text,bigint,text,text,text[],integer,text,text,text,integer,text,text,text,text,smallint,jsonb,text,text,text,text,text[],extensions.vector) to service_role;
 
 commit;
