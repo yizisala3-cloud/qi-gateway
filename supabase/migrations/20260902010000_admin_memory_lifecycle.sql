@@ -1,7 +1,7 @@
 -- Admin memory lifecycle: user-authored formal memories, full editing,
 -- type-change versioning, last type-change undo, and natural-archive restore.
 --
--- Five purpose-built atomic RPCs replace generic table PATCHes for every
+-- Six purpose-built atomic RPCs replace generic table PATCHes for every
 -- memory-authoring flow. The browser never controls assistant_id, source,
 -- verified, is_active, heat, content_hash, continuity_id, or embeddings:
 -- each RPC derives or guards them server-side inside one transaction. The
@@ -122,15 +122,28 @@ language plpgsql
 immutable
 set search_path to 'public'
 as $function$
+declare
+    v_text text := btrim(coalesce(p_memory_time, ''));
 begin
-    if nullif(btrim(coalesce(p_memory_time, '')), '') is null then
+    if v_text = '' then
         return null;
     end if;
-    if p_time_precision = 'day'
-       and btrim(p_memory_time) ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' then
-        return btrim(p_memory_time)::date::timestamp at time zone 'Asia/Shanghai';
+    -- Stable business error instead of a raw PostgreSQL cast failure.
+    if v_text !~ '^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?([Zz]|[+-]\d{2}:?\d{2})?)?$' then
+        raise exception 'admin_memory_invalid_memory_time';
     end if;
-    return btrim(p_memory_time)::timestamptz;
+    -- Date-only always means a calendar day in Asia/Shanghai, with or
+    -- without 'day' precision, never the session's TimeZone.
+    if v_text ~ '^\d{4}-\d{2}-\d{2}$' then
+        return v_text::date::timestamp at time zone 'Asia/Shanghai';
+    end if;
+    -- An explicit offset (or Z) is honoured exactly as written.
+    if v_text ~ '([Zz]|[+-]\d{2}:?\d{2})$' then
+        return v_text::timestamptz;
+    end if;
+    -- Naive wall-clock input is pinned to the project-fixed Asia/Shanghai
+    -- rule so the stored instant never depends on the session TimeZone.
+    return (regexp_replace(v_text, ' ', 'T') || '+08:00')::timestamptz;
 end;
 $function$;
 
@@ -208,6 +221,8 @@ declare
     v_continuity_id uuid;
     v_evidence jsonb;
     v_memory public.memories%rowtype;
+    v_memory_time timestamptz;
+    v_time_precision text;
 begin
     if v_assistant_id is null then
         raise exception 'admin_memory_assistant_required';
@@ -255,11 +270,31 @@ begin
 
     perform pg_advisory_xact_lock(hashtextextended(v_assistant_id, 0));
 
+    -- content_hash carries a table-wide unique constraint: refuse a
+    -- duplicate with the stable business code before anything is written,
+    -- so a rejected create never leaves rows or continuity objects behind.
+    -- Other rows' hashes are never cleared here: hash release belongs
+    -- exclusively to the confirmed same-chain type-change flow.
+    if exists (
+        select 1 from public.memories as other
+        where other.content_hash = p_content_hash
+    ) then
+        raise exception 'admin_memory_content_exists';
+    end if;
+
     insert into public.memory_continuity_objects (assistant_id)
     values (v_assistant_id)
     returning continuity_id into v_continuity_id;
 
     v_evidence := public.admin_memory_resolve_evidence(v_assistant_id, p_evidence_message_ids);
+
+    -- Empty event time always stores precision 'unknown': claiming minute,
+    -- hour, or day accuracy for a time that does not exist is inconsistent.
+    v_memory_time := public.admin_memory_normalize_event_time(p_memory_time, p_time_precision);
+    v_time_precision := coalesce(nullif(btrim(coalesce(p_time_precision, '')), ''), 'unknown');
+    if v_memory_time is null then
+        v_time_precision := 'unknown';
+    end if;
 
     insert into public.memories (
         content, title, tags, heat, importance, embedding,
@@ -286,8 +321,8 @@ begin
         -- source_time is the AI pipeline's own evidence clock; the admin
         -- console has no AI source, so it always stays NULL.
         null,
-        public.admin_memory_normalize_event_time(p_memory_time, p_time_precision),
-        coalesce(nullif(btrim(coalesce(p_time_precision, '')), ''), 'unknown'),
+        v_memory_time,
+        v_time_precision,
         (v_evidence->>'start')::timestamptz,
         (v_evidence->>'end')::timestamptz,
         (v_evidence->>'precision'),
@@ -335,6 +370,8 @@ declare
     v_write_continuity boolean := false;
     v_content text;
     v_evidence jsonb;
+    v_memory_time timestamptz;
+    v_time_precision text;
     v_updated public.memories%rowtype;
     v_new_continuity_id uuid;
 begin
@@ -462,6 +499,31 @@ begin
         raise exception 'admin_memory_invalid_tags';
     end if;
 
+    -- Event time and precision are decided together: clearing the time
+    -- always stores 'unknown', and a time-less row can never claim
+    -- minute/hour/day accuracy, on every write path alike.
+    v_memory_time := v_memory.memory_time;
+    v_time_precision := v_memory.time_precision;
+    if p_patch ? 'memory_time' then
+        v_memory_time := public.admin_memory_normalize_event_time(
+            p_patch->>'memory_time',
+            case when p_patch ? 'time_precision'
+                 then nullif(btrim(coalesce(p_patch->>'time_precision', '')), '')
+                 else v_memory.time_precision end);
+        if v_memory_time is null then
+            v_time_precision := 'unknown';
+        elsif p_patch ? 'time_precision' then
+            v_time_precision := coalesce(
+                nullif(btrim(coalesce(p_patch->>'time_precision', '')), ''), 'unknown');
+        end if;
+    elsif p_patch ? 'time_precision' then
+        v_time_precision := coalesce(
+            nullif(btrim(coalesce(p_patch->>'time_precision', '')), ''), 'unknown');
+        if v_memory_time is null then
+            v_time_precision := 'unknown';
+        end if;
+    end if;
+
     if p_patch ? 'evidence_message_ids' then
         v_evidence := public.admin_memory_resolve_evidence(
             coalesce(v_memory.assistant_id, nullif(btrim(coalesce(p_assistant_id, '')), '')),
@@ -501,18 +563,8 @@ begin
             when p_patch ? 'source_type'
             then nullif(btrim(coalesce(p_patch->>'source_type', '')), '')
             else memory.source_type end,
-        memory_time = case
-            when p_patch ? 'memory_time'
-            then public.admin_memory_normalize_event_time(
-                     p_patch->>'memory_time',
-                     case when p_patch ? 'time_precision'
-                          then nullif(btrim(coalesce(p_patch->>'time_precision', '')), '')
-                          else memory.time_precision end)
-            else memory.memory_time end,
-        time_precision = case
-            when p_patch ? 'time_precision'
-            then coalesce(nullif(btrim(coalesce(p_patch->>'time_precision', '')), ''), 'unknown')
-            else memory.time_precision end,
+        memory_time = v_memory_time,
+        time_precision = v_time_precision,
         recall_scene = case
             when p_patch ? 'recall_scene'
             then nullif(btrim(coalesce(p_patch->>'recall_scene', '')), '')
@@ -625,6 +677,8 @@ declare
     v_evidence jsonb;
     v_removed_earlier boolean := false;
     v_same_hash boolean := false;
+    v_memory_time timestamptz;
+    v_time_precision text;
 begin
     if char_length(v_content) not between 5 and 600 then
         raise exception 'admin_memory_invalid_content';
@@ -715,6 +769,13 @@ begin
         v_source.assistant_id, p_evidence_message_ids
     );
 
+    -- Empty event time always stores precision 'unknown', matching create.
+    v_memory_time := public.admin_memory_normalize_event_time(p_memory_time, p_time_precision);
+    v_time_precision := coalesce(nullif(btrim(coalesce(p_time_precision, '')), ''), 'unknown');
+    if v_memory_time is null then
+        v_time_precision := 'unknown';
+    end if;
+
     -- Retire the source version FIRST: the one-active-per-identity index
     -- must never see two active rows, even inside this transaction.
     update public.memories
@@ -777,8 +838,8 @@ begin
         case when p_continuity_type = 'thread' then p_thread_state else null end,
         public.admin_memory_ids_from_evidence(v_evidence),
         null,
-        public.admin_memory_normalize_event_time(p_memory_time, p_time_precision),
-        coalesce(nullif(btrim(coalesce(p_time_precision, '')), ''), 'unknown'),
+        v_memory_time,
+        v_time_precision,
         (v_evidence->>'start')::timestamptz,
         (v_evidence->>'end')::timestamptz,
         (v_evidence->>'precision'),

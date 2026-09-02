@@ -19,7 +19,6 @@ from .config import cfg
 from .db import get_client
 from .memory_continuity_schema import (
     CONTINUITY_TYPES,
-    SCHEMA_VERSION,
     THREAD_STATES,
     ContinuityDataError,
     validate_continuity_data,

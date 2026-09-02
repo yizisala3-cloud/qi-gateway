@@ -220,6 +220,28 @@ class AdminMemoryLifecycleMigrationContractTests(unittest.TestCase):
         # 未分类旧记忆只编辑普通字段时不触发连续感校验。
         self.assertIn("admin_memory_class_required", body)
 
+    def test_create_refuses_duplicate_hash_after_the_advisory_lock(self):
+        body = self._section("create_admin_memory_v1")
+        lock_at = body.find("pg_advisory_xact_lock")
+        check_at = body.find("admin_memory_content_exists")
+        self.assertGreater(check_at, lock_at, "查重必须发生在 assistant 串行锁之后")
+        insert_at = body.find("insert into public.memories")
+        self.assertLess(check_at, insert_at, "查重必须发生在任何写入之前")
+
+    def test_empty_time_always_stores_unknown_precision(self):
+        for name in ("create_admin_memory_v1", "edit_admin_memory_v1", "change_memory_type_v1"):
+            with self.subTest(rpc=name):
+                body = self._section(name)
+                self.assertIn("'unknown'", body)
+                self.assertIn("v_memory_time is null then", body)
+
+    def test_event_time_normalization_needs_no_session_timezone(self):
+        body = self._section("admin_memory_normalize_event_time")
+        self.assertIn("at time zone 'asia/shanghai'", body)
+        self.assertIn("admin_memory_invalid_memory_time", body)
+        # 带偏移时间按其偏移解释；naive 时间补 +08:00，绝不落回会话时区。
+        self.assertIn("'+08:00')::timestamptz", body)
+
     def test_content_hash_is_server_maintained(self):
         # 哈希只从服务端参数落入写路径；前端无法经 generic PATCH 绕过。
         create_body = self._section("create_admin_memory_v1")

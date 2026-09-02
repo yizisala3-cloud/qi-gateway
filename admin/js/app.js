@@ -1,10 +1,10 @@
 // app.js - shell: login, sidebar, routing, theme, mobile drawers
-import { NAV, ROUTE_INDEX } from './routes.js?v=20260902-adminmem2';
-import { loading, errorBlock, icon, esc } from './ui.js?v=20260902-adminmem2';
-import { gw, getToken, setToken, clearToken } from './api.js?v=20260902-adminmem2';
+import { NAV, ROUTE_INDEX } from './routes.js?v=20260902-adminmem3';
+import { loading, errorBlock, icon, esc } from './ui.js?v=20260902-adminmem3';
+import { gw, getToken, setToken, clearToken } from './api.js?v=20260902-adminmem3';
 
 const DEFAULT_ROUTE = 'memories';
-const ASSET_VERSION = '20260902-adminmem2';
+const ASSET_VERSION = '20260902-adminmem3';
 
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);

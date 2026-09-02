@@ -1,9 +1,12 @@
 // pages/_memory_form.js - 手工新增 / 完整编辑 / 修改类型 共用动态表单
 // 六类连续感结构全部由本模块的中文动态表单生成，用户永不直接编辑 JSON；
 // 普通标签与召回标签是两套独立控件；召回向量和 content_hash 均由服务端维护。
-import { gw, esc } from '../api.js?v=20260902-adminmem2';
-import { modal, confirm, toast, icon } from '../ui.js?v=20260902-adminmem2';
-import { sameInstant, stableJson, buildEditPatch } from './_memory_patch.js?v=20260902-adminmem2';
+import { gw, esc } from '../api.js?v=20260902-adminmem3';
+import { modal, confirm, toast, icon } from '../ui.js?v=20260902-adminmem3';
+import {
+  toDatetimeLocal, fromDatetimeLocal, stableJson, buildEditPatch,
+  isSameMinute, mergeContinuityForSubmit, continuityEquals,
+} from './_memory_patch.js?v=20260902-adminmem3';
 
 /* ---------- 枚举与字段定义 ---------- */
 
@@ -56,6 +59,13 @@ const TIME_PRECISIONS = [
 ];
 
 const ARRAY_LIMIT = { count: 8, chars: 120 };
+
+/** 每个类型的类型专属时间字段键名（thread/episode/inside_joke/profile/interaction_rule）。 */
+function timeKeysFor(type) {
+  return (TYPE_FIELDS[type] || [])
+    .filter((f) => f.kind === 'time')
+    .map((f) => f.k);
+}
 
 /* 每类字段：k=键名，label=中文名，kind=控件，req=必填，hint=用途说明，
    opts=枚举选项，cond=(state)=>是否显示（thread 结束字段专用）。 */
@@ -148,14 +158,6 @@ const TYPE_FIELDS = {
 };
 
 /* ---------- 小工具 ---------- */
-
-function toDatetimeLocal(value) {
-  if (!value) return '';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
 
 function parseArrayInput(text) {
   return String(text || '')
@@ -569,14 +571,14 @@ export async function openMemoryForm({ mode = 'create', memory = null, onSaved =
         tags: values.tags,
         importance: values.importance,
         source_type: values.sourceType || null,
-        memory_time: values.memoryTime || null,
+        memory_time: values.memoryTime ? fromDatetimeLocal(values.memoryTime) : null,
         time_precision: values.precision || null,
         recall_scene: values.recallScene || null,
         recall_tags: values.recallTags,
         evidence_message_ids: values.evidenceIds.map(Number),
         continuity_type: type,
         thread_state: threadState,
-        continuity_data: data,
+        continuity_data: mergeContinuityForSubmit(data, null, timeKeysFor(type)),
       };
       url = '/admin/api/memories/manual';
       successText = '记忆已写入正式记忆库';
@@ -592,14 +594,14 @@ export async function openMemoryForm({ mode = 'create', memory = null, onSaved =
         tags: values.tags,
         importance: values.importance,
         source_type: values.sourceType || null,
-        memory_time: values.memoryTime || null,
+        memory_time: values.memoryTime ? fromDatetimeLocal(values.memoryTime) : null,
         time_precision: values.precision || null,
         recall_scene: values.recallScene || null,
         recall_tags: values.recallTags,
         evidence_message_ids: values.evidenceIds.map(Number),
         continuity_type: type,
         thread_state: threadState,
-        continuity_data: data,
+        continuity_data: mergeContinuityForSubmit(data, null, timeKeysFor(type)),
       };
       url = `/admin/api/memories/${encodeURIComponent(memory.id)}/change-type`;
       successText = '已保存为新版本，原版本保留为直接上一版本';
@@ -612,15 +614,18 @@ export async function openMemoryForm({ mode = 'create', memory = null, onSaved =
         // 已分类：类型固定，只同步真正改动的结构；未触碰就不校验也不提交，
         // 结构不完整的旧记忆只编辑普通字段时不会被强迫补全。结构变化必须
         // 同时携带当前 continuity_type，thread 类型带完整 thread_state。
+        // 时间字段做分钟级语义比较：未改动就原样保留存储值，绝不误判。
         const type = memory.continuity_type;
         const { data, threadState } = readContinuitySection(rootEl, type);
-        const continuityDirty = stableJson(data) !== stableJson(memory.continuity_data || {})
+        const timeKeys = timeKeysFor(type);
+        const merged = mergeContinuityForSubmit(data, memory.continuity_data || {}, timeKeys);
+        const continuityDirty = !continuityEquals(merged, memory.continuity_data || {}, timeKeys)
           || (threadState || null) !== (memory.thread_state || null);
         if (continuityDirty) {
           const problem = validateContinuity(type, data, threadState);
           if (problem) { toast(problem, 'err'); return; }
           patch.continuity_type = type;
-          patch.continuity_data = data;
+          patch.continuity_data = merged;
           if (type === 'thread') patch.thread_state = threadState;
         }
       } else if (typeSelect && typeSelect.value) {

@@ -329,6 +329,20 @@ class CreateAdminMemoryTests(ServiceTestCase):
         self.assertEqual(ctx.exception.code, "recall_embedding_failed")
         self.assertFalse(self.client.calls)
 
+    def test_duplicate_content_maps_to_stable_409(self):
+        self.client.outcomes["create_admin_memory_v1"] = _rpc_error(
+            "admin_memory_content_exists"
+        )
+        with self.assertRaises(AdminMemoryError) as ctx:
+            admin_memory.create_admin_memory({
+                "content": "这条正文与库中现有记忆完全相同。",
+                "continuity_type": "moment", "continuity_data": MOMENT_DATA,
+            })
+        self.assertEqual(ctx.exception.code, "admin_memory_content_exists")
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(str(ctx.exception), "相同内容的记忆已存在")
+        self.assertEqual(len(self.client.calls), 1)
+
     def test_no_evidence_means_no_fabricated_times(self):
         self.client.outcomes["create_admin_memory_v1"] = CREATE_OK
         admin_memory.create_admin_memory({

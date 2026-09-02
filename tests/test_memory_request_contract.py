@@ -23,7 +23,7 @@ INDEX_HTML = ROOT / "admin" / "index.html"
 APP_JS = ROOT / "admin" / "js" / "app.js"
 ADMIN_API = ROOT / "gateway" / "admin_api.py"
 MEMORY_EXTRACT = ROOT / "gateway" / "memory_extract.py"
-ASSET_VERSION = "20260902-adminmem2"
+ASSET_VERSION = "20260902-adminmem3"
 
 
 class MemoryRequestMigrationContractTests(unittest.TestCase):

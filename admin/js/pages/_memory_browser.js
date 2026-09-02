@@ -1,12 +1,12 @@
 // pages/_memory_browser.js - shared library/requests browser with detail panel
-import { gw, query, update, count, esc } from '../api.js?v=20260902-adminmem2';
+import { gw, query, update, count, esc } from '../api.js?v=20260902-adminmem3';
 import {
   loading, empty, errorBlock, banner, tag, heatTag, impTag, pagerHtml,
   toast, modal, confirm, delegate, icon, fmtDate, createDetailPanel,
-} from '../ui.js?v=20260902-adminmem2';
-import { openMemoryForm } from './_memory_form.js?v=20260902-adminmem2';
+} from '../ui.js?v=20260902-adminmem3';
+import { openMemoryForm } from './_memory_form.js?v=20260902-adminmem3';
 
-export const ASSET_VERSION = '20260902-adminmem2';
+export const ASSET_VERSION = '20260902-adminmem3';
 
 const PAGE_SIZE = 20;
 const REQ_FETCH_LIMIT = 100;

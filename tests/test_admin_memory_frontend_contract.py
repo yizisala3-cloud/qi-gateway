@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BROWSER = ROOT / "admin" / "js" / "pages" / "_memory_browser.js"
 FORM = ROOT / "admin" / "js" / "pages" / "_memory_form.js"
 INDEX_HTML = ROOT / "admin" / "index.html"
-ASSET_VERSION = "20260902-adminmem2"
+ASSET_VERSION = "20260902-adminmem3"
 
 EMOJI_PATTERN = re.compile(
     "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F600-\U0001F64F]"

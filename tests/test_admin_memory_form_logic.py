@@ -1,15 +1,16 @@
-"""Executable frontend logic tests for the memory edit patch builder.
+"""Executable frontend logic tests for the edit patch builder and time helpers.
 
-The patch diff (independent time/precision comparison, unknown-precision
-normalization for cleared times) runs as a real ES module under Node. The
-repo's JS is served as browser ES modules without a package.json, so the
-runner copies the module and test script into a temp dir as ``.mjs`` files
-(Node then parses them as ESM) and rewrites the relative import. Skipped
-when no Node runtime is available; the nodejs-bin package provides one in
-the dev environment.
+The patch diff and the Asia/Shanghai time semantics run as a real ES module
+under Node via ``tests/admin_memory_form_logic.test.mjs``. Every result must
+be independent of the system timezone, so the suite is executed twice with
+``TZ=UTC`` and ``TZ=Asia/Shanghai`` and both runs must pass identically.
+Skipped when no Node runtime is available; the nodejs-bin package provides
+one in the dev environment.
 """
 
+import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,43 +20,52 @@ TEST_SCRIPT = ROOT / "tests" / "admin_memory_form_logic.test.mjs"
 PATCH_MODULE = ROOT / "admin" / "js" / "pages" / "_memory_patch.js"
 
 
-def _node_runner():
-    """Return a callable(list[str]) -> CompletedProcess, or None."""
-    import subprocess
-
+def _node_binary():
+    """Return a node executable path, or None."""
     node = shutil.which("node")
-    if not node:
-        try:
-            from nodejs import node as nodejs_module
+    if node:
+        return node
+    try:
+        from nodejs import node as nodejs_module
 
-            node = nodejs_module.path  # nodejs-bin bundles the real binary
-        except (ImportError, AttributeError):
-            return None
+        return nodejs_module.path  # nodejs-bin bundles the real binary
+    except (ImportError, AttributeError):
+        return None
 
-    def run(args):
-        return subprocess.run([node, *args], capture_output=True, text=True)
 
-    return run
+def _prepare_script(tmp: Path) -> Path:
+    """Copy the pure module + test script as .mjs (repo JS has no package.json)."""
+    shutil.copy(PATCH_MODULE, tmp / "_memory_patch.mjs")
+    script = TEST_SCRIPT.read_text(encoding="utf-8").replace(
+        "../admin/js/pages/_memory_patch.js", "./_memory_patch.mjs"
+    )
+    target = tmp / "form_logic.test.mjs"
+    target.write_text(script, encoding="utf-8")
+    return target
 
 
 class MemoryFormPatchLogicTests(unittest.TestCase):
-    def test_patch_builder_rules(self):
-        run = _node_runner()
-        if run is None:
-            self.skipTest("no Node runtime available")
-        with tempfile.TemporaryDirectory(prefix="qigate-form-logic-") as tmp:
-            tmp = Path(tmp)
-            shutil.copy(PATCH_MODULE, tmp / "_memory_patch.mjs")
-            script = TEST_SCRIPT.read_text(encoding="utf-8").replace(
-                "../admin/js/pages/_memory_patch.js", "./_memory_patch.mjs"
+    def _run_under_tz(self, node: str, tz: str) -> subprocess.CompletedProcess:
+        with tempfile.TemporaryDirectory(prefix="qigate-form-logic-") as tmp_name:
+            tmp = Path(tmp_name)
+            target = _prepare_script(tmp)
+            env = {**os.environ, "TZ": tz}
+            return subprocess.run(
+                [node, str(target)], capture_output=True, text=True, env=env,
             )
-            (tmp / "form_logic.test.mjs").write_text(script, encoding="utf-8")
-            proc = run([str(tmp / "form_logic.test.mjs")])
-        output = (proc.stdout or "") + (proc.stderr or "")
-        self.assertEqual(proc.returncode, 0, f"form logic tests failed:\n{output}")
-        self.assertNotIn("FAIL", output)
-        # 十个用例必须全部执行，防止脚本被静默截断。
-        self.assertGreaterEqual(output.count("PASS "), 10, output)
+
+    def test_patch_and_time_rules_are_timezone_independent(self):
+        node = _node_binary()
+        if node is None:
+            self.skipTest("no Node runtime available")
+        for tz in ("UTC", "Asia/Shanghai"):
+            with self.subTest(timezone=tz):
+                proc = self._run_under_tz(node, tz)
+                output = (proc.stdout or "") + (proc.stderr or "")
+                self.assertEqual(proc.returncode, 0, f"TZ={tz} failed:\n{output}")
+                self.assertNotIn("FAIL", output)
+                # 21 个用例必须全部执行，防止脚本被静默截断。
+                self.assertGreaterEqual(output.count("PASS "), 21, output)
 
 
 if __name__ == "__main__":

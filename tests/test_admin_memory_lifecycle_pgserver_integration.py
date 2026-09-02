@@ -196,17 +196,19 @@ class AdminMemoryLifecycleOnPostgresTests(unittest.TestCase):
     # -- 1. manual creation ------------------------------------------------
 
     def _create(self, content, ctype, data, *, thread_state=None, evidence=None,
-                recall_scene=None, recall_tags=None):
+                recall_scene=None, recall_tags=None, memory_time=None,
+                time_precision=None):
         # psycopg 需要显式的 Postgres 数组字面量；生产经 PostgREST 传 JSON 数组。
         if evidence:
             evidence = '{' + ','.join(str(int(i)) for i in evidence) + '}'
         return self._as_service_role(
-            "select public.create_admin_memory_v1(%s, %s, %s, null, %s, 6, %s, null, null,"
+            "select public.create_admin_memory_v1(%s, %s, %s, null, %s, 6, %s, %s, %s,"
             " %s, %s, %s::extensions.vector, %s, %s, %s, %s)",
             (
                 ASSISTANT, content, _sha256(content),
                 ["出行"],
                 None,
+                memory_time, time_precision,
                 recall_scene, recall_tags,
                 "[0.1,0.2,0.3]" if recall_scene else None,
                 ctype, thread_state,
@@ -382,6 +384,45 @@ class AdminMemoryLifecycleOnPostgresTests(unittest.TestCase):
              json.dumps(EPISODE_DATA, ensure_ascii=False)),
             "admin_memory_content_exists",
         )
+
+    # -- 1b. duplicate content on manual create ------------------------------
+
+    def test_create_rejects_duplicate_content_with_stable_error(self):
+        existing = "这条正文已经存在于正式记忆库中，不能重复新增。"
+        self._create(existing, "moment", MOMENT_DATA)
+        rows_before = self._one("select count(*) from public.memories")
+        objects_before = self._one("select count(*) from public.memory_continuity_objects")
+        original_hash = self._query(
+            "select content_hash from public.memories where content = %s",
+            (existing,),
+        )[0][0]
+
+        self._expect_rpc_error(
+            "select public.create_admin_memory_v1(%s, %s, %s, null, '{}', 6, null,"
+            " null, null, null, '{}', null::extensions.vector, 'thread', 'open', %s, null)",
+            (ASSISTANT, existing, _sha256(existing),
+             json.dumps(THREAD_DATA, ensure_ascii=False)),
+            "admin_memory_content_exists",
+        )
+
+        self.assertEqual(self._one("select count(*) from public.memories"), rows_before)
+        self.assertEqual(
+            self._one("select count(*) from public.memory_continuity_objects"),
+            objects_before,
+            "被拒绝的新增不得留下孤立的连续感对象",
+        )
+        self.assertEqual(
+            self._query(
+                "select content_hash from public.memories where content = %s",
+                (existing,),
+            )[0][0],
+            original_hash,
+            "原记忆哈希必须原样保留",
+        )
+
+        # 不同正文仍然可以正常新增。
+        created = self._create("正文完全不同的新记忆可以正常写入。", "moment", MOMENT_DATA)
+        self.assertIsNotNone(created["memory_id"])
 
     # -- 2b. unchanged-content type changes and hash handover --------------
 
@@ -763,6 +804,122 @@ class AdminMemoryLifecycleOnPostgresTests(unittest.TestCase):
         self._expect_rpc_error(
             "select public.restore_archived_memory_v1(%s)", (duplicate_id,),
             "admin_memory_continuity_conflict",
+        )
+
+    # -- 4b. event time normalization ----------------------------------------
+
+    def test_naive_memory_time_is_interpreted_as_asia_shanghai(self):
+        row = self._create("无时区时间按上海规则解释的记忆。", "moment", MOMENT_DATA,
+                           memory_time="2026-08-19 03:11", time_precision="minute")["memory_id"]
+        shanghai_wall = self._query(
+            "select to_char(memory_time at time zone 'Asia/Shanghai',"
+            " 'YYYY-MM-DD HH24:MI:SS') from public.memories where id = %s",
+            (row,),
+        )[0][0]
+        self.assertEqual(shanghai_wall, "2026-08-19 03:11:00")
+
+    def test_explicit_offsets_are_honoured_exactly(self):
+        row = self._create("带明确偏移的时间按其偏移解释。", "moment", MOMENT_DATA,
+                           memory_time="2026-08-19T03:11:00+08:00",
+                           time_precision="minute")["memory_id"]
+        utc_wall = self._query(
+            "select to_char(memory_time at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
+            " from public.memories where id = %s",
+            (row,),
+        )[0][0]
+        self.assertEqual(utc_wall, "2026-08-18 19:11:00")
+
+        row_z = self._create("Z 结尾的时间同样按明确时刻解释。", "moment", MOMENT_DATA,
+                             memory_time="2026-08-18T19:11:00Z",
+                             time_precision="minute")["memory_id"]
+        utc_wall_z = self._query(
+            "select to_char(memory_time at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
+            " from public.memories where id = %s",
+            (row_z,),
+        )[0][0]
+        self.assertEqual(utc_wall_z, "2026-08-18 19:11:00")
+
+    def test_invalid_memory_time_returns_stable_error(self):
+        self._expect_rpc_error(
+            "select public.create_admin_memory_v1(%s, %s, %s, null, '{}', 6, null,"
+            " %s, %s, null, '{}', null::extensions.vector, 'moment', null, %s, null)",
+            (ASSISTANT, "非法时间格式必须返回稳定错误码。", _sha256("非法时间格式必须返回稳定错误码。"),
+             "not-a-valid-time", "minute",
+             json.dumps(MOMENT_DATA, ensure_ascii=False)),
+            "admin_memory_invalid_memory_time",
+        )
+
+    def test_empty_time_forces_unknown_precision_on_every_path(self):
+        # 新增：空时间 + minute -> unknown。
+        created = self._create("空时间不声称分钟精度的记忆一。", "moment", MOMENT_DATA,
+                               memory_time="", time_precision="minute")["memory_id"]
+        self.assertEqual(
+            self._query("select time_precision, memory_time from public.memories where id = %s",
+                        (created,))[0],
+            ("unknown", None),
+        )
+        # 新增：空时间 + approximate -> unknown（近似于不存在的时间同样归一）。
+        created2 = self._create("空时间不声称近似精度的记忆二。", "moment", MOMENT_DATA,
+                                memory_time="", time_precision="approximate")["memory_id"]
+        self.assertEqual(
+            self._query("select time_precision from public.memories where id = %s",
+                        (created2,))[0][0],
+            "unknown",
+        )
+        # 有时间 + minute / approximate 正常保留。
+        with_time = self._create("有时间且精度为分钟的记忆。", "moment", MOMENT_DATA,
+                                 memory_time="2026-08-19 03:11",
+                                 time_precision="minute")["memory_id"]
+        self.assertEqual(
+            self._query("select time_precision from public.memories where id = %s",
+                        (with_time,))[0][0],
+            "minute",
+        )
+        with_time2 = self._create("有时间且精度为大概的记忆。", "moment", MOMENT_DATA,
+                                  memory_time="2026-08-19 03:11",
+                                  time_precision="approximate")["memory_id"]
+        self.assertEqual(
+            self._query("select time_precision from public.memories where id = %s",
+                        (with_time2,))[0][0],
+            "approximate",
+        )
+
+        # 类型修改：空时间 + day -> unknown。
+        b_id = self._change_type(
+            created, "空时间类型修改同样保存 unknown 精度。", "thread", THREAD_DATA,
+            thread_state="open",
+        )["memory"]["id"]
+        self.assertEqual(
+            self._query("select time_precision, memory_time from public.memories where id = %s",
+                        (b_id,))[0],
+            ("unknown", None),
+        )
+
+        # 编辑：清空时间后精度归一为 unknown；有时间 + approximate 保留。
+        self.conn.execute(
+            "update public.memories set memory_time = '2026-08-19 08:00+08',"
+            " time_precision = 'minute' where id = %s",
+            (created2,),
+        )
+        self._as_service_role(
+            "select public.edit_admin_memory_v1(%s, %s, null, null::extensions.vector, %s)",
+            (created2, json.dumps({"memory_time": None}, ensure_ascii=False), ASSISTANT),
+        )
+        self.assertEqual(
+            self._query("select time_precision, memory_time from public.memories where id = %s",
+                        (created2,))[0],
+            ("unknown", None),
+        )
+        self._as_service_role(
+            "select public.edit_admin_memory_v1(%s, %s, null, null::extensions.vector, %s)",
+            (created2, json.dumps({"memory_time": "2026-08-19 09:30",
+                                    "time_precision": "approximate"}, ensure_ascii=False),
+             ASSISTANT),
+        )
+        self.assertEqual(
+            self._query("select time_precision from public.memories where id = %s",
+                        (created2,))[0][0],
+            "approximate",
         )
 
     # -- 5. permissions & immutability --------------------------------------

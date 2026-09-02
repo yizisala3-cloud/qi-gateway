@@ -1,4 +1,4 @@
-"""HTTP-level tests for the five admin memory lifecycle endpoints.
+"""HTTP-level tests for the six admin memory lifecycle endpoints.
 
 Auth must accept GATEWAY_TOKEN only -- the MCP memory token, the plugin
 token, and anonymous requests all stay outside. Errors are stable
@@ -219,6 +219,15 @@ class AdminMemoryApiTests(unittest.TestCase):
                 response = self.http.post("/admin/api/memories/8/archive", json={}, headers=self.auth)
                 self.assertEqual(response.status_code, status)
                 self.assertEqual(response.json()["error_code"], code)
+
+    def test_duplicate_content_returns_http_409(self):
+        self.client.outcomes = {"create_admin_memory_v1": RuntimeError(
+            "admin_memory_content_exists")}
+        response = self.http.post("/admin/api/memories/manual", json=VALID_CREATE, headers=self.auth)
+        self.assertEqual(response.status_code, 409)
+        body = response.json()
+        self.assertEqual(body["error_code"], "admin_memory_content_exists")
+        self.assertEqual(body["error"], "相同内容的记忆已存在")
 
     def test_mcp_token_cannot_archive(self):
         response = self.http.post(
