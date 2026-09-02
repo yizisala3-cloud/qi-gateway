@@ -24,6 +24,7 @@ from .memory_continuity import run_continuity_digest_if_due
 from .memory_extract import resolve_assistant_id
 from .memory_heat import run_heat_decay
 from .admin_api import admin_api_routes
+from .admin_memory_api import admin_memory_routes
 from .memory_digest_api import memory_digest_routes
 from .memory_request_api import memory_request_routes
 from .memory_review_api import memory_review_routes
@@ -391,6 +392,7 @@ _routes = [
     Route("/status", status, methods=["GET"]),
 ]
 _routes.extend(admin_api_routes)
+_routes.extend(admin_memory_routes)
 _routes.extend(memory_digest_routes)
 _routes.extend(memory_request_routes)
 _routes.extend(memory_review_routes)
