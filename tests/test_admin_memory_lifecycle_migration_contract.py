@@ -235,6 +235,19 @@ class AdminMemoryLifecycleMigrationContractTests(unittest.TestCase):
                 self.assertIn("'unknown'", body)
                 self.assertIn("v_memory_time is null then", body)
 
+    def test_time_parsing_failures_map_to_the_stable_code(self):
+        body = self._section("admin_memory_normalize_event_time")
+        # 只捕获确认属于日期时间解析失败的异常，不做 when others。
+        for expected in (
+            "when invalid_datetime_format",
+            "or datetime_field_overflow",
+            "or invalid_time_zone_displacement_value",
+            "admin_memory_invalid_memory_time",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, body)
+        self.assertNotIn("when others", body)
+
     def test_event_time_normalization_needs_no_session_timezone(self):
         body = self._section("admin_memory_normalize_event_time")
         self.assertIn("at time zone 'asia/shanghai'", body)

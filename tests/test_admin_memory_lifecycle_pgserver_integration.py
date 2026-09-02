@@ -849,6 +849,49 @@ class AdminMemoryLifecycleOnPostgresTests(unittest.TestCase):
             "admin_memory_invalid_memory_time",
         )
 
+    def test_semantically_invalid_times_return_stable_error(self):
+        # 形状合法但语义无效的日期/时间（2 月 30 日、13 月、25 点、99:99 偏移）
+        # 必须映射为稳定的 admin_memory_invalid_memory_time，而不是原始 500。
+        rows_before = self._one("select count(*) from public.memories")
+        objects_before = self._one("select count(*) from public.memory_continuity_objects")
+        for invalid_time, precision in (
+            ("2026-02-30", "day"),
+            ("2026-13-01", "day"),
+            ("2026-09-01T25:00:00+08:00", "minute"),
+            ("2026-09-01T12:00:00+99:99", "minute"),
+        ):
+            with self.subTest(invalid_time=invalid_time):
+                self._expect_rpc_error(
+                    "select public.create_admin_memory_v1(%s, %s, %s, null, '{}', 6,"
+                    " null, %s, %s, null, '{}', null::extensions.vector,"
+                    " 'moment', null, %s, null)",
+                    (ASSISTANT, "语义无效的时间必须返回稳定错误码。",
+                     _sha256(f"语义无效的时间必须返回稳定错误码。{invalid_time}"),
+                     invalid_time, precision,
+                     json.dumps(MOMENT_DATA, ensure_ascii=False)),
+                    "admin_memory_invalid_memory_time",
+                )
+        self.assertEqual(self._one("select count(*) from public.memories"), rows_before)
+        self.assertEqual(
+            self._one("select count(*) from public.memory_continuity_objects"),
+            objects_before,
+            "被拒绝的新增不得留下连续感对象",
+        )
+
+        # 合法值继续正常通过：日期、无时区日期时间、+08:00、Z。
+        for legal_time, precision in (
+            ("2026-08-19", "day"),
+            ("2026-08-19 03:11", "minute"),
+            ("2026-08-19T03:11:00+08:00", "minute"),
+            ("2026-08-18T19:11:00Z", "minute"),
+        ):
+            with self.subTest(legal_time=legal_time):
+                created = self._create(
+                    f"合法时间 {legal_time} 正常写入。", "moment", MOMENT_DATA,
+                    memory_time=legal_time, time_precision=precision,
+                )
+                self.assertIsNotNone(created["memory_id"])
+
     def test_empty_time_forces_unknown_precision_on_every_path(self):
         # 新增：空时间 + minute -> unknown。
         created = self._create("空时间不声称分钟精度的记忆一。", "moment", MOMENT_DATA,

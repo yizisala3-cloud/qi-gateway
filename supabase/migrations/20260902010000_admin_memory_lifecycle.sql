@@ -124,6 +124,7 @@ set search_path to 'public'
 as $function$
 declare
     v_text text := btrim(coalesce(p_memory_time, ''));
+    v_result timestamptz;
 begin
     if v_text = '' then
         return null;
@@ -132,18 +133,32 @@ begin
     if v_text !~ '^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?([Zz]|[+-]\d{2}:?\d{2})?)?$' then
         raise exception 'admin_memory_invalid_memory_time';
     end if;
-    -- Date-only always means a calendar day in Asia/Shanghai, with or
-    -- without 'day' precision, never the session's TimeZone.
-    if v_text ~ '^\d{4}-\d{2}-\d{2}$' then
-        return v_text::date::timestamp at time zone 'Asia/Shanghai';
-    end if;
-    -- An explicit offset (or Z) is honoured exactly as written.
-    if v_text ~ '([Zz]|[+-]\d{2}:?\d{2})$' then
-        return v_text::timestamptz;
-    end if;
-    -- Naive wall-clock input is pinned to the project-fixed Asia/Shanghai
-    -- rule so the stored instant never depends on the session TimeZone.
-    return (regexp_replace(v_text, ' ', 'T') || '+08:00')::timestamptz;
+    -- Shape-valid values can still be semantically impossible
+    -- (2026-02-30, 2026-13-01, 25:00:00, +99:99). Catch exactly the
+    -- date/time parsing failures -- invalid format, out-of-range fields,
+    -- and out-of-range zone displacements -- and re-raise the stable
+    -- business code; every other error propagates untouched.
+    begin
+        -- Date-only always means a calendar day in Asia/Shanghai, with or
+        -- without 'day' precision, never the session's TimeZone.
+        if v_text ~ '^\d{4}-\d{2}-\d{2}$' then
+            v_result := v_text::date::timestamp at time zone 'Asia/Shanghai';
+        -- An explicit offset (or Z) is honoured exactly as written.
+        elsif v_text ~ '([Zz]|[+-]\d{2}:?\d{2})$' then
+            v_result := v_text::timestamptz;
+        else
+            -- Naive wall-clock input is pinned to the project-fixed
+            -- Asia/Shanghai rule so the stored instant never depends on the
+            -- session TimeZone.
+            v_result := (regexp_replace(v_text, ' ', 'T') || '+08:00')::timestamptz;
+        end if;
+    exception
+        when invalid_datetime_format
+          or datetime_field_overflow
+          or invalid_time_zone_displacement_value then
+            raise exception 'admin_memory_invalid_memory_time';
+    end;
+    return v_result;
 end;
 $function$;
 
