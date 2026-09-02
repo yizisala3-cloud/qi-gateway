@@ -408,6 +408,15 @@ begin
         if p_content_hash is null or p_content_hash !~ '^[0-9a-f]{64}$' then
             raise exception 'admin_memory_invalid_content_hash';
         end if;
+        -- An in-place edit must not steal another memory's content_hash
+        -- (table-wide unique constraint); refuse with a stable code.
+        if exists (
+            select 1 from public.memories as other
+            where other.content_hash = p_content_hash
+              and other.id <> v_memory.id
+        ) then
+            raise exception 'admin_memory_content_exists';
+        end if;
     elsif p_content_hash is not null then
         raise exception 'admin_memory_invalid_content_hash';
     end if;
@@ -615,6 +624,7 @@ declare
     v_recall_scene text := nullif(btrim(coalesce(p_recall_scene, '')), '');
     v_evidence jsonb;
     v_removed_earlier boolean := false;
+    v_same_hash boolean := false;
 begin
     if char_length(v_content) not between 5 and 600 then
         raise exception 'admin_memory_invalid_content';
@@ -685,10 +695,18 @@ begin
     end if;
     perform pg_advisory_xact_lock(hashtextextended(v_continuity_id::text, 0));
 
+    -- content_hash carries a table-wide unique constraint. A type change may
+    -- keep the content untouched, so the new version legitimately reuses the
+    -- source hash. Occupation by unrelated memories is still refused; the
+    -- source itself and the to-be-deleted parent are handled below inside
+    -- this same transaction.
+    v_same_hash := (p_content_hash = v_source.content_hash);
     if exists (
         select 1 from public.memories as other
         where other.content_hash = p_content_hash
           and other.id <> v_source.id
+          and (v_source.supersedes_memory_id is null
+               or other.id <> v_source.supersedes_memory_id)
     ) then
         raise exception 'admin_memory_content_exists';
     end if;
@@ -703,6 +721,37 @@ begin
         set is_active = false,
             superseded_at = now()
         where id = v_source.id;
+
+    -- Same-content type change: the retired source temporarily releases the
+    -- hash so the new version can hold the real value; the undo hands it
+    -- back. Any failure rolls the whole release back with the transaction.
+    if v_same_hash then
+        update public.memories
+            set content_hash = null
+            where id = v_source.id;
+    end if;
+
+    -- Keep exactly two generations, and free the parent BEFORE the insert:
+    -- deleting it releases a chain-internal hash occupation (A -> B -> C
+    -- with unchanged content) and nulls every dangling reference through
+    -- the on-delete set null foreign keys.
+    if v_source.supersedes_memory_id is not null then
+        select * into v_earlier
+        from public.memories as memory
+        where memory.id = v_source.supersedes_memory_id
+        for update;
+        if found then
+            if v_earlier.is_active is true then
+                raise exception 'admin_memory_chain_conflict';
+            end if;
+            delete from public.memories where id = v_earlier.id;
+            v_removed_earlier := true;
+            if v_earlier.continuity_id is not null
+               and v_earlier.continuity_id <> v_continuity_id then
+                perform public.admin_memory_reap_continuity_object(v_earlier.continuity_id);
+            end if;
+        end if;
+    end if;
 
     insert into public.memories (
         content, title, tags, heat, importance, embedding,
@@ -743,28 +792,6 @@ begin
         set superseded_by_memory_id = v_new.id
         where id = v_source.id;
 
-    -- Keep exactly two generations: drop the direct parent of the retired
-    -- version. Deleting it nulls every dangling reference through the
-    -- on-delete set null foreign keys (supersedes pointers, request links,
-    -- review-event links), and its embeddings leave with the row.
-    if v_source.supersedes_memory_id is not null then
-        select * into v_earlier
-        from public.memories as memory
-        where memory.id = v_source.supersedes_memory_id
-        for update;
-        if found then
-            if v_earlier.is_active is true then
-                raise exception 'admin_memory_chain_conflict';
-            end if;
-            delete from public.memories where id = v_earlier.id;
-            v_removed_earlier := true;
-            if v_earlier.continuity_id is not null
-               and v_earlier.continuity_id <> v_continuity_id then
-                perform public.admin_memory_reap_continuity_object(v_earlier.continuity_id);
-            end if;
-        end if;
-    end if;
-
     update public.memory_continuity_objects
         set updated_at = now()
         where continuity_id = v_continuity_id;
@@ -796,6 +823,7 @@ declare
     v_current public.memories%rowtype;
     v_previous public.memories%rowtype;
     v_deleted boolean := true;
+    v_current_hash text;
 begin
     select * into v_current
     from public.memories as memory
@@ -833,26 +861,35 @@ begin
         perform pg_advisory_xact_lock(hashtextextended(v_current.continuity_id::text, 0));
     end if;
 
+    -- The current version may hold the chain's real content_hash (a
+    -- same-content type change released the parent's hash). Capture it
+    -- before the row leaves so the parent can take it back.
+    v_current_hash := v_current.content_hash;
+
     begin
         delete from public.memories where id = v_current.id;
     exception
         when foreign_key_violation then
             -- A hard reference outside the version chain pins this row, so
-            -- demote it instead of deleting. Any other error type must
+            -- demote it instead of deleting. The hash is released first so
+            -- the restored parent can retake it without ever leaving two
+            -- non-null copies of the same hash. Any other error type must
             -- propagate; it is never swallowed into a fake success.
             v_deleted := false;
             update public.memories
                 set is_active = false,
                     supersedes_memory_id = null,
                     superseded_by_memory_id = null,
-                    superseded_at = null
+                    superseded_at = null,
+                    content_hash = null
                 where id = v_current.id;
     end;
 
     update public.memories
         set is_active = true,
             superseded_by_memory_id = null,
-            superseded_at = null
+            superseded_at = null,
+            content_hash = coalesce(content_hash, v_current_hash)
         where id = v_previous.id;
 
     if v_deleted and v_current.continuity_id is not null
@@ -883,7 +920,6 @@ set search_path to 'public'
 as $function$
 declare
     v_memory public.memories%rowtype;
-    v_parent_id integer;
 begin
     select * into v_memory
     from public.memories as memory
@@ -932,15 +968,17 @@ begin
     ) then
         raise exception 'admin_memory_chain_conflict';
     end if;
-    if v_memory.supersedes_memory_id is not null then
-        select supersedes_memory_id into v_parent_id
-        from public.memories
-        where id = v_memory.supersedes_memory_id
-          and is_active = true
-          and verified = 'verified';
-        if v_parent_id is not null then
-            raise exception 'admin_memory_chain_conflict';
-        end if;
+    -- A live parent link means the chain still has an effective version
+    -- above this row: restoring would put two active generations in one
+    -- chain. The check is on the parent row itself being active + verified,
+    -- never on whether the parent has an even older supersedes pointer.
+    if v_memory.supersedes_memory_id is not null and exists (
+        select 1 from public.memories as parent
+        where parent.id = v_memory.supersedes_memory_id
+          and parent.is_active = true
+          and parent.verified = 'verified'
+    ) then
+        raise exception 'admin_memory_chain_conflict';
     end if;
 
     update public.memories
@@ -962,6 +1000,51 @@ end;
 $function$;
 
 -- ---------------------------------------------------------------------------
+-- 6. Archive a current formal memory. This is the only write path the admin
+--    console may use to set is_active=false: the generic data PATCH no
+--    longer accepts is_active or heat, so the lifecycle rules (which rows
+--    are archivable, and that restore alone resets heat to 50) cannot be
+--    bypassed. Only is_active changes; every other column stays untouched.
+-- ---------------------------------------------------------------------------
+create or replace function public.archive_admin_memory_v1(
+    p_memory_id integer
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path to 'public'
+as $function$
+declare
+    v_memory public.memories%rowtype;
+begin
+    select * into v_memory
+    from public.memories as memory
+    where memory.id = p_memory_id
+    for update;
+
+    if not found then
+        raise exception 'admin_memory_not_found';
+    end if;
+    if v_memory.superseded_by_memory_id is not null then
+        raise exception 'admin_memory_superseded';
+    end if;
+    if v_memory.is_active is not true then
+        raise exception 'admin_memory_already_archived';
+    end if;
+    if v_memory.verified is distinct from 'verified' then
+        raise exception 'admin_memory_not_archivable';
+    end if;
+
+    update public.memories
+        set is_active = false
+        where id = v_memory.id
+        returning * into v_memory;
+
+    return jsonb_build_object('memory', to_jsonb(v_memory));
+end;
+$function$;
+
+-- ---------------------------------------------------------------------------
 -- Grants: these RPCs are server-only. The browser reaches them exclusively
 -- through the gateway's token-checked admin API; the MCP memory token has no
 -- path here, and anon/authenticated keep no execute rights.
@@ -977,11 +1060,13 @@ revoke all on function public.edit_admin_memory_v1(integer, jsonb, text, extensi
 revoke all on function public.change_memory_type_v1(integer, text, text, text, text[], integer, text, text, text, text, text[], extensions.vector, text, text, jsonb, bigint[]) from public, anon, authenticated;
 revoke all on function public.undo_memory_type_change_v1(integer) from public, anon, authenticated;
 revoke all on function public.restore_archived_memory_v1(integer) from public, anon, authenticated;
+revoke all on function public.archive_admin_memory_v1(integer) from public, anon, authenticated;
 
 grant execute on function public.create_admin_memory_v1(text, text, text, text, text[], integer, text, text, text, text, text[], extensions.vector, text, text, jsonb, bigint[]) to service_role;
 grant execute on function public.edit_admin_memory_v1(integer, jsonb, text, extensions.vector, text) to service_role;
 grant execute on function public.change_memory_type_v1(integer, text, text, text, text[], integer, text, text, text, text, text[], extensions.vector, text, text, jsonb, bigint[]) to service_role;
 grant execute on function public.undo_memory_type_change_v1(integer) to service_role;
 grant execute on function public.restore_archived_memory_v1(integer) to service_role;
+grant execute on function public.archive_admin_memory_v1(integer) to service_role;
 
 commit;

@@ -130,6 +130,12 @@ class AdminMemoryApiTests(unittest.TestCase):
              "admin_memory_previous_conflict", 409),
             ("restore", "/admin/api/memories/8/restore", {},
              "admin_memory_superseded", 409),
+            ("edit-type-switch", "/admin/api/memories/7/edit",
+             {"continuity_type": "profile",
+              "continuity_data": {"facet": "作息", "statement": "习惯晚睡",
+                                   "scope": "全局", "stability": "stable",
+                                   "basis": "explicit_self_report"}},
+             "admin_memory_type_change_forbidden", 400),
         ]
         for name, url, payload, code, status in cases:
             with self.subTest(endpoint=name):
@@ -138,6 +144,9 @@ class AdminMemoryApiTests(unittest.TestCase):
                     "undo_memory_type_change_v1": RuntimeError("admin_memory_previous_conflict"),
                     "restore_archived_memory_v1": RuntimeError("admin_memory_superseded"),
                 }
+                if name == "edit-type-switch":
+                    self.client.outcomes["edit_admin_memory_v1"] = RuntimeError(
+                        "admin_memory_type_change_forbidden")
                 response = self.http.post(url, json=payload, headers=self.auth)
                 self.assertEqual(response.status_code, status)
                 body = response.json()
@@ -178,12 +187,46 @@ class AdminMemoryApiTests(unittest.TestCase):
 
     def test_generic_data_patch_no_longer_accepts_content_fields(self):
         from gateway.admin_api import _TABLES
-        for field in ("content", "title", "tags", "importance", "source"):
+        for field in ("content", "title", "tags", "importance", "source",
+                      "is_active", "heat"):
             with self.subTest(field=field):
                 self.assertNotIn(field, _TABLES["memories"]["write"])
-        # 操作性字段（归档、确认状态）保留在白名单内。
-        for field in ("is_active", "verified"):
-            self.assertIn(field, _TABLES["memories"]["write"])
+        # 既有审核动作（确认/驳回）仍走 verified 字段。
+        self.assertIn("verified", _TABLES["memories"]["write"])
+
+    def test_archive_endpoint_archives_current_version(self):
+        self.client.outcomes = {"archive_admin_memory_v1": {
+            "memory": {"id": 8, "is_active": False, "heat": 60.0},
+        }}
+        response = self.http.post("/admin/api/memories/8/archive", json={}, headers=self.auth)
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["success"])
+        self.assertFalse(body["memory"]["is_active"])
+        payload = self.client.calls[0][1]
+        self.assertEqual(payload, {"p_memory_id": 8})
+
+    def test_archive_endpoint_refuses_with_stable_codes(self):
+        cases = [
+            ("admin_memory_superseded", 409),
+            ("admin_memory_already_archived", 409),
+            ("admin_memory_not_archivable", 409),
+            ("admin_memory_not_found", 404),
+        ]
+        for code, status in cases:
+            with self.subTest(code=code):
+                self.client.outcomes = {"archive_admin_memory_v1": RuntimeError(code)}
+                response = self.http.post("/admin/api/memories/8/archive", json={}, headers=self.auth)
+                self.assertEqual(response.status_code, status)
+                self.assertEqual(response.json()["error_code"], code)
+
+    def test_mcp_token_cannot_archive(self):
+        response = self.http.post(
+            "/admin/api/memories/8/archive", json={},
+            headers={"Authorization": f"Bearer {MCP_TOKEN}"},
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertFalse(self.client.calls)
 
 
 if __name__ == "__main__":

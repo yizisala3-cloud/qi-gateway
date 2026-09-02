@@ -20,6 +20,7 @@ from starlette.routing import Route
 from .config import cfg
 from .admin_memory import (
     AdminMemoryError,
+    archive_admin_memory,
     change_memory_type,
     create_admin_memory,
     edit_admin_memory,
@@ -153,10 +154,34 @@ async def restore_memory_entry(request: Request) -> JSONResponse:
         return _error("internal_error", "恢复失败，请稍后重试", 500)
 
 
+async def archive_memory_entry(request: Request) -> JSONResponse:
+    """Archive a current formal memory -- the only is_active=false write path.
+
+    The generic data PATCH no longer accepts is_active or heat, so archiving
+    must go through this checked endpoint: it refuses superseded, already
+    archived, and unverified rows instead of letting the browser flip the
+    flag directly.
+    """
+    if not _authorized(request):
+        return _error("unauthorized", "无效的网关 Token", 401)
+    memory_id = request.path_params["memory_id"]
+    try:
+        result = await asyncio.to_thread(archive_admin_memory, memory_id)
+        return JSONResponse({"success": True, **result})
+    except AdminMemoryError as exc:
+        return _error(exc.code, str(exc), exc.status_code)
+    except Exception as exc:
+        log.exception(
+            "admin memory archive failed: memory_id=%s error=%s", memory_id, type(exc).__name__
+        )
+        return _error("internal_error", "归档失败，请稍后重试", 500)
+
+
 admin_memory_routes = [
     Route("/admin/api/memories/manual", create_memory_entry, methods=["POST"]),
     Route("/admin/api/memories/{memory_id:int}/edit", edit_memory_entry, methods=["POST"]),
     Route("/admin/api/memories/{memory_id:int}/change-type", change_memory_type_entry, methods=["POST"]),
     Route("/admin/api/memories/{memory_id:int}/undo-type-change", undo_type_change_entry, methods=["POST"]),
     Route("/admin/api/memories/{memory_id:int}/restore", restore_memory_entry, methods=["POST"]),
+    Route("/admin/api/memories/{memory_id:int}/archive", archive_memory_entry, methods=["POST"]),
 ]

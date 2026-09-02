@@ -1,12 +1,12 @@
 // pages/_memory_browser.js - shared library/requests browser with detail panel
-import { gw, query, update, count, esc } from '../api.js?v=20260902-adminmem1';
+import { gw, query, update, count, esc } from '../api.js?v=20260902-adminmem2';
 import {
   loading, empty, errorBlock, banner, tag, heatTag, impTag, pagerHtml,
   toast, modal, confirm, delegate, icon, fmtDate, createDetailPanel,
-} from '../ui.js?v=20260902-adminmem1';
-import { openMemoryForm } from './_memory_form.js?v=20260902-adminmem1';
+} from '../ui.js?v=20260902-adminmem2';
+import { openMemoryForm } from './_memory_form.js?v=20260902-adminmem2';
 
-export const ASSET_VERSION = '20260902-adminmem1';
+export const ASSET_VERSION = '20260902-adminmem2';
 
 const PAGE_SIZE = 20;
 const REQ_FETCH_LIMIT = 100;
@@ -938,9 +938,12 @@ export function createMemoryBrowser({
   /* ----- 生命周期操作（新增 / 编辑 / 类型修改 / 撤销 / 恢复） ----- */
 
   async function refreshAfterWrite(result) {
-    // 写操作完成后刷新列表、计数，并按返回结果重新打开对应详情。
+    // 写操作完成后刷新列表、计数，并按返回结果重新打开对应详情：
+    // 新增/编辑/归档返回 memory_id，类型修改返回 memory.id，撤销返回
+    // restored_memory_id。
     await loadCurrentList();
-    const targetId = result && (result.memory_id || result.restored_memory_id);
+    const targetId = result
+      && (result.memory_id || result.restored_memory_id || (result.memory && result.memory.id));
     if (targetId) await showMemory(targetId);
     else {
       state.selected = null;
@@ -1062,14 +1065,31 @@ export function createMemoryBrowser({
     'mem-undo': (el) => undoTypeChange(el),
     'mem-restore': (el) => restoreArchived(el),
     'mem-archive': async (el) => {
-      if (!(await confirm('归档这条记忆？归档后不再参与召回，但仍保留在数据库中。', { okText: '归档' }))) return;
+      if (!(await confirm('归档这条记忆？归档后不再参与召回，但仍保留在数据库中；恢复后热度会重置为 50。', { okText: '归档' }))) return;
       el.disabled = true;
       try {
-        await update('memories', el.dataset.id, { is_active: false });
+        // 归档走专用接口：通用 PATCH 已不接受 is_active/heat，生命周期
+        // 规则（可归档状态、恢复热度重置）不可能被绕过。
+        const result = await gw(`/admin/api/memories/${encodeURIComponent(el.dataset.id)}/archive`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
         toast('已归档');
-        await refreshAfterWrite({ memory_id: el.dataset.id });
+        await refreshAfterWrite(result);
       } catch (error) {
-        toast(`操作失败：${error.message}`, 'err');
+        const raw = String(error.message || '');
+        const detail = raw.includes(': ') ? raw.split(': ').slice(1).join(': ') : raw;
+        if (/409|404/.test(raw)) {
+          const errModal = modal({
+            title: '当前无法归档',
+            body: `<p class="confirm-text">${esc(detail)}</p>`,
+            footer: '<button class="btn btn-primary" data-ok>知道了</button>',
+          });
+          errModal.root.querySelector('[data-ok]').onclick = errModal.close;
+        } else {
+          toast(`操作失败：${detail}`, 'err');
+        }
         el.disabled = false;
       }
     },

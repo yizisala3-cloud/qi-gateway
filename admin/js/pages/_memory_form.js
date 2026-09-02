@@ -1,8 +1,9 @@
 // pages/_memory_form.js - 手工新增 / 完整编辑 / 修改类型 共用动态表单
 // 六类连续感结构全部由本模块的中文动态表单生成，用户永不直接编辑 JSON；
 // 普通标签与召回标签是两套独立控件；召回向量和 content_hash 均由服务端维护。
-import { gw, esc } from '../api.js?v=20260902-adminmem1';
-import { modal, confirm, toast, icon } from '../ui.js?v=20260902-adminmem1';
+import { gw, esc } from '../api.js?v=20260902-adminmem2';
+import { modal, confirm, toast, icon } from '../ui.js?v=20260902-adminmem2';
+import { sameInstant, stableJson, buildEditPatch } from './_memory_patch.js?v=20260902-adminmem2';
 
 /* ---------- 枚举与字段定义 ---------- */
 
@@ -156,13 +157,6 @@ function toDatetimeLocal(value) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-function sameInstant(a, b) {
-  const da = Date.parse(a);
-  const db = Date.parse(b);
-  if (Number.isNaN(da) || Number.isNaN(db)) return String(a || '') === String(b || '');
-  return da === db;
-}
-
 function parseArrayInput(text) {
   return String(text || '')
     .split(/[,，\n]/)
@@ -245,9 +239,10 @@ function renderContinuitySection(type, data, threadState) {
         ${(f.opts || []).map((o) => `<option value="${o.value}" ${value === o.value ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}
       </select>`;
     } else if (f.kind === 'thread_state') {
+      // 选中态来自独立的 threadState 参数，而不是 continuity_data。
       control = `<select id="${id}">
         <option value="">请选择</option>
-        ${THREAD_STATES.map((o) => `<option value="${o.value}" ${value === o.value ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}
+        ${THREAD_STATES.map((o) => `<option value="${o.value}" ${threadState === o.value ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}
       </select>`;
     } else if (f.kind === 'array') {
       control = `<input type="text" id="${id}" value="${esc(Array.isArray(value) ? value.join('，') : '')}">`;
@@ -424,15 +419,6 @@ function buildContinuityDataFromMemory(memory) {
   };
 }
 
-function stableJson(value) {
-  if (value === null || value === undefined) return '';
-  if (Array.isArray(value)) return JSON.stringify([...value].sort());
-  if (typeof value === 'object') {
-    return JSON.stringify(Object.keys(value).sort().map((k) => [k, value[k]]));
-  }
-  return JSON.stringify(value);
-}
-
 /**
  * 打开记忆表单弹窗。
  * mode: 'create' | 'edit' | 'change'
@@ -515,6 +501,16 @@ export async function openMemoryForm({ mode = 'create', memory = null, onSaved =
   };
   contentEl.addEventListener('input', updateCount);
   updateCount();
+  // 清空记忆时间时，精度不再保留 minute/hour/day 这类伪造精度。
+  const timeInput = rootEl.querySelector('#mf-memory-time');
+  const precisionSelect = rootEl.querySelector('#mf-time-precision');
+  if (timeInput && precisionSelect) {
+    timeInput.addEventListener('input', () => {
+      if (!timeInput.value && ['minute', 'hour', 'day'].includes(precisionSelect.value)) {
+        precisionSelect.value = '';
+      }
+    });
+  }
 
   /* ----- 读取与校验 ----- */
   const readCommon = () => {
@@ -608,32 +604,14 @@ export async function openMemoryForm({ mode = 'create', memory = null, onSaved =
       url = `/admin/api/memories/${encodeURIComponent(memory.id)}/change-type`;
       successText = '已保存为新版本，原版本保留为直接上一版本';
     } else {
-      // edit：只提交真正发生变化的字段，避免把未触碰的证据时间清空。
-      const patch = {};
-      if ((values.title || null) !== (memory.title || null)) patch.title = values.title || null;
-      if (values.content !== memory.content) patch.content = values.content;
-      if (stableJson(values.tags) !== stableJson(memory.tags || [])) patch.tags = values.tags;
-      if (values.importance !== (Number(memory.importance) || 5)) patch.importance = values.importance;
-      if ((values.sourceType || null) !== (memory.source_type || null)) patch.source_type = values.sourceType || null;
-      if (values.memoryTime) {
-        if (!memory.memory_time || !sameInstant(values.memoryTime, memory.memory_time)) {
-          patch.memory_time = values.memoryTime;
-          if ((values.precision || null) !== (memory.time_precision || null)) patch.time_precision = values.precision || null;
-        }
-      } else if (memory.memory_time) {
-        patch.memory_time = null;
-        patch.time_precision = values.precision || null;
-      }
-      if (values.recallScene !== (memory.recall_scene || '')) patch.recall_scene = values.recallScene || null;
-      if (stableJson(values.recallTags) !== stableJson(memory.recall_tags || [])) patch.recall_tags = values.recallTags;
-      const originalEvidence = (memory.evidence_message_ids || []).map(String).join(',');
-      if (values.evidenceIds.map(String).join(',') !== originalEvidence) {
-        patch.evidence_message_ids = values.evidenceIds.map(Number);
-      }
+      // edit：只提交真正发生变化的字段（时间与精度分别比较），避免把
+      // 未触碰的证据时间清空。
+      const patch = buildEditPatch(memory, values);
 
       if (memory.continuity_type) {
         // 已分类：类型固定，只同步真正改动的结构；未触碰就不校验也不提交，
-        // 结构不完整的旧记忆只编辑普通字段时不会被强迫补全。
+        // 结构不完整的旧记忆只编辑普通字段时不会被强迫补全。结构变化必须
+        // 同时携带当前 continuity_type，thread 类型带完整 thread_state。
         const type = memory.continuity_type;
         const { data, threadState } = readContinuitySection(rootEl, type);
         const continuityDirty = stableJson(data) !== stableJson(memory.continuity_data || {})
@@ -641,6 +619,7 @@ export async function openMemoryForm({ mode = 'create', memory = null, onSaved =
         if (continuityDirty) {
           const problem = validateContinuity(type, data, threadState);
           if (problem) { toast(problem, 'err'); return; }
+          patch.continuity_type = type;
           patch.continuity_data = data;
           if (type === 'thread') patch.thread_state = threadState;
         }
@@ -677,14 +656,14 @@ export async function openMemoryForm({ mode = 'create', memory = null, onSaved =
 
     submitBtn.disabled = true;
     try {
-      await gw(url, {
+      const result = await gw(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
       toast(successText);
       close();
-      if (onSaved) await onSaved();
+      if (onSaved) await onSaved(result);
     } catch (error) {
       submitBtn.disabled = false;
       const raw = String(error.message || '保存失败');

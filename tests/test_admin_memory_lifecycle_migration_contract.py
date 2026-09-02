@@ -19,6 +19,7 @@ RPC_NAMES = (
     "change_memory_type_v1",
     "undo_memory_type_change_v1",
     "restore_archived_memory_v1",
+    "archive_admin_memory_v1",
 )
 
 HELPER_NAMES = (
@@ -66,7 +67,7 @@ class AdminMemoryLifecycleMigrationContractTests(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, self.flat)
 
-    def test_five_lifecycle_rpcs_are_security_definer_with_fixed_search_path(self):
+    def test_six_lifecycle_rpcs_are_security_definer_with_fixed_search_path(self):
         for name in RPC_NAMES:
             with self.subTest(rpc=name):
                 signature = self.sql.find(f"function public.{name}(")
@@ -160,6 +161,49 @@ class AdminMemoryLifecycleMigrationContractTests(unittest.TestCase):
             body.find("delete from public.memories where id = v_current.id"),
             body.find("update public.memories"),
         )
+
+    def test_restore_chain_conflict_checks_parent_row_itself(self):
+        # 上一版本冲突判断看的是父版本行本身是否 active+verified，
+        # 不是父版本是否还有更早的 supersedes 指针。
+        body = self._section("restore_archived_memory_v1")
+        self.assertIn("where parent.id = v_memory.supersedes_memory_id", body)
+        self.assertIn("parent.is_active = true", body)
+        self.assertNotIn("select supersedes_memory_id into v_parent_id", body)
+
+    def test_type_change_releases_and_restores_chain_internal_hashes(self):
+        body = self._section("change_memory_type_v1")
+        # 同哈希：先失活源版本并临时释放哈希，新版本持有真实哈希。
+        self.assertIn("v_same_hash := (p_content_hash = v_source.content_hash)", body)
+        self.assertIn("set content_hash = null", body)
+        self.assertLess(
+            body.find("set content_hash = null"),
+            body.find("insert into public.memories ("),
+        )
+        # 无关记忆占用哈希仍然拒绝；链内父版本被排除后在本事务内删除。
+        self.assertIn("other.id <> v_source.supersedes_memory_id", body)
+        self.assertIn("admin_memory_content_exists", body)
+        # 更早版本在插入新版本之前删除，释放链内哈希占用。
+        self.assertLess(
+            body.find("delete from public.memories where id = v_earlier.id"),
+            body.find("insert into public.memories ("),
+        )
+
+    def test_undo_hands_the_hash_back_without_duplicates(self):
+        body = self._section("undo_memory_type_change_v1")
+        self.assertIn("v_current_hash := v_current.content_hash", body)
+        # 归档分支先释放哈希再恢复上一版本。
+        self.assertIn("content_hash = null", body)
+        self.assertIn("content_hash = coalesce(content_hash, v_current_hash)", body)
+
+    def test_archive_is_the_only_is_active_write_path(self):
+        body = self._section("archive_admin_memory_v1")
+        self.assertIn("security definer", body)
+        self.assertIn("admin_memory_superseded", body)
+        self.assertIn("admin_memory_already_archived", body)
+        self.assertIn("admin_memory_not_archivable", body)
+        self.assertIn("set is_active = false", body)
+        # 归档绝不顺手改热度或其他内容。
+        self.assertNotIn("heat", body.replace("v_memory.heat", ""))
 
     def test_restore_checks_every_double_active_conflict(self):
         body = self._section("restore_archived_memory_v1")

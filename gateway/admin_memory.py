@@ -318,6 +318,9 @@ _RPC_ERROR_MESSAGES: dict[str, tuple[str, int]] = {
     "admin_memory_no_previous_version": ("这条记忆没有可撤销的类型修改", 409),
     "admin_memory_previous_conflict": ("恢复会造成两个版本同时生效，当前无法撤销", 409),
     "admin_memory_superseded": ("这条记忆已被新版本替代，禁止恢复", 409),
+    "admin_memory_not_archived": ("这条记忆不在归档状态", 409),
+    "admin_memory_already_archived": ("这条记忆已经处于归档状态", 409),
+    "admin_memory_not_archivable": ("只有已确认的当前有效版本才能归档", 409),
     "admin_memory_continuity_conflict": ("恢复后同一连续感身份会有两个有效版本，当前无法恢复", 409),
     "admin_memory_key_conflict": ("恢复后同一主题键会有两个有效版本，当前无法恢复", 409),
     "admin_memory_chain_conflict": ("恢复会与现有版本链冲突，当前无法恢复", 409),
@@ -351,7 +354,12 @@ def _call_rpc(client: Any, name: str, payload: dict[str, Any]) -> dict[str, Any]
         for code, (text, status) in _RPC_ERROR_MESSAGES.items():
             if code in message:
                 raise AdminMemoryError(code, text, status) from exc
-        log.error("admin memory RPC failed: rpc=%s error=%s", name, type(exc).__name__)
+        # 结构化日志：RPC 名称、异常类型与完整堆栈；绝不含 Token、密钥、
+        # 记忆正文、召回场景或向量内容。
+        log.exception(
+            "admin memory RPC failed: rpc=%s stage=call_database error_type=%s",
+            name, type(exc).__name__,
+        )
         raise AdminMemoryError("admin_memory_rpc_failed", "数据库操作未完成，请稍后重试", 500) from exc
     return _rpc_result(response.data, "admin_memory_rpc_failed")
 
@@ -610,4 +618,30 @@ def restore_archived_memory(memory_id: Any) -> dict[str, Any]:
         "memory": memory,
         "memory_id": memory.get("id", normalized_id),
         "heat": memory.get("heat"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 6. Archive a current formal memory (the only is_active=false write path)
+# ---------------------------------------------------------------------------
+
+def archive_admin_memory(memory_id: Any) -> dict[str, Any]:
+    try:
+        normalized_id = int(memory_id)
+    except (TypeError, ValueError) as exc:
+        raise AdminMemoryError("admin_memory_invalid_memory_id", "记忆 ID 必须是整数") from exc
+    if normalized_id <= 0:
+        raise AdminMemoryError("admin_memory_invalid_memory_id", "记忆 ID 必须是正整数")
+
+    client = _require_client()
+    row = _call_rpc(client, "archive_admin_memory_v1", {"p_memory_id": normalized_id})
+    memory = row.get("memory") or {}
+    log.info(
+        "admin_memory_op op=archive memory_id=%s is_active=%s",
+        memory.get("id", normalized_id), memory.get("is_active"),
+    )
+    return {
+        "memory": memory,
+        "memory_id": memory.get("id", normalized_id),
+        "is_active": memory.get("is_active"),
     }

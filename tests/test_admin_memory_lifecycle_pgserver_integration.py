@@ -383,6 +383,214 @@ class AdminMemoryLifecycleOnPostgresTests(unittest.TestCase):
             "admin_memory_content_exists",
         )
 
+    # -- 2b. unchanged-content type changes and hash handover --------------
+
+    def test_type_change_with_unchanged_content_succeeds(self):
+        content = "只改类型不改正文：哈希在同一事务内交接。"
+        a_id = self._create(content, "moment", MOMENT_DATA)["memory_id"]
+        real_hash = _sha256(content)
+
+        b_result = self._change_type(
+            a_id, content, "thread", THREAD_DATA, thread_state="open"
+        )
+        b_id = b_result["memory"]["id"]
+
+        a_row = self._memory_row(a_id)
+        self.assertFalse(a_row[2], "旧版本应失活")
+        a_hash = self._query(
+            "select content_hash from public.memories where id = %s", (a_id,))[0][0]
+        self.assertIsNone(a_hash, "同内容改型后，失活源版本的哈希应为 NULL")
+        b_hash = self._query(
+            "select content_hash from public.memories where id = %s", (b_id,))[0][0]
+        self.assertEqual(b_hash, real_hash, "新版本必须持有真实正文哈希")
+        self.assertTrue(self._memory_row(b_id)[2])
+
+        result = self._as_service_role(
+            "select public.undo_memory_type_change_v1(%s)", (b_id,)
+        )[0][0]
+        self.assertTrue(result["undo_deleted"])
+        self.assertIsNone(self._memory_row(b_id), "撤销后新版本被物理删除")
+        a_after = self._query(
+            "select is_active, content_hash from public.memories where id = %s", (a_id,)
+        )[0]
+        self.assertTrue(a_after[0], "撤销后上一版本恢复有效")
+        self.assertEqual(a_after[1], real_hash, "恢复的上一版本收回正确正文哈希")
+
+    def test_type_change_chain_abc_unchanged_content_keeps_two_generations(self):
+        content = "A 到 B 到 C 正文始终不变的版本链。"
+        real_hash = _sha256(content)
+        a_id = self._create(content, "moment", MOMENT_DATA)["memory_id"]
+        b_id = self._change_type(
+            a_id, content, "thread", THREAD_DATA, thread_state="open"
+        )["memory"]["id"]
+        c_id = self._change_type(
+            b_id, content, "episode", EPISODE_DATA
+        )["memory"]["id"]
+
+        self.assertIsNone(self._memory_row(a_id), "更早版本 A 必须被清理")
+        continuity_id = self._memory_row(c_id)[8]
+        remaining = self._query(
+            "select id, is_active, content_hash from public.memories"
+            " where continuity_id = %s order by id",
+            (continuity_id,),
+        )
+        self.assertEqual([row[0] for row in remaining], [b_id, c_id])
+        self.assertFalse(remaining[0][1])
+        self.assertIsNone(remaining[0][2], "中间版本哈希让渡后保持 NULL")
+        self.assertTrue(remaining[1][1])
+        self.assertEqual(remaining[1][2], real_hash)
+
+        self._as_service_role("select public.undo_memory_type_change_v1(%s)", (c_id,))
+        b_after = self._query(
+            "select is_active, content_hash from public.memories where id = %s", (b_id,)
+        )[0]
+        self.assertTrue(b_after[0])
+        self.assertEqual(b_after[1], real_hash, "撤销后中间版本收回真实哈希")
+
+    def test_unrelated_content_hash_occupation_still_rejected(self):
+        occupied = "无关记忆已经占用的正文内容，其他记忆不能复用。"
+        self._create(occupied, "moment", MOMENT_DATA)
+        m_id = self._own_chain_base("内容查重测试的起点记忆，正文完全不同。")
+        self._expect_rpc_error(
+            "select public.change_memory_type_v1(%s, %s, %s, null, '{}', 6, null,"
+            " null, null, null, '{}', null::extensions.vector, 'episode', null, %s, null)",
+            (m_id, occupied, _sha256(occupied),
+             json.dumps(EPISODE_DATA, ensure_ascii=False)),
+            "admin_memory_content_exists",
+        )
+
+    def test_type_change_failure_rolls_back_hash_release(self):
+        # 异常夹具：X 持有哈希且 supersedes 指向仍然有效的 P（非正常链状态）。
+        # 同哈希改型会在释放哈希之后才撞上链冲突，整个事务必须回滚。
+        content = "回滚测试：哈希释放必须在失败时一并回滚。"
+        real_hash = _sha256(content)
+        p_id = self._create(content, "moment", MOMENT_DATA)["memory_id"]
+        self.conn.execute(
+            "update public.memories set content_hash = null where id = %s", (p_id,))
+        self.conn.execute(
+            "insert into public.memory_continuity_objects"
+            " (continuity_id, assistant_id) values"
+            " ('33333333-3333-3333-3333-3333333333a2', %s)",
+            (ASSISTANT,),
+        )
+        x_id = self._one(
+            """
+            insert into public.memories (
+                content, source, verified, is_active, assistant_id, confidence,
+                content_hash, supersedes_memory_id, continuity_id, continuity_type,
+                continuity_schema_version, continuity_data
+            ) values (
+                %s, 'daily_digest', 'verified', true, %s, 1.0, %s, %s,
+                '33333333-3333-3333-3333-3333333333a2', 'episode', 1, %s
+            ) returning id
+            """,
+            (content, ASSISTANT, real_hash, p_id,
+             json.dumps(EPISODE_DATA, ensure_ascii=False)),
+        )
+        self._expect_rpc_error(
+            "select public.change_memory_type_v1(%s, %s, %s, null, '{}', 6, null,"
+            " null, null, null, '{}', null::extensions.vector, 'thread', 'open', %s, null)",
+            (x_id, content, real_hash, json.dumps(THREAD_DATA, ensure_ascii=False)),
+            "admin_memory_chain_conflict",
+        )
+        x_row = self._query(
+            "select is_active, content_hash from public.memories where id = %s", (x_id,)
+        )[0]
+        self.assertTrue(x_row[0], "失败回滚后源版本仍然有效")
+        self.assertEqual(x_row[1], real_hash, "失败回滚后源版本哈希原样保留")
+
+    def test_restore_rejects_when_parent_row_is_active(self):
+        # X 失活且 supersedes 指向仍有效的 P：恢复 X 会造成同链双有效版本。
+        # 冲突判断必须检查父版本行本身是否 active+verified。
+        p_id = self._create("恢复链冲突测试的父版本记忆，保持有效。", "moment", MOMENT_DATA)["memory_id"]
+        self.conn.execute(
+            "insert into public.memory_continuity_objects"
+            " (continuity_id, assistant_id) values"
+            " ('33333333-3333-3333-3333-3333333333a3', %s)",
+            (ASSISTANT,),
+        )
+        x_id = self._one(
+            """
+            insert into public.memories (
+                content, source, verified, is_active, assistant_id, confidence,
+                content_hash, supersedes_memory_id, continuity_id, continuity_type,
+                continuity_schema_version, continuity_data
+            ) values (
+                '恢复链冲突测试的失活子版本。', 'daily_digest', 'verified', false,
+                %s, 1.0, %s, %s, '33333333-3333-3333-3333-3333333333a3',
+                'episode', 1, %s
+            ) returning id
+            """,
+            (ASSISTANT, _sha256("恢复链冲突测试的失活子版本。"), p_id,
+             json.dumps(EPISODE_DATA, ensure_ascii=False)),
+        )
+        self._expect_rpc_error(
+            "select public.restore_archived_memory_v1(%s)", (x_id,),
+            "admin_memory_chain_conflict",
+        )
+
+    # -- 2c. dedicated archive endpoint -------------------------------------
+
+    def test_archive_current_version_and_conflicts(self):
+        memory_id = self._create("归档接口测试记忆：正常归档后再恢复。", "moment", MOMENT_DATA)["memory_id"]
+
+        row = self._as_service_role(
+            "select public.archive_admin_memory_v1(%s)", (memory_id,)
+        )[0][0]
+        self.assertFalse(row["memory"]["is_active"])
+        # 归档只翻 is_active，不动热度。
+        heat = self._query("select heat from public.memories where id = %s", (memory_id,))[0][0]
+        self.assertEqual(heat, 50.0)
+
+        self._expect_rpc_error(
+            "select public.archive_admin_memory_v1(%s)", (memory_id,),
+            "admin_memory_already_archived",
+        )
+        self._as_service_role("select public.restore_archived_memory_v1(%s)", (memory_id,))
+        restored = self._query(
+            "select is_active, heat from public.memories where id = %s", (memory_id,)
+        )[0]
+        self.assertTrue(restored[0])
+        self.assertEqual(restored[1], 50.0)
+
+        # 被替代旧版本不能归档。
+        b_id = self._change_type(
+            memory_id, "被替代版本不能归档的新线索版本。", "thread", THREAD_DATA,
+            thread_state="open",
+        )["memory"]["id"]
+        self._expect_rpc_error(
+            "select public.archive_admin_memory_v1(%s)", (memory_id,),
+            "admin_memory_superseded",
+        )
+        self.assertTrue(self._memory_row(b_id)[2])
+
+        # 非正式记录（未确认）不能归档。
+        self.conn.execute(
+            "insert into public.memory_continuity_objects"
+            " (continuity_id, assistant_id) values"
+            " ('33333333-3333-3333-3333-3333333333a4', %s)",
+            (ASSISTANT,),
+        )
+        pending_id = self._one(
+            """
+            insert into public.memories (
+                content, source, verified, is_active, assistant_id, confidence,
+                content_hash, continuity_id, continuity_type,
+                continuity_schema_version, continuity_data
+            ) values (
+                '未确认状态的记忆不能直接归档。', 'daily_digest', 'pending', true,
+                %s, 1.0, %s, '33333333-3333-3333-3333-3333333333a4',
+                'moment', 1, %s
+            ) returning id
+            """,
+            (ASSISTANT, _sha256("未确认状态的记忆不能直接归档。"),
+             json.dumps(MOMENT_DATA, ensure_ascii=False)),
+        )
+        self._expect_rpc_error(
+            "select public.archive_admin_memory_v1(%s)", (pending_id,),
+            "admin_memory_not_archivable",
+        )
+
     # -- 3. undo -----------------------------------------------------------
 
     def test_undo_restores_direct_parent_exactly_once(self):
@@ -415,6 +623,92 @@ class AdminMemoryLifecycleOnPostgresTests(unittest.TestCase):
             "select public.undo_memory_type_change_v1(%s)", (a_id,),
             "admin_memory_no_previous_version",
         )
+
+    # -- 3b. undo fallback branch (defensive) --------------------------------
+
+    def test_undo_fallback_archives_when_hard_foreign_key_blocks_delete(self):
+        # 生产所有引用 memories 的外键均为 ON DELETE SET NULL，正常结构下
+        # 物理删除不会被阻止；此用例在临时库显式构造一个限制删除的硬外键，
+        # 验证防御分支：删除抛 foreign_key_violation -> 新版本转归档并释放
+        # 哈希，上一版本恢复并收回真实哈希，全程不出现重复非 NULL 哈希。
+        content = "撤销回退分支：硬外键阻止物理删除时转归档。"
+        real_hash = _sha256(content)
+        a_id = self._create(content, "moment", MOMENT_DATA)["memory_id"]
+        b_id = self._change_type(
+            a_id, content, "thread", THREAD_DATA, thread_state="open"
+        )["memory"]["id"]
+
+        self.conn.execute(
+            "create table public.undo_pin (id integer primary key,"
+            " pinned_memory integer not null references public.memories(id)"
+            " on delete restrict)"
+        )
+        try:
+            self.conn.execute(
+                "insert into public.undo_pin values (1, %s)", (b_id,))
+            result = self._as_service_role(
+                "select public.undo_memory_type_change_v1(%s)", (b_id,)
+            )[0][0]
+            self.assertFalse(result["undo_deleted"], "物理删除被阻止时应转归档")
+            b_row = self._memory_row(b_id)
+            self.assertFalse(b_row[2], "新版本转归档后失活")
+            self.assertIsNone(b_row[5], "转归档版本解除与上一版本的替代关系")
+            b_hash = self._query(
+                "select content_hash from public.memories where id = %s", (b_id,))[0][0]
+            self.assertIsNone(b_hash, "归档新版本必须先释放哈希")
+            a_row = self._query(
+                "select is_active, content_hash from public.memories where id = %s",
+                (a_id,),
+            )[0]
+            self.assertTrue(a_row[0], "上一版本恢复有效")
+            self.assertEqual(a_row[1], real_hash, "上一版本收回真实哈希")
+            duplicates = self._one(
+                "select count(*) from (select content_hash from public.memories"
+                " where content_hash is not null group by content_hash"
+                " having count(*) > 1) as dup"
+            )
+            self.assertEqual(duplicates, 0, "不能出现两个非 NULL 的相同哈希")
+        finally:
+            self.conn.execute("drop table public.undo_pin")
+
+    def test_undo_non_fk_failure_rolls_back_completely(self):
+        # 非 foreign_key_violation 的数据库异常必须完整回滚，绝不转成归档成功。
+        content = "撤销的其他数据库异常必须完整回滚。"
+        a_id = self._create(content, "moment", MOMENT_DATA)["memory_id"]
+        b_id = self._change_type(
+            a_id, content, "thread", THREAD_DATA, thread_state="open"
+        )["memory"]["id"]
+
+        self.conn.execute(
+            """
+            create function public.undo_blocker() returns trigger
+            language plpgsql as $fn$
+            begin
+                raise exception 'undo blocked by non-fk failure';
+            end;
+            $fn$;
+            """
+        )
+        self.conn.execute(
+            "create trigger block_undo_delete before delete on public.memories"
+            " for each row execute function public.undo_blocker()"
+        )
+        try:
+            with self.assertRaises(psycopg.errors.RaiseException):
+                self._as_service_role(
+                    "select public.undo_memory_type_change_v1(%s)", (b_id,)
+                )
+            # 完整回滚：B 仍有效并持有哈希，A 仍失活且哈希为 NULL。
+            self.assertTrue(self._memory_row(b_id)[2])
+            b_hash = self._query(
+                "select content_hash from public.memories where id = %s", (b_id,))[0][0]
+            self.assertEqual(b_hash, _sha256(content))
+            self.assertFalse(self._memory_row(a_id)[2])
+            self.assertIsNone(self._query(
+                "select content_hash from public.memories where id = %s", (a_id,))[0][0])
+        finally:
+            self.conn.execute("drop trigger block_undo_delete on public.memories")
+            self.conn.execute("drop function public.undo_blocker()")
 
     # -- 4. natural archive restore ----------------------------------------
 

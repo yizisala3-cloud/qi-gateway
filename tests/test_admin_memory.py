@@ -420,6 +420,56 @@ class EditAdminMemoryTests(ServiceTestCase):
         with self.assertRaises(AdminMemoryError):
             admin_memory.edit_admin_memory(7, {})
 
+    def test_same_type_continuity_edit_carries_current_type(self):
+        # 前端实际构造的同类型结构编辑请求：continuity_data + 当前
+        # continuity_type 一起提交；thread 同时带完整 thread_state。
+        admin_memory.edit_admin_memory(7, {
+            "continuity_type": "moment",
+            "continuity_data": {**MOMENT_DATA, "outcome": "定在下周三"},
+        })
+        payload = self._last_call("edit_admin_memory_v1")
+        self.assertEqual(payload["p_patch"]["continuity_type"], "moment")
+        self.assertNotIn("thread_state", payload["p_patch"])
+
+    def test_thread_same_type_edit_with_state_change(self):
+        self.client.outcomes["edit_admin_memory_v1"] = {
+            "memory": {"id": 7, "continuity_type": "thread"},
+        }
+        admin_memory.edit_admin_memory(7, {
+            "continuity_type": "thread",
+            "thread_state": "paused",
+            "continuity_data": THREAD_OPEN_DATA,
+        })
+        payload = self._last_call("edit_admin_memory_v1")
+        self.assertEqual(payload["p_patch"]["continuity_type"], "thread")
+        self.assertEqual(payload["p_patch"]["thread_state"], "paused")
+        self.assertEqual(
+            payload["p_patch"]["continuity_data"],
+            validate_continuity_data("thread", "paused", THREAD_OPEN_DATA),
+        )
+
+    def test_type_switch_via_edit_reaches_rpc_and_maps_rejection(self):
+        # 服务层不做类型切换裁决（由事务 RPC 强制），但稳定错误码必须映射。
+        self.client.outcomes["edit_admin_memory_v1"] = _rpc_error(
+            "admin_memory_type_change_forbidden"
+        )
+        with self.assertRaises(AdminMemoryError) as ctx:
+            admin_memory.edit_admin_memory(7, {
+                "continuity_type": "profile",
+                "continuity_data": PROFILE_DATA,
+            })
+        self.assertEqual(ctx.exception.code, "admin_memory_type_change_forbidden")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_content_hash_conflict_maps_to_409(self):
+        self.client.outcomes["edit_admin_memory_v1"] = _rpc_error(
+            "admin_memory_content_exists"
+        )
+        with self.assertRaises(AdminMemoryError) as ctx:
+            admin_memory.edit_admin_memory(7, {"content": "这条正文和别的记忆一样了。"})
+        self.assertEqual(ctx.exception.code, "admin_memory_content_exists")
+        self.assertEqual(ctx.exception.status_code, 409)
+
 
 class ChangeTypeTests(ServiceTestCase):
     def setUp(self):
@@ -511,6 +561,40 @@ class UndoAndRestoreTests(ServiceTestCase):
         }
         result = admin_memory.undo_memory_type_change(9)
         self.assertFalse(result["undo_deleted"])
+
+    def test_archive_calls_dedicated_rpc_and_maps_codes(self):
+        self.client.outcomes["archive_admin_memory_v1"] = {
+            "memory": {"id": 8, "is_active": False, "heat": 60.0},
+        }
+        result = admin_memory.archive_admin_memory(8)
+        self.assertFalse(result["is_active"])
+        # 归档只翻 is_active，不动 heat：服务端返回什么就透传什么。
+        self.assertEqual(result["memory"]["heat"], 60.0)
+        payload = self._last_call("archive_admin_memory_v1")
+        self.assertEqual(payload, {"p_memory_id": 8})
+
+        for code, status in (
+            ("admin_memory_superseded", 409),
+            ("admin_memory_already_archived", 409),
+            ("admin_memory_not_archivable", 409),
+            ("admin_memory_not_found", 404),
+        ):
+            with self.subTest(code=code):
+                self.client.outcomes["archive_admin_memory_v1"] = _rpc_error(code)
+                self.client.calls.clear()
+                with self.assertRaises(AdminMemoryError) as ctx:
+                    admin_memory.archive_admin_memory(8)
+                self.assertEqual(ctx.exception.code, code)
+                self.assertEqual(ctx.exception.status_code, status)
+
+    def test_restore_not_archived_maps_to_stable_code(self):
+        self.client.outcomes["restore_archived_memory_v1"] = _rpc_error(
+            "admin_memory_not_archived"
+        )
+        with self.assertRaises(AdminMemoryError) as ctx:
+            admin_memory.restore_archived_memory(8)
+        self.assertEqual(ctx.exception.code, "admin_memory_not_archived")
+        self.assertEqual(ctx.exception.status_code, 409)
 
     def test_restore_resets_heat_and_maps_conflicts(self):
         self.client.outcomes["restore_archived_memory_v1"] = {

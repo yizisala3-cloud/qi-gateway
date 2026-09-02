@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BROWSER = ROOT / "admin" / "js" / "pages" / "_memory_browser.js"
 FORM = ROOT / "admin" / "js" / "pages" / "_memory_form.js"
 INDEX_HTML = ROOT / "admin" / "index.html"
-ASSET_VERSION = "20260902-adminmem1"
+ASSET_VERSION = "20260902-adminmem2"
 
 EMOJI_PATTERN = re.compile(
     "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F600-\U0001F64F]"
@@ -111,6 +111,26 @@ class MemoryBrowserContractTests(unittest.TestCase):
     def test_old_panel_edit_form_is_gone(self):
         self.assertNotIn("ed-recall-scene", self.browser)
         self.assertNotIn("ed-evidence-time", self.browser)
+
+    def test_archive_uses_dedicated_endpoint(self):
+        self.assertIn("/archive", self.browser)
+        self.assertIn("data-act=\"mem-archive\"", self.browser)
+        # 通用 PATCH 不再承载归档：is_active 不允许经 generic PATCH 修改。
+        self.assertNotIn("{ is_active: false }", self.browser)
+
+    def test_form_passes_result_to_on_saved(self):
+        form = FORM.read_text(encoding="utf-8")
+        self.assertIn("const result = await gw(url", form)
+        self.assertIn("await onSaved(result)", form)
+
+    def test_same_type_edit_accompanies_continuity_type(self):
+        form = FORM.read_text(encoding="utf-8")
+        self.assertIn("patch.continuity_type = type;", form)
+
+    def test_edit_patch_logic_is_a_pure_tested_module(self):
+        assert (ROOT / "admin" / "js" / "pages" / "_memory_patch.js").exists()
+        form = FORM.read_text(encoding="utf-8")
+        self.assertIn("buildEditPatch(memory, values)", form)
 
     def test_conflicts_use_modal_not_alert(self):
         self.assertNotIn("window.alert", self.browser)
