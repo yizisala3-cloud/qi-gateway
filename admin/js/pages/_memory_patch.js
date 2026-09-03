@@ -45,6 +45,11 @@ function epochToShanghaiLocalInput(epoch) {
   return `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}T${pad(shifted.getUTCHours())}:${pad(shifted.getUTCMinutes())}`;
 }
 
+/** 当前时刻的 Asia/Shanghai datetime-local 表示（与系统时区无关）。 */
+export function nowShanghaiLocalInput() {
+  return epochToShanghaiLocalInput(Date.now());
+}
+
 /** 数据库存储值 → datetime-local 显示值（Asia/Shanghai 墙上时钟）。 */
 export function toDatetimeLocal(value) {
   if (!value) return '';

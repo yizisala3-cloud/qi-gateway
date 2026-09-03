@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   buildEditPatch, toDatetimeLocal, fromDatetimeLocal, stableJson,
   isSameMinute, parseInstant, mergeContinuityForSubmit, continuityEquals,
+  nowShanghaiLocalInput,
 } from '../admin/js/pages/_memory_patch.js';
 
 const results = [];
@@ -46,6 +47,14 @@ test('isSameMinute 跨格式判定同一分钟', () => {
   assert.ok(!isSameMinute('2026-08-19T03:11', '2026-08-19T04:20:00+08:00'));
   assert.ok(isSameMinute(null, ''));
   assert.ok(!isSameMinute(null, '2026-08-19T03:11:00+08:00'));
+});
+
+test('nowShanghaiLocalInput 返回上海墙上时钟的 datetime-local 形态', () => {
+  const now = nowShanghaiLocalInput();
+  assert.match(now, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
+  // 分钟粒度：与当前时刻差不超过 1 分钟
+  const diff = Math.abs(parseInstant(now) - Date.now());
+  assert.ok(diff <= 60000, `now offset too large: ${diff}ms`);
 });
 
 test('parseInstant 对无时区字符串按 Asia/Shanghai 解释（与运行环境时区无关）', () => {
