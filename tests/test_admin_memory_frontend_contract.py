@@ -127,6 +127,14 @@ class MemoryBrowserContractTests(unittest.TestCase):
         form = FORM.read_text(encoding="utf-8")
         self.assertIn("patch.continuity_type = type;", form)
 
+    def test_picker_cleanup_watches_body_not_modal(self):
+        # modal 关闭是被其父节点（body）整体移除，modal 内部无 childList
+        # 变化；清理观察必须挂在 body 上（辅助断言，主验为浏览器验收）。
+        form = FORM.read_text(encoding="utf-8")
+        self.assertIn("rootObserver.observe(document.body, { childList: true });", form)
+        self.assertNotIn("observer.observe(host,", form)
+        self.assertIn("if (!document.contains(anchor)) closeRetroTimePop();", form)
+
     def test_no_native_datetime_inputs_remain(self):
         # 原生 datetime-local 的浏览器弹窗与复古视觉体系不符，
         # 一律使用自绘复古时间选择器。

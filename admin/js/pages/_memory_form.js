@@ -624,19 +624,16 @@ function openRetroTimePop(anchor, input, apply) {
   });
   pop._cleanup = cleanup;
 
-  // 宿主表单关闭（弹窗被移除）时同步回收日历弹层
-  const host = anchor.closest('.modal, .field, .retro-time')?.closest('.modal') || anchor.closest('.modal');
-  if (host) {
-    const observer = new MutationObserver(() => {
-      if (!document.contains(anchor)) {
-        closeRetroTimePop();
-        observer.disconnect();
-      }
-    });
-    observer.observe(host, { childList: true, subtree: true });
-    const prevCleanup = pop._cleanup;
-    pop._cleanup = () => { prevCleanup(); observer.disconnect(); };
-  }
+  // 外层表单关闭时，modal 是被其父节点（document.body）整体移除的——
+  // modal 自身内部没有 childList 变化，监听 modal 无法发现关闭。
+  // 这里观察 body 的直接子级变动：modal mask 被移除必然触发一次回调，
+  // 届时宿主按钮已离开文档，立即回收弹层与其全局监听。
+  const rootObserver = new MutationObserver(() => {
+    if (!document.contains(anchor)) closeRetroTimePop();
+  });
+  rootObserver.observe(document.body, { childList: true });
+  const prevCleanup = pop._cleanup;
+  pop._cleanup = () => { prevCleanup(); rootObserver.disconnect(); };
 }
 
 function buildContinuityDataFromMemory(memory) {
