@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BROWSER = ROOT / "admin" / "js" / "pages" / "_memory_browser.js"
 FORM = ROOT / "admin" / "js" / "pages" / "_memory_form.js"
 INDEX_HTML = ROOT / "admin" / "index.html"
-ASSET_VERSION = "20260902-adminmem3"
+ASSET_VERSION = "20260903-retrotime1"
 
 EMOJI_PATTERN = re.compile(
     "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F600-\U0001F64F]"
@@ -126,6 +126,17 @@ class MemoryBrowserContractTests(unittest.TestCase):
     def test_same_type_edit_accompanies_continuity_type(self):
         form = FORM.read_text(encoding="utf-8")
         self.assertIn("patch.continuity_type = type;", form)
+
+    def test_no_native_datetime_inputs_remain(self):
+        # 原生 datetime-local 的浏览器弹窗与复古视觉体系不符，
+        # 一律使用自绘复古时间选择器。
+        form = FORM.read_text(encoding="utf-8")
+        self.assertNotIn("datetime-local", form)
+        self.assertIn("retro-time-field", form)
+        self.assertIn("retro-time-pop", form)
+        css = (ROOT / "admin" / "css" / "style.css").read_text(encoding="utf-8")
+        self.assertIn(".retro-time-pop", css)
+        self.assertNotIn("#3b82f6", css.lower())
 
     def test_edit_patch_logic_is_a_pure_tested_module(self):
         assert (ROOT / "admin" / "js" / "pages" / "_memory_patch.js").exists()
