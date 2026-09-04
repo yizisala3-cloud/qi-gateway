@@ -29,6 +29,7 @@ _TABLES: dict[str, dict[str, Any]] = {
             "evidence_message_ids", "source_time", "memory_time", "time_precision",
             "evidence_time_precision",
             "recall_scene", "recall_tags",
+            "producer_path", "maintained_by",
         },
         "write": {
             # Verified-state review actions only. Content, title, tags,
@@ -75,6 +76,7 @@ _TABLES: dict[str, dict[str, Any]] = {
             "evidence_time_precision",
             "recall_scene", "recall_tags",
             "dedupe_reason", "related_request_id",
+            "producer_path",
         },
         "write": set(),
         "insert": False,

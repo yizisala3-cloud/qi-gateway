@@ -48,6 +48,15 @@ class Config:
     # JSON 输出；允许 1024-120000，越界按边界处理。默认 8192。只作用于连续感
     # 提取，不影响旧版自动总结、普通聊天上游和 embedding。
     CONTINUITY_MAX_TOKENS: int = _clamped_env_int("CONTINUITY_MAX_TOKENS", 8192, 1024, 120000)
+    # 反刍连续感路径的独立提取模型。留空时回退复用 CONTINUITY_*；两者都为空
+    # 表示反刍未配置。提示词、游标与运行记录始终独立于连续感快速路径。
+    RUMINATION_BASE_URL: str = os.getenv("RUMINATION_BASE_URL", "")
+    RUMINATION_API_KEY: str = os.getenv("RUMINATION_API_KEY", "")
+    RUMINATION_MODEL: str = os.getenv("RUMINATION_MODEL", "")
+    # 反刍文本提取最大输出 token 数。允许 1024-120000，越界按边界处理；默认 8192。
+    RUMINATION_MAX_TOKENS: int = _clamped_env_int("RUMINATION_MAX_TOKENS", 8192, 1024, 120000)
+    # 反刍每日调度小时（Asia/Shanghai，0-23），默认 6 点。
+    RUMINATION_DAILY_HOUR: int = max(0, min(23, int(os.getenv("RUMINATION_DAILY_HOUR", "6"))))
     # 记忆总结。assistant_id 留空时从 chat_messages 最新有效记录自动发现。
     MEMORY_ASSISTANT_ID: str = os.getenv("MEMORY_ASSISTANT_ID", "")
     MEMORY_DIGEST_MAX_MESSAGES: int = int(os.getenv("MEMORY_DIGEST_MAX_MESSAGES", "60"))
