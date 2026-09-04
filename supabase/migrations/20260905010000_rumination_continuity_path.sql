@@ -631,6 +631,15 @@ begin
             )
             else null
         end;
+        -- A non-empty recall_scene must always arrive with its own vector: the
+        -- recall embedding serves the scene alone, and a scene saved without a
+        -- vector is a permanently incomplete write. The op-level failure
+        -- aborts the whole batch transaction, so no memory row, no continuity
+        -- object, no handoff row and no cursor advance can survive it.
+        if v_recall_scene is not null
+           and (not (v_op ? 'recall_embedding') or v_op->'recall_embedding' = 'null'::jsonb) then
+            raise exception 'memory_rumination_missing_recall_embedding';
+        end if;
         v_recall_embedding := case
             when v_recall_scene is not null
                  and v_op ? 'recall_embedding'
@@ -684,6 +693,9 @@ begin
         -- Thread-target ops share target resolution. Any unfinished thread is
         -- addressable; acting on a fast_path thread implicitly takes it over
         -- (maintained_by flips and an audit row is written in this transaction).
+        -- A takeover must end with a stable memory_key: ops other than
+        -- adopt_thread refuse a keyless fast_path target unless the op itself
+        -- carries the key to fill in.
         if v_op_type in ('adopt_thread', 'evidence_only', 'update_thread', 'pause_thread', 'resume_thread', 'resolve_thread') then
             v_target_id := nullif(trim(coalesce(v_op->>'target_memory_id', '')), '')::integer;
             if v_target_id is null then
@@ -702,6 +714,12 @@ begin
             end if;
             if v_target.thread_state not in ('open', 'paused') then
                 raise exception 'memory_rumination_target_closed';
+            end if;
+            if v_op_type <> 'adopt_thread'
+               and v_target.maintained_by = 'fast_path'
+               and v_target.memory_key is null
+               and nullif(trim(coalesce(v_op->>'memory_key', '')), '') is null then
+                raise exception 'memory_rumination_invalid_memory_key';
             end if;
         end if;
 
@@ -1037,9 +1055,19 @@ begin
 
         if v_op_type = 'evidence_only' then
             -- Repeated expression: merge evidence into the current active
-            -- version, never rewrite the body, never create a version.
+            -- version, never rewrite the body, never create a version. An op
+            -- (or merge) carrying a key fills in a keyless fast_path takeover.
+            v_memory_key := coalesce(
+                nullif(lower(trim(coalesce(v_op->>'memory_key', ''))), ''),
+                v_target.memory_key
+            );
+            if v_memory_key is not null
+               and v_memory_key !~ '^[a-z0-9][a-z0-9._:/-]{2,119}$' then
+                raise exception 'memory_rumination_invalid_memory_key';
+            end if;
             update public.memories
             set maintained_by = 'rumination',
+                memory_key = v_memory_key,
                 evidence_message_ids = (
                     select coalesce(array_agg(distinct id order by id), '{}'::bigint[])
                     from unnest(v_target.evidence_message_ids || v_evidence) as id
@@ -1062,7 +1090,7 @@ begin
                 ) values (
                     v_run.assistant_id, v_run.id, 'adopt_thread',
                     v_target.id, v_target.id,
-                    v_target.memory_key, v_target.continuity_id,
+                    v_memory_key, v_target.continuity_id,
                     left(coalesce(v_reason, 'evidence merge takeover'), 500)
                 );
                 v_counts := jsonb_set(v_counts, '{adopted_threads}',
@@ -1122,6 +1150,29 @@ begin
                 raise exception 'memory_rumination_invalid_continuity_data';
             end if;
 
+            -- The version keeps the thread's stable key; an op-provided key
+            -- only fills in the key of a keyless fast_path takeover, and it
+            -- never re-keys an existing rumination thread.
+            v_memory_key := coalesce(
+                case when v_target.memory_key is null
+                     then nullif(lower(trim(coalesce(v_op->>'memory_key', ''))), '') end,
+                v_target.memory_key
+            );
+            if v_memory_key is not null then
+                if v_memory_key !~ '^[a-z0-9][a-z0-9._:/-]{2,119}$' then
+                    raise exception 'memory_rumination_invalid_memory_key';
+                end if;
+                if exists (
+                    select 1 from public.memories as memory
+                    where memory.memory_key = v_memory_key
+                      and memory.is_active = true
+                      and memory.verified = 'verified'
+                      and memory.id <> v_target.id
+                ) then
+                    raise exception 'memory_rumination_memory_key_conflict';
+                end if;
+            end if;
+
             -- Soft-deactivate first, then insert the successor and link both
             -- directions: one transaction, so a failure restores the old row
             -- while the partial unique index never sees two active versions
@@ -1154,7 +1205,7 @@ begin
                 v_run.assistant_id, v_run.id,
                 v_evidence[1], v_evidence[cardinality(v_evidence)],
                 v_confidence, v_content_hash,
-                v_target.memory_key, v_target.id,
+                v_memory_key, v_target.id,
                 v_target.continuity_id, 1, v_continuity_data,
                 'thread', v_thread_state,
                 v_memory_time, v_time_precision,
@@ -1185,7 +1236,7 @@ begin
                 ) values (
                     v_run.assistant_id, v_run.id, 'adopt_thread',
                     v_target.id, v_new_memory_id,
-                    v_target.memory_key, v_target.continuity_id,
+                    v_memory_key, v_target.continuity_id,
                     left(coalesce(v_reason, 'thread op takeover'), 500)
                 );
                 v_counts := jsonb_set(v_counts, '{adopted_threads}',
@@ -1254,6 +1305,44 @@ begin
                     raise exception 'memory_rumination_invalid_memory_key';
                 end if;
                 v_memory_key := null;
+            end if;
+
+            -- The content is already in flight or finalized by a request from
+            -- ANY lane. A pending row from another source shares the partial
+            -- unique index (assistant_id, content_hash), and an approved or
+            -- merged request has already produced its formal result: in both
+            -- cases a second rumination request must not be created.
+            if exists (
+                select 1 from public.memory_requests as request
+                where request.assistant_id = v_run.assistant_id
+                  and request.content_hash = v_content_hash
+                  and request.status in ('pending', 'approved', 'merged')
+            ) then
+                v_counts := jsonb_set(v_counts, '{skipped_duplicates}',
+                    ((v_counts->>'skipped_duplicates')::integer + 1)::text::jsonb);
+                v_preview := v_preview || jsonb_build_object(
+                    'op', 'create_request', 'commit_status', 'skipped_existing_request',
+                    'reason', v_reason, 'evidence_message_ids', to_jsonb(v_evidence)
+                );
+                continue;
+            end if;
+
+            -- The content already exists as a formal memory: a new request
+            -- would duplicate an active truth.
+            if exists (
+                select 1 from public.memories as memory
+                where memory.is_active = true
+                  and memory.verified = 'verified'
+                  and (memory.assistant_id = v_run.assistant_id or memory.assistant_id is null)
+                  and memory.content_hash = v_content_hash
+            ) then
+                v_counts := jsonb_set(v_counts, '{skipped_duplicates}',
+                    ((v_counts->>'skipped_duplicates')::integer + 1)::text::jsonb);
+                v_preview := v_preview || jsonb_build_object(
+                    'op', 'create_request', 'commit_status', 'skipped_active_memory',
+                    'reason', v_reason, 'evidence_message_ids', to_jsonb(v_evidence)
+                );
+                continue;
             end if;
 
             -- Same-content pending rumination request already exists: never a

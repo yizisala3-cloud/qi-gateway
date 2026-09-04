@@ -76,6 +76,11 @@ THREAD_OP_TYPES = frozenset({
     "adopt_thread", "evidence_only", "update_thread",
     "pause_thread", "resume_thread", "resolve_thread",
 })
+_THREAD_STATE_KINDS = {
+    "resolved": "resolve_thread",
+    "paused": "pause_thread",
+    "open": "resume_thread",
+}
 RUMINATION_TRIGGERS = frozenset({
     "rumination_scheduled", "rumination_manual", "rumination_retry",
 })
@@ -111,20 +116,20 @@ _OP_FIELDS: dict[str, frozenset[str]] = {
     }),
     "update_thread": frozenset({
         "op", "reason", "evidence_message_ids", "target_memory_id", "content",
-        "title", "thread_state", "continuity_data", "memory_time",
+        "title", "thread_state", "continuity_data", "memory_key", "memory_time",
         "time_precision",
     }),
     "pause_thread": frozenset({
         "op", "reason", "evidence_message_ids", "target_memory_id", "content",
-        "title", "continuity_data", "memory_time", "time_precision",
+        "title", "continuity_data", "memory_key", "memory_time", "time_precision",
     }),
     "resume_thread": frozenset({
         "op", "reason", "evidence_message_ids", "target_memory_id", "content",
-        "title", "continuity_data", "memory_time", "time_precision",
+        "title", "continuity_data", "memory_key", "memory_time", "time_precision",
     }),
     "resolve_thread": frozenset({
         "op", "reason", "evidence_message_ids", "target_memory_id", "content",
-        "title", "continuity_data", "memory_time", "time_precision",
+        "title", "continuity_data", "memory_key", "memory_time", "time_precision",
     }),
     "create_request": frozenset({
         "op", "reason", "evidence_message_ids", "continuity_type", "content",
@@ -168,6 +173,7 @@ RUMINATION_SYSTEM_PROMPT = """你是“反刍连续感”提取器，负责在�
 10. 不输出 API Key、Token、密码、service_role 等秘密。
 11. 已有实质相同的 pending 反刍申请时不要再提交；rejected/duplicate/conflict 的申请只有在出现拒绝之后的新原文证据时才能重新提交。
 12. 没有新证据的长期进程不要重写；不确定时选择 ignore 或 evidence_only。
+13. 同一条 thread 在本批出现多个连续进展时（例如上午完成、下午部署、晚上验收），必须把它们合并为一个操作：content 写最终完整当前状态，evidence_message_ids 取各进展消息的并集，按证据时间得到的最终状态决定操作类型；不要为同一 thread 输出多个版本操作。
 
 ## 输出 JSON
 只返回严格 JSON，不要 Markdown、解释或代码围栏：
@@ -566,6 +572,10 @@ def parse_rumination_output(
                     f"target_memory_id {target_id} is not an unfinished thread in this input",
                 )
             op["target_memory_id"] = target_id
+            # A stable key may only accompany a thread op to fill in the key
+            # of a fast-path takeover; it never re-keys a rumination thread.
+            if raw.get("memory_key"):
+                op["memory_key"] = _normalize_memory_key(raw.get("memory_key"))
             if op_type == "pause_thread" and target.get("thread_state") != "open":
                 raise RuminationPipelineError(
                     "model_schema_error", "pause_thread requires an open thread",
@@ -765,6 +775,186 @@ def _require_memory_key(value: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Same-batch consecutive progress merging
+# ---------------------------------------------------------------------------
+
+def _op_evidence_time(op: dict[str, Any], evidence_times: dict[int, str | None]) -> str:
+    """Latest real evidence time of an op, or a hard failure when the ops on
+    one thread cannot be ordered by genuine evidence."""
+    times = [
+        evidence_times.get(message_id)
+        for message_id in op["evidence_message_ids"]
+    ]
+    valid = [time for time in times if time]
+    if not valid:
+        raise RuminationPipelineError(
+            "model_schema_error",
+            "multiple operations on one thread cannot be ordered by real "
+            "evidence time: no valid evidence times",
+        )
+    return max(valid)
+
+
+def _merged_thread_op(
+    target_id: int,
+    entries: list[tuple[int, dict[str, Any]]],
+    target: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    """Merge several same-thread ops into one final operation.
+
+    entries are already sorted by real evidence time. The final current state
+    is derived by walking the state machine; the merged op keeps the union of
+    evidence, the last content-bearing body and the latest state's continuity
+    data, so one batch produces exactly one new active version per thread.
+    """
+    chain = target.get("thread_state")
+    resolved_seen = False
+    for _, op in entries:
+        kind = op["op"]
+        if resolved_seen:
+            raise RuminationPipelineError(
+                "model_schema_error",
+                "contradictory operations: progress after resolve_thread on "
+                f"memory {target_id}",
+            )
+        if kind == "resolve_thread":
+            if chain not in ("open", "paused"):
+                raise RuminationPipelineError(
+                    "model_schema_error",
+                    f"contradictory operations: resolve_thread on a {chain} "
+                    f"thread (memory {target_id})",
+                )
+            chain = "resolved"
+            resolved_seen = True
+        elif kind == "pause_thread":
+            if chain != "open":
+                raise RuminationPipelineError(
+                    "model_schema_error",
+                    f"contradictory operations: pause_thread on a {chain} "
+                    f"thread (memory {target_id})",
+                )
+            chain = "paused"
+        elif kind == "resume_thread":
+            if chain != "paused":
+                raise RuminationPipelineError(
+                    "model_schema_error",
+                    f"contradictory operations: resume_thread on a {chain} "
+                    f"thread (memory {target_id})",
+                )
+            chain = "open"
+        # update_thread / adopt_thread / evidence_only keep the state.
+
+    content_ops = [op for _, op in entries if op.get("content")]
+    if chain == "resolved":
+        merged_kind = "resolve_thread"
+    elif chain != target.get("thread_state"):
+        merged_kind = _THREAD_STATE_KINDS[chain]
+    elif content_ops:
+        merged_kind = "update_thread"
+    else:
+        merged_kind = "evidence_only"
+    evidence_union = sorted({
+        message_id
+        for _, op in entries
+        for message_id in op["evidence_message_ids"]
+    })
+    merged: dict[str, Any] = {
+        "op": merged_kind,
+        "target_memory_id": target_id,
+        "reason": "；".join(
+            dict.fromkeys(op["reason"] for _, op in entries)
+        )[:500],
+        "evidence_message_ids": evidence_union,
+        "thread_state": chain,
+    }
+    # Body and state data come from the last op that carries them (the latest
+    # progress represents the final current state).
+    for key in ("content", "continuity_data", "title", "memory_time", "time_precision"):
+        for _, op in reversed(entries):
+            if op.get(key) is not None:
+                merged[key] = op[key]
+                break
+    # Scalar presentation fields prefer the latest explicit value.
+    for key in ("importance", "confidence", "source_type", "recall_scene", "recall_tags"):
+        for _, op in reversed(entries):
+            if op.get(key) is not None:
+                merged[key] = op[key]
+                break
+    # A stable key proposed for a fast-path takeover must survive the merge.
+    for _, op in entries:
+        if op.get("memory_key"):
+            merged["memory_key"] = op["memory_key"]
+            break
+    if merged.get("content"):
+        merged["content_hash"] = hashlib.sha256(
+            merged["content"].casefold().encode("utf-8"),
+        ).hexdigest()
+    # 状态未变且最终正文与当前版本相同：不重写正文，只合并证据。
+    if (
+        merged_kind == "update_thread"
+        and merged.get("content")
+        and str(target.get("content") or "")
+        and merged["content"].casefold() == str(target["content"]).casefold()
+    ):
+        merged_kind = "evidence_only"
+        merged["op"] = merged_kind
+        for key in ("content", "content_hash", "continuity_data"):
+            merged.pop(key, None)
+    first_index = entries[0][0]
+    return first_index, merged
+
+
+def merge_thread_operations(
+    ops: list[dict[str, Any]],
+    *,
+    evidence_times: dict[int, str | None],
+    threads_by_id: dict[int, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """同批内同一条 thread 的多个连续进展合并为一个最终操作。
+
+    按真实证据时间（消息时间）排序后沿状态机推进；无法排序或操作互相矛盾
+    时整批失败。最终每条 thread 在本批至多产生一个新 active 版本，中间进展
+    的消息全部并入合并后操作的 evidence_message_ids。
+    """
+    grouped: dict[int, list[tuple[int, dict[str, Any]]]] = {}
+    for index, op in enumerate(ops):
+        if op.get("op") in THREAD_OP_TYPES:
+            target_id = op["target_memory_id"]
+            grouped.setdefault(target_id, []).append((index, op))
+
+    replacements: dict[int, dict[str, Any] | None] = {}
+    for target_id, entries in grouped.items():
+        if len(entries) == 1:
+            continue
+        target = threads_by_id.get(target_id)
+        if target is None:  # pragma: no cover - parse already validated
+            raise RuminationPipelineError(
+                "model_schema_error",
+                f"target_memory_id {target_id} is not an unfinished thread",
+            )
+        ordered = sorted(
+            entries,
+            key=lambda entry: (_op_evidence_time(entry[1], evidence_times), entry[0]),
+        )
+        first_index, merged = _merged_thread_op(target_id, ordered, target)
+        for index, _ in entries:
+            replacements[index] = None
+        replacements[first_index] = merged
+
+    if not replacements:
+        return ops
+    merged_ops: list[dict[str, Any]] = []
+    for index, op in enumerate(ops):
+        if index in replacements:
+            merged = replacements[index]
+            if merged is not None:
+                merged_ops.append(merged)
+        else:
+            merged_ops.append(op)
+    return merged_ops
+
+
+# ---------------------------------------------------------------------------
 # Model call (independent provider, independent prompt)
 # ---------------------------------------------------------------------------
 
@@ -840,7 +1030,13 @@ def _call_rumination_model(model_input: str) -> str:
 # ---------------------------------------------------------------------------
 
 def enrich_rumination_ops(ops: list[dict[str, Any]], run_id: int) -> list[dict[str, Any]]:
-    """内容向量失败让整批失败；召回向量失败仅该操作以 NULL 向量落库。"""
+    """正文向量失败或非空场景的召回向量失败都让整批失败。
+
+    召回向量只服务于 recall_scene；正式写入绝不允许出现"场景已写入但向量
+    永久缺失"的半完成状态。整批在同一事务内提交，任何失败都不会留下记忆行、
+    continuity 对象、交接记录，也不会推进游标。没有可靠场景的操作显式写入
+    空场景（recall_scene=None 且 recall_embedding=None）。
+    """
     enriched: list[dict[str, Any]] = []
     for op in ops:
         _update_heartbeat(run_id)
@@ -853,10 +1049,13 @@ def enrich_rumination_ops(ops: list[dict[str, Any]], run_id: int) -> list[dict[s
                 try:
                     item["recall_embedding"] = _get_embedding_sync(recall_scene)
                 except DigestPipelineError as exc:
-                    log.warning(
-                        "反刍召回向量生成失败，该操作将以 NULL 向量提交: %s", exc.code,
-                    )
-                    item["recall_embedding"] = None
+                    # 场景非空必须有向量：失败让整批失败并回滚，等待重试。
+                    raise RuminationPipelineError(
+                        "recall_embedding_failed",
+                        f"Recall scene embedding failed ({exc.code}); "
+                        "the batch was not committed",
+                    ) from exc
+                item["recall_embedding"] = item.get("recall_embedding")
         enriched.append(item)
     return enriched
 
@@ -967,6 +1166,13 @@ def run_rumination_batch(
         _update_heartbeat(run_id)
         ops = parse_rumination_output(
             model_output,
+            evidence_times=evidence_times,
+            threads_by_id=threads_by_id,
+        )
+        # 同批内同一条 thread 的多个连续进展按真实证据时间合并为一个最终
+        # 版本操作；互相矛盾或无法排序时整批失败。
+        ops = merge_thread_operations(
+            ops,
             evidence_times=evidence_times,
             threads_by_id=threads_by_id,
         )

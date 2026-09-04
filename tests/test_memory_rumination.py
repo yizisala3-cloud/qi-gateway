@@ -24,6 +24,7 @@ from gateway.memory_rumination import (
     enrich_rumination_ops,
     first_run_message_ids,
     get_rumination_status,
+    merge_thread_operations,
     parse_rumination_output,
     plan_rumination_batches,
     run_rumination_batch,
@@ -223,7 +224,7 @@ class ParseValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuminationPipelineError, "unknown rumination op"):
             self._parse([{"op": "archive_everything", "reason": "x", "evidence_message_ids": [1]}])
         with self.assertRaisesRegex(RuminationPipelineError, "unsupported fields"):
-            self._parse([_op(memory_key="topic.hack")])
+            self._parse([_op(update_mode="replace")])
 
     def test_missing_reason_rejected(self):
         with self.assertRaisesRegex(RuminationPipelineError, "reason"):
@@ -363,6 +364,7 @@ class EnrichmentTests(unittest.TestCase):
                 # 正文向量失败让整批失败。
                 enrich_rumination_ops(ops, 1)
 
+        # 场景非空但召回向量失败：整批失败，绝不留下"有场景无向量"的写入。
         def fake_embedding(text):
             from gateway.memory_extract import DigestPipelineError
 
@@ -374,11 +376,22 @@ class EnrichmentTests(unittest.TestCase):
             patch("gateway.memory_rumination._update_heartbeat"),
             patch("gateway.memory_rumination._get_embedding_sync", side_effect=fake_embedding),
         ):
-            enriched = enrich_rumination_ops(ops, 1)
-        # 正文向量成功；召回向量失败仅该操作以 NULL 向量提交。
-        self.assertEqual(enriched[0]["embedding"], [0.1, 0.2])
+            with self.assertRaisesRegex(RuminationPipelineError, "Recall scene embedding failed"):
+                enrich_rumination_ops(ops, 1)
+
+        # 没有可靠场景时显式空场景写入，不调用召回向量。
+        sceneless = [dict(ops[1])]
+        with (
+            patch("gateway.memory_rumination._update_heartbeat"),
+            patch("gateway.memory_rumination._get_embedding_sync", return_value=[0.3, 0.4]) as embed,
+        ):
+            enriched = enrich_rumination_ops(sceneless, 1)
+        self.assertEqual(enriched[0]["embedding"], [0.3, 0.4])
         self.assertIsNone(enriched[0].get("recall_embedding"))
-        self.assertEqual(enriched[1]["embedding"], [0.1, 0.2])
+        self.assertEqual(
+            [call for call in embed.call_args_list if call.args[0] == "聊到赶海时"],
+            [],
+        )
 
 
 class RunFlowTests(unittest.TestCase):
@@ -631,6 +644,310 @@ class RuminationApiTests(unittest.TestCase):
             response = asyncio.run(rumination_execute(_Request()))
         self.assertEqual(response.status_code, 503)
         self.assertEqual(json.loads(response.body)["error_code"], "analysis_not_configured")
+
+
+class MergeThreadOperationsTests(unittest.TestCase):
+    """同批同 thread 多个连续进展：按真实证据时间合并为一个最终版本操作。"""
+
+    def setUp(self):
+        self.times = {
+            101: "2026-09-01T09:00+08:00",   # 上午：后端完成
+            102: "2026-09-01T09:30+08:00",
+            201: "2026-09-01T14:00+08:00",   # 下午：前端部署
+            202: "2026-09-01T14:30+08:00",
+            301: "2026-09-01T20:00+08:00",   # 晚上：实测通过
+            302: "2026-09-01T20:30+08:00",
+        }
+        self.threads = _threads_by_id(_thread(memory_id=12, state="open"))
+
+    def _update(self, evidence, content, state_data=None):
+        return {
+            "op": "update_thread",
+            "reason": "进程有实质进展",
+            "target_memory_id": 12,
+            "content": content,
+            "continuity_data": state_data or {
+                "open_question": "网关改造是否完成",
+                "current_state": content,
+                "closure_criteria": ["生产实测通过"],
+            },
+            "evidence_message_ids": list(evidence),
+        }
+
+    def test_two_consecutive_progresses_merge_into_one_version(self):
+        ops = [
+            self._update([101], "网关改造当前状态：后端已完成。",
+                         {"open_question": "q", "current_state": "后端已完成"}),
+            self._update([201, 202], "网关改造当前状态：后端与前端部署均完成。",
+                         {"open_question": "q", "current_state": "前后端均完成"}),
+        ]
+        merged = merge_thread_operations(
+            ops, evidence_times=self.times, threads_by_id=self.threads,
+        )
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["op"], "update_thread")
+        self.assertEqual(merged[0]["evidence_message_ids"], [101, 201, 202])
+        # 最终状态来自证据时间最晚的操作。
+        self.assertEqual(merged[0]["content"], "网关改造当前状态：后端与前端部署均完成。")
+        self.assertEqual(merged[0]["thread_state"], "open")
+
+    def test_three_progresses_ending_in_resolve_merge_into_one_resolve(self):
+        ops = [
+            self._update([101], "网关改造当前状态：后端已完成。",
+                         {"open_question": "q", "current_state": "后端已完成"}),
+            self._update([201], "网关改造当前状态：前端已部署。",
+                         {"open_question": "q", "current_state": "前端已部署"}),
+            {
+                "op": "resolve_thread",
+                "reason": "生产实测通过，进程完成",
+                "target_memory_id": 12,
+                "content": "网关改造已完成：后端完成、前端部署、生产实测通过。",
+                "continuity_data": {
+                    "open_question": "网关改造是否完成",
+                    "current_state": "生产实测通过，改造完成",
+                    "closure_criteria": ["生产实测通过"],
+                    "closure_summary": "改造全链路完成并实测通过。",
+                    "closure_reason": "原文明确说明实测通过",
+                    "closed_at": "2026-09-01",
+                },
+                "evidence_message_ids": [301, 302],
+            },
+        ]
+        merged = merge_thread_operations(
+            ops, evidence_times=self.times, threads_by_id=self.threads,
+        )
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["op"], "resolve_thread")
+        self.assertEqual(merged[0]["thread_state"], "resolved")
+        self.assertEqual(merged[0]["evidence_message_ids"], [101, 201, 301, 302])
+        self.assertIn("closure_summary", merged[0]["continuity_data"])
+
+    def test_pause_then_resume_merges_to_state_unchanged_update(self):
+        ops = [
+            {
+                "op": "pause_thread", "reason": "临时暂停",
+                "target_memory_id": 12,
+                "content": "网关改造当前状态：临时暂停。",
+                "continuity_data": {"open_question": "q", "current_state": "临时暂停"},
+                "evidence_message_ids": [101],
+            },
+            {
+                "op": "resume_thread", "reason": "恢复推进",
+                "target_memory_id": 12,
+                "content": "网关改造当前状态：恢复推进。",
+                "continuity_data": {"open_question": "q", "current_state": "恢复推进"},
+                "evidence_message_ids": [201],
+            },
+        ]
+        merged = merge_thread_operations(
+            ops, evidence_times=self.times, threads_by_id=self.threads,
+        )
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["op"], "update_thread")
+        self.assertEqual(merged[0]["thread_state"], "open")
+        self.assertEqual(merged[0]["evidence_message_ids"], [101, 201])
+
+    def test_progress_after_resolve_is_contradictory(self):
+        ops = [
+            {
+                "op": "resolve_thread", "reason": "完成",
+                "target_memory_id": 12,
+                "content": "网关改造已完成。",
+                "continuity_data": {
+                    "open_question": "q", "current_state": "完成",
+                    "closure_summary": "s", "closure_reason": "r", "closed_at": "2026-09-01",
+                },
+                "evidence_message_ids": [101],
+            },
+            self._update([201], "网关改造当前状态：完成后又改动了。"),
+        ]
+        with self.assertRaisesRegex(RuminationPipelineError, "contradictory"):
+            merge_thread_operations(
+                ops, evidence_times=self.times, threads_by_id=self.threads,
+            )
+
+    def test_pause_on_paused_thread_is_contradictory(self):
+        threads = _threads_by_id(_thread(memory_id=13, state="paused", key="topic.p"))
+        ops = [
+            {
+                "op": "pause_thread", "reason": "重复暂停",
+                "target_memory_id": 13,
+                "content": "网关改造当前状态：再次暂停。",
+                "continuity_data": {"open_question": "q", "current_state": "再次暂停"},
+                "evidence_message_ids": [101],
+            },
+            {
+                "op": "pause_thread", "reason": "又一次暂停",
+                "target_memory_id": 13,
+                "content": "网关改造当前状态：第三次暂停。",
+                "continuity_data": {"open_question": "q", "current_state": "第三次暂停"},
+                "evidence_message_ids": [201],
+            },
+        ]
+        with self.assertRaisesRegex(RuminationPipelineError, "contradictory"):
+            merge_thread_operations(
+                ops, evidence_times=self.times, threads_by_id=threads,
+            )
+
+    def test_unchanged_update_merges_to_evidence_only(self):
+        ops = [
+            {"op": "evidence_only", "reason": "只补证据",
+             "target_memory_id": 12, "evidence_message_ids": [101]},
+            self._update([201], "叶子和栖约定下周三赶海。"),  # 与目标正文相同
+        ]
+        merged = merge_thread_operations(
+            ops, evidence_times=self.times, threads_by_id=self.threads,
+        )
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["op"], "evidence_only")
+        self.assertEqual(merged[0]["evidence_message_ids"], [101, 201])
+        self.assertNotIn("content", merged[0])
+
+    def test_ordering_requires_real_evidence_times(self):
+        ops = [
+            self._update([101], "网关改造当前状态：后端已完成。"),
+            self._update([201], "网关改造当前状态：前端已部署。"),
+        ]
+        broken_times = dict(self.times)
+        broken_times[201] = None
+        with self.assertRaisesRegex(RuminationPipelineError, "cannot be ordered"):
+            merge_thread_operations(
+                ops, evidence_times=broken_times, threads_by_id=self.threads,
+            )
+
+    def test_single_ops_and_other_ops_pass_through(self):
+        ops = [
+            {"op": "ignore", "reason": "寒暄", "evidence_message_ids": [101]},
+            self._update([201], "网关改造当前状态：后端已完成。"),
+            {"op": "create_memory", "reason": "瞬间", "continuity_type": "moment",
+             "content": "一条独立的普通记忆。", "continuity_data": {
+                 "scene": "s", "event": "e", "moment_state": "standalone"},
+             "evidence_message_ids": [202]},
+        ]
+        merged = merge_thread_operations(
+            ops, evidence_times=self.times, threads_by_id=self.threads,
+        )
+        self.assertEqual(merged, ops)
+
+    def test_adopt_memory_key_survives_merge(self):
+        threads = _threads_by_id(
+            _thread(memory_id=14, state="open", maintained_by="fast_path", key=None),
+        )
+        ops = [
+            {
+                "op": "adopt_thread", "reason": "接管快速路径 thread",
+                "target_memory_id": 14, "memory_key": "topic.gateway.rework",
+                "evidence_message_ids": [101],
+            },
+            {
+                "op": "update_thread", "reason": "进程有实质进展",
+                "target_memory_id": 14,
+                "content": "网关改造当前状态：前端已部署。",
+                "continuity_data": {"open_question": "q", "current_state": "前端已部署"},
+                "evidence_message_ids": [201],
+            },
+        ]
+        merged = merge_thread_operations(
+            ops, evidence_times=self.times, threads_by_id=threads,
+        )
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["evidence_message_ids"], [101, 201])
+        self.assertEqual(merged[0].get("memory_key"), "topic.gateway.rework")
+
+
+class _FakeQuery:
+    def __init__(self, data):
+        self.calls = []
+        self._data = data
+
+    def select(self, *args):
+        self.calls.append(("select", args))
+        return self
+
+    def eq(self, key, value):
+        self.calls.append(("eq", key, value))
+        return self
+
+    def in_(self, key, values):
+        self.calls.append(("in", key, tuple(values)))
+        return self
+
+    def order(self, *args, **kwargs):
+        self.calls.append(("order", args, tuple(sorted(kwargs.items()))))
+        return self
+
+    def limit(self, count):
+        self.calls.append(("limit", count))
+        return self
+
+    def execute(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(data=list(self._data))
+
+
+class _FakeClient:
+    def __init__(self, data):
+        self._data = data
+        self.queries = {}
+
+    def table(self, name):
+        query = _FakeQuery(self._data.get(name, []))
+        self.queries[name] = query
+        return query
+
+
+class ModelVisibilityQueryTests(unittest.TestCase):
+    """模型输入查询必须严格限定允许范围（DB 过滤层）。"""
+
+    def test_thread_query_excludes_resolved_and_non_thread_rows(self):
+        from gateway.memory_rumination import _load_unfinished_threads
+
+        fake = _FakeClient({"memories": [_thread(memory_id=1)]})
+        with patch("gateway.memory_rumination.get_client", return_value=fake):
+            rows = _load_unfinished_threads("assistant-1")
+        self.assertEqual(len(rows), 1)
+        calls = fake.queries["memories"].calls
+        filters = {call[1]: call[2] for call in calls if call[0] == "eq"}
+        self.assertEqual(filters.get("continuity_type"), "thread")
+        self.assertEqual(filters.get("verified"), "verified")
+        self.assertEqual(filters.get("is_active"), True)
+        self.assertEqual(filters.get("assistant_id"), "assistant-1")
+        state_filter = next(call for call in calls if call[0] == "in")
+        self.assertEqual(state_filter[2], ("open", "paused"))
+
+    def test_request_query_only_reads_own_rumination_requests(self):
+        from gateway.memory_rumination import _load_own_requests
+
+        fake = _FakeClient({"memory_requests": [{"id": 7}]})
+        with patch("gateway.memory_rumination.get_client", return_value=fake):
+            rows = _load_own_requests("assistant-1")
+        self.assertEqual(len(rows), 1)
+        calls = fake.queries["memory_requests"].calls
+        filters = {call[1]: call[2] for call in calls if call[0] == "eq"}
+        self.assertEqual(filters.get("source"), "rumination")
+        self.assertEqual(filters.get("assistant_id"), "assistant-1")
+        status_filter = next(call for call in calls if call[0] == "in")
+        self.assertEqual(
+            status_filter[2], ("pending", "rejected", "duplicate", "conflict"),
+        )
+
+    def test_model_input_carries_only_whitelisted_thread_fields(self):
+        thread = _thread(memory_id=12)
+        thread["continuity_data"] = dict(
+            thread["continuity_data"],
+            closure_summary="绝不进入模型输入",
+            closure_reason="绝不进入模型输入",
+        )
+        text = build_model_input(
+            [{"id": 5, "conversation_id": "c1", "role": "user",
+              "content": "本批原文", "source_time": "2026-09-01T10:00+08:00"}],
+            [thread],
+            [],
+        )
+        self.assertIn("本批原文", text)
+        self.assertNotIn("绝不进入模型输入", text)
+        self.assertNotIn("closure_summary", text)
 
 
 if __name__ == "__main__":

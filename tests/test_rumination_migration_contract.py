@@ -165,6 +165,25 @@ class RuminationMigrationContractTests(unittest.TestCase):
         self.assertNotIn("proposed_relations", self.executable)
         self.assertNotIn("'relationship'", self.executable)
 
+    def test_recall_scene_requires_embedding_at_commit(self):
+        self.assertIn("memory_rumination_missing_recall_embedding", self.commit)
+        self.assertRegex(
+            self.commit,
+            r"v_recall_scene is not null[\s\S]{0,200}?not \(v_op \? 'recall_embedding'\)",
+        )
+
+    def test_keyless_fast_path_takeover_requires_key(self):
+        self.assertIn("v_target.memory_key is null", self.commit)
+        self.assertRegex(
+            self.commit,
+            r"v_target\.maintained_by = 'fast_path'[\s\S]{0,200}?"
+            r"v_target\.memory_key is null",
+        )
+
+    def test_requests_skip_when_content_in_flight_final_or_formal(self):
+        self.assertIn("request.status in ('pending', 'approved', 'merged')", self.commit)
+        self.assertIn("skipped_active_memory", self.commit)
+
     def test_migration_wraps_in_transaction(self):
         self.assertRegex(self.executable, r"\bbegin\s*;")
         self.assertRegex(self.executable, r"\bcommit\s*;")

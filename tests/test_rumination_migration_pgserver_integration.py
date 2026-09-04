@@ -1245,6 +1245,385 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             )
         self.assertIn("memory_thread_rumination_maintained", str(raised.exception))
 
+    # -- recall embedding atomicity -----------------------------------------
+
+    def test_missing_recall_embedding_aborts_batch_atomically(self):
+        self._set_cursor(initialized=True, value=500)
+        objects_before = self._query_one(
+            "select count(*) from public.memory_continuity_objects"
+        )
+        memories_before = self._query_one("select count(*) from public.memories")
+        run_id = self._claim(501, 510)
+        with self.assertRaises(Exception) as raised:
+            self._commit(run_id, [{
+                "op": "create_memory",
+                "reason": "有场景但缺召回向量",
+                "continuity_type": "moment",
+                "content": "一条带召回场景却缺向量的记忆。",
+                "continuity_data": {
+                    "scene": "聊天窗口", "event": "缺向量", "moment_state": "standalone",
+                },
+                "recall_scene": "聊到缺向量写入时",
+                "evidence_message_ids": [503],
+                "content_hash": _sha256("一条带召回场景却缺向量的记忆。"),
+                "embedding": "[0.2,0.2,0.2]",
+            }])
+        self.assertIn("memory_rumination_missing_recall_embedding", str(raised.exception))
+        # 整批回滚：无记忆行、无 continuity 对象、游标不动、run 未提交。
+        self.assertEqual(
+            self._query_one("select count(*) from public.memories"), memories_before,
+        )
+        self.assertEqual(
+            self._query_one("select count(*) from public.memory_continuity_objects"),
+            objects_before,
+        )
+        self.assertEqual(self._cursor(), 500)
+        self.assertEqual(self._query_one(
+            "select status from public.memory_digest_runs where id = %s", (run_id,),
+        ), "running")
+
+    def test_missing_recall_embedding_retry_after_fix_succeeds(self):
+        self._set_cursor(initialized=True, value=500)
+        content = "一条带召回场景却缺向量的记忆。"
+        ops_without_vector = [{
+            "op": "create_memory",
+            "reason": "有场景但缺召回向量",
+            "continuity_type": "moment",
+            "content": content,
+            "continuity_data": {
+                "scene": "聊天窗口", "event": "缺向量", "moment_state": "standalone",
+            },
+            "recall_scene": "聊到缺向量写入时",
+            "evidence_message_ids": [503],
+            "content_hash": _sha256(content),
+            "embedding": "[0.2,0.2,0.2]",
+        }]
+        run_id = self._claim(501, 510)
+        with self.assertRaises(Exception):
+            self._commit(run_id, ops_without_vector)
+        # 重试同一批：补充召回向量后成功提交，游标推进。
+        ops_with_vector = [dict(ops_without_vector[0], recall_embedding="[0.2,0.2,0.2]")]
+        result = self._commit(run_id, ops_with_vector)
+        self.assertEqual(result["op_counts"]["created_memories"], 1)
+        self.assertEqual(self._cursor(), 510)
+        memory = self._query_row(
+            "select recall_scene is not null, recall_embedding is not null "
+            "from public.memories where content_hash = %s",
+            (_sha256(content),),
+        )
+        self.assertEqual(memory, (True, True))
+
+    def test_sceneless_write_keeps_null_scene_and_null_vector(self):
+        self._set_cursor(initialized=True, value=500)
+        content = "一条没有可靠召回场景的记忆正文。"
+        run_id = self._claim(501, 510)
+        result = self._commit(run_id, [{
+            "op": "create_memory",
+            "reason": "没有可靠场景",
+            "continuity_type": "moment",
+            "content": content,
+            "continuity_data": {
+                "scene": "聊天窗口", "event": "无场景", "moment_state": "standalone",
+            },
+            "evidence_message_ids": [503],
+            "content_hash": _sha256(content),
+            "embedding": "[0.2,0.2,0.2]",
+        }])
+        self.assertEqual(result["op_counts"]["created_memories"], 1)
+        row = self._query_row(
+            "select recall_scene is null, recall_embedding is null "
+            "from public.memories where content_hash = %s",
+            (_sha256(content),),
+        )
+        self.assertEqual(row, (True, True))
+
+    # -- same-batch version boundary -----------------------------------------
+
+    def test_second_version_op_on_same_target_is_rejected(self):
+        # 合并由 Python 管线完成；DB 层保持防御：同批对同一 target 的第二个
+        # 版本操作（旧 id 已在本事务内失活）必须失败且不推进游标。
+        self._set_cursor(initialized=True, value=520)
+        watch_id = self._active_memory("memory_key = 'topic.night.watch'")
+        run_id = self._claim(521, 522)
+        with self.assertRaises(Exception):
+            self._commit(run_id, [
+                {
+                    "op": "update_thread",
+                    "reason": "第一个进展",
+                    "target_memory_id": watch_id,
+                    "content": "夜间观察计划当前状态：第一次推进。",
+                    "continuity_data": {
+                        "open_question": "夜间观察是否成行",
+                        "current_state": "第一次推进",
+                        "closure_criteria": ["观察完成或取消"],
+                    },
+                    "evidence_message_ids": [521],
+                    "content_hash": _sha256("夜间观察计划当前状态：第一次推进。"),
+                    "embedding": "[0.7,0.7,0.7]",
+                },
+                {
+                    "op": "update_thread",
+                    "reason": "第二个进展",
+                    "target_memory_id": watch_id,
+                    "content": "夜间观察计划当前状态：第二次推进。",
+                    "continuity_data": {
+                        "open_question": "夜间观察是否成行",
+                        "current_state": "第二次推进",
+                        "closure_criteria": ["观察完成或取消"],
+                    },
+                    "evidence_message_ids": [522],
+                    "content_hash": _sha256("夜间观察计划当前状态：第二次推进。"),
+                    "embedding": "[0.75,0.75,0.75]",
+                },
+            ])
+        self.assertEqual(self._cursor(), 520)
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memories where supersedes_memory_id = %s",
+            (watch_id,),
+        ), 0)
+
+    # -- request re-filing ----------------------------------------------------
+
+    def test_same_batch_duplicate_request_ops_are_idempotent(self):
+        self._set_cursor(initialized=True, value=520)
+        content = "同批内重复提交的episode申请内容。"
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [
+            self._episode_request(content, [521]),
+            self._episode_request(content, [521]),
+        ])
+        self.assertEqual(result["op_counts"]["created_requests"], 1)
+        self.assertEqual(result["op_counts"]["skipped_duplicates"], 1)
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_requests where content_hash = %s",
+            (_sha256(content),),
+        ), 1)
+
+    def test_approved_request_blocks_refile_without_crash(self):
+        content = "已通过申请的正文不得再次提交为申请。"
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [self._episode_request(content, [521])])
+        request_id = result["preview"][0]["request_id"]
+        self.conn.execute(
+            "update public.memory_requests set status = 'approved', reviewed_at = now(), "
+            "reviewed_by = 'tester' where id = %s",
+            (request_id,),
+        )
+        # approved 后重提：跳过而不是触发部分唯一索引冲突。
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [self._episode_request(content, [521])])
+        self.assertEqual(result["op_counts"]["created_requests"], 0)
+        self.assertEqual(result["preview"][0]["commit_status"], "skipped_existing_request")
+
+    def test_active_memory_blocks_duplicate_request(self):
+        # 内容已经是正式记忆（含正式 moment 正文）时不再创建申请。
+        moment_hash = self._query_one(
+            "select content_hash from public.memories where is_active "
+            "and content = '叶子和栖把防晒霜叫作贝壳的瞬间。'"
+        )
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [{
+            "op": "create_request",
+            "reason": "与正式记忆正文相同",
+            "continuity_type": "episode",
+            "content": "叶子和栖把防晒霜叫作贝壳的瞬间。",
+            "continuity_data": EPISODE_DATA,
+            "evidence_message_ids": [521],
+            "content_hash": moment_hash,
+            "importance": 6, "confidence": 0.8,
+            "embedding": "[0.8,0.8,0.8]",
+        }])
+        self.assertEqual(result["op_counts"]["created_requests"], 0)
+        self.assertEqual(result["preview"][0]["commit_status"], "skipped_active_memory")
+
+    # -- handoff --------------------------------------------------------------
+
+    def test_pending_request_keeps_fast_path_memory_active(self):
+        self._set_cursor(initialized=True, value=500)
+        fast_moment = self._active_memory(
+            "content = '叶子和栖把防晒霜叫作贝壳的瞬间。'"
+        )
+        content = "反刍申请 pending 期间快速路径记忆必须保留的episode。"
+        run_id = self._claim(501, 510)
+        self._commit(run_id, [self._episode_request(content, [503])])
+        self.assertIsNotNone(self._active_memory(
+            "content = '叶子和栖把防晒霜叫作贝壳的瞬间。'"
+        ))
+        self.assertEqual(self._query_one(
+            "select status from public.memory_requests where content_hash = %s",
+            (_sha256(content),),
+        ), "pending")
+
+    def test_approved_rumination_request_carries_provenance(self):
+        # 申请通过后，正式记忆通过既有 sync 触发器继承反刍 provenance；
+        # pending 阶段没有任何快速路径记忆被移动或归档。
+        content = "approved 后正式记忆应继承反刍来源的episode。"
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [self._episode_request(content, [521])])
+        request_id = result["preview"][0]["request_id"]
+        fast_moment = self._active_memory(
+            "content = '叶子和栖把防晒霜叫作贝壳的瞬间。'"
+        )
+        self.assertIsNotNone(fast_moment)
+        # 通过现有审核 RPC 批准（叶子审核路径，不做任何改动）。
+        self._query_one(
+            "select public.review_memory_request_v5(%s, 'approve', %s, %s, %s, %s, %s, "
+            "'tester', null, null, null, null, null, null, null, null, null)",
+            (
+                request_id, content, "赶海经历", "{episode}", 6, _sha256(content),
+            ),
+        )
+        approved_memory = self._query_row(
+            "select producer_path, maintained_by, source from public.memories "
+            "where content_hash = %s and is_active",
+            (_sha256(content),),
+        )
+        self.assertEqual(
+            approved_memory, ("rumination", "rumination", "rumination"),
+        )
+        # 既有快速路径记忆不受影响。
+        self.assertIsNotNone(self._active_memory(
+            "content = '叶子和栖把防晒霜叫作贝壳的瞬间。'"
+        ))
+
+    def test_rejected_request_keeps_fast_path_memory_and_thread_state(self):
+        self._set_cursor(initialized=True, value=500)
+        fast_moment = self._active_memory(
+            "content = '叶子和栖把防晒霜叫作贝壳的瞬间。'"
+        )
+        resolved_before = self._active_memory("memory_key = 'topic.haishan.review'")
+        content = "被拒后不得影响正式记忆与已完成 thread 的episode。"
+        run_id = self._claim(501, 510)
+        result = self._commit(run_id, [self._episode_request(content, [503])])
+        request_id = result["preview"][0]["request_id"]
+        self.conn.execute(
+            "update public.memory_requests set status = 'rejected', reviewed_at = now(), "
+            "reviewed_by = 'tester' where id = %s",
+            (request_id,),
+        )
+        self.assertIsNotNone(self._active_memory(
+            "content = '叶子和栖把防晒霜叫作贝壳的瞬间。'"
+        ))
+        self.assertEqual(
+            self._query_one(
+                "select thread_state from public.memories where id = %s",
+                (resolved_before,),
+            ),
+            "resolved",
+        )
+
+    def test_same_evidence_different_semantics_stay_active(self):
+        # 仅证据重合不能证明语义相同：同批两条不同分类记忆互不归档。
+        self._set_cursor(initialized=True, value=500)
+        run_id = self._claim(501, 510)
+        result = self._commit(run_id, [
+            {
+                "op": "create_memory",
+                "reason": "值得记住的瞬间",
+                "continuity_type": "moment",
+                "content": "赶海清晨潮水带来的难忘瞬间。",
+                "continuity_data": {
+                    "scene": "海边", "event": "清晨潮水", "moment_state": "standalone",
+                },
+                "evidence_message_ids": [509],
+                "content_hash": _sha256("赶海清晨潮水带来的难忘瞬间。"),
+                "embedding": "[0.31,0.31,0.31]",
+            },
+            {
+                "op": "create_tracked_thread",
+                "reason": "新的长期进程",
+                "content": "赶海记录计划当前状态：约定整理赶海收获清单。",
+                "title": "赶海记录计划",
+                "thread_state": "open",
+                "memory_key": "topic.haishan.log",
+                "continuity_data": {
+                    "open_question": "收获清单是否整理完成",
+                    "current_state": "约定整理赶海收获清单",
+                    "closure_criteria": ["清单完成"],
+                },
+                "evidence_message_ids": [509, 510],
+                "content_hash": _sha256("赶海记录计划当前状态：约定整理赶海收获清单。"),
+                "embedding": "[0.32,0.32,0.32]",
+            },
+        ])
+        self.assertEqual(result["op_counts"]["created_memories"], 1)
+        self.assertEqual(result["op_counts"]["created_threads"], 1)
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memories where is_active and evidence_message_ids @> '{509}'::bigint[]",
+        ), 3)  # seed plan thread + new moment + new thread
+
+    def test_handoff_batch_failure_rolls_back_everything(self):
+        self._set_cursor(initialized=True, value=520)
+        # A fresh fast-path thread for this test: the adopt must roll back.
+        self.conn.execute(
+            "insert into public.memory_continuity_objects (continuity_id, assistant_id) "
+            "values ('21111111-1111-1111-1111-1111111111f8', 'a-rumination') "
+            "on conflict (continuity_id) do nothing"
+        )
+        rollback_content = "回滚夹具：双方约定一起修补帐篷，尚未开始。"
+        self.conn.execute(
+            "insert into public.memories ("
+            "content, title, tags, importance, embedding, source, verified, is_active, "
+            "assistant_id, confidence, content_hash, memory_key, "
+            "continuity_id, continuity_schema_version, continuity_data, "
+            "continuity_type, thread_state, evidence_message_ids "
+            ") values ("
+            "%s, '帐篷修补', '{thread}', 5, '[0.18,0.28,0.38]', 'daily_digest', 'verified', true, "
+            "'a-rumination', 0.9, %s, 'topic.tent.repair', "
+            "'21111111-1111-1111-1111-1111111111f8', 1, "
+            "'{\"open_question\": \"帐篷修补是否开始\", \"current_state\": \"约定修补，尚未开始\"}'::jsonb, "
+            "'thread', 'open', '{504}'"
+            ") on conflict (content_hash) do nothing",
+            (rollback_content, _sha256(rollback_content)),
+        )
+        fast_id = self._active_memory("memory_key = 'topic.tent.repair'")
+        objects_before = self._query_one(
+            "select count(*) from public.memory_continuity_objects"
+        )
+        handoffs_before = self._query_one(
+            "select count(*) from public.memory_path_handoffs"
+        )
+        run_id = self._claim(521, 522)
+        with self.assertRaises(Exception):
+            self._commit(run_id, [
+                {
+                    "op": "adopt_thread",
+                    "reason": "先合法接管",
+                    "target_memory_id": fast_id,
+                    "memory_key": "topic.tent.repair",
+                    "evidence_message_ids": [521],
+                },
+                {
+                    "op": "create_memory",
+                    "reason": "随后非法结构",
+                    "continuity_type": "moment",
+                    "content": "一条结构非法的记忆正文。",
+                    "continuity_data": {
+                        "scene": "s", "event": "e", "moment_state": "bogus",
+                    },
+                    "evidence_message_ids": [522],
+                    "content_hash": _sha256("一条结构非法的记忆正文。"),
+                    "embedding": "[0.4,0.4,0.4]",
+                },
+            ])
+        # 接管与写入全部回滚：maintained_by 未翻转、无交接记录、无 continuity
+        # 对象、游标不动。
+        self.assertEqual(self._query_row(
+            "select maintained_by, memory_key from public.memories where id = %s",
+            (fast_id,),
+        ), ("fast_path", "topic.tent.repair"))
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_path_handoffs"
+        ), handoffs_before)
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_continuity_objects"
+        ), objects_before)
+        self.assertEqual(self._cursor(), 520)
+
     # -- recall -------------------------------------------------------------
 
     def test_resolved_thread_exits_default_recall_but_stays_queryable(self):
