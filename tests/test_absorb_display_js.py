@@ -78,10 +78,6 @@ def _snapshot(memory_id=1, content_hash="a" * 64, **overrides):
     _QUICKJS_AVAILABLE,
     "quickjs 未安装（pip install -r requirements-test.txt）：跳过前端纯函数执行测试",
 )
-@unittest.skipUnless(
-    _QUICKJS_AVAILABLE,
-    "quickjs 未安装（pip install -r requirements-test.txt）：跳过前端纯函数执行测试",
-)
 class AbsorbImpactViewTests(unittest.TestCase):
     """审核表单影响范围：快照逐项比较 + 缺失目标的独立降级。"""
 
@@ -115,6 +111,29 @@ class AbsorbImpactViewTests(unittest.TestCase):
                     [current], [_snapshot(4)],
                 )
                 self.assertTrue(views[0]["changed"], field)
+
+    def test_unchanged_content_hash_does_not_block(self):
+        # content_hash 完全一致时不阻塞（审查修复回归：前端字段列表缺
+        # content_hash 导致 undefined !== snapshot 值 → 全部误判变化）。
+        views = _call(
+            self.ctx, "absorbImpactViews", [4],
+            [_row(4, content_hash="abc123")],
+            [_snapshot(4, content_hash="abc123")],
+        )
+        self.assertTrue(views[0]["ok"])
+        self.assertFalse(views[0]["changed"])
+        self.assertFalse(views[0]["snapshotMissing"])
+        summary = _call(self.ctx, "absorbImpactSummary", views)
+        self.assertFalse(summary["blocked"])
+
+    def test_changed_content_hash_blocks(self):
+        views = _call(
+            self.ctx, "absorbImpactViews", [4],
+            [_row(4, content_hash="old_hash")],
+            [_snapshot(4, content_hash="new_hash")],
+        )
+        self.assertTrue(views[0]["changed"])
+        self.assertTrue(_call(self.ctx, "absorbImpactSummary", views)["blocked"])
 
     def test_producer_path_and_verified_changes_are_flagged(self):
         for field, override in (

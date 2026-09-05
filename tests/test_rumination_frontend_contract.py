@@ -87,6 +87,9 @@ class MemoryBrowserAbsorptionContractTests(unittest.TestCase):
         self.assertIn("本次通过会被拒绝", self.browser)
         self.assertIn("absorbImpactSummary", self.browser)
 
+    def test_content_hash_in_memory_fields(self):
+        self.assertIn("content_hash", self.browser)
+
     def test_no_emoji_icons(self):
         self.assertIsNone(EMOJI_PATTERN.search(self.browser))
 

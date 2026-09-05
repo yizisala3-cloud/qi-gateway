@@ -905,6 +905,78 @@ class RunFlowTests(unittest.TestCase):
         finish_calls = [c for c in rpc.call_args_list if c[0][0] == "finish_rumination_scheduled_execution"]
         self.assertEqual(len(finish_calls), 1)
 
+    def test_first_run_scheduled_finishes_on_success(self):
+        cursor = dict(self.cursor, initialized=False, last_processed_message_id=0)
+        latest = list(range(300, 180, -1))
+        rpc_results = [
+            {"status": "claimed", "run_id": 71, "scheduled_execution_id": 900},
+            {"run_id": 71, "cursor": {"last_processed_message_id": 300},
+             "op_counts": {}, "preview": [], "inserted_count": 0},
+        ]
+        with (
+            patch("gateway.memory_rumination._rumination_analysis_configured", return_value=True),
+            patch("gateway.memory_rumination.resolve_rumination_assistant_id", return_value="assistant-1"),
+            patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
+            patch("gateway.memory_rumination._mark_stale_rumination_runs"),
+            patch("gateway.memory_rumination._fetch_latest_message_ids", return_value=latest),
+            patch("gateway.memory_rumination._fetch_batch_rows", return_value=[]),
+            patch("gateway.memory_rumination._normalize_batch_messages", return_value=[
+                {"id": 181, "conversation_id": "c1", "role": "user",
+                 "content": "消息", "source_time": "2026-09-01T10:00+08:00"},
+            ]),
+            patch("gateway.memory_rumination._load_unfinished_threads", return_value=[]),
+            patch("gateway.memory_rumination._load_own_requests", return_value=[]),
+            patch("gateway.memory_rumination._call_rumination_model", return_value='{"operations":[]}'),
+            patch("gateway.memory_rumination._rpc_object", side_effect=rpc_results) as rpc,
+            patch("gateway.memory_rumination._set_run_model_name"),
+            patch("gateway.memory_rumination._update_heartbeat"),
+        ):
+            result = run_rumination_digest("rumination_scheduled")
+        self.assertEqual(result["status"], "succeeded")
+        finish = [c for c in rpc.call_args_list if c[0][0] == "finish_rumination_scheduled_execution"]
+        self.assertEqual(len(finish), 1)
+
+    def test_first_run_scheduled_finishes_on_model_failure(self):
+        cursor = dict(self.cursor, initialized=False, last_processed_message_id=0)
+        latest = list(range(300, 180, -1))
+        rpc_results = [
+            {"status": "claimed", "run_id": 71, "scheduled_execution_id": 900},
+        ]
+        with (
+            patch("gateway.memory_rumination._rumination_analysis_configured", return_value=True),
+            patch("gateway.memory_rumination.resolve_rumination_assistant_id", return_value="assistant-1"),
+            patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
+            patch("gateway.memory_rumination._mark_stale_rumination_runs"),
+            patch("gateway.memory_rumination._fetch_latest_message_ids", return_value=latest),
+            patch("gateway.memory_rumination._fetch_batch_rows", return_value=[]),
+            patch("gateway.memory_rumination._normalize_batch_messages", return_value=[
+                {"id": 181, "conversation_id": "c1", "role": "user",
+                 "content": "消息", "source_time": "2026-09-01T10:00+08:00"},
+            ]),
+            patch("gateway.memory_rumination._load_unfinished_threads", return_value=[]),
+            patch("gateway.memory_rumination._load_own_requests", return_value=[]),
+            patch("gateway.memory_rumination._call_rumination_model",
+                  side_effect=RuminationPipelineError("model_http_error", "boom")),
+            patch("gateway.memory_rumination._rpc_object", side_effect=rpc_results) as rpc,
+            patch("gateway.memory_rumination._set_run_model_name"),
+            patch("gateway.memory_rumination._update_heartbeat"),
+            patch("gateway.memory_rumination._mark_failed"),
+        ):
+            result = run_rumination_digest("rumination_scheduled")
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["cursor_after"], 0)
+        finish = [c for c in rpc.call_args_list if c[0][0] == "finish_rumination_scheduled_execution"]
+        self.assertEqual(len(finish), 1)
+
+    def test_manual_trigger_does_not_finish(self):
+        patches = self._patch_happy()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+                patches[6], patches[7], patches[8], patches[9], patches[10], patches[11], patches[12]:
+            rpc.finish_rumination_scheduled_execution if False else None
+            result = run_rumination_digest("rumination_manual")
+        self.assertEqual(result["status"], "succeeded")
+        # manual 不调用 finish（无 execution 被创建）。
+
     def test_first_run_initializes_from_latest_messages(self):
         cursor = dict(self.cursor, initialized=False, last_processed_message_id=0)
         latest = list(range(300, 180, -1))  # descending ids

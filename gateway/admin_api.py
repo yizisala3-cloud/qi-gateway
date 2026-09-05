@@ -21,6 +21,7 @@ _TABLES: dict[str, dict[str, Any]] = {
     "memories": {
         "read": {
             "id", "content", "title", "tags", "heat", "importance",
+            "content_hash",
             "source", "verified", "is_active", "last_recalled_at", "recall_count",
             "created_at", "memory_key", "supersedes_memory_id",
             "superseded_by_memory_id", "superseded_at", "continuity_id",

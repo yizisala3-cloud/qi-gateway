@@ -1399,6 +1399,7 @@ def run_rumination_batch(
         }
     except RuminationPipelineError as exc:
         _mark_failed(run_id, exc.code, str(exc))
+        exc.scheduled_execution_id = scheduled_execution_id
         raise
     except Exception as exc:
         log.exception("Rumination batch failed: run_id=%s error=%s", run_id, type(exc).__name__)
@@ -1440,6 +1441,7 @@ def run_rumination_digest(trigger: str = "rumination_manual") -> dict[str, Any]:
 
     results: list[dict[str, Any]] = []
     tail_count = 0
+    execution_id: int | None = None
 
     def _failed_result(exc: RuminationPipelineError, batch: tuple[int, int, int]):
         # Earlier committed batches survive; this batch keeps the cursor
@@ -1455,38 +1457,96 @@ def run_rumination_digest(trigger: str = "rumination_manual") -> dict[str, Any]:
             },
         }
 
-    if initialized:
-        # 逐页交错处理积压：取一页（≤120 条真实消息行）→ claim → 模型 → 原子
-        # 提交 → 推进读取位置；不足 60 条的尾部留到次日。绝不一次性读取或
-        # 持有全部积压，也不设总批次上限；批次大小按真实行数计，与消息 ID
-        # 是否连续无关。任一批失败即停止，其后消息不推进游标。
-        # scheduled 触发时：第一个批次在数据库内领取当日 execution identity，
-        # 后续批次携带它绕过当日防重连批；循环结束（完成/尾部/失败）后由
-        # 数据库将 execution 置为终态。
-        position = cursor_id
-        execution_id: int | None = None
-        while True:
-            page = _fetch_message_ids(
-                assistant_id, after=position, limit=RUMINATION_BATCH_MAX,
-            )
-            if len(page) < RUMINATION_BATCH_MIN:
-                tail_count = len(page)
-                break
-            batch = (page[0], page[-1], len(page))
+    try:
+        if initialized:
+            # 逐页交错处理积压：取一页（≤120 条真实消息行）→ claim → 模型 →
+            # 原子提交 → 推进读取位置；不足 60 条的尾部留到次日。绝不一次性
+            # 读取或持有全部积压，也不设总批次上限；批次大小按真实行数计，
+            # 与消息 ID 是否连续无关。任一批失败即停止，其后消息不推进游标。
+            # scheduled 触发时：第一个批次在数据库内领取当日 execution
+            # identity，后续批次携带它绕过当日防重连批；整个执行（无论完成、
+            # 尾部不足、失败）由 finally 统一收尾。
+            position = cursor_id
+            while True:
+                page = _fetch_message_ids(
+                    assistant_id, after=position, limit=RUMINATION_BATCH_MAX,
+                )
+                if len(page) < RUMINATION_BATCH_MIN:
+                    tail_count = len(page)
+                    break
+                batch = (page[0], page[-1], len(page))
+                try:
+                    result = run_rumination_batch(
+                        assistant_id, trigger, batch, first_batch=False,
+                        scheduled_execution_id=execution_id,
+                    )
+                except RuminationPipelineError as exc:
+                    results.append(_failed_result(exc, batch))
+                    execution_id = (
+                        getattr(exc, "scheduled_execution_id", None) or execution_id
+                    )
+                    break
+                results.append(result)
+                execution_id = result.get("scheduled_execution_id") or execution_id
+                if result.get("status") != "succeeded":
+                    break
+                position = page[-1]
+            if not results:
+                skipped = _rpc_object("record_rumination_skipped", {
+                    "p_assistant_id": assistant_id,
+                    "p_trigger": trigger,
+                    "p_backlog_count": tail_count,
+                    "p_reason": (
+                        f"backlog {tail_count} below the {RUMINATION_BATCH_MIN}-message batch threshold"
+                    ),
+                })
+                return {
+                    "status": "skipped",
+                    "trigger": trigger,
+                    "run_id": skipped.get("run_id"),
+                    "backlog_count": tail_count,
+                    "cursor_before": cursor_id,
+                    "cursor_after": cursor_id,
+                    "batch_count": 0,
+                    "batches": [],
+                }
+        else:
+            latest_ids = _fetch_latest_message_ids(assistant_id, FIRST_RUN_MAX_MESSAGES)
+            first_run_ids = first_run_message_ids(latest_ids)
+            batches = plan_rumination_batches(first_run_ids, initialized=False)
+            if not batches:
+                return {
+                    "status": "skipped",
+                    "trigger": trigger,
+                    "run_id": None,
+                    "backlog_count": 0,
+                    "cursor_before": cursor_id,
+                    "cursor_after": cursor_id,
+                    "batch_count": 0,
+                    "batches": [],
+                }
+            batch = batches[0]
             try:
                 result = run_rumination_batch(
-                    assistant_id, trigger, batch, first_batch=False,
-                    scheduled_execution_id=execution_id,
+                    assistant_id, trigger, batch, first_batch=True,
                 )
             except RuminationPipelineError as exc:
                 results.append(_failed_result(exc, batch))
-                break
-            results.append(result)
-            execution_id = result.get("scheduled_execution_id") or execution_id
-            if result.get("status") != "succeeded":
-                break
-            position = page[-1]
-        if execution_id is not None:
+                execution_id = (
+                    getattr(exc, "scheduled_execution_id", None) or execution_id
+                )
+            else:
+                results.append(result)
+                if results[-1].get("scheduled_execution_id"):
+                    execution_id = results[-1]["scheduled_execution_id"]
+    finally:
+        # Unified lifecycle close: the day's scheduled execution always reaches
+        # a terminal state regardless of success, model failure, embedding
+        # failure, JSON parse failure, DB commit failure, or legitimate skip.
+        # No-op for manual triggers (no execution was created) and for
+        # already_scheduled_today / already_running claims (no execution was
+        # created for this instance).
+        if trigger == "rumination_scheduled" and execution_id is not None:
             try:
                 _rpc_object("finish_rumination_scheduled_execution", {
                     "p_execution_id": execution_id,
@@ -1496,49 +1556,6 @@ def run_rumination_digest(trigger: str = "rumination_manual") -> dict[str, Any]:
                     "Failed to finish scheduled execution: execution_id=%s",
                     execution_id,
                 )
-        if not results:
-            skipped = _rpc_object("record_rumination_skipped", {
-                "p_assistant_id": assistant_id,
-                "p_trigger": trigger,
-                "p_backlog_count": tail_count,
-                "p_reason": (
-                    f"backlog {tail_count} below the {RUMINATION_BATCH_MIN}-message batch threshold"
-                ),
-            })
-            return {
-                "status": "skipped",
-                "trigger": trigger,
-                "run_id": skipped.get("run_id"),
-                "backlog_count": tail_count,
-                "cursor_before": cursor_id,
-                "cursor_after": cursor_id,
-                "batch_count": 0,
-                "batches": [],
-            }
-    else:
-        latest_ids = _fetch_latest_message_ids(assistant_id, FIRST_RUN_MAX_MESSAGES)
-        first_run_ids = first_run_message_ids(latest_ids)
-        batches = plan_rumination_batches(first_run_ids, initialized=False)
-        if not batches:
-            return {
-                "status": "skipped",
-                "trigger": trigger,
-                "run_id": None,
-                "backlog_count": 0,
-                "cursor_before": cursor_id,
-                "cursor_after": cursor_id,
-                "batch_count": 0,
-                "batches": [],
-            }
-        batch = batches[0]
-        try:
-            result = run_rumination_batch(
-                assistant_id, trigger, batch, first_batch=True,
-            )
-        except RuminationPipelineError as exc:
-            results.append(_failed_result(exc, batch))
-        else:
-            results.append(result)
 
     failed = [item for item in results if item.get("status") == "failed"]
     skipped_only = results and all(
