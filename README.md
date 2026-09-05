@@ -38,6 +38,9 @@
 | `MEMORY_REQUEST_RATE_LIMIT` | 每个 assistant 每分钟最多提交的记忆申请数，默认 6 |
 | `TODO_PLUGIN_TOKEN` | 橘瓣待办插件的独立鉴权 Token |
 | `TODO_REQUEST_RATE_LIMIT` | 单实例每分钟最多处理的待办插件请求数，默认 60 |
+| `RUMINATION_BASE_URL` / `RUMINATION_API_KEY` / `RUMINATION_MODEL` | 反刍连续感路径的独立提取模型；留空回退复用 `CONTINUITY_*` |
+| `RUMINATION_MAX_TOKENS` | 反刍文本提取最大输出 token 数，默认 8192 |
+| `RUMINATION_DAILY_HOUR` | 反刍每日调度小时（Asia/Shanghai），默认 6 点 |
 | `PORT` | 端口（默认 8000） |
 
 ### Zeabur 部署

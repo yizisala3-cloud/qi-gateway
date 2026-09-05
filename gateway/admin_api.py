@@ -21,6 +21,7 @@ _TABLES: dict[str, dict[str, Any]] = {
     "memories": {
         "read": {
             "id", "content", "title", "tags", "heat", "importance",
+            "content_hash",
             "source", "verified", "is_active", "last_recalled_at", "recall_count",
             "created_at", "memory_key", "supersedes_memory_id",
             "superseded_by_memory_id", "superseded_at", "continuity_id",
@@ -29,6 +30,7 @@ _TABLES: dict[str, dict[str, Any]] = {
             "evidence_message_ids", "source_time", "memory_time", "time_precision",
             "evidence_time_precision",
             "recall_scene", "recall_tags",
+            "producer_path", "maintained_by",
         },
         "write": {
             # Verified-state review actions only. Content, title, tags,
@@ -75,6 +77,9 @@ _TABLES: dict[str, dict[str, Any]] = {
             "evidence_time_precision",
             "recall_scene", "recall_tags",
             "dedupe_reason", "related_request_id",
+            "producer_path",
+            "absorbed_fast_path_memory_ids",
+            "absorbed_fast_path_memory_snapshots",
         },
         "write": set(),
         "insert": False,

@@ -5,6 +5,7 @@ import {
   toast, modal, confirm, delegate, icon, fmtDate, createDetailPanel,
 } from '../ui.js?v=20260903-retrotime1';
 import { openMemoryForm } from './_memory_form.js?v=20260903-retrotime1';
+import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20260909-absorb1';
 
 export const ASSET_VERSION = '20260903-retrotime1';
 
@@ -18,8 +19,8 @@ export const CONTINUITY_TYPE_LABELS = {
 const TIME_PRECISION_LABELS = {
   minute: '精确到分钟', hour: '精确到小时', day: '精确到日期', approximate: '大概时间', unknown: '时间未知',
 };
-const MEMORY_FIELDS = 'id,title,content,tags,heat,importance,source,verified,is_active,last_recalled_at,recall_count,created_at,memory_key,supersedes_memory_id,superseded_by_memory_id,superseded_at,continuity_id,continuity_type,continuity_schema_version,continuity_data,source_type,thread_state,evidence_start_time,evidence_end_time,evidence_message_ids,source_time,memory_time,time_precision,evidence_time_precision,recall_scene,recall_tags';
-const REQUEST_FIELDS = 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,memory_key,update_mode,related_memory_id,related_request_id,continuity_id,continuity_type,continuity_schema_version,continuity_data,thread_state,confidence,evidence_message_ids,source_time,memory_time,time_precision,digest_run_id,dedupe_state,dedupe_reason,evidence_time_precision,recall_scene,recall_tags,created_at,reviewed_at,reviewed_by,review_note';
+const MEMORY_FIELDS = 'id,title,content,content_hash,tags,heat,importance,source,verified,is_active,last_recalled_at,recall_count,created_at,memory_key,supersedes_memory_id,superseded_by_memory_id,superseded_at,continuity_id,continuity_type,continuity_schema_version,continuity_data,source_type,thread_state,evidence_start_time,evidence_end_time,evidence_message_ids,source_time,memory_time,time_precision,evidence_time_precision,recall_scene,recall_tags';
+const REQUEST_FIELDS = 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,memory_key,update_mode,related_memory_id,related_request_id,continuity_id,continuity_type,continuity_schema_version,continuity_data,thread_state,confidence,evidence_message_ids,source_time,memory_time,time_precision,digest_run_id,dedupe_state,dedupe_reason,evidence_time_precision,recall_scene,recall_tags,producer_path,absorbed_fast_path_memory_ids,absorbed_fast_path_memory_snapshots,created_at,reviewed_at,reviewed_by,review_note';
 
 export function continuityTypeLabel(value) {
   return CONTINUITY_TYPE_LABELS[value] || value || '未分类历史数据';
@@ -118,11 +119,46 @@ function requestKvRows(r) {
     ${r.recall_scene ? `<div class="kv"><span class="k">召回场景</span></div><div class="kv-block"><span class="v">${esc(r.recall_scene)}</span></div>` : ''}
     ${(r.recall_tags || []).length ? `<div class="kv"><span class="k">召回标签</span><span class="v">${r.recall_tags.map(t => esc(t)).join('、')}</span></div>` : ''}
     <div class="kv"><span class="k">来源消息</span><span class="v">#${esc(r.source_message_id ?? '-')} · 会话 ${esc(r.conversation_id || '-')}</span></div>
+    ${r.producer_path === 'rumination' ? `<div class="kv"><span class="k">申请来源</span><span class="v">${tag('反刍路径申请', 'plum')}</span></div>` : ''}
     ${r.digest_run_id ? `<div class="kv"><span class="k">来源总结</span><span class="v">#${esc(r.digest_run_id)}</span></div>` : ''}
+    <div id="absorb-targets" data-request-id="${esc(r.id)}"></div>
     <div class="kv"><span class="k">申请时间</span><span class="v">${esc(fmtDate(r.created_at))}</span></div>
     ${r.reviewed_at ? `<div class="kv"><span class="k">审核时间</span><span class="v">${esc(fmtDate(r.reviewed_at))} · ${esc(r.reviewed_by || '-')}</span></div>` : ''}
     ${r.memory_id ? `<div class="kv"><span class="k">结果记忆</span><span class="v">memory #${esc(r.memory_id)}</span></div>` : ''}
   `;
+}
+
+/* ---------- 反刍吸收目标展示 ----------
+ * 反刍申请通过后会停用其 absorbed_fast_path_memory_ids 列出的快速路径正式
+ * 记忆。这里按 ID 拉取每条目标的类型、标题与简短内容，让叶子在审核前看
+ * 清楚影响范围；没有吸收目标时明确显示不会停用其他正式记忆。 */
+async function hydrateAbsorbTargets(root, request) {
+  const box = root.querySelector('#absorb-targets');
+  if (!box) return;
+  const ids = request.absorbed_fast_path_memory_ids || [];
+  if (!ids.length) {
+    box.innerHTML = `
+      <div class="kv"><span class="k">拟交接目标</span><span class="v muted">无 · 通过后不会停用其他正式记忆</span></div>`;
+    return;
+  }
+  box.innerHTML = `
+    <div class="kv"><span class="k">拟交接目标</span><span class="v">${tag(`通过后停用 ${ids.length} 条快速路径记忆`, 'amber')}</span></div>
+    <div class="absorb-target-list">${loading()}</div>`;
+  const rows = await Promise.all(ids.map(async (id) => {
+    try {
+      const result = await gw(`/admin/api/data/memories/${encodeURIComponent(id)}`);
+      return result.data?.[0] || null;
+    } catch { return null; }
+  }));
+  const views = absorbImpactViews(
+    ids, rows, request.absorbed_fast_path_memory_snapshots,
+  );
+  const items = views.map((view) => {
+    const marker = view.changed ? ' · <strong>目标已变化，本次通过会被拒绝</strong>' : '';
+    return `<div class="kv"><span class="k">memory</span><span class="v"${view.ok && !view.changed ? '' : ' style="color:var(--red)"'}>${esc(view.label)}${marker}</span></div>`;
+  });
+  const list = box.querySelector('.absorb-target-list');
+  if (list) list.innerHTML = items.join('');
 }
 
 /* ---------- 共享弹窗：原文证据 / 版本关系 / 审核记录 ---------- */
@@ -661,11 +697,53 @@ export function createMemoryBrowser({
             <option value="unknown">时间未知</option>
           </select></div>
         </div>
-        <div class="field"><label>审核备注（可选）</label><textarea id="rv-note" rows="3" maxlength="500"></textarea></div>`,
+        <div class="field"><label>审核备注（可选）</label><textarea id="rv-note" rows="3" maxlength="500"></textarea></div>
+        <div id="absorb-impact"></div>`,
       actions: `
+        <div id="absorb-impact-confirm" style="width:100%"></div>
         <button class="btn btn-primary btn-sm" data-act="req-approve-save" data-id="${r.id}">${icon('check')}通过并写入记忆</button>
         <button class="btn btn-secondary btn-sm" data-act="req-detail-back" data-id="${r.id}">取消</button>`,
     });
+    hydrateAbsorbImpact(panel.el, r);
+  }
+
+  /* 通过按钮附近再次显示吸收影响范围；目标已变化时提示通过会被拒绝。 */
+  async function hydrateAbsorbImpact(root, request) {
+    const impact = root.querySelector('#absorb-impact');
+    const confirmBox = root.querySelector('#absorb-impact-confirm');
+    if (!impact || !confirmBox) return;
+    const ids = request.absorbed_fast_path_memory_ids || [];
+    if (!ids.length) {
+      impact.innerHTML = `<div class="kv"><span class="k">影响范围</span><span class="v muted">无 · 通过后不会停用其他正式记忆</span></div>`;
+      return;
+    }
+    const rows = await Promise.all(ids.map(async (id) => {
+      try {
+        const result = await gw(`/admin/api/data/memories/${encodeURIComponent(id)}`);
+        return result.data?.[0] || null;
+      } catch { return null; }
+    }));
+    const views = absorbImpactViews(
+      ids, rows, request.absorbed_fast_path_memory_snapshots,
+    );
+    const summary = absorbImpactSummary(views);
+    const lines = views.map((view) => {
+      const marker = view.changed
+        ? ' · <strong>目标已变化，本次通过会被拒绝</strong>'
+        : view.snapshotMissing
+          ? ' · <strong>申请快照缺失，本次通过会被拒绝</strong>'
+          : '';
+      return `${esc(view.label)}${marker}`;
+    });
+    impact.innerHTML = `
+      <div class="field">
+        <label>影响范围：通过后将停用以下 ${ids.length} 条快速路径正式记忆</label>
+        <div class="kv-block">${lines.join('<br>')}</div>
+        ${summary.blocked ? '<div class="disabled-note" style="margin-top:4px">部分目标已变化或不再可用：服务端将拒绝本次通过，不会部分生效。</div>' : ''}
+      </div>`;
+    confirmBox.innerHTML = summary.blocked
+      ? `<div class="banner banner-danger" style="margin-bottom:8px"><span class="banner-ico">${icon('alert')}</span><div>拟交接目标已变化或不再可用，通过操作会被服务端整笔拒绝。</div></div>`
+      : '';
   }
 
   async function saveRequestApprove(id) {
@@ -899,7 +977,9 @@ export function createMemoryBrowser({
     state.selected = { kind: 'req', id: Number(id) };
     highlightCard('req', id);
     try {
-      renderRequestDetail(await fetchRequest(id));
+      const request = await fetchRequest(id);
+      renderRequestDetail(request);
+      hydrateAbsorbTargets(panel.el, request);
     } catch (error) {
       panel.render({ title: '申请详情', html: errorBlock(esc(error.message)), actions: '' });
     }

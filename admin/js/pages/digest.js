@@ -1,6 +1,6 @@
-// pages/digest.js - 记忆总结：仅连续感总结
-import { gw, esc } from '../api.js?v=20260903-retrotime1';
-import { loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, fmtDate } from '../ui.js?v=20260903-retrotime1';
+// pages/digest.js - 记忆总结：连续感总结 + 反刍连续感
+import { gw, esc } from '../api.js?v=20260905-rumination1';
+import { loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, fmtDate } from '../ui.js?v=20260905-rumination1';
 
 const TIME_PRECISION_LABELS = {
   minute: '精确到分钟', day: '精确到日期', approximate: '大概时间', unknown: '时间未知',
@@ -84,7 +84,9 @@ function candidateCards(candidates) {
 
 export default {
   busy: false,
+  ruminationBusy: false,
   data: null,
+  rumination: null,
 
   async mount(root) {
     this.root = root;
@@ -103,10 +105,22 @@ export default {
           <div id="continuity-status">${loading()}</div>
           <div class="section-title">最近连续感运行</div>
           <div id="continuity-runs">${loading()}</div>
+          <div class="section-title">反刍连续感</div>
+          <div id="rumination-warning"></div>
+          <div class="toolbar">
+            <span class="muted text-sm">独立游标 · 每日一次 · 批次 60～120 条</span>
+            <span class="grow"></span>
+            <button class="btn btn-primary" data-act="rumination-execute" disabled>${icon('check')}执行反刍总结</button>
+          </div>
+          <div id="rumination-status">${loading()}</div>
+          <div class="section-title">最近反刍运行</div>
+          <div id="rumination-runs">${loading()}</div>
         </div>
         <aside class="side-panel" aria-label="状态概览">
           <div class="panel-title">${icon('scroll')}连续感概览</div>
           <div id="continuity-overview">${loading()}</div>
+          <div class="panel-title mt16">${icon('scroll')}反刍概览</div>
+          <div id="rumination-overview">${loading()}</div>
         </aside>
       </div>`;
     delegate(root, {
@@ -114,7 +128,9 @@ export default {
       preview: () => this.runPreview(),
       execute: () => this.runExecute(),
       skip: () => this.skipBatch(),
+      'rumination-execute': () => this.runRumination(),
       detail: (el) => this.openRun(el.dataset.id),
+      'rumination-detail': (el) => this.openRuminationRun(el.dataset.id),
     });
     await this.load();
   },
@@ -132,6 +148,9 @@ export default {
       skip.disabled = this.busy || !paused;
       skip.style.display = paused ? '' : 'none';
     }
+    const ruminationReady = Boolean(this.rumination?.configured);
+    const ruminationButton = this.root.querySelector('[data-act="rumination-execute"]');
+    if (ruminationButton) ruminationButton.disabled = this.ruminationBusy || !ruminationReady;
   },
 
   async load() {
@@ -162,6 +181,202 @@ export default {
       runs.innerHTML = empty('无法读取运行记录');
       overview.innerHTML = empty('无法读取状态概览');
     }
+    await this.loadRumination();
+  },
+
+  async loadRumination() {
+    const status = this.root.querySelector('#rumination-status');
+    const runs = this.root.querySelector('#rumination-runs');
+    const overview = this.root.querySelector('#rumination-overview');
+    const warning = this.root.querySelector('#rumination-warning');
+    if (!status) return;
+    status.innerHTML = loading();
+    runs.innerHTML = loading();
+    overview.innerHTML = loading();
+    warning.innerHTML = '';
+    try {
+      const data = await gw('/admin/api/memory-rumination/status');
+      this.rumination = data;
+      this.syncControls();
+      if (!data.configured) {
+        warning.innerHTML = `
+          <div class="banner">
+            <span class="banner-ico">${icon('info')}</span>
+            <div><strong>反刍提取模型未配置。</strong>请配置 RUMINATION_*（或回退的 CONTINUITY_*）密钥后重新部署；配置完成前执行按钮保持禁用。</div>
+          </div>`;
+      }
+      this.renderRuminationStatus(data);
+      this.renderRuminationRuns(data.recent_runs || []);
+      this.renderRuminationOverview(data);
+    } catch (error) {
+      this.rumination = null;
+      this.syncControls();
+      status.innerHTML = errorBlock(`反刍状态读取失败：${esc(error.message)}`);
+      runs.innerHTML = empty('无法读取反刍运行记录');
+      overview.innerHTML = empty('无法读取反刍状态概览');
+    }
+  },
+
+  renderRuminationStatus(data) {
+    const latest = data.latest_batch || {};
+    this.root.querySelector('#rumination-status').innerHTML = `
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">${icon('scroll')}反刍连续感 ${data.configured ? tag('已配置', 'green') : tag('未配置', 'red')}</div>
+            <div class="card-sub">独立于连续感快速路径：每天到达配置小时后运行一次，首批只取最近 120 条；不足 60 条的积压留到次日。</div>
+          </div>
+        </div>
+        <div class="kv"><span class="k">独立游标</span><span class="v mono">${esc(data.cursor ?? 0)}${data.initialized ? '' : ' · 首次运行待初始化'}</span></div>
+        <div class="kv"><span class="k">最近批次</span><span class="v">${esc(latest.first_message_id ?? '-')} → ${esc(latest.last_message_id ?? '-')} · ${esc(latest.message_count ?? 0)} 条</span></div>
+        <div class="kv"><span class="k">每日调度</span><span class="v">Asia/Shanghai ${esc(String(data.daily_hour ?? 6)).padStart(2, '0')}:00 · 上次 ${esc(data.last_scheduled_date || '-')}</span></div>
+        <div class="kv"><span class="k">提取模型</span><span class="v mono text-sm">${esc(data.model || '-')}</span></div>
+      </div>`;
+  },
+
+  renderRuminationRuns(runs) {
+    const box = this.root.querySelector('#rumination-runs');
+    if (!runs.length) {
+      box.innerHTML = empty('暂无反刍运行记录', '部署后首次执行或到达每日调度时间后会在这里显示');
+      return;
+    }
+    const counts = (run) => {
+      const opCounts = run.op_counts || {};
+      const parts = [];
+      if (opCounts.created_threads) parts.push(`新 thread ${opCounts.created_threads}`);
+      if (opCounts.adopted_threads) parts.push(`接管 ${opCounts.adopted_threads}`);
+      if (opCounts.updated_versions) parts.push(`新版本 ${opCounts.updated_versions}`);
+      if (opCounts.evidence_only) parts.push(`补证据 ${opCounts.evidence_only}`);
+      if (opCounts.paused || opCounts.resumed || opCounts.resolved) {
+        parts.push(`停 ${opCounts.paused || 0}/启 ${opCounts.resumed || 0}/结 ${opCounts.resolved || 0}`);
+      }
+      if (opCounts.created_memories) parts.push(`直接记忆 ${opCounts.created_memories}`);
+      if (opCounts.created_requests) parts.push(`申请 ${opCounts.created_requests}`);
+      if (opCounts.skipped_duplicates) parts.push(`去重跳过 ${opCounts.skipped_duplicates}`);
+      return parts.length ? parts.join(' · ') : '无结构化操作';
+    };
+    box.innerHTML = runs.map((run) => `
+      <div class="mem-card" data-act="rumination-detail" data-id="${run.id}">
+        <div class="card-top">
+          <div class="card-main">
+            <div class="mem-title">#${esc(run.id)} · ${esc(run.trigger)} ${statusTag(run.status)}</div>
+            <div class="card-meta">
+              来源 ${esc(run.source_first_message_id ?? '-')} → ${esc(run.source_last_message_id ?? '-')}
+              · ${esc(run.message_count ?? 0)} 条消息 · ${esc(counts(run))}
+              · ${esc(fmtDate(run.started_at))}
+            </div>
+            ${run.error_code ? `<div class="card-meta" style="color:var(--red)">${esc(run.error_code)}: ${esc(run.error_message || '')}</div>` : ''}
+          </div>
+          <div class="card-side"><button class="btn btn-quiet btn-sm">${icon('info')}运行详情</button></div>
+        </div>
+      </div>`).join('');
+  },
+
+  renderRuminationOverview(data) {
+    const backlogColor = data.threshold_met ? 'var(--green-ink)' : 'var(--amber)';
+    this.root.querySelector('#rumination-overview').innerHTML = `
+      <div class="kv"><span class="k">待处理消息</span><span class="v overview-num" style="color:${backlogColor}">${esc(data.backlog_count ?? 0)}</span></div>
+      <div class="kv"><span class="k">反刍 cursor</span><span class="v overview-num">${esc(data.cursor ?? 0)}</span></div>
+      <div class="kv"><span class="k">批次门槛</span><span class="v">${esc(data.batch_min ?? 60)} ～ ${esc(data.batch_max ?? 120)} 条${data.initialized ? '' : '（首批 120）'}</span></div>
+      <div class="kv"><span class="k">达到门槛</span><span class="v">${data.threshold_met ? tag('可执行', 'green') : tag('等待积压', 'amber')}</span></div>
+      <div class="kv"><span class="k">最近成功</span><span class="v">${esc(fmtMinute(data.last_success_at))}</span></div>
+      <div class="kv"><span class="k">模型就绪</span><span class="v">${data.configured ? tag('已配置', 'green') : tag('未配置', 'red')}</span></div>`;
+  },
+
+  async runRumination() {
+    if (this.ruminationBusy) return;
+    if (!this.rumination?.configured) {
+      toast('反刍提取模型未配置，无法执行', 'err');
+      return;
+    }
+    const backlog = Number(this.rumination?.backlog_count || 0);
+    const initialized = Boolean(this.rumination?.initialized);
+    if (initialized && backlog < 60) {
+      const ok = await confirm(`当前积压 ${backlog} 条，不足 60 条批次门槛。按规则本批将跳过并留到次日，仍要执行吗？`, { okText: '仍然执行' });
+      if (!ok) return;
+    }
+    this.ruminationBusy = true;
+    this.syncControls();
+    toast('正在执行反刍总结……');
+    try {
+      const result = await gw('/admin/api/memory-rumination/execute', { method: 'POST' });
+      this.showRuminationResult(result);
+      await this.load();
+      if (result.status === 'skipped') {
+        toast('积压不足 60 条，本批跳过并留到次日', 'err');
+      } else if (result.status === 'failed') {
+        toast('反刍总结部分批次失败，游标停在失败批次；已成功批次不受影响', 'err');
+      } else {
+        toast(`反刍完成：${result.batch_count || 0} 个批次`);
+      }
+    } catch (error) {
+      toast(`反刍总结失败：${error.message}`, 'err');
+      await this.load();
+    } finally {
+      this.ruminationBusy = false;
+      this.syncControls();
+    }
+  },
+
+  showRuminationResult(result) {
+    const batches = Array.isArray(result.batches) ? result.batches : [];
+    const opCounts = result.op_counts || {};
+    const countLine = Object.entries(opCounts)
+      .filter(([, value]) => Number(value) > 0)
+      .map(([key, value]) => `${esc(key)} ${esc(value)}`)
+      .join(' · ') || '无结构化操作';
+    const batchCards = batches.map((batch) => `
+      <div class="mem-card" style="cursor:default">
+        <div class="mem-title">批次 ${esc(batch.batch?.first_message_id ?? '-')} → ${esc(batch.batch?.last_message_id ?? '-')}（${esc(batch.batch?.message_count ?? 0)} 条）${statusTag(batch.status || '-')}</div>
+        <div class="kv"><span class="k">Cursor 推进</span><span class="v mono">${esc(batch.cursor_after ?? '-')}</span></div>
+        ${batch.error_code ? `<div class="card-meta" style="color:var(--red)">${esc(batch.error_code)}: ${esc(batch.error_message || '')}</div>` : ''}
+      </div>`).join('') || '<p class="muted">本批没有可显示的批次。</p>';
+    const { root, close } = modal({
+      title: `反刍总结 · ${esc(result.trigger || '-')}`,
+      body: `
+        <div class="kv"><span class="k">状态</span><span class="v">${esc(result.status || '-')}</span></div>
+        <div class="kv"><span class="k">批次数</span><span class="v">${esc(result.batch_count ?? 0)}</span></div>
+        <div class="kv"><span class="k">操作统计</span><span class="v">${countLine}</span></div>
+        <div class="mt16">${batchCards}</div>`,
+      footer: '<button class="btn btn-secondary" data-close>关闭</button>',
+      wide: true,
+      draggable: true,
+    });
+    root.querySelector('[data-close]').onclick = close;
+  },
+
+  openRuminationRun(id) {
+    const run = (this.rumination?.recent_runs || []).find((item) => String(item.id) === String(id));
+    if (!run) { toast('运行记录不在当前列表中', 'err'); return; }
+    const opCounts = run.op_counts || {};
+    const countLines = Object.entries(opCounts)
+      .map(([key, value]) => `<div class="kv"><span class="k">${esc(key)}</span><span class="v">${esc(value)}</span></div>`)
+      .join('');
+    const candidates = Array.isArray(run.preview_memories) ? run.preview_memories : [];
+    const opCards = candidates.map((item) => `
+      <div class="mem-card" style="cursor:default">
+        <div class="mem-title">${esc(item.op || '-')} ${tag(COMMIT_STATUS_LABELS[item.commit_status] || item.commit_status || '-', item.commit_status && item.commit_status.startsWith('skipped_') ? 'muted' : 'green')}</div>
+        <div class="card-meta">${esc(item.reason || '')}</div>
+        <div class="kv"><span class="k">证据消息</span><span class="v">${(item.evidence_message_ids || []).map((mid) => `#${esc(mid)}`).join('、') || '-'}</span></div>
+        ${item.memory_id ? `<div class="kv"><span class="k">记忆 ID</span><span class="v">${esc(item.memory_id)}</span></div>` : ''}
+        ${item.request_id ? `<div class="kv"><span class="k">申请 ID</span><span class="v">${esc(item.request_id)}</span></div>` : ''}
+        ${item.memory_key ? `<div class="kv"><span class="k">memory_key</span><span class="v mono">${esc(item.memory_key)}</span></div>` : ''}
+      </div>`).join('') || '<p class="muted">本批没有结构化操作。</p>';
+    const { root, close } = modal({
+      title: `反刍运行 #${esc(run.id)} · ${esc(run.trigger)}`,
+      body: `
+        <div class="kv"><span class="k">状态</span><span class="v">${statusTag(run.status)}</span></div>
+        <div class="kv"><span class="k">来源范围</span><span class="v">${esc(run.source_first_message_id ?? '-')} → ${esc(run.source_last_message_id ?? '-')}</span></div>
+        <div class="kv"><span class="k">消息数量</span><span class="v">${esc(run.message_count ?? 0)}</span></div>
+        <div class="kv"><span class="k">开始时间</span><span class="v">${esc(fmtDate(run.started_at))}</span></div>
+        ${countLines}
+        ${run.error_code ? `<div class="banner banner-danger mt16">${esc(run.error_code)}: ${esc(run.error_message || '')}</div>` : ''}
+        <div class="section-title">操作详情</div>${opCards}`,
+      footer: '<button class="btn btn-secondary" data-close>关闭</button>',
+      wide: true,
+      draggable: true,
+    });
+    root.querySelector('[data-close]').onclick = close;
   },
 
   renderStatusCard(data) {

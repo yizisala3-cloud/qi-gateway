@@ -23,6 +23,8 @@ from .context import build_context
 from .memory_continuity import run_continuity_digest_if_due
 from .memory_extract import resolve_assistant_id
 from .memory_heat import run_heat_decay
+from .memory_rumination import _rumination_analysis_configured as _rumination_configured
+from .memory_rumination import run_rumination_digest_if_due
 from .admin_api import admin_api_routes
 from .admin_memory_api import admin_memory_routes
 from .memory_digest_api import memory_digest_routes
@@ -187,6 +189,24 @@ async def daily_task_loop():
                     result.get("extracted_count"), result.get("inserted_count"),
                 )
 
+            # 反刍路径独立调度：每天到达配置小时后运行一次，独立游标与
+            # 运行记录；失败只记日志，绝不影响连续感快速路径与热度衰减。
+            try:
+                rumination_result = await loop.run_in_executor(
+                    bg_executor, run_rumination_digest_if_due,
+                )
+            except Exception as exc:
+                rumination_result = None
+                log.exception("反刍连续感调度检查失败: %s", type(exc).__name__)
+            if rumination_result:
+                log.info(
+                    "反刍运行完成: trigger=%s status=%s batches=%s op_counts=%s",
+                    rumination_result.get("trigger"),
+                    rumination_result.get("status"),
+                    rumination_result.get("batch_count"),
+                    rumination_result.get("op_counts"),
+                )
+
             now_cst = datetime.now(timezone(timedelta(hours=8)))
             today = now_cst.strftime("%Y-%m-%d")
             if _last_heat_decay_date != today:
@@ -344,6 +364,7 @@ async def status(request: Request):
         "bg_tasks": len(_background_tasks),
         "daily_running": _daily_running,
         "last_digest_run": _last_digest_run,
+        "rumination_configured": _rumination_configured(),
         "last_heat_decay_date": _last_heat_decay_date,
         "memory_plugin_configured": bool(cfg.MEMORY_PLUGIN_TOKEN),
         "memory_mcp_configured": bool(cfg.MCP_MEMORY_TOKEN),

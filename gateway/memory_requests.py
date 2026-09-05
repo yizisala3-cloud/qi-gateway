@@ -479,11 +479,26 @@ def create_memory_request(
     try:
         response = client.rpc(rpc_name, rpc_payload).execute()
     except Exception as exc:
-        if "memory_request_rate_limited" in str(exc).casefold():
+        message = str(exc).casefold()
+        if "memory_request_rate_limited" in message:
             raise MemoryRequestError(
                 "rate_limited",
                 "too many memory applications; retry later",
                 429,
+            ) from exc
+        # 快速路径 thread 写入门控：命中反刍长期 thread 时不创建平级
+        # active 真源，也不让快速路径改写反刍维护的当前状态。
+        if "memory_thread_rumination_conflict" in message:
+            raise MemoryRequestError(
+                "rumination_thread_conflict",
+                "已有反刍路径正在维护同一长期线索，本次不创建平行的正式 thread",
+                409,
+            ) from exc
+        if "memory_thread_rumination_maintained" in message:
+            raise MemoryRequestError(
+                "rumination_thread_maintained",
+                "该主题键的长期线索由反刍路径维护，快速路径不能改写其当前状态",
+                409,
             ) from exc
         raise MemoryRequestError(
             "request_store_failed",

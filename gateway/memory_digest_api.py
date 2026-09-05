@@ -23,6 +23,11 @@ from .memory_extract import (
     list_digest_runs,
     run_memory_digest,
 )
+from .memory_rumination import (
+    RuminationPipelineError,
+    get_rumination_status,
+    run_rumination_digest,
+)
 
 log = logging.getLogger("gateway.memory_digest_api")
 
@@ -188,6 +193,46 @@ async def continuity_skip_blocked(request: Request):
         )
 
 
+def _rumination_error(exc: RuminationPipelineError) -> JSONResponse:
+    return JSONResponse(
+        {"error": str(exc), "error_code": exc.code},
+        status_code=exc.status_code,
+    )
+
+
+async def rumination_status(request: Request):
+    if not _authorized(request):
+        return _error("unauthorized", 401)
+    try:
+        return JSONResponse(await asyncio.to_thread(get_rumination_status))
+    except RuminationPipelineError as exc:
+        return _rumination_error(exc)
+    except Exception:
+        log.exception("Failed to read rumination status")
+        return JSONResponse(
+            {"error": "Failed to read rumination status", "error_code": "status_failed"},
+            status_code=500,
+        )
+
+
+async def rumination_execute(request: Request):
+    """手动执行/失败重试：同样遵守首次 120 条、60~120 条批次、游标与幂等规则。"""
+    if not _authorized(request):
+        return _error("unauthorized", 401)
+    try:
+        return JSONResponse(
+            await asyncio.to_thread(run_rumination_digest, "rumination_manual"),
+        )
+    except RuminationPipelineError as exc:
+        return _rumination_error(exc)
+    except Exception:
+        log.exception("Rumination execute failed")
+        return JSONResponse(
+            {"error": "Rumination execute failed", "error_code": "execute_failed"},
+            status_code=500,
+        )
+
+
 memory_digest_routes = [
     Route("/admin/api/memory-digest/status", digest_status, methods=["GET"]),
     Route("/admin/api/memory-digest/runs", digest_runs, methods=["GET"]),
@@ -205,4 +250,6 @@ memory_digest_routes = [
         continuity_skip_blocked,
         methods=["POST"],
     ),
+    Route("/admin/api/memory-rumination/status", rumination_status, methods=["GET"]),
+    Route("/admin/api/memory-rumination/execute", rumination_execute, methods=["POST"]),
 ]

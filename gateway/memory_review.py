@@ -476,6 +476,19 @@ def review_memory_request(
                 "the selected memory is no longer active and verified",
                 409,
             ) from exc
+        if "memory_rumination_absorb_target_invalid" in message:
+            # 拟交接目标已变化、归档或不再合法：整笔审核未通过，无部分生效。
+            raise MemoryRequestError(
+                "rumination_absorb_target_invalid",
+                "拟交接的快速路径记忆已发生变化或不再可用，本次审核未通过，请重新确认后重试",
+                409,
+            ) from exc
+        if "memory_rumination_absorb_result_invalid" in message:
+            raise MemoryRequestError(
+                "rumination_result_invalid",
+                "审核结果记忆状态异常，本次审核未回写，请重试或联系检查",
+                409,
+            ) from exc
         if (
             "memory_request_related_memory_required" in message
             or "memory_request_relation_disallows_edits" in message
