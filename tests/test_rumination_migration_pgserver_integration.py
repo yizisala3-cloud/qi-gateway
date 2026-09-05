@@ -455,6 +455,48 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             params,
         )
 
+    def _thread_snapshot(self, memory_id):
+        """The exact snapshot the model read and must echo on thread ops."""
+        row = self._query_row(
+            "select memory_key, continuity_id::text, content_hash, thread_state "
+            "from public.memories where id = %s",
+            (memory_id,),
+        )
+        return {
+            "target_memory_key": row[0],
+            "target_continuity_id": row[1],
+            "target_content_hash": row[2],
+            "target_thread_state": row[3],
+        }
+
+    def _fast_path_moment(self, content, key_suffix):
+        """Seed a dedicated active fast-path moment for handoff tests."""
+        self.conn.execute(
+            "insert into public.memory_continuity_objects (continuity_id, assistant_id) "
+            "values (('21111111-1111-1111-1111-1111111111f' || %s)::uuid, 'a-rumination') "
+            "on conflict (continuity_id) do nothing",
+            (key_suffix,),
+        )
+        self.conn.execute(
+            "insert into public.memories ("
+            "content, title, tags, importance, embedding, source, verified, is_active, "
+            "assistant_id, confidence, content_hash, "
+            "continuity_id, continuity_schema_version, continuity_data, "
+            "continuity_type, evidence_message_ids "
+            ") values ("
+            "%s, '快速路径片段', '{moment}', 5, '[0.21,0.31,0.41]', 'daily_digest', "
+            "'verified', true, 'a-rumination', 0.9, %s, "
+            "('21111111-1111-1111-1111-1111111111f' || %s)::uuid, 1, "
+            "'{\"scene\": \"聊天窗口\", \"event\": \"快速路径片段\", "
+            "\"moment_state\": \"standalone\"}'::jsonb, "
+            "'moment', '{503}'"
+            ") on conflict (content_hash) do nothing",
+            (content, _sha256(content), key_suffix),
+        )
+        return self._active_memory(
+            "content_hash = %s", (_sha256(content),),
+        )
+
     # -- cursor & claim ----------------------------------------------------
 
     def test_cursor_row_defaults_are_uninitialized(self):
@@ -583,6 +625,7 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
                 "op": "adopt_thread",
                 "reason": "快速路径 thread 值得长期追踪",
                 "target_memory_id": fast_thread_id,
+                **self._thread_snapshot(fast_thread_id),
                 "memory_key": "topic.trip.weather",
                 "evidence_message_ids": [501],
             },
@@ -701,6 +744,7 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "op": "adopt_thread",
             "reason": "快速路径 thread 有实质进展，值得长期追踪",
             "target_memory_id": fast_id,
+            **self._thread_snapshot(fast_id),
             "memory_key": "topic.album.sorting",
             "content": new_content,
             "thread_state": "open",
@@ -783,6 +827,7 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
                 "op": "evidence_only",
                 "reason": "证据不属于本批",
                 "target_memory_id": rum_thread,
+                **self._thread_snapshot(rum_thread),
                 "evidence_message_ids": [501],
             }])
         self.assertEqual(self._cursor(), 520)
@@ -797,12 +842,14 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
                 "op": "evidence_only",
                 "reason": "重复表达，只补证据",
                 "target_memory_id": rum_id,
+                **self._thread_snapshot(rum_id),
                 "evidence_message_ids": [521],
             },
             {
                 "op": "pause_thread",
                 "reason": "原文明确说明暂停一周",
                 "target_memory_id": rum_id,
+                **self._thread_snapshot(rum_id),
                 "content": "赶海计划当前状态：因出差暂停一周。",
                 "title": "赶海计划",
                 "continuity_data": {
@@ -854,6 +901,7 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
                 "op": "resume_thread",
                 "reason": "出差回来，进程重新推进",
                 "target_memory_id": paused_id,
+                **self._thread_snapshot(paused_id),
                 "content": "赶海计划当前状态：出差结束，赶海继续推进。",
                 "title": "赶海计划",
                 "continuity_data": {
@@ -878,6 +926,7 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
                 "op": "resolve_thread",
                 "reason": "原文明确说明赶海完成",
                 "target_memory_id": resumed_id,
+                **self._thread_snapshot(resumed_id),
                 "content": "赶海计划已明确完成，潮水很美。",
                 "title": "赶海计划",
                 "continuity_data": {
@@ -928,6 +977,7 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "op": "update_thread",
             "reason": "没有实质进展，只重复当前状态",
             "target_memory_id": watch_id,
+            **self._thread_snapshot(watch_id),
             "content": current_content,
             "continuity_data": {
                 "open_question": "夜间观察是否成行",
@@ -978,6 +1028,7 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
                 "op": "resume_thread",
                 "reason": "目标本来就是 open",
                 "target_memory_id": watch_id,
+                **self._thread_snapshot(watch_id),
                 "content": "夜间观察计划当前状态：约定观察猎户座，等待晴夜。",
                 "continuity_data": {
                     "open_question": "夜间观察是否成行",
@@ -1351,6 +1402,7 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
                     "op": "update_thread",
                     "reason": "第一个进展",
                     "target_memory_id": watch_id,
+                    **self._thread_snapshot(watch_id),
                     "content": "夜间观察计划当前状态：第一次推进。",
                     "continuity_data": {
                         "open_question": "夜间观察是否成行",
@@ -1365,6 +1417,7 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
                     "op": "update_thread",
                     "reason": "第二个进展",
                     "target_memory_id": watch_id,
+                    **self._thread_snapshot(watch_id),
                     "content": "夜间观察计划当前状态：第二次推进。",
                     "continuity_data": {
                         "open_question": "夜间观察是否成行",
@@ -1594,6 +1647,7 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
                     "op": "adopt_thread",
                     "reason": "先合法接管",
                     "target_memory_id": fast_id,
+                    **self._thread_snapshot(fast_id),
                     "memory_key": "topic.tent.repair",
                     "evidence_message_ids": [521],
                 },
@@ -1623,6 +1677,225 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "select count(*) from public.memory_continuity_objects"
         ), objects_before)
         self.assertEqual(self._cursor(), 520)
+
+    # -- target snapshot concurrency -----------------------------------------
+
+    def test_target_snapshot_conflict_rejects_stale_commit(self):
+        self._set_cursor(initialized=True, value=520)
+        watch_id = self._active_memory("memory_key = 'topic.night.watch'")
+        snapshot = self._thread_snapshot(watch_id)
+        run_id = self._claim(521, 522)
+        # 提交前外部修改了该 thread（并发替换），旧快照随之过期。
+        changed = "夜间观察计划当前状态：外部并发修改后的正文。"
+        self.conn.execute(
+            "update public.memories set content = %s, content_hash = %s where id = %s",
+            (changed, _sha256(changed), watch_id),
+        )
+        with self.assertRaises(Exception) as raised:
+            self._commit(run_id, [{
+                "op": "update_thread",
+                "reason": "使用读取时的快照提交",
+                "target_memory_id": watch_id,
+                **snapshot,
+                "content": "夜间观察计划当前状态：第一次推进。",
+                "continuity_data": {
+                    "open_question": "夜间观察是否成行",
+                    "current_state": "第一次推进",
+                    "closure_criteria": ["观察完成或取消"],
+                },
+                "evidence_message_ids": [521],
+                "content_hash": _sha256("夜间观察计划当前状态：第一次推进。"),
+                "embedding": "[0.7,0.7,0.7]",
+            }])
+        self.assertIn("memory_rumination_target_changed", str(raised.exception))
+        # 无新版本、无交接、无申请残留，游标不动。
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memories where supersedes_memory_id = %s",
+            (watch_id,),
+        ), 0)
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_path_handoffs where run_id = %s",
+            (run_id,),
+        ), 0)
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_requests where digest_run_id = %s",
+            (run_id,),
+        ), 0)
+        self.assertEqual(self._cursor(), 520)
+
+        # 重试携带最新快照可以正常推进。
+        result = self._commit(run_id, [{
+            "op": "update_thread",
+            "reason": "使用最新快照重试",
+            "target_memory_id": watch_id,
+            **self._thread_snapshot(watch_id),
+            "content": changed,
+            "continuity_data": {
+                "open_question": "夜间观察是否成行",
+                "current_state": "外部并发修改后的正文",
+                "closure_criteria": ["观察完成或取消"],
+            },
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(changed),
+            "embedding": "[0.72,0.72,0.72]",
+        }])
+        self.assertEqual(result["op_counts"]["evidence_only"], 1)
+        self.assertEqual(self._cursor(), 522)
+
+    # -- absorption handoff ---------------------------------------------------
+
+    def test_absorbed_request_handoff_lifecycle(self):
+        fast_id = self._fast_path_moment(
+            "快速路径片段：双方约定一起写旅行手账。", "9"
+        )
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        content = "反刍整合手账约定的完整episode经历。"
+        result = self._commit(run_id, [{
+            "op": "create_request",
+            "reason": "吸收快速路径记忆并整理成完整经历",
+            "continuity_type": "episode",
+            "content": content,
+            "title": "手账经历",
+            "continuity_data": EPISODE_DATA,
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "importance": 6, "confidence": 0.8,
+            "embedding": "[0.85,0.85,0.85]",
+            "absorbed_fast_path_memory_ids": [fast_id],
+        }])
+        self.assertEqual(result["op_counts"]["created_requests"], 1)
+        request_id = result["preview"][0]["request_id"]
+
+        # pending：拟交接目标已保存，但快速路径记忆保持 active。
+        self.assertEqual(self._query_one(
+            "select absorbed_fast_path_memory_ids from public.memory_requests "
+            "where id = %s",
+            (request_id,),
+        ), [fast_id])
+        self.assertTrue(self._query_one(
+            "select is_active from public.memories where id = %s", (fast_id,),
+        ))
+
+        # 拒绝：快速路径记忆保持原状，无任何交接记录。
+        self._query_one(
+            "select public.review_memory_request_v5(%s, 'reject', null, null, null, "
+            "null, null, 'tester', '不需要', null, null, null, null, null, null, "
+            "null, null)",
+            (request_id,),
+        )
+        self.assertTrue(self._query_one(
+            "select is_active from public.memories where id = %s", (fast_id,),
+        ))
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_path_handoffs where request_id = %s",
+            (request_id,),
+        ), 0)
+
+        # 重新提交（新证据）并通过：目标退出 active，交接审计完整。
+        content2 = "反刍整合手账约定的完整episode经历，补充了新证据。"
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(523, 524)
+        result = self._commit(run_id, [{
+            "op": "create_request",
+            "reason": "吸收快速路径记忆并整理成完整经历",
+            "continuity_type": "episode",
+            "content": content2,
+            "title": "手账经历",
+            "continuity_data": EPISODE_DATA,
+            "evidence_message_ids": [523],
+            "content_hash": _sha256(content2),
+            "importance": 6, "confidence": 0.8,
+            "embedding": "[0.86,0.86,0.86]",
+            "absorbed_fast_path_memory_ids": [fast_id],
+        }])
+        request_id = result["preview"][0]["request_id"]
+        self._query_one(
+            "select public.review_memory_request_v5(%s, 'approve', %s, %s, %s, %s, %s, "
+            "'tester', null, null, null, null, null, null, null, null, null)",
+            (request_id, content2, "手账经历", "{episode}", 6, _sha256(content2)),
+        )
+        new_memory_id = self._query_one(
+            "select id from public.memories where content_hash = %s and is_active",
+            (_sha256(content2),),
+        )
+        self.assertIsNotNone(new_memory_id)
+        self.assertEqual(self._query_row(
+            "select is_active, maintained_by from public.memories where id = %s",
+            (fast_id,),
+        ), (False, "fast_path"))
+        # 跨类型交接不写入版本链字段。
+        self.assertIsNone(self._query_one(
+            "select superseded_by_memory_id from public.memories where id = %s",
+            (fast_id,),
+        ))
+        handoff = self._query_row(
+            "select kind, fast_path_memory_id, rumination_memory_id, request_id, "
+            "run_id from public.memory_path_handoffs where request_id = %s",
+            (request_id,),
+        )
+        self.assertEqual(handoff[0], "absorbed_by_request")
+        self.assertEqual(handoff[1], fast_id)
+        self.assertEqual(handoff[2], new_memory_id)
+        self.assertEqual(handoff[4], self._query_one(
+            "select digest_run_id from public.memory_requests where id = %s",
+            (request_id,),
+        ))
+        # 未列出的其他快速路径记忆不受影响。
+        other = self._active_memory(
+            "content = '叶子和栖把防晒霜叫作贝壳的瞬间。'"
+        )
+        self.assertIsNotNone(other)
+
+    def test_absorb_target_validation_rejects_invalid(self):
+        # 反刍产出的记忆不可被申请吸收。
+        rum_id = self._active_memory("memory_key = 'topic.night.watch'")
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        content = "试图吸收反刍记忆的episode申请。"
+        with self.assertRaises(Exception) as raised:
+            self._commit(run_id, [{
+                "op": "create_request",
+                "reason": "非法吸收目标",
+                "continuity_type": "episode",
+                "content": content,
+                "continuity_data": EPISODE_DATA,
+                "evidence_message_ids": [521],
+                "content_hash": _sha256(content),
+                "embedding": "[0.87,0.87,0.87]",
+                "absorbed_fast_path_memory_ids": [rum_id],
+            }])
+        self.assertIn("memory_rumination_absorb_target_invalid", str(raised.exception))
+        self.assertEqual(self._cursor(), 520)
+        # 失败提交的事务回滚后 run 仍处于 running：释放租约再重试。
+        self.conn.execute(
+            "update public.memory_digest_runs set status = 'failed', "
+            "error_code = 'test_release' where id = %s", (run_id,),
+        )
+
+        # 已经 inactive 的快速路径记忆不可吸收。
+        inactive_id = self._fast_path_moment(
+            "已归档的快速路径片段：约定一起修自行车。", "a"
+        )
+        self.conn.execute(
+            "update public.memories set is_active = false where id = %s",
+            (inactive_id,),
+        )
+        run_id = self._claim(521, 522)
+        content2 = "试图吸收已归档记忆的episode申请。"
+        with self.assertRaises(Exception) as raised:
+            self._commit(run_id, [{
+                "op": "create_request",
+                "reason": "吸收已归档记忆",
+                "continuity_type": "episode",
+                "content": content2,
+                "continuity_data": EPISODE_DATA,
+                "evidence_message_ids": [521],
+                "content_hash": _sha256(content2),
+                "embedding": "[0.88,0.88,0.88]",
+                "absorbed_fast_path_memory_ids": [inactive_id],
+            }])
+        self.assertIn("memory_rumination_absorb_target_invalid", str(raised.exception))
 
     # -- recall -------------------------------------------------------------
 

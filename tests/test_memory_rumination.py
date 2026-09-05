@@ -49,6 +49,7 @@ def _thread(memory_id=12, state="open", maintained_by="rumination", key="topic.x
         "thread_state": state,
         "maintained_by": maintained_by,
         "content": "叶子和栖约定下周三赶海。",
+        "content_hash": _sha256("叶子和栖约定下周三赶海。"),
         "continuity_data": {
             "open_question": "赶海是否成行",
             "current_state": "已约定待确认天气",
@@ -65,11 +66,25 @@ def _threads_by_id(*threads):
     return {int(thread["id"]): thread for thread in threads}
 
 
+_DEFAULT_TARGET = _thread(memory_id=12, state="open")
+
+
+def _snap(target):
+    """Snapshot fields the model must echo for the given thread fixture."""
+    return {
+        "target_memory_key": target["memory_key"],
+        "target_continuity_id": target["continuity_id"],
+        "target_content_hash": target["content_hash"],
+        "target_thread_state": target["thread_state"],
+    }
+
+
 def _op(**kwargs):
     base = {
         "op": "update_thread",
         "reason": "进程有实质进展",
         "target_memory_id": 12,
+        **_snap(_DEFAULT_TARGET),
         "content": "赶海计划当前状态：天气已确认，周三成行。",
         "continuity_data": {
             "open_question": "赶海是否成行",
@@ -184,6 +199,9 @@ class ParseValidationTests(unittest.TestCase):
         )
         self.times = _evidence_times([1, 2, 3, 4, 5])
 
+    def _snap(self, memory_id):
+        return _snap(self.threads[memory_id])
+
     def _parse(self, ops):
         return parse_rumination_output(
             json.dumps({"operations": ops}, ensure_ascii=False),
@@ -195,7 +213,7 @@ class ParseValidationTests(unittest.TestCase):
         ops = self._parse([
             _op(),
             {"op": "evidence_only", "reason": "重复表达", "target_memory_id": 12,
-             "evidence_message_ids": [4]},
+             **self._snap(12), "evidence_message_ids": [4]},
             {"op": "ignore", "reason": "寒暄", "evidence_message_ids": [1]},
         ])
         self.assertEqual([item["op"] for item in ops], ["update_thread", "evidence_only", "ignore"])
@@ -235,6 +253,7 @@ class ParseValidationTests(unittest.TestCase):
             self._parse([{
                 "op": "pause_thread", "reason": "还没暂停就想暂停",
                 "target_memory_id": 13,
+                **self._snap(13),
                 "content": "赶海计划当前状态：暂停。",
                 "continuity_data": {"open_question": "赶海是否成行", "current_state": "暂停"},
                 "evidence_message_ids": [1],
@@ -243,6 +262,7 @@ class ParseValidationTests(unittest.TestCase):
             self._parse([{
                 "op": "resume_thread", "reason": "还没暂停就想恢复",
                 "target_memory_id": 12,
+                **self._snap(12),
                 "content": "赶海计划当前状态：恢复。",
                 "continuity_data": {"open_question": "赶海是否成行", "current_state": "恢复"},
                 "evidence_message_ids": [1],
@@ -257,6 +277,7 @@ class ParseValidationTests(unittest.TestCase):
             self._parse([{
                 "op": "resolve_thread", "reason": "没有闭合字段的完成",
                 "target_memory_id": 12,
+                **self._snap(12),
                 "content": "赶海计划已完成。",
                 "continuity_data": {"open_question": "赶海是否成行", "current_state": "完成"},
                 "evidence_message_ids": [1],
@@ -317,6 +338,60 @@ class ParseValidationTests(unittest.TestCase):
                 "continuity_data": {"scene": "聊天", "event": "发密钥", "moment_state": "standalone"},
                 "evidence_message_ids": [1],
             }])
+
+    def test_missing_snapshot_fields_rejected(self):
+        for key in (
+            "target_memory_key", "target_continuity_id",
+            "target_content_hash", "target_thread_state",
+        ):
+            with self.subTest(field=key):
+                op = _op()
+                op.pop(key)
+                with self.assertRaisesRegex(
+                    RuminationPipelineError, "snapshot mismatch",
+                ):
+                    self._parse([op])
+
+    def test_stale_snapshot_fields_rejected(self):
+        with self.assertRaisesRegex(RuminationPipelineError, "snapshot mismatch"):
+            self._parse([_op(target_content_hash="a" * 64)])
+        with self.assertRaisesRegex(RuminationPipelineError, "snapshot mismatch"):
+            self._parse([_op(target_thread_state="paused")])
+        with self.assertRaisesRegex(RuminationPipelineError, "snapshot mismatch"):
+            self._parse([_op(target_memory_key="topic.other")])
+        with self.assertRaisesRegex(RuminationPipelineError, "snapshot mismatch"):
+            self._parse([_op(target_continuity_id="2" * 36 if False else
+                             "21111111-1111-1111-1111-1111111111a2")])
+
+    def test_keyless_fast_path_target_allows_null_key_snapshot(self):
+        ops = self._parse([_op(target_memory_id=14, **self._snap(14))])
+        self.assertEqual(ops[0]["target_memory_key"], None)
+
+    def test_absorb_targets_validated(self):
+        op = {
+            "op": "create_request", "reason": "完整经历",
+            "continuity_type": "episode",
+            "content": "一段完整的共同赶海经历。",
+            "continuity_data": {
+                "beginning": "约好", "development": "准备", "outcome": "成行",
+                "closure_quality": "complete",
+            },
+            "evidence_message_ids": [1],
+            "absorbed_fast_path_memory_ids": [14],
+        }
+        ops = self._parse([op])
+        self.assertEqual(ops[0]["absorbed_fast_path_memory_ids"], [14])
+        # 反刍产出的 thread 不可吸收。
+        op["absorbed_fast_path_memory_ids"] = [12]
+        with self.assertRaisesRegex(RuminationPipelineError, "rumination-produced"):
+            self._parse([op])
+        # 非法形态整批拒绝。
+        op["absorbed_fast_path_memory_ids"] = []
+        with self.assertRaisesRegex(RuminationPipelineError, "non-empty array"):
+            self._parse([op])
+        op["absorbed_fast_path_memory_ids"] = [1, 1]
+        ops = self._parse([op])
+        self.assertEqual(ops[0]["absorbed_fast_path_memory_ids"], [1])
 
     def test_identical_content_ops_deduplicated(self):
         ops = self._parse([_op(), _op(reason="同义重复")])
@@ -419,7 +494,10 @@ class RunFlowTests(unittest.TestCase):
             patch("gateway.memory_rumination.resolve_rumination_assistant_id", return_value="assistant-1"),
             patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
             patch("gateway.memory_rumination._mark_stale_rumination_runs"),
-            patch("gateway.memory_rumination._fetch_message_ids", return_value=list(range(101, 161))),
+            patch(
+                "gateway.memory_rumination._fetch_message_ids",
+                side_effect=[list(range(101, 161)), []],
+            ),
             patch("gateway.memory_rumination._fetch_batch_rows", return_value=[]),
             patch("gateway.memory_rumination._normalize_batch_messages", return_value=[
                 {"id": 101, "conversation_id": "c1", "role": "user",
@@ -464,7 +542,7 @@ class RunFlowTests(unittest.TestCase):
         ]
         commit_ok = {
             "run_id": 71,
-            "cursor": {"last_processed_message_id": 219},
+            "cursor": {"last_processed_message_id": 220},
             "op_counts": {"created_threads": 1},
             "preview": [],
             "inserted_count": 1,
@@ -475,7 +553,10 @@ class RunFlowTests(unittest.TestCase):
             patch("gateway.memory_rumination.resolve_rumination_assistant_id", return_value="assistant-1"),
             patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
             patch("gateway.memory_rumination._mark_stale_rumination_runs"),
-            patch("gateway.memory_rumination._fetch_message_ids", return_value=list(range(101, 341))),
+            patch(
+                "gateway.memory_rumination._fetch_message_ids",
+                side_effect=[list(range(101, 221)), list(range(221, 341))],
+            ),
             patch("gateway.memory_rumination._fetch_batch_rows", return_value=[]),
             patch("gateway.memory_rumination._normalize_batch_messages", return_value=[
                 {"id": 101, "conversation_id": "c1", "role": "user",
@@ -502,7 +583,7 @@ class RunFlowTests(unittest.TestCase):
         self.assertEqual(result["batches"][1]["status"], "failed")
         # 前一批已成功提交，游标推进不回滚；失败批只记录失败。
         mark_failed.assert_called_once()
-        self.assertEqual(result["batches"][0]["cursor_after"], 219)
+        self.assertEqual(result["batches"][0]["cursor_after"], 220)
 
     def test_below_threshold_creates_skipped_run_without_model_call(self):
         cursor = dict(self.cursor)
@@ -511,7 +592,10 @@ class RunFlowTests(unittest.TestCase):
             patch("gateway.memory_rumination.resolve_rumination_assistant_id", return_value="assistant-1"),
             patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
             patch("gateway.memory_rumination._mark_stale_rumination_runs"),
-            patch("gateway.memory_rumination._fetch_message_ids", return_value=list(range(101, 146))),
+            patch(
+                "gateway.memory_rumination._fetch_message_ids",
+                side_effect=[list(range(101, 146))],
+            ),
             patch("gateway.memory_rumination._rpc_object", return_value={
                 "status": "skipped", "run_id": 80,
             }) as rpc,
@@ -523,6 +607,134 @@ class RunFlowTests(unittest.TestCase):
         self.assertEqual(result["cursor_after"], 100)
         rpc.assert_called_once()
         model.assert_not_called()
+
+    def test_paged_backlog_processes_every_qualifying_page(self):
+        # 260 条积压：120 + 120 两批处理，尾部 20 条不足 60 留到次日。
+        pages = [
+            list(range(101, 221)),
+            list(range(221, 341)),
+            list(range(341, 361)),
+        ]
+        rpc_results = [
+            {"status": "claimed", "run_id": 71},
+            {
+                "run_id": 71,
+                "cursor": {"last_processed_message_id": 220},
+                "op_counts": {}, "preview": [], "inserted_count": 0,
+            },
+            {"status": "claimed", "run_id": 72},
+            {
+                "run_id": 72,
+                "cursor": {"last_processed_message_id": 340},
+                "op_counts": {}, "preview": [], "inserted_count": 0,
+            },
+        ]
+        cursor = dict(self.cursor)
+        with (
+            patch("gateway.memory_rumination._rumination_analysis_configured", return_value=True),
+            patch("gateway.memory_rumination.resolve_rumination_assistant_id", return_value="assistant-1"),
+            patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
+            patch("gateway.memory_rumination._mark_stale_rumination_runs"),
+            patch("gateway.memory_rumination._fetch_message_ids", side_effect=pages) as fetch,
+            patch("gateway.memory_rumination._fetch_batch_rows", return_value=[]),
+            patch("gateway.memory_rumination._normalize_batch_messages", return_value=[
+                {"id": 101, "conversation_id": "c1", "role": "user",
+                 "content": "消息", "source_time": "2026-09-01T10:00+08:00"},
+            ]),
+            patch("gateway.memory_rumination._load_unfinished_threads", return_value=[]),
+            patch("gateway.memory_rumination._load_own_requests", return_value=[]),
+            patch("gateway.memory_rumination._call_rumination_model", return_value='{"operations":[]}'),
+            patch("gateway.memory_rumination._rpc_object", side_effect=rpc_results),
+            patch("gateway.memory_rumination._set_run_model_name"),
+            patch("gateway.memory_rumination._update_heartbeat"),
+        ):
+            result = run_rumination_digest("rumination_manual")
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["batch_count"], 2)
+        self.assertEqual(result["cursor_after"], 340)
+        # 每页最多 120 条，从未一次性读取全部积压。
+        for call in fetch.call_args_list:
+            self.assertLessEqual(call.kwargs["limit"], 120)
+
+    def test_paging_continues_beyond_large_backlogs_without_cap(self):
+        pages = [list(range(101 + 120 * i, 221 + 120 * i)) for i in range(4)]
+        pages.append(list(range(581, 592)))  # 11 条尾部
+        rpc_results = []
+        for index in range(4):
+            rpc_results.append({"status": "claimed", "run_id": 80 + index})
+            rpc_results.append({
+                "run_id": 80 + index,
+                "cursor": {"last_processed_message_id": 220 + 120 * index},
+                "op_counts": {}, "preview": [], "inserted_count": 0,
+            })
+        cursor = dict(self.cursor)
+        with (
+            patch("gateway.memory_rumination._rumination_analysis_configured", return_value=True),
+            patch("gateway.memory_rumination.resolve_rumination_assistant_id", return_value="assistant-1"),
+            patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
+            patch("gateway.memory_rumination._mark_stale_rumination_runs"),
+            patch("gateway.memory_rumination._fetch_message_ids", side_effect=pages),
+            patch("gateway.memory_rumination._fetch_batch_rows", return_value=[]),
+            patch("gateway.memory_rumination._normalize_batch_messages", return_value=[
+                {"id": 101, "conversation_id": "c1", "role": "user",
+                 "content": "消息", "source_time": "2026-09-01T10:00+08:00"},
+            ]),
+            patch("gateway.memory_rumination._load_unfinished_threads", return_value=[]),
+            patch("gateway.memory_rumination._load_own_requests", return_value=[]),
+            patch("gateway.memory_rumination._call_rumination_model", return_value='{"operations":[]}'),
+            patch("gateway.memory_rumination._rpc_object", side_effect=rpc_results),
+            patch("gateway.memory_rumination._set_run_model_name"),
+            patch("gateway.memory_rumination._update_heartbeat"),
+        ):
+            result = run_rumination_digest("rumination_manual")
+        self.assertEqual(result["batch_count"], 4)
+        self.assertEqual(result["cursor_after"], 580)
+
+    def test_sparse_message_ids_are_counted_as_real_rows(self):
+        # 稀疏 ID：批次数按真实行数计，而非 last-first+1。
+        sparse_ids = list(range(101, 221))
+        sparse_ids2 = [900 + i for i in range(60)]
+        rpc_results = [
+            {"status": "claimed", "run_id": 71},
+            {
+                "run_id": 71,
+                "cursor": {"last_processed_message_id": 959},
+                "op_counts": {}, "preview": [], "inserted_count": 0,
+            },
+            {"status": "claimed", "run_id": 72},
+            {
+                "run_id": 72,
+                "cursor": {"last_processed_message_id": 959},
+                "op_counts": {}, "preview": [], "inserted_count": 0,
+            },
+        ]
+        cursor = dict(self.cursor)
+        with (
+            patch("gateway.memory_rumination._rumination_analysis_configured", return_value=True),
+            patch("gateway.memory_rumination.resolve_rumination_assistant_id", return_value="assistant-1"),
+            patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
+            patch("gateway.memory_rumination._mark_stale_rumination_runs"),
+            patch(
+                "gateway.memory_rumination._fetch_message_ids",
+                side_effect=[sparse_ids, sparse_ids2, []],
+            ),
+            patch("gateway.memory_rumination._fetch_batch_rows", return_value=[]),
+            patch("gateway.memory_rumination._normalize_batch_messages", return_value=[
+                {"id": 101, "conversation_id": "c1", "role": "user",
+                 "content": "消息", "source_time": "2026-09-01T10:00+08:00"},
+            ]),
+            patch("gateway.memory_rumination._load_unfinished_threads", return_value=[]),
+            patch("gateway.memory_rumination._load_own_requests", return_value=[]),
+            patch("gateway.memory_rumination._call_rumination_model", return_value='{"operations":[]}'),
+            patch("gateway.memory_rumination._rpc_object", side_effect=rpc_results),
+            patch("gateway.memory_rumination._set_run_model_name"),
+            patch("gateway.memory_rumination._update_heartbeat"),
+        ):
+            result = run_rumination_digest("rumination_manual")
+        self.assertEqual(result["batch_count"], 2)
+        first, second = result["batches"]
+        self.assertEqual(first["batch"], {"first_message_id": 101, "last_message_id": 220, "message_count": 120})
+        self.assertEqual(second["batch"], {"first_message_id": 900, "last_message_id": 959, "message_count": 60})
 
     def test_first_run_initializes_from_latest_messages(self):
         cursor = dict(self.cursor, initialized=False, last_processed_message_id=0)
@@ -660,11 +872,15 @@ class MergeThreadOperationsTests(unittest.TestCase):
         }
         self.threads = _threads_by_id(_thread(memory_id=12, state="open"))
 
+    def _snap(self, memory_id):
+        return _snap(self.threads[memory_id])
+
     def _update(self, evidence, content, state_data=None):
         return {
             "op": "update_thread",
             "reason": "进程有实质进展",
             "target_memory_id": 12,
+            **self._snap(12),
             "content": content,
             "continuity_data": state_data or {
                 "open_question": "网关改造是否完成",
@@ -701,6 +917,7 @@ class MergeThreadOperationsTests(unittest.TestCase):
                 "op": "resolve_thread",
                 "reason": "生产实测通过，进程完成",
                 "target_memory_id": 12,
+                **self._snap(12),
                 "content": "网关改造已完成：后端完成、前端部署、生产实测通过。",
                 "continuity_data": {
                     "open_question": "网关改造是否完成",
@@ -727,6 +944,7 @@ class MergeThreadOperationsTests(unittest.TestCase):
             {
                 "op": "pause_thread", "reason": "临时暂停",
                 "target_memory_id": 12,
+                **self._snap(12),
                 "content": "网关改造当前状态：临时暂停。",
                 "continuity_data": {"open_question": "q", "current_state": "临时暂停"},
                 "evidence_message_ids": [101],
@@ -734,6 +952,7 @@ class MergeThreadOperationsTests(unittest.TestCase):
             {
                 "op": "resume_thread", "reason": "恢复推进",
                 "target_memory_id": 12,
+                **self._snap(12),
                 "content": "网关改造当前状态：恢复推进。",
                 "continuity_data": {"open_question": "q", "current_state": "恢复推进"},
                 "evidence_message_ids": [201],
@@ -752,6 +971,7 @@ class MergeThreadOperationsTests(unittest.TestCase):
             {
                 "op": "resolve_thread", "reason": "完成",
                 "target_memory_id": 12,
+                **self._snap(12),
                 "content": "网关改造已完成。",
                 "continuity_data": {
                     "open_question": "q", "current_state": "完成",
@@ -792,7 +1012,8 @@ class MergeThreadOperationsTests(unittest.TestCase):
     def test_unchanged_update_merges_to_evidence_only(self):
         ops = [
             {"op": "evidence_only", "reason": "只补证据",
-             "target_memory_id": 12, "evidence_message_ids": [101]},
+             "target_memory_id": 12, **self._snap(12),
+             "evidence_message_ids": [101]},
             self._update([201], "叶子和栖约定下周三赶海。"),  # 与目标正文相同
         ]
         merged = merge_thread_operations(
@@ -836,12 +1057,15 @@ class MergeThreadOperationsTests(unittest.TestCase):
         ops = [
             {
                 "op": "adopt_thread", "reason": "接管快速路径 thread",
-                "target_memory_id": 14, "memory_key": "topic.gateway.rework",
+                "target_memory_id": 14,
+                **_snap(threads[14]),
+                "memory_key": "topic.gateway.rework",
                 "evidence_message_ids": [101],
             },
             {
                 "op": "update_thread", "reason": "进程有实质进展",
                 "target_memory_id": 14,
+                **_snap(threads[14]),
                 "content": "网关改造当前状态：前端已部署。",
                 "continuity_data": {"open_question": "q", "current_state": "前端已部署"},
                 "evidence_message_ids": [201],

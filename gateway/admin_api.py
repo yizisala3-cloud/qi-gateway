@@ -77,6 +77,7 @@ _TABLES: dict[str, dict[str, Any]] = {
             "recall_scene", "recall_tags",
             "dedupe_reason", "related_request_id",
             "producer_path",
+            "absorbed_fast_path_memory_ids",
         },
         "write": set(),
         "insert": False,

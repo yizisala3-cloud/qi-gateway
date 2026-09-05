@@ -189,5 +189,89 @@ class RuminationMigrationContractTests(unittest.TestCase):
         self.assertRegex(self.executable, r"\bcommit\s*;")
 
 
+
+
+class RuminationReviewHandoffMigrationContractTests(unittest.TestCase):
+    """Static contract for 20260906010000_rumination_review_handoff.sql."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = ROOT / "supabase/migrations/20260906010000_rumination_review_handoff.sql"
+        cls.sql = path.read_text(encoding="utf-8")
+        cls.executable = re.sub(r"--[^\n]*", "", cls.sql)
+        cls.v5 = cls.executable.split(
+            "create or replace function public.review_memory_request_v5", 1
+        )[1].split(
+            "create or replace function public.commit_rumination_batch", 1
+        )[0]
+        cls.commit = cls.executable.split(
+            "create or replace function public.commit_rumination_batch", 1
+        )[1]
+
+    def test_absorption_intent_column_and_handoff_enrichment(self):
+        self.assertIn(
+            "add column if not exists absorbed_fast_path_memory_ids bigint[]",
+            self.executable,
+        )
+        self.assertIn("add column if not exists request_id bigint", self.executable)
+        self.assertIn("'absorbed_by_request'", self.executable)
+
+    def test_review_v5_rebuilt_with_transactional_handoff(self):
+        self.assertIn("security definer", self.v5)
+        self.assertIn("set search_path to 'public'", self.v5)
+        self.assertIn("memory_rumination_absorb_target_invalid", self.v5)
+        # 逐项结构校验：同 assistant、fast_path 生产、verified、active、非闭合 thread
+        for needle in (
+            "v_absorbed.assistant_id is distinct from v_request.assistant_id",
+            "v_absorbed.producer_path is distinct from 'fast_path'",
+            "v_absorbed.verified is distinct from 'verified'",
+            "v_absorbed.is_active is not true",
+            "'resolved', 'dissolved', 'abandoned'",
+        ):
+            self.assertIn(needle, self.v5)
+        # 仅在真实状态变更时交接（幂等重放不重复写审计）。
+        self.assertIn("(v_result->>'changed')::boolean", self.v5)
+        # 交接只翻转 is_active，不写入版本链字段。
+        self.assertNotIn(
+            "set is_active = false,\n                    superseded_at",
+            self.v5,
+        )
+        self.assertRegex(
+            self.executable,
+            r"revoke\s+all\s+on\s+function\s+public\.review_memory_request_v5",
+        )
+        self.assertRegex(
+            self.executable,
+            r"grant\s+execute\s+on\s+function\s+public\.review_memory_request_v5"
+            r"[\s\S]{0,400}?to\s+service_role",
+        )
+
+    def test_commit_rpc_rebuilt_with_target_snapshots(self):
+        self.assertEqual(self.commit.count("memory_rumination_target_changed"), 4)
+        for needle in (
+            "target_memory_key", "target_continuity_id",
+            "target_content_hash", "target_thread_state",
+        ):
+            with self.subTest(field=needle):
+                self.assertIn(needle, self.commit)
+        # 快照校验发生在 FOR UPDATE 加载目标之后。
+        self.assertIn("for update", self.commit)
+
+    def test_commit_rpc_persists_absorption_intent(self):
+        self.assertIn("memory_rumination_invalid_absorb_target", self.commit)
+        self.assertIn("memory_rumination_absorb_target_invalid", self.commit)
+        self.assertIn("absorbed_fast_path_memory_ids", self.commit)
+        self.assertIn("cardinality(v_absorbed_ids), 0) > 8", self.commit)
+
+    def test_chat_messages_and_relations_untouched(self):
+        forbidden = re.findall(
+            r"(insert\s+into|update|delete\s+from|alter\s+table)[\s\S]{0,120}?chat_messages",
+            self.executable,
+            re.IGNORECASE,
+        )
+        self.assertEqual(forbidden, [])
+        self.assertNotIn("memory_relations", self.executable)
+
+
 if __name__ == "__main__":
     unittest.main()

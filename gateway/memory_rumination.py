@@ -107,35 +107,50 @@ _OP_FIELDS: dict[str, frozenset[str]] = {
     }),
     "adopt_thread": frozenset({
         "op", "reason", "evidence_message_ids", "target_memory_id",
+        "target_memory_key", "target_continuity_id", "target_content_hash",
+        "target_thread_state",
         "memory_key", "content", "title", "thread_state", "continuity_data",
         "importance", "confidence", "source_type", "recall_scene",
         "recall_tags", "memory_time", "time_precision",
     }),
     "evidence_only": frozenset({
         "op", "reason", "evidence_message_ids", "target_memory_id",
+        "target_memory_key", "target_continuity_id", "target_content_hash",
+        "target_thread_state",
     }),
     "update_thread": frozenset({
-        "op", "reason", "evidence_message_ids", "target_memory_id", "content",
-        "title", "thread_state", "continuity_data", "memory_key", "memory_time",
-        "time_precision",
+        "op", "reason", "evidence_message_ids", "target_memory_id",
+        "target_memory_key", "target_continuity_id", "target_content_hash",
+        "target_thread_state",
+        "content", "title", "thread_state", "continuity_data", "memory_key",
+        "memory_time", "time_precision",
     }),
     "pause_thread": frozenset({
-        "op", "reason", "evidence_message_ids", "target_memory_id", "content",
-        "title", "continuity_data", "memory_key", "memory_time", "time_precision",
+        "op", "reason", "evidence_message_ids", "target_memory_id",
+        "target_memory_key", "target_continuity_id", "target_content_hash",
+        "target_thread_state",
+        "content", "title", "continuity_data", "memory_key", "memory_time",
+        "time_precision",
     }),
     "resume_thread": frozenset({
-        "op", "reason", "evidence_message_ids", "target_memory_id", "content",
-        "title", "continuity_data", "memory_key", "memory_time", "time_precision",
+        "op", "reason", "evidence_message_ids", "target_memory_id",
+        "target_memory_key", "target_continuity_id", "target_content_hash",
+        "target_thread_state",
+        "content", "title", "continuity_data", "memory_key", "memory_time",
+        "time_precision",
     }),
     "resolve_thread": frozenset({
-        "op", "reason", "evidence_message_ids", "target_memory_id", "content",
-        "title", "continuity_data", "memory_key", "memory_time", "time_precision",
+        "op", "reason", "evidence_message_ids", "target_memory_id",
+        "target_memory_key", "target_continuity_id", "target_content_hash",
+        "target_thread_state",
+        "content", "title", "continuity_data", "memory_key", "memory_time",
+        "time_precision",
     }),
     "create_request": frozenset({
         "op", "reason", "evidence_message_ids", "continuity_type", "content",
         "title", "continuity_data", "memory_key", "importance", "confidence",
         "source_type", "recall_scene", "recall_tags", "memory_time",
-        "time_precision",
+        "time_precision", "absorbed_fast_path_memory_ids",
     }),
 }
 
@@ -167,17 +182,18 @@ RUMINATION_SYSTEM_PROMPT = """你是“反刍连续感”提取器，负责在�
 4. 一个进程完成后，可以生成一条或多条有独立含义的终态记忆（episode/moment/inside_joke/profile/interaction_rule），多条必须表达不同信息，不得同义改写；终态绝不允许 thread 类型。
 5. 正文忠于事实：AI 参与的经历可以写成共同经历；AI 未参与时不得写成“我们共同完成”。
 6. 每项操作的 evidence_message_ids 必须是本批 <chat_log> 中真实存在、且直接支持该操作的消息 id（1-8 条）；引用输入列表之外的 id 会被整批拒绝。
-7. 目标 thread 操作的 target_memory_id 必须来自 <unfinished_threads>。
+7. 目标 thread 操作的 target_memory_id 必须来自 <unfinished_threads>，并且必须逐字回显该 thread 的快照字段：target_memory_key（无 key 的 fast_path thread 回显 null）、target_continuity_id、target_content_hash、target_thread_state。快照缺失、写错或与输入不一致时整批被拒绝；回显快照用于确保你提交时的判断仍基于读取时的状态。
 8. content 是完整、独立可理解的正文（5-600 字符），不写“今天/昨天”等相对时间；绝对时间放 memory_time，无法可靠确定时填 null 且 time_precision=unknown。
 9. recall_scene 是以后触发召回的场景描述，不是正文复制；无法确定填 null。recall_tags 来自原文真实依据，没有就留空数组。
 10. 不输出 API Key、Token、密码、service_role 等秘密。
 11. 已有实质相同的 pending 反刍申请时不要再提交；rejected/duplicate/conflict 的申请只有在出现拒绝之后的新原文证据时才能重新提交。
 12. 没有新证据的长期进程不要重写；不确定时选择 ignore 或 evidence_only。
 13. 同一条 thread 在本批出现多个连续进展时（例如上午完成、下午部署、晚上验收），必须把它们合并为一个操作：content 写最终完整当前状态，evidence_message_ids 取各进展消息的并集，按证据时间得到的最终状态决定操作类型；不要为同一 thread 输出多个版本操作。
+14. create_request 可以带可选的 absorbed_fast_path_memory_ids：仅当该申请明确吸收或覆盖某条正式快速路径记忆时才列出其 memory_id（最多 8 条）。只能列出你确有语义依据的目标；不得因为 evidence_message_ids 相同就吸收所有快速路径记忆——相同原文可以合法支撑不同分类和不同语义。不能确定目标时省略该字段。
 
 ## 输出 JSON
 只返回严格 JSON，不要 Markdown、解释或代码围栏：
-{"operations":[{"op":"update_thread","target_memory_id":12,"reason":"进程有实质进展","content":"完整当前状态……","thread_state":"open","continuity_data":{"open_question":"...","current_state":"...","next_expected":"...","closure_criteria":["..."],"closure_summary":null,"closure_reason":null,"opened_at":null,"closed_at":null,"abstract_retrieval_hints":[],"concrete_retrieval_hints":[]},"evidence_message_ids":[101,102]}]}
+{"operations":[{"op":"update_thread","target_memory_id":12,"target_memory_key":"topic.example","target_continuity_id":"21111111-1111-1111-1111-1111111111a1","target_content_hash":"<输入中的 content_hash>","target_thread_state":"open","reason":"进程有实质进展","content":"完整当前状态……","thread_state":"open","continuity_data":{"open_question":"...","current_state":"...","next_expected":"...","closure_criteria":["..."],"closure_summary":null,"closure_reason":null,"opened_at":null,"closed_at":null,"abstract_retrieval_hints":[],"concrete_retrieval_hints":[]},"evidence_message_ids":[101,102]}]}
 没有可执行操作时必须返回 {"operations":[]}。"""
 
 
@@ -252,7 +268,9 @@ def plan_rumination_batches(
     """Return (first_id, last_id, count) batches for the given ascending ids.
 
     首批（initialized=False）只消费传入的最新消息（调用方负责截取最近 120 条）。
-    日常批次：每次最多 120 条，剩余不足 60 条停止并留到次日。
+    日常批次：每次最多 120 条真实消息行，剩余不足 60 条停止并留到次日。
+    生产管线按 120 条一页增量实现同一规则（见 run_rumination_digest），
+    该纯函数保留作为批次规则的规范实现与测试锚点。
     """
     if not initialized:
         if not message_ids:
@@ -352,7 +370,7 @@ def _load_unfinished_threads(assistant_id: str) -> list[dict[str, Any]]:
         _client().table("memories")
         .select(
             "id,memory_key,continuity_id,thread_state,maintained_by,producer_path,"
-            "content,continuity_data,evidence_message_ids,"
+            "content,content_hash,continuity_data,evidence_message_ids,"
             "evidence_start_time,evidence_end_time,created_at"
         )
         .eq("assistant_id", assistant_id)
@@ -394,6 +412,7 @@ def _compact_thread(row: dict[str, Any]) -> dict[str, Any]:
         "thread_state": row.get("thread_state"),
         "maintained_by": row.get("maintained_by"),
         "content": str(row.get("content") or ""),
+        "content_hash": row.get("content_hash"),
         "open_question": data.get("open_question"),
         "current_state": data.get("current_state"),
         "next_expected": data.get("next_expected"),
@@ -572,6 +591,9 @@ def parse_rumination_output(
                     f"target_memory_id {target_id} is not an unfinished thread in this input",
                 )
             op["target_memory_id"] = target_id
+            # Optimistic target snapshot: the model must echo exactly what it
+            # read. Missing, malformed, or stale snapshots fail the batch.
+            op.update(_validated_target_snapshot(raw, target))
             # A stable key may only accompany a thread op to fill in the key
             # of a fast-path takeover; it never re-keys a rumination thread.
             if raw.get("memory_key"):
@@ -741,6 +763,9 @@ def parse_rumination_output(
                     "model_schema_error",
                     "episode/profile requests must not carry a memory_key",
                 )
+            op["absorbed_fast_path_memory_ids"] = _validated_absorb_targets(
+                raw.get("absorbed_fast_path_memory_ids"), threads_by_id,
+            )
 
         validated.append(op)
     return validated
@@ -772,6 +797,116 @@ def _require_memory_key(value: Any) -> str:
             "model_schema_error", "a stable memory_key is required",
         )
     return key
+
+
+# ---------------------------------------------------------------------------
+# Target snapshot and absorption-target validation
+# ---------------------------------------------------------------------------
+
+_UUID_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+)
+_HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+MAX_ABSORB_TARGETS = 8
+
+
+def _validated_target_snapshot(
+    raw: dict[str, Any],
+    target: dict[str, Any],
+) -> dict[str, Any]:
+    """Echoed target snapshot must match the loaded unfinished thread."""
+    target_key = target.get("memory_key")
+    snapshot_key = raw.get("target_memory_key")
+    if (str(snapshot_key).strip().casefold() if snapshot_key else None) != (
+        str(target_key).strip().casefold() if target_key else None
+    ):
+        raise RuminationPipelineError(
+            "model_schema_error",
+            f"target_memory_key snapshot mismatch for memory {target.get('id')}",
+        )
+
+    snapshot_id = str(raw.get("target_continuity_id") or "").strip().casefold()
+    loaded_id = str(target.get("continuity_id") or "").strip().casefold()
+    if not _UUID_PATTERN.fullmatch(snapshot_id) or snapshot_id != loaded_id:
+        raise RuminationPipelineError(
+            "model_schema_error",
+            f"target_continuity_id snapshot mismatch for memory {target.get('id')}",
+        )
+
+    snapshot_hash = str(raw.get("target_content_hash") or "").strip().casefold()
+    loaded_hash = str(target.get("content_hash") or "").strip().casefold()
+    if not _HASH_PATTERN.fullmatch(snapshot_hash) or snapshot_hash != loaded_hash:
+        raise RuminationPipelineError(
+            "model_schema_error",
+            f"target_content_hash snapshot mismatch for memory {target.get('id')}",
+        )
+
+    snapshot_state = str(raw.get("target_thread_state") or "").strip().casefold()
+    if snapshot_state != target.get("thread_state"):
+        raise RuminationPipelineError(
+            "model_schema_error",
+            f"target_thread_state snapshot mismatch for memory {target.get('id')}",
+        )
+    return {
+        "target_memory_key": snapshot_key if snapshot_key else None,
+        "target_continuity_id": snapshot_id,
+        "target_content_hash": snapshot_hash,
+        "target_thread_state": snapshot_state,
+    }
+
+
+def _validated_absorb_targets(
+    value: Any,
+    threads_by_id: dict[int, dict[str, Any]],
+) -> list[int]:
+    """Explicit fast-path absorption list; never auto-derived.
+
+    Ids visible in the model input are validated locally (they must not be
+    rumination-produced); anything else is re-verified by the database inside
+    the commit transaction.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list) or not value:
+        raise RuminationPipelineError(
+            "model_schema_error",
+            "absorbed_fast_path_memory_ids must be a non-empty array when provided",
+        )
+    ids: list[int] = []
+    for candidate in value:
+        if isinstance(candidate, bool):
+            raise RuminationPipelineError(
+                "model_schema_error", "absorbed ids must be integers",
+            )
+        try:
+            memory_id = int(candidate)
+        except (TypeError, ValueError) as exc:
+            raise RuminationPipelineError(
+                "model_schema_error", "absorbed ids must be integers",
+            ) from exc
+        if memory_id <= 0:
+            raise RuminationPipelineError(
+                "model_schema_error", "absorbed ids must be positive",
+            )
+        if memory_id not in ids:
+            ids.append(memory_id)
+    if len(ids) > MAX_ABSORB_TARGETS:
+        raise RuminationPipelineError(
+            "model_schema_error",
+            f"at most {MAX_ABSORB_TARGETS} absorption targets per request",
+        )
+    for memory_id in ids:
+        visible = threads_by_id.get(memory_id)
+        if visible is not None:
+            if (
+                visible.get("producer_path") == "rumination"
+                or visible.get("maintained_by") == "rumination"
+            ):
+                raise RuminationPipelineError(
+                    "model_schema_error",
+                    "rumination-produced threads cannot be absorbed by a request",
+                )
+    return ids
 
 
 # ---------------------------------------------------------------------------
@@ -867,6 +1002,13 @@ def _merged_thread_op(
         "evidence_message_ids": evidence_union,
         "thread_state": chain,
     }
+    # Every op in the group echoed the same validated snapshot; keep it.
+    for key in (
+        "target_memory_key", "target_continuity_id",
+        "target_content_hash", "target_thread_state",
+    ):
+        if entries[0][1].get(key) is not None:
+            merged[key] = entries[0][1][key]
     # Body and state data come from the last op that carries them (the latest
     # progress represents the final current state).
     for key in ("content", "continuity_data", "title", "memory_time", "time_precision"):
@@ -1231,23 +1373,62 @@ def run_rumination_digest(trigger: str = "rumination_manual") -> dict[str, Any]:
     initialized = bool(cursor.get("initialized"))
     cursor_id = int(cursor.get("last_processed_message_id") or 0)
 
+    results: list[dict[str, Any]] = []
+    tail_count = 0
+
+    def _failed_result(exc: RuminationPipelineError, batch: tuple[int, int, int]):
+        # Earlier committed batches survive; this batch keeps the cursor
+        # untouched, so the next run retries it idempotently.
+        return {
+            "status": "failed",
+            "error_code": exc.code,
+            "error_message": str(exc),
+            "batch": {
+                "first_message_id": batch[0],
+                "last_message_id": batch[1],
+                "message_count": batch[2],
+            },
+        }
+
     if initialized:
-        ids = _fetch_message_ids(assistant_id, after=cursor_id, limit=10_000)
-        batches = plan_rumination_batches(ids, initialized=True)
-        if not batches:
+        # 逐页交错处理积压：取一页（≤120 条真实消息行）→ claim → 模型 → 原子
+        # 提交 → 推进读取位置；不足 60 条的尾部留到次日。绝不一次性读取或
+        # 持有全部积压，也不设总批次上限；批次大小按真实行数计，与消息 ID
+        # 是否连续无关。任一批失败即停止，其后消息不推进游标。
+        position = cursor_id
+        while True:
+            page = _fetch_message_ids(
+                assistant_id, after=position, limit=RUMINATION_BATCH_MAX,
+            )
+            if len(page) < RUMINATION_BATCH_MIN:
+                tail_count = len(page)
+                break
+            batch = (page[0], page[-1], len(page))
+            try:
+                result = run_rumination_batch(
+                    assistant_id, trigger, batch, first_batch=False,
+                )
+            except RuminationPipelineError as exc:
+                results.append(_failed_result(exc, batch))
+                break
+            results.append(result)
+            if result.get("status") != "succeeded":
+                break
+            position = page[-1]
+        if not results:
             skipped = _rpc_object("record_rumination_skipped", {
                 "p_assistant_id": assistant_id,
                 "p_trigger": trigger,
-                "p_backlog_count": len(ids),
+                "p_backlog_count": tail_count,
                 "p_reason": (
-                    f"backlog {len(ids)} below the {RUMINATION_BATCH_MIN}-message batch threshold"
+                    f"backlog {tail_count} below the {RUMINATION_BATCH_MIN}-message batch threshold"
                 ),
             })
             return {
                 "status": "skipped",
                 "trigger": trigger,
                 "run_id": skipped.get("run_id"),
-                "backlog_count": len(ids),
+                "backlog_count": tail_count,
                 "cursor_before": cursor_id,
                 "cursor_after": cursor_id,
                 "batch_count": 0,
@@ -1268,33 +1449,15 @@ def run_rumination_digest(trigger: str = "rumination_manual") -> dict[str, Any]:
                 "batch_count": 0,
                 "batches": [],
             }
-
-    results: list[dict[str, Any]] = []
-    for index, batch in enumerate(batches):
+        batch = batches[0]
         try:
             result = run_rumination_batch(
-                assistant_id,
-                trigger,
-                batch,
-                first_batch=(not initialized and index == 0),
+                assistant_id, trigger, batch, first_batch=True,
             )
         except RuminationPipelineError as exc:
-            # Earlier committed batches survive; this batch keeps the cursor
-            # untouched, so the next run retries it idempotently.
-            results.append({
-                "status": "failed",
-                "error_code": exc.code,
-                "error_message": str(exc),
-                "batch": {
-                    "first_message_id": batch[0],
-                    "last_message_id": batch[1],
-                    "message_count": batch[2],
-                },
-            })
-            break
-        results.append(result)
-        if result.get("status") != "succeeded":
-            break
+            results.append(_failed_result(exc, batch))
+        else:
+            results.append(result)
 
     failed = [item for item in results if item.get("status") == "failed"]
     cursor_after = next(
