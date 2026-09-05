@@ -5,7 +5,7 @@ import {
   toast, modal, confirm, delegate, icon, fmtDate, createDetailPanel,
 } from '../ui.js?v=20260903-retrotime1';
 import { openMemoryForm } from './_memory_form.js?v=20260903-retrotime1';
-import { absorbTargetViews, absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20260905-absorb1';
+import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20260909-absorb1';
 
 export const ASSET_VERSION = '20260903-retrotime1';
 

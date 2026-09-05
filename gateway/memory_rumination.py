@@ -1404,9 +1404,11 @@ def run_rumination_batch(
     except Exception as exc:
         log.exception("Rumination batch failed: run_id=%s error=%s", run_id, type(exc).__name__)
         _mark_failed(run_id, "pipeline_error", f"{type(exc).__name__}: {str(exc)[:1200]}")
-        raise RuminationPipelineError(
+        wrapped = RuminationPipelineError(
             "pipeline_error", "Rumination pipeline failed", 500,
-        ) from exc
+        )
+        wrapped.scheduled_execution_id = scheduled_execution_id
+        raise wrapped from exc
 
 
 def _backlog_count(assistant_id: str, cursor: int) -> int:

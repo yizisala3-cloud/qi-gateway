@@ -6,6 +6,7 @@ target row fails to load) is verified by behaviour, not by string matching.
 """
 
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -208,6 +209,64 @@ class AbsorbImpactViewTests(unittest.TestCase):
             [_row(1)], [_snapshot(1)],
         )
         self.assertFalse(_call(self.ctx, "absorbImpactSummary", views)["blocked"])
+
+
+
+
+class AbsorbDisplayImportExportTests(unittest.TestCase):
+    """Verify every named import in _memory_browser.js matches a real export
+    in absorb_display.js, and that referenced local module files exist."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not _QUICKJS_AVAILABLE:
+            raise unittest.SkipTest("quickjs 未安装")
+
+    def _read(self, rel):
+        return (ROOT / rel).read_text(encoding="utf-8")
+
+    def test_all_named_imports_have_real_exports(self):
+        browser = self._read("admin/js/pages/_memory_browser.js")
+        lib = self._read("admin/js/lib/absorb_display.js")
+
+        import_match = re.search(
+            r"import\s*\{([^}]+)\}\s*from\s*'[.\w/.-]+absorb_display",
+            browser,
+        )
+        self.assertIsNotNone(
+            import_match, "absorb_display import not found in _memory_browser.js",
+        )
+        imported_names = {n.strip() for n in import_match.group(1).split(",")}
+
+        export_match = re.search(r"export\s*\{([^}]+)\}", lib)
+        self.assertIsNotNone(export_match, "absorb_display has no named export")
+        exported_names = {n.strip() for n in export_match.group(1).split(",")}
+
+        missing = imported_names - exported_names
+        self.assertEqual(
+            missing, set(),
+            f"_memory_browser.js imports {missing} which absorb_display.js does not export",
+        )
+
+    def test_absorb_target_views_is_not_imported(self):
+        browser = self._read("admin/js/pages/_memory_browser.js")
+        self.assertNotIn("absorbTargetViews", browser)
+
+    def test_absorb_impact_views_and_summary_are_exported(self):
+        lib = self._read("admin/js/lib/absorb_display.js")
+        self.assertIn("absorbImpactViews", lib)
+        self.assertIn("absorbImpactSummary", lib)
+
+    def test_no_missing_local_module_files(self):
+        browser = self._read("admin/js/pages/_memory_browser.js")
+        base = ROOT / "admin" / "js" / "pages"
+        for match in re.finditer(r"from\s*'([./][\w/.-]+)\?v=", browser):
+            rel_path = match.group(1)
+            full_path = (base / rel_path).resolve()
+            self.assertTrue(
+                full_path.exists(),
+                f"module {rel_path} does not exist at {full_path}",
+            )
 
 
 if __name__ == "__main__":
