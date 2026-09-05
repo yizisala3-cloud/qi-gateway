@@ -202,11 +202,12 @@ class ParseValidationTests(unittest.TestCase):
     def _snap(self, memory_id):
         return _snap(self.threads[memory_id])
 
-    def _parse(self, ops):
+    def _parse(self, ops, absorbable_ids=frozenset()):
         return parse_rumination_output(
             json.dumps({"operations": ops}, ensure_ascii=False),
             evidence_times=self.times,
             threads_by_id=self.threads,
+            absorbable_ids=absorbable_ids,
         )
 
     def test_valid_operation_list_parses(self):
@@ -367,8 +368,8 @@ class ParseValidationTests(unittest.TestCase):
         ops = self._parse([_op(target_memory_id=14, **self._snap(14))])
         self.assertEqual(ops[0]["target_memory_key"], None)
 
-    def test_absorb_targets_validated(self):
-        op = {
+    def test_absorb_targets_must_be_candidates(self):
+        episode_request = {
             "op": "create_request", "reason": "完整经历",
             "continuity_type": "episode",
             "content": "一段完整的共同赶海经历。",
@@ -377,30 +378,103 @@ class ParseValidationTests(unittest.TestCase):
                 "closure_quality": "complete",
             },
             "evidence_message_ids": [1],
-            "absorbed_fast_path_memory_ids": [14],
         }
-        ops = self._parse([op])
+        # 候选集合中的 ID 才可吸收。
+        op = dict(episode_request, absorbed_fast_path_memory_ids=[14])
+        ops = self._parse([op], absorbable_ids={14})
         self.assertEqual(ops[0]["absorbed_fast_path_memory_ids"], [14])
-        # 反刍产出的 thread 不可吸收。
-        op["absorbed_fast_path_memory_ids"] = [12]
-        with self.assertRaisesRegex(RuminationPipelineError, "rumination-produced"):
+        # 候选集合为空时禁止任何吸收 ID。
+        with self.assertRaisesRegex(RuminationPipelineError, "no absorbable"):
             self._parse([op])
+        # 幻觉 ID 即使对应真实 fast-path 记忆（ID=12 是 rumination 之外任意值），
+        # 只要不属于候选集合即整批拒绝。
+        op["absorbed_fast_path_memory_ids"] = [999]
+        with self.assertRaisesRegex(RuminationPipelineError, "not an absorbable candidate"):
+            self._parse([op], absorbable_ids={14})
+        # 非候选但真实存在的 ID 同样拒绝。
+        op["absorbed_fast_path_memory_ids"] = [12]
+        with self.assertRaisesRegex(RuminationPipelineError, "not an absorbable candidate"):
+            self._parse([op], absorbable_ids={14})
         # 非法形态整批拒绝。
         op["absorbed_fast_path_memory_ids"] = []
         with self.assertRaisesRegex(RuminationPipelineError, "non-empty array"):
-            self._parse([op])
-        op["absorbed_fast_path_memory_ids"] = [1, 1]
-        ops = self._parse([op])
-        self.assertEqual(ops[0]["absorbed_fast_path_memory_ids"], [1])
+            self._parse([op], absorbable_ids={14})
+        # 去重 + 数量上限。
+        op["absorbed_fast_path_memory_ids"] = [14, 14]
+        ops = self._parse([op], absorbable_ids={14})
+        self.assertEqual(ops[0]["absorbed_fast_path_memory_ids"], [14])
+        op["absorbed_fast_path_memory_ids"] = list(range(101, 110))
+        with self.assertRaisesRegex(RuminationPipelineError, "at most"):
+            self._parse([op], absorbable_ids=set(range(101, 110)))
+
+    def test_create_memory_absorb_targets_validated(self):
+        op = {
+            "op": "create_memory", "reason": "整合重复片段",
+            "continuity_type": "moment",
+            "content": "整合后的赶海瞬间记忆正文。",
+            "continuity_data": {
+                "scene": "聊天窗口", "event": "赶海瞬间", "moment_state": "standalone",
+            },
+            "evidence_message_ids": [1],
+            "absorbed_fast_path_memory_ids": [14],
+        }
+        ops = self._parse([op], absorbable_ids={14})
+        self.assertEqual(ops[0]["absorbed_fast_path_memory_ids"], [14])
+        with self.assertRaisesRegex(
+            RuminationPipelineError, "no absorbable fast-path memories",
+        ):
+            self._parse([op], absorbable_ids=frozenset())
+
+    def test_twenty_five_operations_parse_fine(self):
+        # 25 个合法操作不因数量被拒：内容互异、目标同一条 thread。
+        ops = [
+            _op(
+                content=f"网关改造当前状态：第 {index} 个进展节点已达成。",
+            )
+            for index in range(25)
+        ]
+        parsed = self._parse(ops)
+        self.assertEqual(len(parsed), 25)
+
+    def test_candidate_loader_scopes_to_batch_evidence(self):
+        fake = _FakeClient({"memories": [{"id": 5}]})
+        rows = [{"id": 3}, {"id": 4}]
+        with patch("gateway.memory_rumination.get_client", return_value=fake):
+            from gateway.memory_rumination import _load_absorbable_candidates
+
+            candidates = _load_absorbable_candidates("assistant-1", rows)
+        self.assertEqual(len(candidates), 1)
+        calls = fake.queries["memories"].calls
+        filters = {call[1]: call[2] for call in calls if call[0] == "eq"}
+        self.assertEqual(filters.get("producer_path"), "fast_path")
+        self.assertEqual(filters.get("verified"), "verified")
+        self.assertEqual(filters.get("is_active"), True)
+        overlaps = next(call for call in calls if call[0] == "overlaps")
+        self.assertEqual(overlaps[1], "evidence_message_ids")
+        self.assertEqual(overlaps[2], [3, 4])
+
+    def test_candidate_loader_excludes_closed_threads(self):
+        closed = {
+            "id": 9, "continuity_type": "thread", "thread_state": "resolved",
+            "title": "已完成的线索", "memory_key": None,
+            "evidence_message_ids": [3], "producer_path": "fast_path",
+            "verified": "verified", "is_active": True,
+        }
+        fake = _FakeClient({"memories": [closed]})
+        with patch("gateway.memory_rumination.get_client", return_value=fake):
+            from gateway.memory_rumination import _load_absorbable_candidates
+
+            candidates = _load_absorbable_candidates("assistant-1", [{"id": 3}])
+        self.assertEqual(candidates, [])
+
+    def test_candidate_loader_empty_batch_returns_empty(self):
+        from gateway.memory_rumination import _load_absorbable_candidates
+
+        self.assertEqual(_load_absorbable_candidates("a", []), [])
 
     def test_identical_content_ops_deduplicated(self):
         ops = self._parse([_op(), _op(reason="同义重复")])
         self.assertEqual(len(ops), 1)
-
-    def test_too_many_operations_rejected(self):
-        ops = [_op(target_memory_id=12) for _ in range(30)]
-        with self.assertRaisesRegex(RuminationPipelineError, "more than"):
-            self._parse(ops)
 
     def test_invalid_memory_key_format_rejected(self):
         with self.assertRaisesRegex(RuminationPipelineError, "memory_key"):
@@ -1094,6 +1168,10 @@ class _FakeQuery:
 
     def in_(self, key, values):
         self.calls.append(("in", key, tuple(values)))
+        return self
+
+    def overlaps(self, key, values):
+        self.calls.append(("overlaps", key, list(values)))
         return self
 
     def order(self, *args, **kwargs):

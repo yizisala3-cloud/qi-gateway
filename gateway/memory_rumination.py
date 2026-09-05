@@ -57,7 +57,6 @@ CST = timezone(timedelta(hours=8))
 FIRST_RUN_MAX_MESSAGES = 120
 RUMINATION_BATCH_MAX = 120
 RUMINATION_BATCH_MIN = 60
-MAX_OPS = 24
 MAX_EVIDENCE_IDS = 8
 STALE_RUN_MINUTES = 30
 THREAD_INPUT_LIMIT = 40
@@ -98,6 +97,7 @@ _OP_FIELDS: dict[str, frozenset[str]] = {
         "op", "reason", "evidence_message_ids", "continuity_type", "content",
         "title", "continuity_data", "importance", "confidence", "source_type",
         "recall_scene", "recall_tags", "memory_time", "time_precision",
+        "absorbed_fast_path_memory_ids",
     }),
     "create_tracked_thread": frozenset({
         "op", "reason", "evidence_message_ids", "content", "title",
@@ -189,7 +189,7 @@ RUMINATION_SYSTEM_PROMPT = """你是“反刍连续感”提取器，负责在�
 11. 已有实质相同的 pending 反刍申请时不要再提交；rejected/duplicate/conflict 的申请只有在出现拒绝之后的新原文证据时才能重新提交。
 12. 没有新证据的长期进程不要重写；不确定时选择 ignore 或 evidence_only。
 13. 同一条 thread 在本批出现多个连续进展时（例如上午完成、下午部署、晚上验收），必须把它们合并为一个操作：content 写最终完整当前状态，evidence_message_ids 取各进展消息的并集，按证据时间得到的最终状态决定操作类型；不要为同一 thread 输出多个版本操作。
-14. create_request 可以带可选的 absorbed_fast_path_memory_ids：仅当该申请明确吸收或覆盖某条正式快速路径记忆时才列出其 memory_id（最多 8 条）。只能列出你确有语义依据的目标；不得因为 evidence_message_ids 相同就吸收所有快速路径记忆——相同原文可以合法支撑不同分类和不同语义。不能确定目标时省略该字段。
+14. create_request 与 create_memory（moment/inside_joke）可以带可选的 absorbed_fast_path_memory_ids：仅当该操作明确吸收或覆盖某条快速路径正式记忆时才列出其 memory_id（最多 8 条）。只能引用 <absorbable_fast_path_memories> 中列出的候选 ID——该列表为空时禁止输出任何吸收 ID；候选之外的任何 ID（包括碰巧真实存在的记忆）都会整批拒绝。候选只提供最小元数据（id、类型、标题、证据 ID），不含完整正文；吸收判断以你本批原文证据为准。不得因为 evidence_message_ids 相同就吸收所有候选——相同原文可以合法支撑不同分类和不同语义。不能确定目标时省略该字段。thread 的生命周期请使用专门的 thread 操作，不要通过吸收来处置 thread。
 
 ## 输出 JSON
 只返回严格 JSON，不要 Markdown、解释或代码围栏：
@@ -385,6 +385,53 @@ def _load_unfinished_threads(assistant_id: str) -> list[dict[str, Any]]:
     return response.data or []
 
 
+def _load_absorbable_candidates(
+    assistant_id: str,
+    batch_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Fast-path formal memories that overlap THIS batch's evidence.
+
+    候选只暴露吸收判断所需的最小元数据（memory_id、continuity_type、title、
+    evidence_message_ids、memory_key、thread_state）：五类正式记忆的完整正文
+    仍不进入模型输入，标题（≤100 字符的短标签）仅用于把候选与本批原文对齐。
+    候选围绕本批证据交集生成，绝不把全部正式记忆列给模型；closed thread 不
+    是合法吸收目标，直接排除。
+    """
+    evidence_ids = sorted({int(row["id"]) for row in batch_rows})
+    if not evidence_ids:
+        return []
+    response = (
+        _client().table("memories")
+        .select(
+            "id,continuity_type,producer_path,is_active,verified,"
+            "evidence_message_ids,title,memory_key,thread_state"
+        )
+        .eq("assistant_id", assistant_id)
+        .eq("producer_path", "fast_path")
+        .eq("verified", "verified")
+        .eq("is_active", True)
+        .overlaps("evidence_message_ids", evidence_ids)
+        .order("id", desc=True)
+        .execute()
+    )
+    candidates = []
+    for row in response.data or []:
+        if (
+            row.get("continuity_type") == "thread"
+            and row.get("thread_state") in ("resolved", "dissolved", "abandoned")
+        ):
+            continue
+        candidates.append({
+            "memory_id": int(row["id"]),
+            "continuity_type": row.get("continuity_type"),
+            "title": str(row.get("title") or "")[:100] or None,
+            "evidence_message_ids": row.get("evidence_message_ids") or [],
+            "memory_key": row.get("memory_key"),
+            "thread_state": row.get("thread_state"),
+        })
+    return candidates
+
+
 def _load_own_requests(assistant_id: str) -> list[dict[str, Any]]:
     """只读取反刍自己产生且状态为 pending/rejected/duplicate/conflict 的申请。"""
     response = (
@@ -452,6 +499,7 @@ def build_model_input(
     messages: list[dict[str, Any]],
     threads: list[dict[str, Any]],
     own_requests: list[dict[str, Any]],
+    absorbable_candidates: list[dict[str, Any]] | None = None,
 ) -> str:
     chat_log = _format_conversation(messages)
     threads_json = json.dumps(
@@ -460,10 +508,15 @@ def build_model_input(
     requests_json = json.dumps(
         [_compact_request(row) for row in own_requests], ensure_ascii=False, indent=1,
     )
+    candidates_json = json.dumps(
+        absorbable_candidates or [], ensure_ascii=False, indent=1,
+    )
     return (
         f"<chat_log>\n{chat_log}\n</chat_log>\n\n"
         f"<unfinished_threads>\n{threads_json}\n</unfinished_threads>\n\n"
-        f"<rumination_requests>\n{requests_json}\n</rumination_requests>"
+        f"<rumination_requests>\n{requests_json}\n</rumination_requests>\n\n"
+        f"<absorbable_fast_path_memories>\n{candidates_json}\n"
+        f"</absorbable_fast_path_memories>"
     )
 
 
@@ -491,6 +544,7 @@ def parse_rumination_output(
     *,
     evidence_times: dict[int, str | None],
     threads_by_id: dict[int, dict[str, Any]],
+    absorbable_ids: set[int] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Validate the model's operation list. Any hallucinated id, unknown op,
     illegal type or secret raises instead of being silently accepted."""
@@ -506,11 +560,9 @@ def parse_rumination_output(
         raise RuminationPipelineError(
             "model_schema_error", "Rumination model JSON has no operations array",
         )
+    # 操作数量没有产品上限：合法操作数由模型输出预算与单批 120 条消息自然
+    # 约束；任何非法操作仍整批拒绝。
     raw_ops = payload["operations"]
-    if len(raw_ops) > MAX_OPS:
-        raise RuminationPipelineError(
-            "model_schema_error", f"Rumination model returned more than {MAX_OPS} operations",
-        )
 
     validated: list[dict[str, Any]] = []
     seen_content_hashes: set[str] = set()
@@ -697,6 +749,9 @@ def parse_rumination_output(
             op["continuity_data"] = _validated_continuity_data(
                 continuity_type, None, raw.get("continuity_data"),
             )
+            op["absorbed_fast_path_memory_ids"] = _validated_absorb_targets(
+                raw.get("absorbed_fast_path_memory_ids"), absorbable_ids,
+            )
         elif op_type == "create_tracked_thread":
             op["memory_key"] = _require_memory_key(raw.get("memory_key"))
             thread_state = str(raw.get("thread_state") or "").strip().casefold() or "open"
@@ -764,7 +819,7 @@ def parse_rumination_output(
                     "episode/profile requests must not carry a memory_key",
                 )
             op["absorbed_fast_path_memory_ids"] = _validated_absorb_targets(
-                raw.get("absorbed_fast_path_memory_ids"), threads_by_id,
+                raw.get("absorbed_fast_path_memory_ids"), absorbable_ids,
             )
 
         validated.append(op)
@@ -857,13 +912,14 @@ def _validated_target_snapshot(
 
 def _validated_absorb_targets(
     value: Any,
-    threads_by_id: dict[int, dict[str, Any]],
+    absorbable_ids: set[int],
 ) -> list[int]:
     """Explicit fast-path absorption list; never auto-derived.
 
-    Ids visible in the model input are validated locally (they must not be
-    rumination-produced); anything else is re-verified by the database inside
-    the commit transaction.
+    模型只能引用本次输入 <absorbable_fast_path_memories> 中明确提供的候选
+    ID：候选集合为空时禁止输出任何吸收 ID；候选之外的 ID（包括碰巧存在的
+    真实 fast-path 记忆 ID）一律整批拒绝。数据库在提交事务内继续复核结构
+    条件（同 assistant、fast_path 生产、verified、active、非闭合 thread）。
     """
     if value is None:
         return []
@@ -871,6 +927,11 @@ def _validated_absorb_targets(
         raise RuminationPipelineError(
             "model_schema_error",
             "absorbed_fast_path_memory_ids must be a non-empty array when provided",
+        )
+    if not absorbable_ids:
+        raise RuminationPipelineError(
+            "model_schema_error",
+            "no absorbable fast-path memories were provided in this input",
         )
     ids: list[int] = []
     for candidate in value:
@@ -888,6 +949,11 @@ def _validated_absorb_targets(
             raise RuminationPipelineError(
                 "model_schema_error", "absorbed ids must be positive",
             )
+        if memory_id not in absorbable_ids:
+            raise RuminationPipelineError(
+                "model_schema_error",
+                f"absorbed id {memory_id} is not an absorbable candidate in this input",
+            )
         if memory_id not in ids:
             ids.append(memory_id)
     if len(ids) > MAX_ABSORB_TARGETS:
@@ -895,17 +961,6 @@ def _validated_absorb_targets(
             "model_schema_error",
             f"at most {MAX_ABSORB_TARGETS} absorption targets per request",
         )
-    for memory_id in ids:
-        visible = threads_by_id.get(memory_id)
-        if visible is not None:
-            if (
-                visible.get("producer_path") == "rumination"
-                or visible.get("maintained_by") == "rumination"
-            ):
-                raise RuminationPipelineError(
-                    "model_schema_error",
-                    "rumination-produced threads cannot be absorbed by a request",
-                )
     return ids
 
 
@@ -1300,16 +1355,19 @@ def run_rumination_batch(
         threads = _load_unfinished_threads(assistant_id)
         threads_by_id = {int(row["id"]): row for row in threads}
         own_requests = _load_own_requests(assistant_id)
+        absorbable = _load_absorbable_candidates(assistant_id, rows)
+        absorbable_ids = {int(row["memory_id"]) for row in absorbable}
         _update_heartbeat(run_id)
 
         model_output = _call_rumination_model(
-            build_model_input(messages, threads, own_requests),
+            build_model_input(messages, threads, own_requests, absorbable),
         )
         _update_heartbeat(run_id)
         ops = parse_rumination_output(
             model_output,
             evidence_times=evidence_times,
             threads_by_id=threads_by_id,
+            absorbable_ids=absorbable_ids,
         )
         # 同批内同一条 thread 的多个连续进展按真实证据时间合并为一个最终
         # 版本操作；互相矛盾或无法排序时整批失败。

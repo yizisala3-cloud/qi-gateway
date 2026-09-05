@@ -55,5 +55,38 @@ class RuminationFrontendContractTests(unittest.TestCase):
         self.assertNotIn("run.preview_memories.map((item) => item.content", self.page)
 
 
+class MemoryBrowserAbsorptionContractTests(unittest.TestCase):
+    """审核界面必须清楚展示反刍申请的交接影响范围。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.browser = (ROOT / "admin" / "js" / "pages" / "_memory_browser.js").read_text(
+            encoding="utf-8"
+        )
+
+    def test_request_fields_include_lane_and_absorption(self):
+        self.assertIn("producer_path", self.browser)
+        self.assertIn("absorbed_fast_path_memory_ids", self.browser)
+
+    def test_request_detail_shows_rumination_lane(self):
+        self.assertIn("反刍路径申请", self.browser)
+
+    def test_absorb_targets_are_rendered_for_review(self):
+        self.assertIn("拟交接目标", self.browser)
+        self.assertIn("通过后不会停用其他正式记忆", self.browser)
+        self.assertIn("absorbed_fast_path_memory_ids", self.browser)
+        # 详情与通过表单都水合影响范围。
+        self.assertIn("hydrateAbsorbTargets", self.browser)
+        self.assertIn("hydrateAbsorbImpact", self.browser)
+        self.assertIn("通过后停用", self.browser)
+
+    def test_target_changes_surface_before_submit(self):
+        self.assertIn("通过将被拒绝", self.browser)
+        self.assertIn("已非 active", self.browser)
+
+    def test_no_emoji_icons(self):
+        self.assertIsNone(EMOJI_PATTERN.search(self.browser))
+
+
 if __name__ == "__main__":
     unittest.main()

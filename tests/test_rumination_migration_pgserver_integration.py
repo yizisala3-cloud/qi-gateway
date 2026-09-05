@@ -18,6 +18,7 @@ resets the rumination cursor, so execution order never matters.
 
 import hashlib
 import json
+import re
 import os
 import shutil
 import tempfile
@@ -469,13 +470,17 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "target_thread_state": row[3],
         }
 
-    def _fast_path_moment(self, content, key_suffix):
+    def _fast_path_moment(self, content, object_uuid):
         """Seed a dedicated active fast-path moment for handoff tests."""
+        assert re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            object_uuid,
+        ), object_uuid
         self.conn.execute(
             "insert into public.memory_continuity_objects (continuity_id, assistant_id) "
-            "values (('21111111-1111-1111-1111-1111111111f' || %s)::uuid, 'a-rumination') "
+            "values (%s::uuid, 'a-rumination') "
             "on conflict (continuity_id) do nothing",
-            (key_suffix,),
+            (object_uuid,),
         )
         self.conn.execute(
             "insert into public.memories ("
@@ -486,16 +491,18 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             ") values ("
             "%s, '快速路径片段', '{moment}', 5, '[0.21,0.31,0.41]', 'daily_digest', "
             "'verified', true, 'a-rumination', 0.9, %s, "
-            "('21111111-1111-1111-1111-1111111111f' || %s)::uuid, 1, "
+            "%s::uuid, 1, "
             "'{\"scene\": \"聊天窗口\", \"event\": \"快速路径片段\", "
             "\"moment_state\": \"standalone\"}'::jsonb, "
             "'moment', '{503}'"
             ") on conflict (content_hash) do nothing",
-            (content, _sha256(content), key_suffix),
+            (content, _sha256(content), object_uuid),
         )
-        return self._active_memory(
+        found = self._active_memory(
             "content_hash = %s", (_sha256(content),),
         )
+        assert found is not None, f"fast-path fixture not seeded: {content}"
+        return found
 
     # -- cursor & claim ----------------------------------------------------
 
@@ -1746,7 +1753,8 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
 
     def test_absorbed_request_handoff_lifecycle(self):
         fast_id = self._fast_path_moment(
-            "快速路径片段：双方约定一起写旅行手账。", "9"
+            "快速路径片段：双方约定一起写旅行手账。",
+            "21111111-1111-1111-1111-1111111112a1",
         )
         self._set_cursor(initialized=True, value=520)
         run_id = self._claim(521, 522)
@@ -1875,7 +1883,8 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
 
         # 已经 inactive 的快速路径记忆不可吸收。
         inactive_id = self._fast_path_moment(
-            "已归档的快速路径片段：约定一起修自行车。", "a"
+            "已归档的快速路径片段：约定一起修自行车。",
+            "21111111-1111-1111-1111-1111111112a2",
         )
         self.conn.execute(
             "update public.memories set is_active = false where id = %s",
@@ -1896,6 +1905,321 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
                 "absorbed_fast_path_memory_ids": [inactive_id],
             }])
         self.assertIn("memory_rumination_absorb_target_invalid", str(raised.exception))
+
+    # -- direct-write absorption ----------------------------------------------
+
+    def test_direct_memory_absorbs_listed_fast_path(self):
+        fast_id = self._fast_path_moment(
+            "快速路径片段：双方约定写旅行手账初稿。",
+            "21111111-1111-1111-1111-1111111112b1",
+        )
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        content = "反刍整合后的手账约定时刻，正文与快速路径片段同义但不同文。"
+        result = self._commit(run_id, [{
+            "op": "create_memory",
+            "reason": "整合同义的快速路径片段",
+            "continuity_type": "moment",
+            "content": content,
+            "continuity_data": {
+                "scene": "聊天窗口", "event": "手账约定", "moment_state": "standalone",
+            },
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "embedding": "[0.33,0.33,0.33]",
+            "absorbed_fast_path_memory_ids": [fast_id],
+        }])
+        self.assertEqual(result["op_counts"]["created_memories"], 1)
+        new_id = self._query_one(
+            "select id from public.memories where content_hash = %s",
+            (_sha256(content),),
+        )
+        # 新记忆 active、旧目标退出 active；跨语义吸收不写版本链。
+        self.assertTrue(self._query_one(
+            "select is_active from public.memories where id = %s", (new_id,),
+        ))
+        self.assertFalse(self._query_one(
+            "select is_active from public.memories where id = %s", (fast_id,),
+        ))
+        self.assertIsNone(self._query_one(
+            "select superseded_by_memory_id from public.memories where id = %s",
+            (fast_id,),
+        ))
+        handoff = self._query_row(
+            "select kind, fast_path_memory_id, rumination_memory_id, run_id "
+            "from public.memory_path_handoffs where run_id = %s",
+            (run_id,),
+        )
+        self.assertEqual(handoff[0], "absorbed_by_direct_memory")
+        self.assertEqual(handoff[1], fast_id)
+        self.assertEqual(handoff[2], new_id)
+        self.assertEqual(handoff[3], run_id)
+        self.assertEqual(self._cursor(), 522)
+
+    def test_direct_inside_joke_absorbs_listed_fast_path(self):
+        fast_id = self._fast_path_moment(
+            "快速路径片段：把防晒霜叫作贝壳的梗。",
+            "21111111-1111-1111-1111-1111111112c1",
+        )
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        content = "贝壳梗：把防晒霜叫作贝壳，双方共享的专属玩笑。"
+        result = self._commit(run_id, [{
+            "op": "create_memory",
+            "reason": "吸收快速路径片段并整理为内部梗",
+            "continuity_type": "inside_joke",
+            "content": content,
+            "continuity_data": {
+                "origin": "赶海前涂防晒霜时产生",
+                "trigger_phrases": ["贝壳"],
+                "shared_meaning": "防晒霜的代号",
+                "reinforcement_count": 1,
+            },
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "embedding": "[0.34,0.34,0.34]",
+            "absorbed_fast_path_memory_ids": [fast_id],
+        }])
+        self.assertEqual(result["op_counts"]["created_memories"], 1)
+        self.assertFalse(self._query_one(
+            "select is_active from public.memories where id = %s", (fast_id,),
+        ))
+        self.assertEqual(self._query_one(
+            "select kind from public.memory_path_handoffs where run_id = %s",
+            (run_id,),
+        ), "absorbed_by_direct_memory")
+
+    def test_unlisted_fast_path_memory_stays_active(self):
+        kept_id = self._fast_path_moment(
+            "快速路径片段：双方约定周末整理相册。",
+            "21111111-1111-1111-1111-1111111112d1",
+        )
+        absorbed_id = self._fast_path_moment(
+            "快速路径片段：双方约定写旅行手账修订稿。",
+            "21111111-1111-1111-1111-1111111112d2",
+        )
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        content = "反刍整合手账约定的时刻，仅吸收明确列出的目标。"
+        self._commit(run_id, [{
+            "op": "create_memory",
+            "reason": "只吸收列出的目标",
+            "continuity_type": "moment",
+            "content": content,
+            "continuity_data": {
+                "scene": "聊天窗口", "event": "手账约定", "moment_state": "standalone",
+            },
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "embedding": "[0.35,0.35,0.35]",
+            "absorbed_fast_path_memory_ids": [absorbed_id],
+        }])
+        self.assertTrue(self._query_one(
+            "select is_active from public.memories where id = %s", (kept_id,),
+        ))
+        self.assertFalse(self._query_one(
+            "select is_active from public.memories where id = %s", (absorbed_id,),
+        ))
+
+    def test_direct_absorption_failure_rolls_back_everything(self):
+        fast_id = self._fast_path_moment(
+            "快速路径片段：双方约定写旅行手账初稿。",
+            "21111111-1111-1111-1111-1111111112f1",
+        )
+        objects_before = self._query_one(
+            "select count(*) from public.memory_continuity_objects"
+        )
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        content = "将被回滚的反刍整合时刻，正文独立有效。"
+        with self.assertRaises(Exception):
+            self._commit(run_id, [
+                {
+                    "op": "create_memory",
+                    "reason": "合法吸收",
+                    "continuity_type": "moment",
+                    "content": content,
+                    "continuity_data": {
+                        "scene": "聊天窗口", "event": "手账约定",
+                        "moment_state": "standalone",
+                    },
+                    "evidence_message_ids": [521],
+                    "content_hash": _sha256(content),
+                    "embedding": "[0.36,0.36,0.36]",
+                    "absorbed_fast_path_memory_ids": [fast_id],
+                },
+                {
+                    "op": "create_memory",
+                    "reason": "随后结构非法",
+                    "continuity_type": "moment",
+                    "content": "一条结构非法的记忆正文。",
+                    "continuity_data": {
+                        "scene": "s", "event": "e", "moment_state": "bogus",
+                    },
+                    "evidence_message_ids": [522],
+                    "content_hash": _sha256("一条结构非法的记忆正文。"),
+                    "embedding": "[0.37,0.37,0.37]",
+                },
+            ])
+        # 新记忆、旧目标、handoff、continuity 对象、游标全部回滚。
+        self.assertTrue(self._query_one(
+            "select is_active from public.memories where id = %s", (fast_id,),
+        ))
+        self.assertIsNone(self._query_one(
+            "select id from public.memories where content_hash = %s",
+            (_sha256(content),),
+        ))
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_path_handoffs where run_id = %s",
+            (run_id,),
+        ), 0)
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_continuity_objects"
+        ), objects_before)
+        self.assertEqual(self._cursor(), 520)
+
+    # -- merge self-target protection -----------------------------------------
+
+    def test_merge_with_listed_target_never_self_deactivates(self):
+        target_id = self._fast_path_moment(
+            "快速路径片段：双方约定一起整理相册。",
+            "21111111-1111-1111-1111-1111111112e1",
+        )
+        other_id = self._fast_path_moment(
+            "快速路径片段：约定写旅行手账补充稿。",
+            "21111111-1111-1111-1111-1111111112e2",
+        )
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        content = "反刍episode申请：整合相册与手账的共同约定经历。"
+        result = self._commit(run_id, [{
+            "op": "create_request",
+            "reason": "吸收两条快速路径记忆",
+            "continuity_type": "episode",
+            "content": content,
+            "title": "相册与手账",
+            "continuity_data": EPISODE_DATA,
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "importance": 6, "confidence": 0.8,
+            "embedding": "[0.89,0.89,0.89]",
+            "absorbed_fast_path_memory_ids": [target_id, other_id],
+        }])
+        request_id = result["preview"][0]["request_id"]
+
+        # 人工 merge，并把 memory A（target_id）选为 related_memory_id。
+        merged_content = "人工合并后的最终相册手账episode正文。"
+        self._query_one(
+            "select public.review_memory_request_v5(%s, 'merge', %s, %s, %s, %s, %s, "
+            "'tester', null, null, null, %s, null, null, null, null, null)",
+            (
+                request_id, merged_content, "相册与手账", "{episode}", 6,
+                _sha256(merged_content), target_id,
+            ),
+        )
+        result_memory_id = self._query_one(
+            "select memory_id from public.memory_requests where id = %s",
+            (request_id,),
+        )
+        self.assertIsNotNone(result_memory_id)
+        # 最终结果记忆保持 verified + active，与 request.memory_id 一致。
+        self.assertEqual(self._query_row(
+            "select verified, is_active from public.memories where id = %s",
+            (result_memory_id,),
+        ), ("verified", True))
+        # 列为目标且恰为合并主目标的记忆：作为 merge 前驱自然退出 active，
+        # 但绝不会被吸收逻辑再次停用，也不产生自指向 handoff。
+        self.assertEqual(self._query_row(
+            "select superseded_by_memory_id, is_active from public.memories "
+            "where id = %s",
+            (target_id,),
+        ), (result_memory_id, False))
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_path_handoffs "
+            "where request_id = %s and rumination_memory_id = fast_path_memory_id",
+            (request_id,),
+        ), 0)
+        # 其他列出目标仍按规则完成交接。
+        self.assertEqual(self._query_row(
+            "select kind, fast_path_memory_id, rumination_memory_id "
+            "from public.memory_path_handoffs where request_id = %s",
+            (request_id,),
+        ), ("absorbed_by_request", other_id, result_memory_id))
+
+    # -- scheduled day stamping -------------------------------------------------
+
+    def test_scheduled_claim_stamps_day_and_lease_holds(self):
+        self._set_cursor(initialized=True, value=520)
+        self.conn.execute(
+            "update public.memory_rumination_cursors set last_scheduled_date = null "
+            "where assistant_id = %s", (ASSISTANT,),
+        )
+        from datetime import datetime, timedelta, timezone
+
+        today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+        run_id = self._claim(521, 522, trigger="rumination_scheduled")
+        self.assertEqual(self._query_one(
+            "select last_scheduled_date::text from public.memory_rumination_cursors "
+            "where assistant_id = %s",
+            (ASSISTANT,),
+        ), today)
+        # 并发第二个实例：租约期内无法获得当天批次。
+        second = self._call("claim_rumination_batch", {
+            "p_assistant_id": ASSISTANT,
+            "p_trigger": "rumination_scheduled",
+            "p_first_message_id": 523,
+            "p_last_message_id": 530,
+            "p_message_count": 8,
+            "p_first_batch": False,
+        })
+        self.assertEqual(second["status"], "already_running")
+        # scheduled 运行失败后：当日戳仍在（同日不再自动重试），游标不动。
+        self.conn.execute(
+            "update public.memory_digest_runs set status = 'failed', "
+            "error_code = 'model_http_error' where id = %s", (run_id,),
+        )
+        self.assertEqual(self._query_one(
+            "select last_scheduled_date::text from public.memory_rumination_cursors "
+            "where assistant_id = %s",
+            (ASSISTANT,),
+        ), today)
+        self.assertEqual(self._cursor(), 520)
+        # 手动触发不盖章。
+        self.conn.execute(
+            "update public.memory_digest_runs set status = 'failed', "
+            "error_code = 'test_release' where id = %s", (run_id,),
+        )
+        manual_run = self._claim(521, 522, trigger="rumination_manual")
+        self.assertEqual(self._query_one(
+            "select last_scheduled_date::text from public.memory_rumination_cursors "
+            "where assistant_id = %s",
+            (ASSISTANT,),
+        ), today)
+
+    # -- operation count ---------------------------------------------------------
+
+    def test_large_operation_batch_without_cap(self):
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        ops = []
+        for index in range(25):
+            content = f"夜间观测记录第 {index} 号点位的独立瞬间记忆。"
+            ops.append({
+                "op": "create_memory",
+                "reason": f"第 {index} 号观测点的独立瞬间",
+                "continuity_type": "moment",
+                "content": content,
+                "continuity_data": {
+                    "scene": "夜间观察", "event": f"第 {index} 号点位",
+                    "moment_state": "standalone",
+                },
+                "evidence_message_ids": [521],
+                "content_hash": _sha256(content),
+                "embedding": "[0.4,0.4,0.4]",
+            })
+        result = self._commit(run_id, ops)
+        self.assertEqual(result["op_counts"]["created_memories"], 25)
+        self.assertEqual(self._cursor(), 522)
 
     # -- recall -------------------------------------------------------------
 

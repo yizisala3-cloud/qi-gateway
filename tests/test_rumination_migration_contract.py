@@ -273,5 +273,87 @@ class RuminationReviewHandoffMigrationContractTests(unittest.TestCase):
         self.assertNotIn("memory_relations", self.executable)
 
 
+class RuminationAbsorbClosureMigrationContractTests(unittest.TestCase):
+    """Static contract for 20260907010000_rumination_absorb_closure.sql."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = ROOT / "supabase/migrations/20260907010000_rumination_absorb_closure.sql"
+        cls.sql = path.read_text(encoding="utf-8")
+        cls.executable = re.sub(r"--[^\n]*", "", cls.sql)
+        cls.claim = cls.executable.split(
+            "create or replace function public.claim_rumination_batch", 1
+        )[1].split("create or replace function public.commit_rumination_batch", 1)[0]
+        cls.commit = cls.executable.split(
+            "create or replace function public.commit_rumination_batch", 1
+        )[1].split("create or replace function public.review_memory_request_v5", 1)[0]
+        cls.v5 = cls.executable.split(
+            "create or replace function public.review_memory_request_v5", 1
+        )[1]
+
+    def test_no_arbitrary_operation_cap(self):
+        self.assertNotIn("memory_rumination_too_many_operations", self.executable)
+        self.assertNotIn("jsonb_array_length(v_ops) > 24", self.executable)
+
+    def test_direct_write_absorption_is_transactional(self):
+        self.assertIn("'absorbed_by_direct_memory'", self.executable)
+        self.assertIn("memory_rumination_invalid_absorb_target", self.commit)
+        self.assertIn("memory_rumination_absorb_target_invalid", self.commit)
+        # 结构复核：同 assistant、fast_path 生产、verified、active、非闭合 thread。
+        for needle in (
+            "v_absorbed.assistant_id is distinct from v_run.assistant_id",
+            "v_absorbed.producer_path is distinct from 'fast_path'",
+            "v_absorbed.verified is distinct from 'verified'",
+            "v_absorbed.is_active is not true",
+            "'resolved', 'dissolved', 'abandoned'",
+        ):
+            self.assertIn(needle, self.commit)
+        # 吸收在新记忆插入之后、同事务内执行。
+        self.assertIn("returning id into v_new_memory_id", self.commit)
+
+    def test_v5_skips_merge_related_target_and_verifies_result(self):
+        self.assertIn("v_absorbed_id = v_memory_id", self.v5)
+        self.assertIn("v_absorbed_id = v_request.related_memory_id", self.v5)
+        self.assertIn("memory_rumination_absorb_result_invalid", self.v5)
+        # 交接前重读申请，拿到 v4 写入的 related_memory_id。
+        self.assertIn("from public.memory_requests\n        where id = v_request.id", self.v5)
+
+    def test_scheduled_attempt_stamped_inside_claim_lock(self):
+        self.assertIn("p_trigger = 'rumination_scheduled'", self.claim)
+        self.assertIn(
+            "(now() at time zone 'Asia/Shanghai')::date", self.claim,
+        )
+        self.assertIn("returning * into v_cursor", self.claim)
+
+    def test_security_model_unchanged(self):
+        for function_name in (
+            "claim_rumination_batch",
+            "commit_rumination_batch",
+            "review_memory_request_v5",
+        ):
+            with self.subTest(rpc=function_name):
+                self.assertRegex(
+                    self.executable,
+                    rf"revoke\s+all\s+on\s+function\s+public\.{function_name}"
+                    r"[\s\S]{0,400}?from\s+public,\s*anon,\s*authenticated",
+                )
+                self.assertRegex(
+                    self.executable,
+                    rf"grant\s+execute\s+on\s+function\s+public\.{function_name}"
+                    r"[\s\S]{0,400}?to\s+service_role",
+                )
+        self.assertIn("security definer", self.commit)
+        self.assertIn("set search_path to 'public', 'extensions'", self.commit)
+
+    def test_chat_messages_and_relations_untouched(self):
+        forbidden = re.findall(
+            r"(insert\s+into|update|delete\s+from|alter\s+table)[\s\S]{0,120}?chat_messages",
+            self.executable,
+            re.IGNORECASE,
+        )
+        self.assertEqual(forbidden, [])
+        self.assertNotIn("memory_relations", self.executable)
+
+
 if __name__ == "__main__":
     unittest.main()
