@@ -365,9 +365,13 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             elif isinstance(value, int):
                 parts.append(psql.SQL("%s::bigint"))
                 values.append(value)
+            elif value is None:
+                # 无类型 NULL：让 PG 按函数签名解析参数类型。
+                parts.append(psql.SQL("%s"))
+                values.append(None)
             else:
                 parts.append(psql.SQL("%s::text"))
-                values.append(None if value is None else str(value))
+                values.append(str(value))
         query = psql.SQL("select public.{name}({args})").format(
             name=psql.SQL(name),
             args=psql.SQL(", ").join(parts),
@@ -401,12 +405,16 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
         )
 
     def setUp(self):
-        # Every test is order-independent: no leftover live runs and a cursor
-        # at a known position.
+        # Every test is order-independent: no leftover live runs, no leftover
+        # scheduled-execution rows, and a cursor at a known position.
         self.conn.execute(
             "update public.memory_digest_runs set status = 'failed', "
             "error_code = 'test_cleanup' "
             "where pipeline = 'rumination' and status in ('claimed', 'running')"
+        )
+        self.conn.execute(
+            "delete from public.memory_rumination_scheduled_executions "
+            "where assistant_id = %s", (ASSISTANT,),
         )
         self._set_cursor(initialized=False, value=0)
 
@@ -418,7 +426,8 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             (initialized, value, ASSISTANT),
         )
 
-    def _claim(self, first, last, *, trigger="rumination_manual", first_batch=False):
+    def _claim(self, first, last, *, trigger="rumination_manual", first_batch=False,
+               scheduled_execution_id=None):
         claim = self._call("claim_rumination_batch", {
             "p_assistant_id": ASSISTANT,
             "p_trigger": trigger,
@@ -426,6 +435,7 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "p_last_message_id": last,
             "p_message_count": last - first + 1,
             "p_first_batch": first_batch,
+            "p_scheduled_execution_id": scheduled_execution_id,
         })
         self.assertEqual(claim["status"], "claimed", claim)
         return claim["run_id"]
@@ -521,6 +531,7 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "p_last_message_id": 530,
             "p_message_count": 10,
             "p_first_batch": False,
+            "p_scheduled_execution_id": None,
         })
         self.assertEqual(second["status"], "already_running")
         self.assertEqual(int(second["run_id"]), int(run_id))
@@ -543,6 +554,7 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "p_last_message_id": 519,
             "p_message_count": 20,
             "p_first_batch": False,
+            "p_scheduled_execution_id": None,
         })
         self.assertEqual(stale["status"], "batch_stale")
         self.assertEqual(int(stale["cursor"]), 520)
@@ -556,6 +568,7 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "p_last_message_id": 520,
             "p_message_count": 20,
             "p_first_batch": True,
+            "p_scheduled_execution_id": None,
         })
         self.assertEqual(result["status"], "already_initialized")
 
@@ -2163,16 +2176,36 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "where assistant_id = %s",
             (ASSISTANT,),
         ), today)
-        # 并发第二个实例：租约期内无法获得当天批次。
-        second = self._call("claim_rumination_batch", {
+        # 并发第二个实例（无 identity）：租约先行挡住（already_running），
+        # 租约过期后由当日防重兜底（already_scheduled_today，见
+        # test_scheduled_claim_guard_is_database_authoritative）。
+        another = self._call("claim_rumination_batch", {
             "p_assistant_id": ASSISTANT,
             "p_trigger": "rumination_scheduled",
             "p_first_message_id": 523,
             "p_last_message_id": 530,
             "p_message_count": 8,
             "p_first_batch": False,
+            "p_scheduled_execution_id": None,
         })
-        self.assertEqual(second["status"], "already_running")
+        self.assertIn(another["status"], ("already_running", "already_scheduled_today"))
+        # 同一次 execution 的后续批次：带 identity 绕过当日防重连批，
+        # 但租约期内仍无法并行获得批次。
+        execution_id = self._query_one(
+            "select scheduled_execution_id from public.memory_digest_runs where id = %s",
+            (run_id,),
+        )
+        self.assertIsNotNone(execution_id)
+        lease = self._call("claim_rumination_batch", {
+            "p_assistant_id": ASSISTANT,
+            "p_trigger": "rumination_scheduled",
+            "p_first_message_id": 523,
+            "p_last_message_id": 530,
+            "p_message_count": 8,
+            "p_first_batch": False,
+            "p_scheduled_execution_id": execution_id,
+        })
+        self.assertEqual(lease["status"], "already_running")
         # scheduled 运行失败后：当日戳仍在（同日不再自动重试），游标不动。
         self.conn.execute(
             "update public.memory_digest_runs set status = 'failed', "
@@ -2525,6 +2558,7 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "p_last_message_id": 522,
             "p_message_count": 2,
             "p_first_batch": False,
+            "p_scheduled_execution_id": None,
         })
         self.assertEqual(first["status"], "claimed")
         # 快速失败后（run 失败但游标不动），第二个 scheduled claim 仍被挡。
@@ -2539,6 +2573,7 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "p_last_message_id": 522,
             "p_message_count": 2,
             "p_first_batch": False,
+            "p_scheduled_execution_id": None,
         })
         self.assertEqual(second["status"], "already_scheduled_today")
         # 同日 manual 不受限。
@@ -2549,6 +2584,7 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "p_last_message_id": 522,
             "p_message_count": 2,
             "p_first_batch": False,
+            "p_scheduled_execution_id": None,
         })
         self.assertEqual(manual["status"], "claimed")
         self.conn.execute(
@@ -2561,7 +2597,12 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "and trigger = 'rumination_scheduled' and status in ('claimed', 'running')"
         )
         self.assertEqual(scheduled_runs, 0)
-        # 次日 scheduled 可以执行。
+        # 次日 scheduled 可以执行：清掉当日执行记录（模拟跨天）。
+        self.conn.execute(
+            "delete from public.memory_rumination_scheduled_executions "
+            "where assistant_id = %s",
+            (ASSISTANT,),
+        )
         self.conn.execute(
             "update public.memory_rumination_cursors set last_scheduled_date = "
             "(now() at time zone 'Asia/Shanghai')::date - 1 where assistant_id = %s",
@@ -2574,6 +2615,7 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "p_last_message_id": 522,
             "p_message_count": 2,
             "p_first_batch": False,
+            "p_scheduled_execution_id": None,
         })
         self.assertEqual(next_day["status"], "claimed")
 
@@ -2623,6 +2665,110 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "and assistant_id = 'a-rumination' and thread_state = 'resolved'"
         )
         self.assertEqual(resolved, 0)
+
+    # -- per-request snapshot isolation ---------------------------------------
+
+    def test_two_requests_in_one_batch_have_isolated_snapshots(self):
+        moment_a = self._fast_path_moment(
+            "快速路径片段：申请 A 吸收的目标记忆。", "21111111-1111-1111-1111-1111111117a1"
+        )
+        moment_b = self._fast_path_moment(
+            "快速路径片段：申请 B 吸收的目标记忆。", "21111111-1111-1111-1111-1111111117b1"
+        )
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        content_a = "反刍 episode 申请 A 的整合正文。"
+        content_b = "反刍 episode 申请 B 的整合正文。"
+        result = self._commit(run_id, [
+            {
+                "op": "create_request",
+                "reason": "申请 A 吸收",
+                "continuity_type": "episode",
+                "content": content_a, "title": "申请 A",
+                "continuity_data": EPISODE_DATA,
+                "evidence_message_ids": [521],
+                "content_hash": _sha256(content_a),
+                "importance": 6, "confidence": 0.8,
+                "embedding": "[0.93,0.93,0.93]",
+                "absorbed_fast_path_memory_ids": [moment_a],
+            },
+            {
+                "op": "create_request",
+                "reason": "申请 B 吸收",
+                "continuity_type": "episode",
+                "content": content_b, "title": "申请 B",
+                "continuity_data": EPISODE_DATA,
+                "evidence_message_ids": [522],
+                "content_hash": _sha256(content_b),
+                "importance": 6, "confidence": 0.8,
+                "embedding": "[0.94,0.94,0.94]",
+                "absorbed_fast_path_memory_ids": [moment_b],
+            },
+        ])
+        self.assertEqual(result["op_counts"]["created_requests"], 2)
+        snap_a = self._query_one(
+            "select absorbed_fast_path_memory_snapshots from public.memory_requests "
+            "where content_hash = %s", (_sha256(content_a),),
+        )
+        snap_b = self._query_one(
+            "select absorbed_fast_path_memory_snapshots from public.memory_requests "
+            "where content_hash = %s", (_sha256(content_b),),
+        )
+        # A 只保存 a 的快照，B 只保存 b 的快照，互不污染。
+        self.assertEqual([s["memory_id"] for s in snap_a], [moment_a])
+        self.assertEqual([s["memory_id"] for s in snap_b], [moment_b])
+
+    def _integrity(self, ids, snapshots):
+        import json as _json
+
+        return self._query_one(
+            "select public.validate_absorb_snapshots(%s::bigint[], %s::jsonb)",
+            (ids, _json.dumps(snapshots)),
+        )
+
+    def _snapshot_json(self, memory_id, **overrides):
+        snapshot = {
+            "memory_id": memory_id, "content_hash": "h",
+            "continuity_id": None, "continuity_type": "moment",
+            "memory_key": None, "thread_state": None,
+            "evidence_message_ids": [], "producer_path": "fast_path",
+            "verified": "verified", "is_active": True,
+        }
+        snapshot.update(overrides)
+        return snapshot
+
+    def test_snapshot_integrity_rejects_id_mismatch(self):
+        self.assertFalse(self._integrity([10], [self._snapshot_json(20)]))
+
+    def test_snapshot_integrity_rejects_duplicate_memory_ids(self):
+        self.assertFalse(self._integrity(
+            [10, 10], [self._snapshot_json(10), self._snapshot_json(10, content_hash="h2")],
+        ))
+
+    def test_snapshot_integrity_rejects_missing_fields(self):
+        self.assertFalse(self._integrity([10], [{"memory_id": 10, "content_hash": "h"}]))
+
+    def test_snapshot_integrity_accepts_valid_pair(self):
+        self.assertTrue(self._integrity([10], [self._snapshot_json(10)]))
+
+    def test_snapshot_integrity_empty_is_valid(self):
+        self.assertTrue(self._integrity([], []))
+
+    def test_review_rejects_when_snapshots_cleared(self):
+        # 快照被清空后审核：数据库快照缺失拒绝（v_snapshot is null）。
+        fast_id = self._fast_path_moment(
+            "快速路径片段：快照清空后审核的目标。", "21111111-1111-1111-1111-1111111117c1"
+        )
+        request_id = self._seed_absorb_request(fast_id)
+        self.conn.execute(
+            "update public.memory_requests set absorbed_fast_path_memory_snapshots = '[]'::jsonb "
+            "where id = %s", (request_id,),
+        )
+        body = "反刍整合快速路径记忆的episode经历（快照清空用例通过稿）。"
+        with self.assertRaises(Exception) as raised:
+            self._approve_absorb_request(request_id, body)
+        self.assertIn("memory_rumination_absorb_target_changed", str(raised.exception))
+        self._assert_absorb_rejected(request_id, fast_id)
 
     # -- recall -------------------------------------------------------------
 

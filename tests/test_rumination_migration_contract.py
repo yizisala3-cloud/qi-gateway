@@ -457,5 +457,174 @@ class RuminationSnapshotAndScheduleGuardContractTests(unittest.TestCase):
         self.assertNotIn("memory_relations", self.executable)
 
 
+class RuminationScheduledExecutionContractTests(unittest.TestCase):
+    """Static contract for 20260909010000_rumination_scheduled_execution_and_snapshot_integrity.sql."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = ROOT / "supabase/migrations/20260909010000_rumination_scheduled_execution_and_snapshot_integrity.sql"
+        cls.sql = path.read_text(encoding="utf-8")
+        cls.executable = re.sub(r"--[^\n]*", "", cls.sql)
+        cls.claim = cls.executable.split(
+            "create or replace function public.claim_rumination_batch", 1
+        )[1].split("create or replace function public.commit_rumination_batch", 1)[0]
+
+    def test_scheduled_executions_table(self):
+        self.assertIn(
+            "create table if not exists public.memory_rumination_scheduled_executions",
+            self.executable,
+        )
+        self.assertIn("unique (assistant_id, execution_date)", self.executable)
+        self.assertIn("check (status in ('running', 'finished'))", self.executable)
+
+    def test_finish_function_exists_and_is_guarded(self):
+        self.assertIn(
+            "create or replace function public.finish_rumination_scheduled_execution",
+            self.executable,
+        )
+        self.assertRegex(
+            self.executable,
+            r"grant\s+execute\s+on\s+function\s+public\.finish_rumination_scheduled_execution"
+            r"[\s\S]{0,200}?to\s+service_role",
+        )
+
+    def test_claim_accepts_execution_identity(self):
+        self.assertIn("p_scheduled_execution_id bigint default null", self.claim)
+        # 首批（无 identity）走当日防重。
+        self.assertIn("already_scheduled_today", self.claim)
+        # 后续批次（带 identity）验证 assistant、日期和 running 状态。
+        self.assertIn("invalid_scheduled_execution", self.claim)
+        self.assertIn("v_execution.status is distinct from 'running'", self.claim)
+        self.assertIn("v_execution.assistant_id is distinct from p_assistant_id", self.claim)
+        self.assertIn("v_execution.execution_date is distinct from v_execution_date", self.claim)
+
+    def test_run_records_scheduled_execution_id(self):
+        self.assertIn("scheduled_execution_id", self.claim)
+        self.assertIn(
+            "add column if not exists scheduled_execution_id bigint", self.executable,
+        )
+
+    def test_old_six_arg_signature_dropped(self):
+        self.assertRegex(
+            self.executable,
+            r"drop function if exists public\.claim_rumination_batch\("
+            r"\s*text, text, bigint, bigint, bigint, boolean\s*\)",
+        )
+
+    def test_snapshot_integrity_validator_exists(self):
+        self.assertIn(
+            "create or replace function public.validate_absorb_snapshots",
+            self.executable,
+        )
+        for needle in (
+            "memory_id", "content_hash", "continuity_id", "continuity_type",
+            "memory_key", "thread_state", "evidence_message_ids",
+            "producer_path", "verified", "is_active",
+        ):
+            self.assertIn(needle, self.executable)
+
+    def test_commit_resets_snapshots_per_request(self):
+        commit = self.executable.split(
+            "create or replace function public.commit_rumination_batch", 1
+        )[1]
+        self.assertIn("v_absorbed_snapshots := '[]'::jsonb", commit)
+        self.assertIn("memory_rumination_absorb_snapshot_mismatch", commit)
+        self.assertIn("public.validate_absorb_snapshots(v_absorbed_ids, v_absorbed_snapshots)", commit)
+
+    def test_chat_messages_and_relations_untouched(self):
+        forbidden = re.findall(
+            r"(insert\s+into|update|delete\s+from|alter\s+table)[\s\S]{0,120}?chat_messages",
+            self.executable,
+            re.IGNORECASE,
+        )
+        self.assertEqual(forbidden, [])
+        self.assertNotIn("memory_relations", self.executable)
+
+
+class RuminationScheduledExecutionContractTests(unittest.TestCase):
+    """Static contract for 20260909010000_rumination_scheduled_execution_and_snapshot_integrity.sql."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = ROOT / "supabase/migrations/20260909010000_rumination_scheduled_execution_and_snapshot_integrity.sql"
+        cls.sql = path.read_text(encoding="utf-8")
+        cls.executable = re.sub(r"--[^\n]*", "", cls.sql)
+        cls.claim = cls.executable.split(
+            "create or replace function public.claim_rumination_batch", 1
+        )[1].split("create or replace function public.commit_rumination_batch", 1)[0]
+        cls.commit = cls.executable.split(
+            "create or replace function public.commit_rumination_batch", 1
+        )[1]
+
+    def test_scheduled_executions_table(self):
+        self.assertIn(
+            "create table if not exists public.memory_rumination_scheduled_executions",
+            self.executable,
+        )
+        self.assertIn("unique (assistant_id, execution_date)", self.executable)
+        self.assertIn("check (status in ('running', 'finished'))", self.executable)
+
+    def test_finish_function_exists_and_is_guarded(self):
+        self.assertIn(
+            "create or replace function public.finish_rumination_scheduled_execution",
+            self.executable,
+        )
+        self.assertRegex(
+            self.executable,
+            r"grant\s+execute\s+on\s+function\s+public\.finish_rumination_scheduled_execution"
+            r"[\s\S]{0,200}?to\s+service_role",
+        )
+
+    def test_claim_accepts_execution_identity(self):
+        self.assertIn("p_scheduled_execution_id bigint default null", self.claim)
+        self.assertIn("already_scheduled_today", self.claim)
+        self.assertIn("invalid_scheduled_execution", self.claim)
+        self.assertIn("v_execution.status is distinct from 'running'", self.claim)
+        self.assertIn("v_execution.assistant_id is distinct from p_assistant_id", self.claim)
+        self.assertIn("v_execution.execution_date is distinct from v_execution_date", self.claim)
+
+    def test_run_records_scheduled_execution_id(self):
+        self.assertIn("scheduled_execution_id", self.claim)
+        self.assertIn(
+            "add column if not exists scheduled_execution_id bigint", self.executable,
+        )
+
+    def test_old_six_arg_signature_dropped(self):
+        self.assertRegex(
+            self.executable,
+            r"drop function if exists public\.claim_rumination_batch\("
+            r"\s*text, text, bigint, bigint, bigint, boolean\s*\)",
+        )
+
+    def test_snapshot_integrity_validator_exists(self):
+        self.assertIn(
+            "create or replace function public.validate_absorb_snapshots",
+            self.executable,
+        )
+        for needle in (
+            "memory_id", "content_hash", "continuity_id", "continuity_type",
+            "memory_key", "thread_state", "evidence_message_ids",
+            "producer_path", "verified", "is_active",
+        ):
+            self.assertIn(needle, self.executable)
+
+    def test_commit_resets_snapshots_per_request(self):
+        self.assertIn("v_absorbed_snapshots := '[]'::jsonb", self.commit)
+        self.assertIn("memory_rumination_absorb_snapshot_mismatch", self.commit)
+        self.assertIn(
+            "public.validate_absorb_snapshots(v_absorbed_ids, v_absorbed_snapshots)",
+            self.commit,
+        )
+
+    def test_chat_messages_and_relations_untouched(self):
+        forbidden = re.findall(
+            r"(insert\s+into|update|delete\s+from|alter\s+table)[\s\S]{0,120}?chat_messages",
+            self.executable,
+            re.IGNORECASE,
+        )
+        self.assertEqual(forbidden, [])
+        self.assertNotIn("memory_relations", self.executable)
+
+
 if __name__ == "__main__":
     unittest.main()

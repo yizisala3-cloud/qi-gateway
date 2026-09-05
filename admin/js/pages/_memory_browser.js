@@ -728,7 +728,11 @@ export function createMemoryBrowser({
     );
     const summary = absorbImpactSummary(views);
     const lines = views.map((view) => {
-      const marker = view.changed ? ' · <strong>目标已变化，本次通过会被拒绝</strong>' : '';
+      const marker = view.changed
+        ? ' · <strong>目标已变化，本次通过会被拒绝</strong>'
+        : view.snapshotMissing
+          ? ' · <strong>申请快照缺失，本次通过会被拒绝</strong>'
+          : '';
       return `${esc(view.label)}${marker}`;
     });
     impact.innerHTML = `

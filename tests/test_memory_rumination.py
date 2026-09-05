@@ -852,6 +852,59 @@ class RunFlowTests(unittest.TestCase):
         self.assertEqual(first["batch"], {"first_message_id": 101, "last_message_id": 220, "message_count": 120})
         self.assertEqual(second["batch"], {"first_message_id": 900, "last_message_id": 959, "message_count": 60})
 
+    def test_scheduled_multi_batch_shares_execution_identity(self):
+        # scheduled 250 条积压：两批连续处理共享同一 execution identity，
+        # 循环结束后 finish 被调用一次。
+        pages = [
+            list(range(101, 221)),
+            list(range(221, 341)),
+            list(range(341, 351)),  # 尾部 10 条
+        ]
+        rpc_results = [
+            {"status": "claimed", "run_id": 71, "scheduled_execution_id": 900},
+            {
+                "run_id": 71, "cursor": {"last_processed_message_id": 220},
+                "op_counts": {}, "preview": [], "inserted_count": 0,
+            },
+            {"status": "claimed", "run_id": 72, "scheduled_execution_id": 900},
+            {
+                "run_id": 72, "cursor": {"last_processed_message_id": 340},
+                "op_counts": {}, "preview": [], "inserted_count": 0,
+            },
+        ]
+        cursor = dict(self.cursor)
+        claim_params = []
+        with (
+            patch("gateway.memory_rumination._rumination_analysis_configured", return_value=True),
+            patch("gateway.memory_rumination.resolve_rumination_assistant_id", return_value="assistant-1"),
+            patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
+            patch("gateway.memory_rumination._mark_stale_rumination_runs"),
+            patch("gateway.memory_rumination._fetch_message_ids", side_effect=pages),
+            patch("gateway.memory_rumination._fetch_batch_rows", return_value=[]),
+            patch("gateway.memory_rumination._normalize_batch_messages", return_value=[
+                {"id": 101, "conversation_id": "c1", "role": "user",
+                 "content": "消息", "source_time": "2026-09-01T10:00+08:00"},
+            ]),
+            patch("gateway.memory_rumination._load_unfinished_threads", return_value=[]),
+            patch("gateway.memory_rumination._load_own_requests", return_value=[]),
+            patch("gateway.memory_rumination._call_rumination_model", return_value='{"operations":[]}'),
+            patch("gateway.memory_rumination._rpc_object", side_effect=rpc_results) as rpc,
+            patch("gateway.memory_rumination._set_run_model_name"),
+            patch("gateway.memory_rumination._update_heartbeat"),
+        ):
+            result = run_rumination_digest("rumination_scheduled")
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["batch_count"], 2)
+        self.assertEqual(result["cursor_after"], 340)
+        # 首批无 identity（数据库分配），后续批次携带同一 identity 连批；
+        # 第三批因尾部不足 60 未发；循环结束后 finish 恰好调用一次。
+        rpc_claim_calls = [c for c in rpc.call_args_list if c[0][0] == "claim_rumination_batch"]
+        self.assertEqual(len(rpc_claim_calls), 2)
+        self.assertIsNone(rpc_claim_calls[0][0][1]["p_scheduled_execution_id"])
+        self.assertEqual(rpc_claim_calls[1][0][1]["p_scheduled_execution_id"], 900)
+        finish_calls = [c for c in rpc.call_args_list if c[0][0] == "finish_rumination_scheduled_execution"]
+        self.assertEqual(len(finish_calls), 1)
+
     def test_first_run_initializes_from_latest_messages(self):
         cursor = dict(self.cursor, initialized=False, last_processed_message_id=0)
         latest = list(range(300, 180, -1))  # descending ids

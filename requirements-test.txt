@@ -1,0 +1,4 @@
+# 测试依赖：生产网关（Dockerfile 安装 requirements.txt）不需要安装。
+# quickjs 让前端纯函数模块（admin/js/lib/absorb_display.js）在无 Node 环境
+# 下被测试真实执行；未安装时相关测试明确 skip。
+quickjs>=1.19 ; python_version >= "3.8"

@@ -9,7 +9,11 @@ import json
 import unittest
 from pathlib import Path
 
-import quickjs
+try:
+    import quickjs  # 测试依赖（requirements-test.txt），生产网关不安装。
+    _QUICKJS_AVAILABLE = True
+except ImportError:  # pragma: no cover - 环境相关
+    _QUICKJS_AVAILABLE = False
 
 ROOT = Path(__file__).resolve().parents[1]
 LIB = ROOT / "admin" / "js" / "lib" / "absorb_display.js"
@@ -20,8 +24,8 @@ def _load_module():
     # quickjs' python binding evaluates plain scripts: replace the single
     # export statement and expose the functions on globalThis.
     script = source.replace(
-        "export { absorbTargetViews, absorbImpactViews, absorbImpactSummary };",
-        "var __absorb = { absorbTargetViews, absorbImpactViews, absorbImpactSummary };",
+        "export { absorbImpactViews, absorbImpactSummary };",
+        "var __absorb = { absorbImpactViews, absorbImpactSummary };",
     )
     assert "__absorb" in script
     ctx = quickjs.Context()
@@ -46,6 +50,7 @@ def _row(memory_id=1, content="正文", content_hash="a" * 64, **overrides):
         "thread_state": None,
         "evidence_message_ids": [3],
         "producer_path": "fast_path",
+        "verified": "verified",
         "is_active": True,
     }
     row.update(overrides)
@@ -69,55 +74,14 @@ def _snapshot(memory_id=1, content_hash="a" * 64, **overrides):
     return snapshot
 
 
-class AbsorbTargetViewTests(unittest.TestCase):
-    """hydrateAbsorbTargets 的失败分支回归：必须使用同位次的原始目标 ID。"""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.ctx = _load_module()
-
-    def test_failed_row_uses_the_original_target_id(self):
-        views = _call(
-            self.ctx, "absorbTargetViews",
-            [7, 9], [
-                None,
-                {"id": 9, "content": "正文九", "title": "标题九",
-                 "continuity_type": "moment", "is_active": True},
-            ],
-        )
-        self.assertEqual(len(views), 2)
-        self.assertEqual(views[0]["id"], 7)
-        self.assertFalse(views[0]["ok"])
-        self.assertIn("#7", views[0]["label"])
-        self.assertIn("无法读取", views[0]["label"])
-        self.assertTrue(views[1]["ok"])
-        self.assertIn("#9", views[1]["label"])
-        self.assertIn("标题九", views[1]["label"])
-
-    def test_one_failure_does_not_block_other_targets(self):
-        views = _call(
-            self.ctx, "absorbTargetViews",
-            [1, 2, 3], [
-                {"id": 1, "content": "甲" * 80, "title": "甲标题",
-                 "continuity_type": "moment", "is_active": True},
-                None,
-                {"id": 3, "content": "丙", "title": "丙标题",
-                 "continuity_type": "inside_joke", "is_active": False},
-            ],
-        )
-        self.assertEqual([view["ok"] for view in views], [True, False, False])
-        self.assertIn("甲标题", views[0]["label"])
-        self.assertIn("…", views[0]["label"])  # 长正文截断为摘录
-        self.assertEqual(views[1]["id"], 2)
-        self.assertIn("已非 active", views[2]["label"])
-
-    def test_null_rows_and_empty_ids(self):
-        views = _call(self.ctx, "absorbTargetViews", [5, 6], None)
-        self.assertEqual([view["id"] for view in views], [5, 6])
-        self.assertTrue(all(not view["ok"] for view in views))
-        self.assertEqual(_call(self.ctx, "absorbTargetViews", [], []), [])
-
-
+@unittest.skipUnless(
+    _QUICKJS_AVAILABLE,
+    "quickjs 未安装（pip install -r requirements-test.txt）：跳过前端纯函数执行测试",
+)
+@unittest.skipUnless(
+    _QUICKJS_AVAILABLE,
+    "quickjs 未安装（pip install -r requirements-test.txt）：跳过前端纯函数执行测试",
+)
 class AbsorbImpactViewTests(unittest.TestCase):
     """审核表单影响范围：快照逐项比较 + 缺失目标的独立降级。"""
 
@@ -152,13 +116,17 @@ class AbsorbImpactViewTests(unittest.TestCase):
                 )
                 self.assertTrue(views[0]["changed"], field)
 
-    def test_producer_path_change_is_flagged(self):
-        views = _call(
-            self.ctx, "absorbImpactViews", [4],
-            [_row(4)],
-            [_snapshot(4, producer_path="rumination")],
-        )
-        self.assertTrue(views[0]["changed"])
+    def test_producer_path_and_verified_changes_are_flagged(self):
+        for field, override in (
+            ("producer_path", {"producer_path": "rumination"}),
+            ("verified", {"verified": "unverified"}),
+        ):
+            with self.subTest(field=field):
+                views = _call(
+                    self.ctx, "absorbImpactViews", [4],
+                    [_row(4)], [_snapshot(4, **override)],
+                )
+                self.assertTrue(views[0]["changed"], field)
 
     def test_failed_row_uses_the_original_target_id(self):
         views = _call(
@@ -168,6 +136,44 @@ class AbsorbImpactViewTests(unittest.TestCase):
         self.assertFalse(views[0]["ok"])
         self.assertEqual(views[0]["id"], 8)
         self.assertIn("无法读取", views[0]["label"])
+
+    def test_snapshot_missing_blocks_even_when_row_active(self):
+        # 有目标 ID、当前行存在、快照缺失：必须阻塞（数据库会拒绝）。
+        views = _call(
+            self.ctx, "absorbImpactViews", [4], [_row(4)], [],
+        )
+        self.assertTrue(views[0]["snapshotMissing"])
+        self.assertFalse(views[0]["changed"])
+        self.assertFalse(views[0]["ok"])
+        self.assertIn("申请快照缺失", views[0]["label"])
+        self.assertTrue(_call(self.ctx, "absorbImpactSummary", views)["blocked"])
+
+    def test_one_missing_snapshot_blocks_but_others_render(self):
+        views = _call(
+            self.ctx, "absorbImpactViews", [4, 5],
+            [_row(4), _row(5)],
+            [_snapshot(4)],
+        )
+        self.assertTrue(views[0]["ok"])
+        self.assertFalse(views[0]["snapshotMissing"])
+        self.assertTrue(views[1]["snapshotMissing"])
+        self.assertTrue(_call(self.ctx, "absorbImpactSummary", views)["blocked"])
+
+    def test_empty_ids_and_snapshots_are_not_flagged(self):
+        views = _call(self.ctx, "absorbImpactViews", [], [], [])
+        self.assertEqual(views, [])
+        summary = _call(self.ctx, "absorbImpactSummary", views)
+        self.assertFalse(summary["blocked"])
+        self.assertFalse(summary["snapshotMissing"])
+
+    def test_id_without_matching_snapshot_blocks(self):
+        # ID 与 snapshot.memory_id 不匹配 → 快照缺失 → blocked。
+        views = _call(
+            self.ctx, "absorbImpactViews", [4], [_row(4)],
+            [_snapshot(99)],
+        )
+        self.assertTrue(views[0]["snapshotMissing"])
+        self.assertTrue(_call(self.ctx, "absorbImpactSummary", views)["blocked"])
 
     def test_summary_blocks_on_missing_or_changed(self):
         views = _call(self.ctx, "absorbImpactViews", [1], [None], [])
