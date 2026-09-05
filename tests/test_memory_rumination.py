@@ -659,6 +659,48 @@ class RunFlowTests(unittest.TestCase):
         mark_failed.assert_called_once()
         self.assertEqual(result["batches"][0]["cursor_after"], 220)
 
+    def test_already_scheduled_today_claim_reports_skipped_run(self):
+        cursor = dict(self.cursor)
+        claim = {"status": "already_scheduled_today"}
+        with (
+            patch("gateway.memory_rumination._rumination_analysis_configured", return_value=True),
+            patch("gateway.memory_rumination.resolve_rumination_assistant_id", return_value="assistant-1"),
+            patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
+            patch("gateway.memory_rumination._mark_stale_rumination_runs"),
+            patch(
+                "gateway.memory_rumination._fetch_message_ids",
+                side_effect=[list(range(101, 221)), list(range(221, 341))],
+            ),
+            patch("gateway.memory_rumination._fetch_batch_rows", return_value=[]),
+            patch("gateway.memory_rumination._normalize_batch_messages", return_value=[
+                {"id": 101, "conversation_id": "c1", "role": "user",
+                 "content": "消息", "source_time": "2026-09-01T10:00+08:00"},
+            ]),
+            patch("gateway.memory_rumination._load_unfinished_threads", return_value=[]),
+            patch("gateway.memory_rumination._load_own_requests", return_value=[]),
+            patch("gateway.memory_rumination._call_rumination_model") as model,
+            patch("gateway.memory_rumination._rpc_object", return_value=claim),
+            patch("gateway.memory_rumination._set_run_model_name"),
+            patch("gateway.memory_rumination._update_heartbeat"),
+        ):
+            result = run_rumination_digest("rumination_scheduled")
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "already_scheduled_today")
+        self.assertEqual(result["cursor_after"], 100)
+        model.assert_not_called()
+
+    def test_scheduled_if_due_treats_already_scheduled_as_quiet_skip(self):
+        cursor = {"initialized": True, "last_processed_message_id": 100,
+                  "last_scheduled_date": "2026-09-05"}
+        with (
+            patch("gateway.memory_rumination._rumination_analysis_configured", return_value=True),
+            patch("gateway.memory_rumination.resolve_rumination_assistant_id", return_value="assistant-1"),
+            patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
+            patch("gateway.memory_rumination.run_rumination_digest") as run,
+        ):
+            self.assertIsNone(run_rumination_digest_if_due())
+        run.assert_not_called()
+
     def test_below_threshold_creates_skipped_run_without_model_call(self):
         cursor = dict(self.cursor)
         with (
@@ -1217,6 +1259,22 @@ class ModelVisibilityQueryTests(unittest.TestCase):
         self.assertEqual(filters.get("assistant_id"), "assistant-1")
         state_filter = next(call for call in calls if call[0] == "in")
         self.assertEqual(state_filter[2], ("open", "paused"))
+
+    def test_thread_query_has_no_count_cap(self):
+        # 未完成 thread 不做 40 条截断：查询不带 limit，45 条全部返回。
+        fake = _FakeClient({"memories": [_thread(memory_id=i) for i in range(1, 46)]})
+        with patch("gateway.memory_rumination.get_client", return_value=fake):
+            from gateway.memory_rumination import _load_unfinished_threads
+
+            rows = _load_unfinished_threads("assistant-1")
+        self.assertEqual(len(rows), 45)
+        calls = fake.queries["memories"].calls
+        self.assertFalse(
+            any(call[0] == "limit" for call in calls),
+            "unfinished-thread loading must not be truncated",
+        )
+        # 旧 ID 的 thread 同样进入输入（无 id desc 截断丢弃）。
+        self.assertEqual(sorted(row["id"] for row in rows), list(range(1, 46)))
 
     def test_request_query_only_reads_own_rumination_requests(self):
         from gateway.memory_rumination import _load_own_requests

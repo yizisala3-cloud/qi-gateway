@@ -355,5 +355,107 @@ class RuminationAbsorbClosureMigrationContractTests(unittest.TestCase):
         self.assertNotIn("memory_relations", self.executable)
 
 
+class RuminationSnapshotAndScheduleGuardContractTests(unittest.TestCase):
+    """Static contract for 20260908010000_rumination_absorb_snapshot_and_schedule_guard.sql."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = ROOT / "supabase/migrations/20260908010000_rumination_absorb_snapshot_and_schedule_guard.sql"
+        cls.sql = path.read_text(encoding="utf-8")
+        cls.executable = re.sub(r"--[^\n]*", "", cls.sql)
+        cls.claim = cls.executable.split(
+            "create or replace function public.claim_rumination_batch", 1
+        )[1].split("create or replace function public.commit_rumination_batch", 1)[0]
+        cls.commit = cls.executable.split(
+            "create or replace function public.commit_rumination_batch", 1
+        )[1].split("create or replace function public.review_memory_request_v5", 1)[0]
+        cls.v5 = cls.executable.split(
+            "create or replace function public.review_memory_request_v5", 1
+        )[1]
+
+    def test_snapshot_column_and_builder(self):
+        self.assertIn(
+            "add column if not exists absorbed_fast_path_memory_snapshots jsonb",
+            self.executable,
+        )
+        self.assertIn(
+            "create or replace function public.build_absorb_target_snapshot",
+            self.executable,
+        )
+        for field in (
+            "memory_id", "content_hash", "continuity_id", "continuity_type",
+            "memory_key", "thread_state", "evidence_message_ids",
+            "producer_path", "verified", "is_active",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, self.executable)
+
+    def test_commit_persists_server_generated_snapshots(self):
+        self.assertIn("public.build_absorb_target_snapshot(v_absorbed)", self.commit)
+        self.assertIn("absorbed_fast_path_memory_snapshots", self.commit)
+        # 快照在 FOR UPDATE 锁定后生成，模型无从提供。
+        self.assertIn("for update", self.commit)
+        self.assertNotIn("p_absorbed_snapshots", self.commit)
+
+    def test_v5_reverifies_every_target_against_snapshot(self):
+        self.assertIn("memory_rumination_absorb_target_changed", self.v5)
+        for needle in (
+            "v_snapshot->>'content_hash' is distinct from v_absorbed.content_hash",
+            "v_snapshot->>'continuity_id' is distinct from v_absorbed.continuity_id::text",
+            "v_snapshot->>'continuity_type' is distinct from v_absorbed.continuity_type",
+            "v_snapshot->>'memory_key' is distinct from v_absorbed.memory_key",
+            "v_snapshot->>'thread_state' is distinct from v_absorbed.thread_state",
+            "v_snapshot->'evidence_message_ids'",
+            "v_snapshot->>'producer_path' is distinct from v_absorbed.producer_path",
+            "v_snapshot->>'verified' is distinct from v_absorbed.verified",
+            "(v_snapshot->>'is_active')::boolean is distinct from v_absorbed.is_active",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.v5)
+        # merge 主目标保护保持不变。
+        self.assertIn("v_absorbed_id = v_request.related_memory_id", self.v5)
+        self.assertIn("v_absorbed_id = v_memory_id", self.v5)
+        # 复核前重读申请（v4 之后 related_memory_id 才存在）。
+        self.assertIn("where id = v_request.id", self.v5)
+
+    def test_claim_guard_returns_already_scheduled_today(self):
+        self.assertIn("already_scheduled_today", self.claim)
+        self.assertRegex(
+            self.claim,
+            r"last_scheduled_date >= \(now\(\) at time zone 'Asia/Shanghai'\)::date",
+        )
+        self.assertIn("return jsonb_build_object('status', 'already_scheduled_today')", self.claim)
+        # 日期检查与写入在同一把锁内（advisory lock 在函数体前段）。
+        self.assertIn("pg_advisory_xact_lock", self.claim)
+
+    def test_security_model_unchanged(self):
+        for function_name in (
+            "claim_rumination_batch",
+            "commit_rumination_batch",
+            "review_memory_request_v5",
+            "build_absorb_target_snapshot",
+        ):
+            with self.subTest(rpc=function_name):
+                self.assertRegex(
+                    self.executable,
+                    rf"revoke\s+all\s+on\s+function\s+public\.{function_name}"
+                    r"[\s\S]{0,400}?from\s+public,\s*anon,\s*authenticated",
+                )
+                self.assertRegex(
+                    self.executable,
+                    rf"grant\s+execute\s+on\s+function\s+public\.{function_name}"
+                    r"[\s\S]{0,400}?to\s+service_role",
+                )
+
+    def test_chat_messages_and_relations_untouched(self):
+        forbidden = re.findall(
+            r"(insert\s+into|update|delete\s+from|alter\s+table)[\s\S]{0,120}?chat_messages",
+            self.executable,
+            re.IGNORECASE,
+        )
+        self.assertEqual(forbidden, [])
+        self.assertNotIn("memory_relations", self.executable)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2221,6 +2221,409 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
         self.assertEqual(result["op_counts"]["created_memories"], 25)
         self.assertEqual(self._cursor(), 522)
 
+    # -- absorb-target snapshots ----------------------------------------------
+
+    _seed_counter = 0
+
+    def _seed_absorb_request(self, fast_id, extra_ids=(), content=None):
+        type(self)._seed_counter = type(self)._seed_counter + 1
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        body = content or f"反刍整合快速路径记忆的完整episode经历（种子 {type(self)._seed_counter} 号）。"
+        op = {
+            "op": "create_request",
+            "reason": "吸收快速路径记忆",
+            "continuity_type": "episode",
+            "content": body,
+            "title": "手账经历",
+            "continuity_data": EPISODE_DATA,
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(body),
+            "importance": 6, "confidence": 0.8,
+            "embedding": "[0.91,0.91,0.91]",
+            "absorbed_fast_path_memory_ids": [fast_id, *extra_ids],
+        }
+        result = self._commit(run_id, [op])
+        request_id = result["preview"][0]["request_id"]
+        return request_id
+
+    def _current_memory_row(self, memory_id):
+        row = self._query_row(
+            "select content_hash, continuity_id::text, continuity_type, memory_key, "
+            "thread_state, evidence_message_ids, producer_path, verified, is_active "
+            "from public.memories where id = %s",
+            (memory_id,),
+        )
+        return {
+            "content_hash": row[0], "continuity_id": row[1],
+            "continuity_type": row[2], "memory_key": row[3],
+            "thread_state": row[4], "evidence_message_ids": list(row[5]),
+            "producer_path": row[6], "verified": row[7], "is_active": row[8],
+        }
+
+    def _snapshot_for(self, request_id, memory_id):
+        snapshots = self._query_one(
+            "select absorbed_fast_path_memory_snapshots from public.memory_requests "
+            "where id = %s",
+            (request_id,),
+        )
+        for snapshot in snapshots:
+            if snapshot["memory_id"] == memory_id:
+                return snapshot
+        return None
+
+    def test_request_stores_server_generated_snapshots(self):
+        fast_id = self._fast_path_moment(
+            "快速路径片段：双方约定写旅行手账草稿。", "21111111-1111-1111-1111-1111111113a1"
+        )
+        request_id = self._seed_absorb_request(fast_id)
+        snapshot = self._snapshot_for(request_id, fast_id)
+        self.assertIsNotNone(snapshot)
+        current = self._current_memory_row(fast_id)
+        for field in (
+            "content_hash", "continuity_id", "continuity_type", "memory_key",
+            "thread_state", "producer_path", "verified",
+        ):
+            self.assertEqual(snapshot[field], current[field], field)
+        self.assertEqual(snapshot["evidence_message_ids"], current["evidence_message_ids"])
+        self.assertTrue(snapshot["is_active"])
+        self.assertEqual(snapshot["memory_id"], fast_id)
+
+    def _approve_absorb_request(self, request_id, content):
+        return self._query_one(
+            "select public.review_memory_request_v5(%s, 'approve', %s, %s, %s, %s, %s, "
+            "'tester', null, null, null, null, null, null, null, null, null)",
+            (request_id, content, "手账经历", "{episode}", 6, _sha256(content)),
+        )
+
+    def _assert_absorb_rejected(self, request_id, fast_id):
+        # 审核被拒绝：无新结果记忆、目标保持 active、无 handoff、申请仍 pending。
+        self.assertTrue(self._query_one(
+            "select is_active from public.memories where id = %s", (fast_id,),
+        ))
+        self.assertEqual(self._query_one(
+            "select status from public.memory_requests where id = %s",
+            (request_id,),
+        ), "pending")
+        self.assertIsNone(self._query_one(
+            "select memory_id from public.memory_requests where id = %s",
+            (request_id,),
+        ))
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_path_handoffs where request_id = %s",
+            (request_id,),
+        ), 0)
+
+    def test_snapshot_rejects_edited_content(self):
+        fast_id = self._fast_path_moment(
+            "快速路径片段：双方约定写旅行手账草稿二。", "21111111-1111-1111-1111-1111111113b1"
+        )
+        request_id = self._seed_absorb_request(fast_id)
+        self.conn.execute(
+            "update public.memories set content = %s, content_hash = %s where id = %s",
+            (
+                "快速路径片段：双方约定写旅行手账草稿二（正文已被编辑）。",
+                _sha256("快速路径片段：双方约定写旅行手账草稿二（正文已被编辑）。"),
+                fast_id,
+            ),
+        )
+        with self.assertRaises(Exception) as raised:
+            self._approve_absorb_request(
+                request_id, "反刍整合快速路径记忆的完整episode经历。"
+            )
+        self.assertIn("memory_rumination_absorb_target_changed", str(raised.exception))
+        self._assert_absorb_rejected(request_id, fast_id)
+
+    def test_snapshot_rejects_type_key_state_and_evidence_changes(self):
+        cases = {
+            # moment → inside_joke：合法的类型变更（同步更新结构数据）。
+            "continuity_type": (
+                "update public.memories set continuity_type = 'inside_joke', "
+                "continuity_data = '{\"origin\": \"o\", \"trigger_phrases\": "
+                "[\"t\"], \"shared_meaning\": \"s\", \"reinforcement_count\": 0}'::jsonb "
+                "where id = %s"
+            ),
+            "memory_key": "update public.memories set memory_key = 'topic.reassigned' where id = %s",
+            "evidence_message_ids": (
+                "update public.memories set evidence_message_ids = '{999}'::bigint[] "
+                "where id = %s"
+            ),
+        }
+        for field, statement in cases.items():
+            with self.subTest(field=field):
+                # 每个子用例使用独立目标。
+                fast_id = self._fast_path_moment(
+                    f"快速路径片段：快照复核用例（{field}）的正文。",
+                    self._new_fixture_uuid(field),
+                )
+                request_id = self._seed_absorb_request(
+                    fast_id,
+                    content=f"反刍整合快速路径记忆的episode经历（{field} 用例）。",
+                )
+                self.conn.execute(statement, (fast_id,))
+                with self.assertRaises(Exception) as raised:
+                    self._approve_absorb_request(
+                        request_id, f"反刍整合快速路径记忆的episode经历（{field} 用例通过稿）。"
+                    )
+                self.assertIn(
+                    "memory_rumination_absorb_target_changed", str(raised.exception),
+                )
+                self._assert_absorb_rejected(request_id, fast_id)
+
+    def test_snapshot_rejects_thread_state_change(self):
+        # thread_state 变化必须作用在 thread 目标上：seed 一个 fast_path thread。
+        digest = hashlib.md5(b"thread-state-change").hexdigest()
+        uuid = f"21111111-1111-1111-1111-1111111116{digest[:2]}"
+        content = "快速路径线索：约定一起补完旅行手账的后续。".replace("的后续", "")
+        self.conn.execute(
+            "insert into public.memory_continuity_objects (continuity_id, assistant_id) "
+            "values (%s::uuid, 'a-rumination') on conflict (continuity_id) do nothing",
+            (uuid,),
+        )
+        self.conn.execute(
+            "insert into public.memories ("
+            "content, title, tags, importance, embedding, source, verified, is_active, "
+            "assistant_id, confidence, content_hash, "
+            "continuity_id, continuity_schema_version, continuity_data, "
+            "continuity_type, thread_state, evidence_message_ids, "
+            "producer_path, maintained_by "
+            ") values ("
+            "%s, '快速路径线索', '{thread}', 5, '[0.5,0.5,0.5]', 'daily_digest', "
+            "'verified', true, 'a-rumination', 0.9, %s, "
+            "%s::uuid, 1, "
+            "'{\"open_question\": \"手账后续是否推进\", \"current_state\": \"约定补完手账\"}'::jsonb, "
+            "'thread', 'open', '{503}', "
+            "'fast_path', 'fast_path'"
+            ") on conflict (content_hash) do nothing",
+            (content, _sha256(content), uuid),
+        )
+        fast_id = self._active_memory(
+            "content_hash = %s", (_sha256(content),),
+        )
+        self.assertIsNotNone(fast_id)
+        request_id = self._seed_absorb_request(
+            fast_id, content="反刍吸收快速路径线索的episode经历（thread_state 用例）。",
+        )
+        self.conn.execute(
+            "update public.memories set thread_state = 'paused' where id = %s",
+            (fast_id,),
+        )
+        with self.assertRaises(Exception) as raised:
+            self._approve_absorb_request(
+                request_id, "反刍吸收快速路径线索的episode经历（thread_state 用例通过稿）。"
+            )
+        self.assertIn(
+            "memory_rumination_absorb_target_changed", str(raised.exception),
+        )
+        self._assert_absorb_rejected(request_id, fast_id)
+
+    def _new_fixture_uuid(self, tag):
+        import hashlib as _hashlib
+
+        digest = _hashlib.md5(tag.encode("utf-8")).hexdigest()
+        return f"21111111-1111-1111-1111-1111111114{digest[:2]}"
+
+    def test_unchanged_targets_approve_and_handoff(self):
+        fast_one = self._fast_path_moment(
+            "快速路径片段：未变化目标一。", "21111111-1111-1111-1111-1111111115a1"
+        )
+        fast_two = self._fast_path_moment(
+            "快速路径片段：未变化目标二。", "21111111-1111-1111-1111-1111111115a2"
+        )
+        body = "反刍整合快速路径记忆的完整episode经历（未变化目标用例）。"
+        request_id = self._seed_absorb_request(fast_one, extra_ids=(fast_two,), content=body)
+        self._approve_absorb_request(request_id, body)
+        result_id = self._query_one(
+            "select memory_id from public.memory_requests where id = %s",
+            (request_id,),
+        )
+        self.assertIsNotNone(result_id)
+        self.assertEqual(self._query_row(
+            "select is_active, producer_path from public.memories where id = %s",
+            (result_id,),
+        ), (True, "rumination"))
+        for fast_id in (fast_one, fast_two):
+            self.assertFalse(self._query_one(
+                "select is_active from public.memories where id = %s", (fast_id,),
+            ))
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_path_handoffs where request_id = %s",
+            (request_id,),
+        ), 2)
+
+    def test_multi_target_any_change_rolls_back_all(self):
+        fast_ok = self._fast_path_moment(
+            "快速路径片段：多目标中未变化的目标。", "21111111-1111-1111-1111-1111111115b1"
+        )
+        fast_changed = self._fast_path_moment(
+            "快速路径片段：多目标中被编辑的目标。", "21111111-1111-1111-1111-1111111115b2"
+        )
+        request_id = self._seed_absorb_request(
+            fast_ok, extra_ids=(fast_changed,),
+        )
+        self.conn.execute(
+            "update public.memories set content = %s, content_hash = %s where id = %s",
+            (
+                "快速路径片段：多目标中被编辑的目标（已编辑）。",
+                _sha256("快速路径片段：多目标中被编辑的目标（已编辑）。"),
+                fast_changed,
+            ),
+        )
+        with self.assertRaises(Exception):
+            self._approve_absorb_request(
+                request_id, "反刍整合快速路径记忆的完整episode经历。"
+            )
+        # 未变化目标也未停用，无部分 handoff。
+        self.assertTrue(self._query_one(
+            "select is_active from public.memories where id = %s", (fast_ok,),
+        ))
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_path_handoffs where request_id = %s",
+            (request_id,),
+        ), 0)
+
+    def test_merge_related_target_still_not_double_processed(self):
+        target_id = self._fast_path_moment(
+            "快速路径片段：merge 主目标。", "21111111-1111-1111-1111-1111111115c1"
+        )
+        request_id = self._seed_absorb_request(target_id)
+        merged_content = "人工合并后的最终正文。"
+        self._query_one(
+            "select public.review_memory_request_v5(%s, 'merge', %s, %s, %s, %s, %s, "
+            "'tester', null, null, null, %s, null, null, null, null, null)",
+            (
+                request_id, merged_content, "手账经历", "{episode}", 6,
+                _sha256(merged_content), target_id,
+            ),
+        )
+        result_memory_id = self._query_one(
+            "select memory_id from public.memory_requests where id = %s",
+            (request_id,),
+        )
+        self.assertEqual(self._query_row(
+            "select verified, is_active from public.memories where id = %s",
+            (result_memory_id,),
+        ), ("verified", True))
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_path_handoffs "
+            "where request_id = %s and rumination_memory_id = fast_path_memory_id",
+            (request_id,),
+        ), 0)
+
+    # -- schedule guard ---------------------------------------------------------
+
+    def test_scheduled_claim_guard_is_database_authoritative(self):
+        self._set_cursor(initialized=True, value=520)
+        self.conn.execute(
+            "update public.memory_rumination_cursors set last_scheduled_date = null "
+            "where assistant_id = %s", (ASSISTANT,),
+        )
+        first = self._call("claim_rumination_batch", {
+            "p_assistant_id": ASSISTANT,
+            "p_trigger": "rumination_scheduled",
+            "p_first_message_id": 521,
+            "p_last_message_id": 522,
+            "p_message_count": 2,
+            "p_first_batch": False,
+        })
+        self.assertEqual(first["status"], "claimed")
+        # 快速失败后（run 失败但游标不动），第二个 scheduled claim 仍被挡。
+        self.conn.execute(
+            "update public.memory_digest_runs set status = 'failed', "
+            "error_code = 'model_http_error' where id = %s", (first["run_id"],),
+        )
+        second = self._call("claim_rumination_batch", {
+            "p_assistant_id": ASSISTANT,
+            "p_trigger": "rumination_scheduled",
+            "p_first_message_id": 521,
+            "p_last_message_id": 522,
+            "p_message_count": 2,
+            "p_first_batch": False,
+        })
+        self.assertEqual(second["status"], "already_scheduled_today")
+        # 同日 manual 不受限。
+        manual = self._call("claim_rumination_batch", {
+            "p_assistant_id": ASSISTANT,
+            "p_trigger": "rumination_manual",
+            "p_first_message_id": 521,
+            "p_last_message_id": 522,
+            "p_message_count": 2,
+            "p_first_batch": False,
+        })
+        self.assertEqual(manual["status"], "claimed")
+        self.conn.execute(
+            "update public.memory_digest_runs set status = 'failed', "
+            "error_code = 'test_release' where id = %s", (manual["run_id"],),
+        )
+        # already_scheduled_today 不创建多余 run。
+        scheduled_runs = self._query_one(
+            "select count(*) from public.memory_digest_runs where pipeline = 'rumination' "
+            "and trigger = 'rumination_scheduled' and status in ('claimed', 'running')"
+        )
+        self.assertEqual(scheduled_runs, 0)
+        # 次日 scheduled 可以执行。
+        self.conn.execute(
+            "update public.memory_rumination_cursors set last_scheduled_date = "
+            "(now() at time zone 'Asia/Shanghai')::date - 1 where assistant_id = %s",
+            (ASSISTANT,),
+        )
+        next_day = self._call("claim_rumination_batch", {
+            "p_assistant_id": ASSISTANT,
+            "p_trigger": "rumination_scheduled",
+            "p_first_message_id": 521,
+            "p_last_message_id": 522,
+            "p_message_count": 2,
+            "p_first_batch": False,
+        })
+        self.assertEqual(next_day["status"], "claimed")
+
+    # -- unfinished-thread visibility -------------------------------------------
+
+    def test_unfinished_threads_beyond_forty_all_visible(self):
+        # 46 条 open/paused thread：全部满足加载谓词，无 40 条截断。
+        for index in range(46):
+            digest = hashlib.md5(f"vis{index}".encode()).hexdigest()
+            uuid = (
+                f"4{digest[:7]}-1111-1111-1111-{digest[:12]}"
+            )
+            self.conn.execute(
+                "insert into public.memory_continuity_objects (continuity_id, assistant_id) "
+                "values (%s::uuid, 'a-rumination') on conflict (continuity_id) do nothing",
+                (uuid,),
+            )
+            self.conn.execute(
+                "insert into public.memories ("
+                "content, title, tags, importance, embedding, source, verified, is_active, "
+                "assistant_id, confidence, content_hash, memory_key, "
+                "continuity_id, continuity_schema_version, continuity_data, "
+                "continuity_type, thread_state, evidence_message_ids "
+                ") values ("
+                "%s, '可见性夹具', '{thread}', 5, '[0.4,0.4,0.4]', 'rumination', "
+                "'verified', true, 'a-rumination', 0.9, %s, %s, "
+                "%s::uuid, 1, "
+                "'{\"open_question\": \"可见性夹具\", \"current_state\": \"可见性夹具状态\"}'::jsonb, "
+                "'thread', 'open', '{501}'"
+                ") on conflict (content_hash) do nothing",
+                (
+                    f"可见性夹具线程 {index}：验证未完成 thread 全部进入模型输入。",
+                    _sha256(f"可见性夹具线程 {index}：验证未完成 thread 全部进入模型输入。"),
+                    f"topic.vis.{index}", uuid,
+                ),
+            )
+        visible = self._query_one(
+            "select count(*) from public.memories where is_active and verified = 'verified' "
+            "and continuity_type = 'thread' and thread_state in ('open', 'paused') "
+            "and assistant_id = 'a-rumination'"
+        )
+        self.assertGreaterEqual(visible, 46)
+        # resolved thread 仍被排除。
+        resolved = self._query_one(
+            "select count(*) from public.memories where is_active and verified = 'verified' "
+            "and continuity_type = 'thread' and thread_state in ('open', 'paused') "
+            "and assistant_id = 'a-rumination' and thread_state = 'resolved'"
+        )
+        self.assertEqual(resolved, 0)
+
     # -- recall -------------------------------------------------------------
 
     def test_resolved_thread_exits_default_recall_but_stays_queryable(self):

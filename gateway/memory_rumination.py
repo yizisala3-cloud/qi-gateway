@@ -59,7 +59,6 @@ RUMINATION_BATCH_MAX = 120
 RUMINATION_BATCH_MIN = 60
 MAX_EVIDENCE_IDS = 8
 STALE_RUN_MINUTES = 30
-THREAD_INPUT_LIMIT = 40
 REQUEST_INPUT_LIMIT = 50
 
 OPERATION_TYPES = frozenset({
@@ -364,7 +363,9 @@ def _normalize_batch_messages(rows: list[dict[str, Any]]) -> list[dict[str, Any]
 def _load_unfinished_threads(assistant_id: str) -> list[dict[str, Any]]:
     """正式未完成 thread（open/paused）：快速路径与反刍产物都在内。
 
-    resolved thread 正文与其他五类正文绝不进入模型输入；这里只查 thread。
+    加载当前 assistant 下全部 verified、active、open/paused 的 thread，不按
+    创建时间或 ID 截断——较旧但仍未完成的 thread 不得永久不可见。resolved/
+    dissolved/abandoned thread 与其他五类正文绝不进入模型输入。
     """
     response = (
         _client().table("memories")
@@ -378,8 +379,7 @@ def _load_unfinished_threads(assistant_id: str) -> list[dict[str, Any]]:
         .eq("verified", "verified")
         .eq("is_active", True)
         .in_("thread_state", ["open", "paused"])
-        .order("id", desc=True)
-        .limit(THREAD_INPUT_LIMIT)
+        .order("id")
         .execute()
     )
     return response.data or []
@@ -1335,7 +1335,10 @@ def run_rumination_batch(
         raise RuminationPipelineError(
             "already_running", "Another rumination batch is already running", 409,
         )
-    if claim.get("status") in {"already_initialized", "not_initialized", "batch_stale"}:
+    if claim.get("status") in {
+        "already_initialized", "not_initialized", "batch_stale",
+        "already_scheduled_today",
+    }:
         return {"status": "skipped", "reason": claim.get("status"), "cursor": claim.get("cursor")}
     if claim.get("status") != "claimed":
         raise RuminationPipelineError(
@@ -1518,6 +1521,9 @@ def run_rumination_digest(trigger: str = "rumination_manual") -> dict[str, Any]:
             results.append(result)
 
     failed = [item for item in results if item.get("status") == "failed"]
+    skipped_only = results and all(
+        item.get("status") == "skipped" for item in results
+    )
     cursor_after = next(
         (
             item["cursor_after"]
@@ -1527,7 +1533,10 @@ def run_rumination_digest(trigger: str = "rumination_manual") -> dict[str, Any]:
         cursor_id,
     )
     return {
-        "status": "failed" if failed else "succeeded",
+        "status": (
+            "failed" if failed else ("skipped" if skipped_only else "succeeded")
+        ),
+        "reason": "already_scheduled_today" if skipped_only else None,
         "trigger": trigger,
         "assistant_id": assistant_id,
         "batch_count": len(results),
@@ -1576,7 +1585,12 @@ def run_rumination_digest_if_due() -> dict[str, Any] | None:
             return None
         if now_cst.hour < max(0, min(23, int(cfg.RUMINATION_DAILY_HOUR or 6))):
             return None
-        return run_rumination_digest("rumination_scheduled")
+        result = run_rumination_digest("rumination_scheduled")
+        if result and result.get("status") == "skipped":
+            # 当天自动尝试已被数据库判定消耗（或同日已在运行）：
+            # 正常静默返回，不算失败。
+            return None
+        return result
     except RuminationPipelineError as exc:
         if exc.code in {"already_running", "no_usable_messages"}:
             return None

@@ -6,3 +6,4 @@ python-dotenv==1.1.0
 jieba==0.42.1
 mcp==2.0.0
 eventide @ git+https://github.com/chuli1122/Eventide.git
+quickjs>=1.19 ; python_version >= "3.8"  # admin JS pure-function tests

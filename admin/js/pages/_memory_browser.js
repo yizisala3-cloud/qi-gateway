@@ -5,6 +5,7 @@ import {
   toast, modal, confirm, delegate, icon, fmtDate, createDetailPanel,
 } from '../ui.js?v=20260903-retrotime1';
 import { openMemoryForm } from './_memory_form.js?v=20260903-retrotime1';
+import { absorbTargetViews, absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20260905-absorb1';
 
 export const ASSET_VERSION = '20260903-retrotime1';
 
@@ -19,7 +20,7 @@ const TIME_PRECISION_LABELS = {
   minute: '精确到分钟', hour: '精确到小时', day: '精确到日期', approximate: '大概时间', unknown: '时间未知',
 };
 const MEMORY_FIELDS = 'id,title,content,tags,heat,importance,source,verified,is_active,last_recalled_at,recall_count,created_at,memory_key,supersedes_memory_id,superseded_by_memory_id,superseded_at,continuity_id,continuity_type,continuity_schema_version,continuity_data,source_type,thread_state,evidence_start_time,evidence_end_time,evidence_message_ids,source_time,memory_time,time_precision,evidence_time_precision,recall_scene,recall_tags';
-const REQUEST_FIELDS = 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,memory_key,update_mode,related_memory_id,related_request_id,continuity_id,continuity_type,continuity_schema_version,continuity_data,thread_state,confidence,evidence_message_ids,source_time,memory_time,time_precision,digest_run_id,dedupe_state,dedupe_reason,evidence_time_precision,recall_scene,recall_tags,producer_path,absorbed_fast_path_memory_ids,created_at,reviewed_at,reviewed_by,review_note';
+const REQUEST_FIELDS = 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,memory_key,update_mode,related_memory_id,related_request_id,continuity_id,continuity_type,continuity_schema_version,continuity_data,thread_state,confidence,evidence_message_ids,source_time,memory_time,time_precision,digest_run_id,dedupe_state,dedupe_reason,evidence_time_precision,recall_scene,recall_tags,producer_path,absorbed_fast_path_memory_ids,absorbed_fast_path_memory_snapshots,created_at,reviewed_at,reviewed_by,review_note';
 
 export function continuityTypeLabel(value) {
   return CONTINUITY_TYPE_LABELS[value] || value || '未分类历史数据';
@@ -149,13 +150,12 @@ async function hydrateAbsorbTargets(root, request) {
       return result.data?.[0] || null;
     } catch { return null; }
   }));
-  const items = rows.map((m) => {
-    if (!m) {
-      return `<div class="kv"><span class="k">memory</span><span class="v" style="color:var(--red)">#${esc(id)} · 无法读取（可能已变化，通过将被拒绝）</span></div>`;
-    }
-    const content = String(m.content || '');
-    const snippet = content.length > 60 ? `${content.slice(0, 60)}…` : content;
-    return `<div class="kv"><span class="k">memory #${esc(m.id)}</span><span class="v">${esc(m.continuity_type || '-')} · ${esc(m.title || '(未命名)')} · ${esc(snippet)}${m.is_active ? '' : ' · 已非 active（通过将被拒绝）'}</span></div>`;
+  const views = absorbImpactViews(
+    ids, rows, request.absorbed_fast_path_memory_snapshots,
+  );
+  const items = views.map((view) => {
+    const marker = view.changed ? ' · <strong>目标已变化，本次通过会被拒绝</strong>' : '';
+    return `<div class="kv"><span class="k">memory</span><span class="v"${view.ok && !view.changed ? '' : ' style="color:var(--red)"'}>${esc(view.label)}${marker}</span></div>`;
   });
   const list = box.querySelector('.absorb-target-list');
   if (list) list.innerHTML = items.join('');
@@ -723,22 +723,22 @@ export function createMemoryBrowser({
         return result.data?.[0] || null;
       } catch { return null; }
     }));
-    const missing = rows.some((m) => !m || !m.is_active);
-    const lines = ids.map((id, index) => {
-      const m = rows[index];
-      if (!m) return `#${esc(id)} · 无法读取（通过将被拒绝）`;
-      const content = String(m.content || '');
-      const snippet = content.length > 40 ? `${content.slice(0, 40)}…` : content;
-      return `#${esc(m.id)} ${esc(m.continuity_type || '-')} · ${esc(m.title || '(未命名)')} · ${esc(snippet)}${m.is_active ? '' : ' · 已非 active'}`;
+    const views = absorbImpactViews(
+      ids, rows, request.absorbed_fast_path_memory_snapshots,
+    );
+    const summary = absorbImpactSummary(views);
+    const lines = views.map((view) => {
+      const marker = view.changed ? ' · <strong>目标已变化，本次通过会被拒绝</strong>' : '';
+      return `${esc(view.label)}${marker}`;
     });
     impact.innerHTML = `
       <div class="field">
         <label>影响范围：通过后将停用以下 ${ids.length} 条快速路径正式记忆</label>
         <div class="kv-block">${lines.join('<br>')}</div>
-        ${missing ? '<div class="disabled-note" style="margin-top:4px">部分目标已变化或不再可用：服务端将拒绝本次通过，不会部分生效。</div>' : ''}
+        ${summary.blocked ? '<div class="disabled-note" style="margin-top:4px">部分目标已变化或不再可用：服务端将拒绝本次通过，不会部分生效。</div>' : ''}
       </div>`;
-    confirmBox.innerHTML = missing
-      ? `<div class="banner banner-danger" style="margin-bottom:8px"><span class="banner-ico">${icon('alert')}</span><div>拟交接目标已变化，通过操作会被服务端整笔拒绝。</div></div>`
+    confirmBox.innerHTML = summary.blocked
+      ? `<div class="banner banner-danger" style="margin-bottom:8px"><span class="banner-ico">${icon('alert')}</span><div>拟交接目标已变化或不再可用，通过操作会被服务端整笔拒绝。</div></div>`
       : '';
   }
 

@@ -81,8 +81,11 @@ class MemoryBrowserAbsorptionContractTests(unittest.TestCase):
         self.assertIn("通过后停用", self.browser)
 
     def test_target_changes_surface_before_submit(self):
-        self.assertIn("通过将被拒绝", self.browser)
-        self.assertIn("已非 active", self.browser)
+        # 影响范围提示改由纯函数视图标记，不再使用固定字符串拼接。
+        self.assertIn("absorbImpactViews", self.browser)
+        self.assertIn("view.changed", self.browser)
+        self.assertIn("本次通过会被拒绝", self.browser)
+        self.assertIn("absorbImpactSummary", self.browser)
 
     def test_no_emoji_icons(self):
         self.assertIsNone(EMOJI_PATTERN.search(self.browser))
