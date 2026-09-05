@@ -2770,6 +2770,78 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
         self.assertIn("memory_rumination_absorb_target_changed", str(raised.exception))
         self._assert_absorb_rejected(request_id, fast_id)
 
+    # -- finish RPC contract -------------------------------------------------
+
+    def _create_execution(self):
+        """Create a running scheduled execution row and return its id."""
+        return self._query_one(
+            "insert into public.memory_rumination_scheduled_executions "
+            "(assistant_id, execution_date, status) "
+            "values ('a-rumination', (now() at time zone 'Asia/Shanghai')::date, 'running') "
+            "on conflict (assistant_id, execution_date) do update set status = 'running' "
+            "returning id"
+        )
+
+    def test_finish_rpc_returns_jsonb_with_changed_true(self):
+        exec_id = self._create_execution()
+        cursor_before = self._cursor()
+        result = self._query_row(
+            "select result->>'status', (result->>'execution_id')::bigint, "
+            "(result->>'changed')::boolean "
+            "from (select public.finish_rumination_scheduled_execution(%s) as result) sub",
+            (exec_id,),
+        )
+        self.assertEqual(result[0], "finished")
+        self.assertEqual(result[1], exec_id)
+        self.assertTrue(result[2])
+        self.assertEqual(self._query_one(
+            "select status from public.memory_rumination_scheduled_executions where id = %s",
+            (exec_id,),
+        ), "finished")
+        # finish 不修改消息游标
+        self.assertEqual(self._cursor(), cursor_before)
+
+    def test_finish_rpc_idempotent_returns_changed_false(self):
+        exec_id = self._create_execution()
+        self._query_one(
+            "select public.finish_rumination_scheduled_execution(%s)", (exec_id,),
+        )
+        result = self._query_row(
+            "select result->>'status', (result->>'changed')::boolean "
+            "from (select public.finish_rumination_scheduled_execution(%s) as result) sub",
+            (exec_id,),
+        )
+        self.assertEqual(result[0], "finished")
+        self.assertFalse(result[1])
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_rumination_scheduled_executions "
+            "where id = %s and status = 'finished'",
+            (exec_id,),
+        ), 1)
+
+    def test_finish_rpc_not_found_raises_stable_error(self):
+        with self.assertRaises(Exception) as raised:
+            self._query_one(
+                "select public.finish_rumination_scheduled_execution(999999)",
+            )
+        self.assertIn(
+            "memory_rumination_scheduled_execution_not_found", str(raised.exception),
+        )
+
+    def test_finish_rpc_does_not_touch_memories_or_requests_or_cursor(self):
+        exec_id = self._create_execution()
+        memories_before = self._query_one("select count(*) from public.memories")
+        requests_before = self._query_one("select count(*) from public.memory_requests")
+        self._query_one(
+            "select public.finish_rumination_scheduled_execution(%s)", (exec_id,),
+        )
+        self.assertEqual(self._query_one("select count(*) from public.memories"), memories_before)
+        self.assertEqual(self._query_one("select count(*) from public.memory_requests"), requests_before)
+        self.assertEqual(self._query_one(
+            "select last_processed_message_id from public.memory_rumination_cursors "
+            "where assistant_id = %s", (ASSISTANT,),
+        ), self._cursor())
+
     # -- recall -------------------------------------------------------------
 
     def test_resolved_thread_exits_default_recall_but_stays_queryable(self):

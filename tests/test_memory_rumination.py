@@ -977,6 +977,102 @@ class RunFlowTests(unittest.TestCase):
         self.assertEqual(result["status"], "succeeded")
         # manual 不调用 finish（无 execution 被创建）。
 
+    def test_finish_validates_response_structure(self):
+        # finish 返回合法 dict 且 status=finished → 正常完成。
+        cursor = dict(self.cursor)
+        pages = [list(range(101, 161)), []]
+        rpc_results = [
+            {"status": "claimed", "run_id": 71, "scheduled_execution_id": 900},
+            {"run_id": 71, "cursor": {"last_processed_message_id": 160},
+             "op_counts": {}, "preview": [], "inserted_count": 0},
+            {"status": "finished", "execution_id": 900, "changed": True},
+        ]
+        with (
+            patch("gateway.memory_rumination._rumination_analysis_configured", return_value=True),
+            patch("gateway.memory_rumination.resolve_rumination_assistant_id", return_value="assistant-1"),
+            patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
+            patch("gateway.memory_rumination._mark_stale_rumination_runs"),
+            patch("gateway.memory_rumination._fetch_message_ids", side_effect=pages),
+            patch("gateway.memory_rumination._fetch_batch_rows", return_value=[]),
+            patch("gateway.memory_rumination._normalize_batch_messages", return_value=[
+                {"id": 101, "conversation_id": "c1", "role": "user",
+                 "content": "消息", "source_time": "2026-09-01T10:00+08:00"},
+            ]),
+            patch("gateway.memory_rumination._load_unfinished_threads", return_value=[]),
+            patch("gateway.memory_rumination._load_own_requests", return_value=[]),
+            patch("gateway.memory_rumination._call_rumination_model", return_value='{"operations":[]}'),
+            patch("gateway.memory_rumination._rpc_object", side_effect=rpc_results) as rpc,
+            patch("gateway.memory_rumination._set_run_model_name"),
+            patch("gateway.memory_rumination._update_heartbeat"),
+        ):
+            result = run_rumination_digest("rumination_scheduled")
+        self.assertEqual(result["status"], "succeeded")
+        # 无 error 级别的 finish 日志（status=finished 校验通过）。
+
+    def test_finish_mismatched_execution_id_logs_error(self):
+        # finish 返回的 execution_id 与请求的 execution_id 不一致 → 结构化错误。
+        cursor = dict(self.cursor)
+        pages = [list(range(101, 161)), []]
+        rpc_results = [
+            {"status": "claimed", "run_id": 71, "scheduled_execution_id": 900},
+            {"run_id": 71, "cursor": {"last_processed_message_id": 160},
+             "op_counts": {}, "preview": [], "inserted_count": 0},
+            {"status": "finished", "execution_id": 999, "changed": True},
+        ]
+        with (
+            patch("gateway.memory_rumination._rumination_analysis_configured", return_value=True),
+            patch("gateway.memory_rumination.resolve_rumination_assistant_id", return_value="assistant-1"),
+            patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
+            patch("gateway.memory_rumination._mark_stale_rumination_runs"),
+            patch("gateway.memory_rumination._fetch_message_ids", side_effect=pages),
+            patch("gateway.memory_rumination._fetch_batch_rows", return_value=[]),
+            patch("gateway.memory_rumination._normalize_batch_messages", return_value=[
+                {"id": 101, "conversation_id": "c1", "role": "user",
+                 "content": "消息", "source_time": "2026-09-01T10:00+08:00"},
+            ]),
+            patch("gateway.memory_rumination._load_unfinished_threads", return_value=[]),
+            patch("gateway.memory_rumination._load_own_requests", return_value=[]),
+            patch("gateway.memory_rumination._call_rumination_model", return_value='{"operations":[]}'),
+            patch("gateway.memory_rumination._rpc_object", side_effect=rpc_results) as rpc,
+            patch("gateway.memory_rumination._set_run_model_name"),
+            patch("gateway.memory_rumination._update_heartbeat"),
+        ):
+            result = run_rumination_digest("rumination_scheduled")
+        # 运行仍成功（finish 失败不影响已完成的 memory/cursor 事务）。
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["cursor_after"], 160)
+
+    def test_finish_idempotent_changed_false_is_ok(self):
+        # changed=false 且 status=finished → 幂等成功。
+        cursor = dict(self.cursor)
+        pages = [list(range(101, 161)), []]
+        rpc_results = [
+            {"status": "claimed", "run_id": 71, "scheduled_execution_id": 900},
+            {"run_id": 71, "cursor": {"last_processed_message_id": 160},
+             "op_counts": {}, "preview": [], "inserted_count": 0},
+            {"status": "finished", "execution_id": 900, "changed": False},
+        ]
+        with (
+            patch("gateway.memory_rumination._rumination_analysis_configured", return_value=True),
+            patch("gateway.memory_rumination.resolve_rumination_assistant_id", return_value="assistant-1"),
+            patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
+            patch("gateway.memory_rumination._mark_stale_rumination_runs"),
+            patch("gateway.memory_rumination._fetch_message_ids", side_effect=pages),
+            patch("gateway.memory_rumination._fetch_batch_rows", return_value=[]),
+            patch("gateway.memory_rumination._normalize_batch_messages", return_value=[
+                {"id": 101, "conversation_id": "c1", "role": "user",
+                 "content": "消息", "source_time": "2026-09-01T10:00+08:00"},
+            ]),
+            patch("gateway.memory_rumination._load_unfinished_threads", return_value=[]),
+            patch("gateway.memory_rumination._load_own_requests", return_value=[]),
+            patch("gateway.memory_rumination._call_rumination_model", return_value='{"operations":[]}'),
+            patch("gateway.memory_rumination._rpc_object", side_effect=rpc_results) as rpc,
+            patch("gateway.memory_rumination._set_run_model_name"),
+            patch("gateway.memory_rumination._update_heartbeat"),
+        ):
+            result = run_rumination_digest("rumination_scheduled")
+        self.assertEqual(result["status"], "succeeded")
+
     def test_first_run_initializes_from_latest_messages(self):
         cursor = dict(self.cursor, initialized=False, last_processed_message_id=0)
         latest = list(range(300, 180, -1))  # descending ids

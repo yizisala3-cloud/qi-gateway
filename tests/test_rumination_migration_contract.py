@@ -626,5 +626,109 @@ class RuminationScheduledExecutionContractTests(unittest.TestCase):
         self.assertNotIn("memory_relations", self.executable)
 
 
+class RuminationFinishRpcContractTests(unittest.TestCase):
+    """Static contract for 20260910010000_rumination_finish_rpc_contract.sql."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = ROOT / "supabase/migrations/20260910010000_rumination_finish_rpc_contract.sql"
+        cls.sql = path.read_text(encoding="utf-8")
+        cls.executable = re.sub(r"--[^\n]*", "", cls.sql)
+
+    def test_returns_jsonb_not_void(self):
+        self.assertIn("returns jsonb", self.executable)
+        self.assertNotIn("returns void", self.executable)
+
+    def test_response_contains_status_execution_id_changed(self):
+        for field in ("status", "execution_id", "changed"):
+            self.assertIn(field, self.executable)
+
+    def test_security_definer_fixed_search_path(self):
+        self.assertIn("security definer", self.executable)
+        self.assertIn("set search_path to 'public'", self.executable)
+
+    def test_service_role_only(self):
+        self.assertRegex(
+            self.executable,
+            r"revoke\s+all\s+on\s+function\s+public\.finish_rumination_scheduled_execution"
+            r"[\s\S]{0,200}?from\s+public,\s*anon,\s*authenticated",
+        )
+        self.assertRegex(
+            self.executable,
+            r"grant\s+execute\s+on\s+function\s+public\.finish_rumination_scheduled_execution"
+            r"[\s\S]{0,200}?to\s+service_role",
+        )
+
+    def test_stable_error_for_missing_execution(self):
+        self.assertIn("memory_rumination_scheduled_execution_not_found", self.executable)
+
+    def test_old_void_signature_dropped(self):
+        self.assertIn(
+            "drop function if exists public.finish_rumination_scheduled_execution(bigint)",
+            self.executable,
+        )
+
+    def test_no_touch_forbidden_tables(self):
+        forbidden = re.findall(
+            r"(insert\s+into|update|delete\s+from|alter\s+table)[\s\S]{0,120}?(chat_messages|memories|memory_requests|memory_rumination_cursors)",
+            self.executable,
+            re.IGNORECASE,
+        )
+        self.assertEqual(forbidden, [])
+        self.assertNotIn("memory_relations", self.executable)
+
+
+class RuminationFinishRpcContractTests(unittest.TestCase):
+    """Static contract for 20260910010000_rumination_finish_rpc_contract.sql."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = ROOT / "supabase/migrations/20260910010000_rumination_finish_rpc_contract.sql"
+        cls.sql = path.read_text(encoding="utf-8")
+        cls.executable = re.sub(r"--[^\n]*", "", cls.sql)
+
+    def test_returns_jsonb_not_void(self):
+        self.assertIn("returns jsonb", self.executable)
+        self.assertNotIn("returns void", self.executable)
+
+    def test_response_contains_status_execution_id_changed(self):
+        for field in ("status", "execution_id", "changed"):
+            self.assertIn(field, self.executable)
+
+    def test_security_definer_fixed_search_path(self):
+        self.assertIn("security definer", self.executable)
+        self.assertIn("set search_path to 'public'", self.executable)
+
+    def test_service_role_only(self):
+        self.assertRegex(
+            self.executable,
+            r"revoke\s+all\s+on\s+function\s+public\.finish_rumination_scheduled_execution"
+            r"[\s\S]{0,200}?from\s+public,\s*anon,\s*authenticated",
+        )
+        self.assertRegex(
+            self.executable,
+            r"grant\s+execute\s+on\s+function\s+public\.finish_rumination_scheduled_execution"
+            r"[\s\S]{0,200}?to\s+service_role",
+        )
+
+    def test_stable_error_for_missing_execution(self):
+        self.assertIn("memory_rumination_scheduled_execution_not_found", self.executable)
+
+    def test_old_void_signature_dropped(self):
+        self.assertIn(
+            "drop function if exists public.finish_rumination_scheduled_execution(bigint)",
+            self.executable,
+        )
+
+    def test_no_touch_forbidden_tables(self):
+        forbidden = re.findall(
+            r"(insert\s+into|update|delete\s+from|alter\s+table)[\s\S]{0,120}?(chat_messages|memories|memory_requests|memory_rumination_cursors)",
+            self.executable,
+            re.IGNORECASE,
+        )
+        self.assertEqual(forbidden, [])
+        self.assertNotIn("memory_relations", self.executable)
+
+
 if __name__ == "__main__":
     unittest.main()

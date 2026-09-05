@@ -1548,13 +1548,37 @@ def run_rumination_digest(trigger: str = "rumination_manual") -> dict[str, Any]:
         # created for this instance).
         if trigger == "rumination_scheduled" and execution_id is not None:
             try:
-                _rpc_object("finish_rumination_scheduled_execution", {
-                    "p_execution_id": execution_id,
-                })
+                finish_result = _rpc_object(
+                    "finish_rumination_scheduled_execution",
+                    {"p_execution_id": execution_id},
+                )
+                if finish_result.get("status") != "finished":
+                    log.error(
+                        "finish_rumination_scheduled_execution returned "
+                        "unexpected status: execution_id=%s status=%s trigger=%s",
+                        execution_id, finish_result.get("status"), trigger,
+                    )
+                elif finish_result.get("execution_id") != execution_id:
+                    log.error(
+                        "finish_rumination_scheduled_execution returned "
+                        "mismatched execution_id: expected=%s got=%s trigger=%s",
+                        execution_id, finish_result.get("execution_id"), trigger,
+                    )
+                elif not finish_result.get("changed"):
+                    log.info(
+                        "finish_rumination_scheduled_execution idempotent: "
+                        "execution_id=%s was already finished trigger=%s",
+                        execution_id, trigger,
+                    )
+                else:
+                    log.info(
+                        "Scheduled execution finished: execution_id=%s trigger=%s",
+                        execution_id, trigger,
+                    )
             except Exception:
                 log.exception(
-                    "Failed to finish scheduled execution: execution_id=%s",
-                    execution_id,
+                    "Failed to finish scheduled execution: execution_id=%s trigger=%s",
+                    execution_id, trigger,
                 )
 
     failed = [item for item in results if item.get("status") == "failed"]
