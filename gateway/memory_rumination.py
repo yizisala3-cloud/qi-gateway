@@ -36,7 +36,6 @@ from .memory_continuity_shadow import (
     ShadowPreviewError,
     _clean_content,
     _contains_secret,
-    _format_conversation,
     _normalize_memory_time,
     _parse_time,
     _response_diagnostic,
@@ -495,13 +494,49 @@ def _compact_request(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _fmt_str(value: Any, default: str = "") -> str:
+    """Explicit str() boundary: never let a non-string reach join()."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _format_rumination_conversation(
+    messages: list[dict[str, Any]],
+) -> str:
+    """反刍专用的聊天原文格式化函数。
+
+    与 Shadow Preview 的 _format_conversation 分离：每个字段在加入 lines
+    列表前都经过显式 str() 转换，确保 "\\n".join() 的每个元素都是 str。
+    生产 Supabase 返回的 conversation_id、id 等字段类型可能与测试 fixture
+    不同（int vs str），此函数作为类型边界屏障。
+    """
+    lines: list[str] = []
+    previous_conversation: str | None = None
+    for message in messages:
+        conversation_id = _fmt_str(message.get("conversation_id")) or "unknown"
+        if conversation_id != previous_conversation:
+            lines.append(
+                f"<conversation id={json.dumps(conversation_id, ensure_ascii=False)}>"
+            )
+            previous_conversation = conversation_id
+        msg_id = _fmt_str(message.get("id"))
+        source_time = _fmt_str(message.get("source_time")) or "unknown"
+        role = _fmt_str(message.get("role"))
+        content = _fmt_str(message.get("content"))
+        lines.append(f"[id={msg_id} t={source_time} role={role}] {content}")
+    return "\n".join(lines)
+
+
 def build_model_input(
     messages: list[dict[str, Any]],
     threads: list[dict[str, Any]],
     own_requests: list[dict[str, Any]],
     absorbable_candidates: list[dict[str, Any]] | None = None,
 ) -> str:
-    chat_log = _format_conversation(messages)
+    chat_log = _format_rumination_conversation(messages)
     threads_json = json.dumps(
         [_compact_thread(row) for row in threads], ensure_ascii=False, indent=1,
     )
@@ -1350,31 +1385,42 @@ def run_rumination_batch(
     scheduled_execution_id = claim.get("scheduled_execution_id")
     _set_run_model_name(run_id)
 
+    stage = "fetch_batch_rows"
     try:
         rows = _fetch_batch_rows(assistant_id, first_id, last_id)
+        stage = "normalize_batch_messages"
         messages = _normalize_batch_messages(rows)
         if not messages:
             raise RuminationPipelineError(
                 "no_usable_messages", "The claimed rumination batch has no usable messages",
             )
+        stage = "build_evidence_times"
         evidence_times = {message["id"]: message["source_time"] for message in messages}
+        stage = "load_unfinished_threads"
         threads = _load_unfinished_threads(assistant_id)
+        stage = "index_threads_by_id"
         threads_by_id = {int(row["id"]): row for row in threads}
+        stage = "load_own_requests"
         own_requests = _load_own_requests(assistant_id)
+        stage = "load_absorbable_candidates"
         absorbable = _load_absorbable_candidates(assistant_id, rows)
+        stage = "index_absorbable_ids"
         absorbable_ids = {int(row["memory_id"]) for row in absorbable}
         _update_heartbeat(run_id)
 
-        model_output = _call_rumination_model(
-            build_model_input(messages, threads, own_requests, absorbable),
-        )
+        stage = "build_model_input"
+        model_input = build_model_input(messages, threads, own_requests, absorbable)
+        stage = "model_request"
+        model_output = _call_rumination_model(model_input)
         _update_heartbeat(run_id)
+        stage = "parse_output"
         ops = parse_rumination_output(
             model_output,
             evidence_times=evidence_times,
             threads_by_id=threads_by_id,
             absorbable_ids=absorbable_ids,
         )
+        stage = "merge_thread_operations"
         # 同批内同一条 thread 的多个连续进展按真实证据时间合并为一个最终
         # 版本操作；互相矛盾或无法排序时整批失败。
         ops = merge_thread_operations(
@@ -1402,7 +1448,13 @@ def run_rumination_batch(
         exc.scheduled_execution_id = scheduled_execution_id
         raise
     except Exception as exc:
-        log.exception("Rumination batch failed: run_id=%s error=%s", run_id, type(exc).__name__)
+        log.exception(
+            "Rumination batch failed: run_id=%s assistant_id=%s "
+            "trigger=%s first_message_id=%s last_message_id=%s "
+            "message_count=%s stage=%s error=%s",
+            run_id, assistant_id, trigger, first_id, last_id, count,
+            stage, type(exc).__name__,
+        )
         _mark_failed(run_id, "pipeline_error", f"{type(exc).__name__}: {str(exc)[:1200]}")
         wrapped = RuminationPipelineError(
             "pipeline_error", "Rumination pipeline failed", 500,
