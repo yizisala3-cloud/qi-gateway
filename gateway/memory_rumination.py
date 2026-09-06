@@ -1428,8 +1428,10 @@ def run_rumination_batch(
             evidence_times=evidence_times,
             threads_by_id=threads_by_id,
         )
+        stage = "enrich_embeddings"
         ops = enrich_rumination_ops(ops, run_id)
 
+        stage = "commit_batch"
         commit = _rpc_object("commit_rumination_batch", {
             "p_run_id": run_id,
             "p_ops": {"operations": ops},

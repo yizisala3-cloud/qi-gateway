@@ -2023,6 +2023,97 @@ class StageDiagnosticsTests(unittest.TestCase):
         self.assertIn(101, first_call.args)
         self.assertIn(160, first_call.args)
 
+    def test_embedding_failure_stage_enrich_embeddings(self):
+        cursor = {
+            "assistant_id": "assistant-1", "initialized": True,
+            "last_processed_message_id": 100, "last_scheduled_date": None,
+            "last_success_at": None,
+        }
+        pages = [list(range(101, 161)), []]
+        ops = [{
+            "op": "create_memory", "reason": "r", "continuity_type": "moment",
+            "content": "一条普通记忆。", "recall_scene": None,
+        }]
+        mock_log = MagicMock()
+        with (
+            patch("gateway.memory_rumination._rumination_analysis_configured", return_value=True),
+            patch("gateway.memory_rumination.resolve_rumination_assistant_id", return_value="assistant-1"),
+            patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
+            patch("gateway.memory_rumination._mark_stale_rumination_runs"),
+            patch("gateway.memory_rumination._fetch_message_ids",
+                  side_effect=[list(range(101, 161)), []]),
+            patch("gateway.memory_rumination._fetch_batch_rows", return_value=[]),
+            patch("gateway.memory_rumination._normalize_batch_messages", return_value=[
+                {"id": 101, "conversation_id": "c1", "role": "user",
+                 "content": "消息", "source_time": "2026-09-01T10:00+08:00"},
+            ]),
+            patch("gateway.memory_rumination._load_unfinished_threads", return_value=[]),
+            patch("gateway.memory_rumination._load_own_requests", return_value=[]),
+            patch("gateway.memory_rumination._call_rumination_model",
+                  return_value='{"operations":[{"op":"create_memory","reason":"r",'
+                               '"continuity_type":"moment","content":"一条普通记忆。",'
+                               '"evidence_message_ids":[101]}]}'),
+            patch("gateway.memory_rumination.parse_rumination_output", return_value=ops),
+            patch("gateway.memory_rumination._get_embedding_sync",
+                  side_effect=RuntimeError("generic embedding failure")),
+            patch("gateway.memory_rumination._rpc_object", side_effect=[
+                {"status": "claimed", "run_id": 71, "scheduled_execution_id": 900},
+            ]) as rpc,
+            patch("gateway.memory_rumination._set_run_model_name"),
+            patch("gateway.memory_rumination._update_heartbeat"),
+            patch("gateway.memory_rumination._mark_failed"),
+            patch("gateway.memory_rumination.log", mock_log),
+        ):
+            result = run_rumination_digest("rumination_scheduled")
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["cursor_after"], 100)
+        self.assertGreaterEqual(mock_log.exception.call_count, 1)
+        first_call = mock_log.exception.call_args_list[0]
+        self.assertIn("enrich_embeddings", first_call.args)
+        self.assertIn(101, first_call.args)
+        self.assertIn(160, first_call.args)
+
+    def test_commit_rpc_failure_stage_commit_batch(self):
+        cursor = {
+            "assistant_id": "assistant-1", "initialized": True,
+            "last_processed_message_id": 100, "last_scheduled_date": None,
+            "last_success_at": None,
+        }
+        pages = [list(range(101, 161)), []]
+        mock_log = MagicMock()
+        with (
+            patch("gateway.memory_rumination._rumination_analysis_configured", return_value=True),
+            patch("gateway.memory_rumination.resolve_rumination_assistant_id", return_value="assistant-1"),
+            patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
+            patch("gateway.memory_rumination._mark_stale_rumination_runs"),
+            patch("gateway.memory_rumination._fetch_message_ids",
+                  side_effect=[list(range(101, 161)), []]),
+            patch("gateway.memory_rumination._fetch_batch_rows", return_value=[]),
+            patch("gateway.memory_rumination._normalize_batch_messages", return_value=[
+                {"id": 101, "conversation_id": "c1", "role": "user",
+                 "content": "消息", "source_time": "2026-09-01T10:00+08:00"},
+            ]),
+            patch("gateway.memory_rumination._load_unfinished_threads", return_value=[]),
+            patch("gateway.memory_rumination._load_own_requests", return_value=[]),
+            patch("gateway.memory_rumination._call_rumination_model", return_value='{"operations":[]}'),
+            patch("gateway.memory_rumination._rpc_object", side_effect=[
+                {"status": "claimed", "run_id": 71, "scheduled_execution_id": 900},
+                RuntimeError("supabase commit failure"),
+            ]) as rpc,
+            patch("gateway.memory_rumination._set_run_model_name"),
+            patch("gateway.memory_rumination._update_heartbeat"),
+            patch("gateway.memory_rumination._mark_failed"),
+            patch("gateway.memory_rumination.log", mock_log),
+        ):
+            result = run_rumination_digest("rumination_scheduled")
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["cursor_after"], 100)
+        self.assertGreaterEqual(mock_log.exception.call_count, 1)
+        first_call = mock_log.exception.call_args_list[0]
+        self.assertIn("commit_batch", first_call.args)
+        self.assertIn(101, first_call.args)
+        self.assertIn(160, first_call.args)
+
 
 if __name__ == "__main__":
     unittest.main()
