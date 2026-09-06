@@ -399,6 +399,9 @@ def _load_absorbable_candidates(
     evidence_ids = sorted({int(row["id"]) for row in batch_rows})
     if not evidence_ids:
         return []
+    # PostgREST client's ov() uses ",".join(values) internally, which raises
+    # TypeError when values are ints. Pass strings; the DB column stays
+    # bigint[] and the overlaps semantics are unchanged.
     response = (
         _client().table("memories")
         .select(
@@ -409,7 +412,7 @@ def _load_absorbable_candidates(
         .eq("producer_path", "fast_path")
         .eq("verified", "verified")
         .eq("is_active", True)
-        .overlaps("evidence_message_ids", evidence_ids)
+        .overlaps("evidence_message_ids", [str(v) for v in evidence_ids])
         .order("id", desc=True)
         .execute()
     )
