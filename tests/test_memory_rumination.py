@@ -11,7 +11,8 @@ import asyncio
 import hashlib
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+from httpx import QueryParams
 
 from gateway.config import cfg
 from gateway.memory_digest_api import rumination_execute, rumination_status
@@ -451,7 +452,8 @@ class ParseValidationTests(unittest.TestCase):
         self.assertEqual(filters.get("is_active"), True)
         overlaps = next(call for call in calls if call[0] == "overlaps")
         self.assertEqual(overlaps[1], "evidence_message_ids")
-        self.assertEqual(overlaps[2], [3, 4])
+        # 修复后 overlaps 接收字符串列表（PostgREST ov() 的 join 需要 str）
+        self.assertEqual(overlaps[2], ["3", "4"])
 
     def test_candidate_loader_excludes_closed_threads(self):
         closed = {
@@ -2115,5 +2117,172 @@ class StageDiagnosticsTests(unittest.TestCase):
         self.assertIn(160, first_call.args)
 
 
+
+
+
+
+
+
+class LoadAbsorbableCandidatesIntegrationTests(unittest.TestCase):
+    """Verify _load_absorbable_candidates passes strings to overlaps()
+    and still applies the correct filter conditions."""
+
+    def _make_fake_client(self):
+        from test_memory_rumination import _FakeClient
+        return _FakeClient({"memories": [{
+            "id": 101, "continuity_type": "moment",
+            "producer_path": "fast_path", "is_active": True,
+            "verified": "verified", "title": "test",
+            "evidence_message_ids": [101],
+            "memory_key": None, "thread_state": None,
+        }]})
+
+    def test_load_candidates_passes_strings_to_overlaps(self):
+        from gateway.memory_rumination import _load_absorbable_candidates
+        from test_memory_rumination import _FakeClient
+
+        fake = self._make_fake_client()
+        batch_rows = [{"id": 101}, {"id": 102}]
+        with patch("gateway.memory_rumination.get_client", return_value=fake):
+            candidates = _load_absorbable_candidates("assistant-1", batch_rows)
+        self.assertEqual(len(candidates), 1)
+        overlaps_calls = [
+            c for c in fake.queries["memories"].calls if c[0] == "overlaps"
+        ]
+        self.assertEqual(len(overlaps_calls), 1)
+        column, values = overlaps_calls[0][1], overlaps_calls[0][2]
+        self.assertEqual(column, "evidence_message_ids")
+        # All values must be strings (production regression fix).
+        for value in values:
+            self.assertIsInstance(value, str)
+
+    def test_load_candidates_filters_correctly(self):
+        from gateway.memory_rumination import _load_absorbable_candidates
+        from test_memory_rumination import _FakeClient
+
+        fake = self._make_fake_client()
+        batch_rows = [{"id": 101}, {"id": 102}]
+        with patch("gateway.memory_rumination.get_client", return_value=fake):
+            candidates = _load_absorbable_candidates("assistant-1", batch_rows)
+        calls = fake.queries["memories"].calls
+        filters = {c[1]: c[2] for c in calls if c[0] == "eq"}
+        self.assertEqual(filters.get("assistant_id"), "assistant-1")
+        self.assertEqual(filters.get("producer_path"), "fast_path")
+        self.assertEqual(filters.get("verified"), "verified")
+        self.assertEqual(filters.get("is_active"), True)
+
+    def test_empty_batch_returns_empty_without_query(self):
+        from gateway.memory_rumination import _load_absorbable_candidates
+
+        self.assertEqual(_load_absorbable_candidates("assistant-1", []), [])
+
+
+class ProductionRegressionTests(unittest.TestCase):
+    """Verify that the production batch shape (2133→2252, 120 messages)
+    can complete load_absorbable_candidates and reach build_model_input."""
+
+    def test_production_batch_reaches_build_model_input(self):
+        cursor = {
+            "assistant_id": "assistant-1", "initialized": True,
+            "last_processed_message_id": 100, "last_scheduled_date": None,
+            "last_success_at": None,
+        }
+        # Production batch: 2133→2252 = 120 messages
+        pages = [list(range(2133, 2253)), []]
+        production_rows = [
+            {"id": i, "assistant_id": "assistant-1",
+             "conversation_id": f"conv-{i % 5}", "role": "user" if i % 2 == 0 else "assistant",
+             "content": f"消息 {i}", "created_at": f"2026-09-06T14:{i % 60:02d}:00+08:00"}
+            for i in range(2133, 2253)
+        ]
+        mock_log = MagicMock()
+        with (
+            patch("gateway.memory_rumination._rumination_analysis_configured", return_value=True),
+            patch("gateway.memory_rumination.resolve_rumination_assistant_id", return_value="assistant-1"),
+            patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
+            patch("gateway.memory_rumination._mark_stale_rumination_runs"),
+            patch("gateway.memory_rumination._fetch_message_ids",
+                  side_effect=[pages[0], []]),
+            patch("gateway.memory_rumination._fetch_batch_rows", return_value=production_rows),
+            patch("gateway.memory_rumination._normalize_batch_messages", return_value=[
+                {"id": i, "conversation_id": f"conv-{i % 5}", "role": "user" if i % 2 == 0 else "assistant",
+                 "content": f"消息 {i}", "source_time": f"2026-09-06T14:{i % 60:02d}+08:00"}
+                for i in range(2133, 2253)
+            ]),
+            patch("gateway.memory_rumination._load_unfinished_threads", return_value=[]),
+            patch("gateway.memory_rumination._load_own_requests", return_value=[]),
+            patch("gateway.memory_rumination._load_absorbable_candidates", return_value=[]),
+            patch("gateway.memory_rumination._call_rumination_model", return_value='{"operations":[]}') as model,
+            patch("gateway.memory_rumination._rpc_object", side_effect=[
+                {"status": "claimed", "run_id": 249, "scheduled_execution_id": None},
+                {"run_id": 249, "cursor": {"last_processed_message_id": 2252},
+                 "op_counts": {}, "preview": [], "inserted_count": 0},
+            ]) as rpc,
+            patch("gateway.memory_rumination._set_run_model_name"),
+            patch("gateway.memory_rumination._update_heartbeat"),
+            patch("gateway.memory_rumination._mark_failed"),
+            patch("gateway.memory_rumination.log", mock_log),
+        ):
+            from gateway.memory_rumination import run_rumination_batch
+            result = run_rumination_batch(
+                "assistant-1", "rumination_manual", (2133, 2252, 120),
+                first_batch=False,
+            )
+        # Reached build_model_input and model_request (past load_absorbable_candidates)
+        model.assert_called_once()
+        self.assertEqual(result["status"], "succeeded")
+        # stage log should not contain load_absorbable_candidates error
+        for c in mock_log.exception.call_args_list:
+            self.assertNotIn("load_absorbable_candidates", c.args)
+
+
+
+
+class RealPostgrestOverlapsSerializationTests(unittest.TestCase):
+    """Use the REAL postgrest query builder (ov method) to verify that
+    overlaps() with string values does not throw, while int values DO throw
+    the exact production TypeError. Regression test for round 11."""
+
+    def _make_builder(self):
+        from unittest.mock import MagicMock
+        from postgrest._sync.request_builder import SyncFilterRequestBuilder
+        return SyncFilterRequestBuilder(
+            session=MagicMock(),
+            path="/memories",
+            http_method="GET",
+            headers={},
+            params=QueryParams(),
+            json=None,
+        )
+
+    def test_ov_with_string_values_does_not_throw(self):
+        builder = self._make_builder()
+        result = builder.ov("evidence_message_ids", ["2133", "2134"])
+        self.assertIsNotNone(result)
+        params_dict = dict(result.params)
+        overlap_values = [
+            v for k, v in params_dict.items() if "evidence_message_ids" in k
+        ]
+        self.assertEqual(len(overlap_values), 1)
+        self.assertIn("2133", overlap_values[0])
+        self.assertIn("2134", overlap_values[0])
+
+    def test_ov_with_int_values_throws_production_typeerror(self):
+        builder = self._make_builder()
+        with self.assertRaises(TypeError) as raised:
+            builder.ov("evidence_message_ids", [2133, 2134])
+        self.assertIn("expected str instance, int found", str(raised.exception))
+
+    def test_ov_filter_type_is_ov_not_cs_or_in(self):
+        builder = self._make_builder()
+        result = builder.ov("evidence_message_ids", ["2133"])
+        params_dict = dict(result.params)
+        overlap_values = [v for k, v in params_dict.items() if "evidence_message_ids" in k]
+        self.assertEqual(len(overlap_values), 1)
+        # PostgREST overlaps filter: value format is "ov.{...}"
+        self.assertTrue(overlap_values[0].startswith("ov."))
+
+
 if __name__ == "__main__":
+    unittest.main()
     unittest.main()
