@@ -2442,8 +2442,8 @@ class MemoryKeyDiagnosticTests(unittest.TestCase):
         with self.assertRaisesRegex(RuminationPipelineError, "require a stable memory_key"):
             self._parse([op])
 
-    def test_fast_path_keyless_adopt_without_key_rejected(self):
-        """keyless fast_path target + 模型未提供 memory_key → parser 直接拒绝。"""
+    def test_fast_path_keyless_adopt_without_key_downgrades_to_ignore(self):
+        """keyless fast_path target + no key → 降级为 ignore，不整批失败。"""
         threads = _threads_by_id(
             _thread(memory_id=14, state="open", maintained_by="fast_path", key=None),
         )
@@ -2456,16 +2456,16 @@ class MemoryKeyDiagnosticTests(unittest.TestCase):
             "target_thread_state": "open",
             "evidence_message_ids": [1],
         }]
-        # 不包含 memory_key 字段（或明确为 None）→ parser 直接拒绝
-        with self.assertRaisesRegex(
-            RuminationPipelineError,
-            "op=adopt_thread field=memory_key.*no stable key",
-        ):
-            parse_rumination_output(
-                json.dumps({"operations": ops}, ensure_ascii=False),
-                evidence_times=self.times,
-                threads_by_id=threads,
-            )
+        parsed = parse_rumination_output(
+            json.dumps({"operations": ops}, ensure_ascii=False),
+            evidence_times=self.times,
+            threads_by_id=threads,
+        )
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["op"], "ignore")
+        self.assertIn("keyless fast_path", parsed[0]["reason"])
+        self.assertIn("memory_key", parsed[0]["reason"])
+        self.assertEqual(parsed[0]["evidence_message_ids"], [1])
 
     def test_fast_path_keyless_adopt_with_valid_key_passes(self):
         """keyless fast_path target + 模型提供合法 memory_key → parser 通过。"""
@@ -2617,28 +2617,28 @@ class KeylessFastPathAdoptEdgeCaseTests(unittest.TestCase):
             op["memory_key"] = memory_key_value
         return op
 
-    def _assert_rejected(self, op):
-        with self.assertRaisesRegex(
-            RuminationPipelineError,
-            r"op=adopt_thread field=memory_key.*memory 14.*no stable key",
-        ):
-            parse_rumination_output(
-                json.dumps({"operations": [op]}, ensure_ascii=False),
-                evidence_times=self.times,
-                threads_by_id=self.threads,
-            )
+    def _assert_ignored(self, op):
+        parsed = parse_rumination_output(
+            json.dumps({"operations": [op]}, ensure_ascii=False),
+            evidence_times=self.times,
+            threads_by_id=self.threads,
+        )
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["op"], "ignore")
+        self.assertIn("keyless fast_path", parsed[0]["reason"])
+        self.assertIn("memory_key", parsed[0]["reason"])
 
-    def test_key_absent_rejected(self):
-        self._assert_rejected(self._make_adopt_op(None, include_field=False))
+    def test_key_absent_downgrades(self):
+        self._assert_ignored(self._make_adopt_op(None, include_field=False))
 
-    def test_key_none_rejected(self):
-        self._assert_rejected(self._make_adopt_op(None))
+    def test_key_none_downgrades(self):
+        self._assert_ignored(self._make_adopt_op(None))
 
-    def test_key_empty_string_rejected(self):
-        self._assert_rejected(self._make_adopt_op(""))
+    def test_key_empty_string_downgrades(self):
+        self._assert_ignored(self._make_adopt_op(""))
 
-    def test_key_whitespace_rejected(self):
-        self._assert_rejected(self._make_adopt_op("   "))
+    def test_key_whitespace_downgrades(self):
+        self._assert_ignored(self._make_adopt_op("   "))
 
     def test_key_valid_string_passes(self):
         op = self._make_adopt_op("topic.valid.key")
@@ -2684,6 +2684,141 @@ class RuminationMaintainedTargetAdoptTests(unittest.TestCase):
         except RuminationPipelineError as exc:
             # 如果 parser 抛出错误，不应该是因为 keyless fast_path 检查。
             self.assertNotIn("no stable key", str(exc))
+
+
+
+
+class KeylessAdoptEdgeCaseTests(unittest.TestCase):
+    """keyless fast_path adopt 降级边界：None、空串、空白、非法 key。"""
+
+    def setUp(self):
+        self.threads = _threads_by_id(
+            _thread(memory_id=14, state="open", maintained_by="fast_path", key=None),
+        )
+        self.times = _evidence_times([1])
+
+    def _make(self, memory_key_value=None, include_field=True):
+        op = {
+            "op": "adopt_thread", "reason": "接管",
+            "target_memory_id": 14,
+            "target_memory_key": None,
+            "target_continuity_id": self.threads[14]["continuity_id"],
+            "target_content_hash": self.threads[14]["content_hash"],
+            "target_thread_state": "open",
+            "evidence_message_ids": [1],
+        }
+        if include_field:
+            op["memory_key"] = memory_key_value
+        return op
+
+    def _parse(self, ops):
+        return parse_rumination_output(
+            json.dumps({"operations": ops}, ensure_ascii=False),
+            evidence_times=self.times,
+            threads_by_id=self.threads,
+        )
+
+    def test_key_none_downgrades(self):
+        parsed = self._parse([self._make(None)])
+        self.assertEqual(parsed[0]["op"], "ignore")
+
+    def test_key_empty_string_downgrades(self):
+        parsed = self._parse([self._make("")])
+        self.assertEqual(parsed[0]["op"], "ignore")
+
+    def test_key_whitespace_downgrades(self):
+        parsed = self._parse([self._make("   ")])
+        self.assertEqual(parsed[0]["op"], "ignore")
+
+    def test_key_valid_passes_as_adopt(self):
+        parsed = self._parse([self._make("topic.valid.key")])
+        self.assertEqual(parsed[0]["op"], "adopt_thread")
+
+    def test_key_chinese_still_rejected(self):
+        with self.assertRaisesRegex(RuminationPipelineError, "invalid memory_key"):
+            self._parse([self._make("中文KEY")])
+
+
+class MixedBatchKeylessAdoptTests(unittest.TestCase):
+    """同批中 keyless adopt 降级 + 其他合法 operation 继续。"""
+
+    def test_keyless_adopt_among_valid_ops(self):
+        threads = _threads_by_id(
+            _thread(memory_id=14, state="open", maintained_by="fast_path", key=None),
+        )
+        times = _evidence_times([1, 2])
+        ops = [
+            {
+                "op": "adopt_thread", "reason": "无 key 接管",
+                "target_memory_id": 14,
+                "target_memory_key": None,
+                "target_continuity_id": threads[14]["continuity_id"],
+                "target_content_hash": threads[14]["content_hash"],
+                "target_thread_state": "open",
+                "evidence_message_ids": [1],
+            },
+            {
+                "op": "create_memory", "reason": "普通记忆",
+                "continuity_type": "moment",
+                "content": "一条普通记忆正文。",
+                "continuity_data": {"scene": "s", "event": "e", "moment_state": "standalone"},
+                "evidence_message_ids": [2],
+            },
+        ]
+        parsed = parse_rumination_output(
+            json.dumps({"operations": ops}, ensure_ascii=False),
+            evidence_times=times,
+            threads_by_id=threads,
+        )
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[0]["op"], "ignore")
+        self.assertEqual(parsed[1]["op"], "create_memory")
+
+    def test_ignore_skips_embedding(self):
+        from gateway.memory_rumination import enrich_rumination_ops
+
+        with patch("gateway.memory_rumination._get_embedding_sync") as embed:
+            enriched = enrich_rumination_ops(
+                [{"op": "ignore", "reason": "r", "evidence_message_ids": [1]}], 1,
+            )
+        embed.assert_not_called()
+
+
+class KeylessAdoptProductionRegressionTests(unittest.TestCase):
+    """生产形状 target memory 98 回归。"""
+
+    def test_target_98_graceful_skip(self):
+        t98 = {
+            "id": 98, "memory_key": None,
+            "continuity_id": "31111111-1111-1111-1111-11111111119a",
+            "thread_state": "open", "maintained_by": "fast_path",
+            "producer_path": "fast_path",
+            "content": "正文。", "content_hash": "b" * 64,
+            "continuity_data": {"open_question": "q", "current_state": "s"},
+            "evidence_message_ids": [2133],
+            "evidence_start_time": "2026-09-06T14:00+08:00",
+            "evidence_end_time": "2026-09-06T14:01+08:00",
+            "created_at": "2026-09-06T14:01+08:00",
+        }
+        threads = _threads_by_id(t98)
+        times = _evidence_times([2133])
+        op = {
+            "op": "adopt_thread", "reason": "接管 98",
+            "target_memory_id": 98,
+            "target_memory_key": None,
+            "target_continuity_id": t98["continuity_id"],
+            "target_content_hash": t98["content_hash"],
+            "target_thread_state": "open",
+            "evidence_message_ids": [2133],
+        }
+        parsed = parse_rumination_output(
+            json.dumps({"operations": [op]}, ensure_ascii=False),
+            evidence_times=times,
+            threads_by_id=threads,
+        )
+        self.assertEqual(parsed[0]["op"], "ignore")
+        self.assertEqual(parsed[0]["evidence_message_ids"], [2133])
+        self.assertIn("memory_key", parsed[0]["reason"])
 
 
 if __name__ == "__main__":

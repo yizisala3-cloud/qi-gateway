@@ -242,6 +242,9 @@ RUMINATION_SYSTEM_PROMPT = """你是“反刍连续感”提取器，负责在�
 - episode/profile 不得输出 memory_key。
 - thread 的 memory_key 必须是 3-120 位小写 ASCII 稳定主题键，只能包含 a-z、0-9、点、下划线、冒号、斜杠和连字符。
 - 中文标题不能直接当作 memory_key。
+- 如果 unfinished_threads 中的 fast_path thread 的 memory_key 为 null，
+  而你无法根据聊天内容确定稳定的 ASCII memory_key，
+  不要输出 adopt_thread。请选择 ignore。
 
 ## 输出 JSON
 只返回严格 JSON，不要 Markdown、解释或代码围栏：
@@ -884,20 +887,24 @@ def parse_rumination_output(
             key = _normalize_memory_key(raw.get("memory_key"), op_type=op_type)
             if key:
                 op["memory_key"] = key
-            # Keyless fast_path target requires an explicit valid key from
-            # the model; reject at parser level so the batch never reaches
-            # the SQL commit RPC.
+            # Keyless fast_path target with no key from the model:
+            # gracefully skip this single operation instead of killing
+            # the batch. Other operations continue to be processed.
             if (
                 target.get("maintained_by") == "fast_path"
                 and target.get("memory_key") is None
                 and not key
             ):
-                raise RuminationPipelineError(
-                    "model_schema_error",
-                    f"op=adopt_thread field=memory_key: fast_path target "
-                    f"memory {target.get('id')} has no stable key and "
-                    "adopt_thread did not provide one",
+                skip_reason = (
+                    "无法接管 keyless fast_path thread：模型未提供合法 "
+                    "memory_key，本批跳过该接管操作"
                 )
+                validated.append({
+                    "op": "ignore",
+                    "reason": skip_reason,
+                    "evidence_message_ids": list(op["evidence_message_ids"]),
+                })
+                continue
             state = str(raw.get("thread_state") or "").strip().casefold() or None
             if state and state != target.get("thread_state"):
                 raise RuminationPipelineError(
