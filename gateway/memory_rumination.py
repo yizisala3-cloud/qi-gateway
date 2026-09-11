@@ -884,6 +884,20 @@ def parse_rumination_output(
             key = _normalize_memory_key(raw.get("memory_key"), op_type=op_type)
             if key:
                 op["memory_key"] = key
+            # Keyless fast_path target requires an explicit valid key from
+            # the model; reject at parser level so the batch never reaches
+            # the SQL commit RPC.
+            if (
+                target.get("maintained_by") == "fast_path"
+                and target.get("memory_key") is None
+                and not key
+            ):
+                raise RuminationPipelineError(
+                    "model_schema_error",
+                    f"op=adopt_thread field=memory_key: fast_path target "
+                    f"memory {target.get('id')} has no stable key and "
+                    "adopt_thread did not provide one",
+                )
             state = str(raw.get("thread_state") or "").strip().casefold() or None
             if state and state != target.get("thread_state"):
                 raise RuminationPipelineError(

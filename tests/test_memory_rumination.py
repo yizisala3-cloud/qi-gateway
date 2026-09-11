@@ -2443,6 +2443,7 @@ class MemoryKeyDiagnosticTests(unittest.TestCase):
             self._parse([op])
 
     def test_fast_path_keyless_adopt_without_key_rejected(self):
+        """keyless fast_path target + 模型未提供 memory_key → parser 直接拒绝。"""
         threads = _threads_by_id(
             _thread(memory_id=14, state="open", maintained_by="fast_path", key=None),
         )
@@ -2455,9 +2456,77 @@ class MemoryKeyDiagnosticTests(unittest.TestCase):
             "target_thread_state": "open",
             "evidence_message_ids": [1],
         }]
-        # No key provided → parser succeeds (DB fills key in later).
-        # But if we set memory_key to an invalid value, it must reject.
-        ops[0]["memory_key"] = "中文KEY"
+        # 不包含 memory_key 字段（或明确为 None）→ parser 直接拒绝
+        with self.assertRaisesRegex(
+            RuminationPipelineError,
+            "op=adopt_thread field=memory_key.*no stable key",
+        ):
+            parse_rumination_output(
+                json.dumps({"operations": ops}, ensure_ascii=False),
+                evidence_times=self.times,
+                threads_by_id=threads,
+            )
+
+    def test_fast_path_keyless_adopt_with_valid_key_passes(self):
+        """keyless fast_path target + 模型提供合法 memory_key → parser 通过。"""
+        threads = _threads_by_id(
+            _thread(memory_id=14, state="open", maintained_by="fast_path", key=None),
+        )
+        ops = [{
+            "op": "adopt_thread", "reason": "提供合法 key 接管",
+            "target_memory_id": 14,
+            "target_memory_key": None,
+            "target_continuity_id": "21111111-1111-1111-1111-1111111111a1",
+            "target_content_hash": threads[14]["content_hash"],
+            "target_thread_state": "open",
+            "memory_key": "topic.valid.key",
+            "evidence_message_ids": [1],
+        }]
+        parsed = parse_rumination_output(
+            json.dumps({"operations": ops}, ensure_ascii=False),
+            evidence_times=self.times,
+            threads_by_id=threads,
+        )
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["memory_key"], "topic.valid.key")
+
+    def test_fast_path_existing_key_adopt_without_new_key_reuses_target(self):
+        """已有合法 key 的 fast_path target + 模型不提供新 key → parser 通过。"""
+        threads = _threads_by_id(
+            _thread(memory_id=15, state="open", maintained_by="fast_path", key="topic.existing.key"),
+        )
+        ops = [{
+            "op": "adopt_thread", "reason": "已有 key 复用",
+            "target_memory_id": 15,
+            "target_memory_key": "topic.existing.key",
+            "target_continuity_id": threads[15]["continuity_id"],
+            "target_content_hash": threads[15]["content_hash"],
+            "target_thread_state": "open",
+            "evidence_message_ids": [1],
+        }]
+        parsed = parse_rumination_output(
+            json.dumps({"operations": ops}, ensure_ascii=False),
+            evidence_times=self.times,
+            threads_by_id=threads,
+        )
+        self.assertEqual(len(parsed), 1)
+        self.assertNotIn("memory_key", parsed[0])
+
+    def test_fast_path_keyless_adopt_with_chinese_key_rejected(self):
+        """keyless fast_path target + 中文 key → parser 拒绝。"""
+        threads = _threads_by_id(
+            _thread(memory_id=14, state="open", maintained_by="fast_path", key=None),
+        )
+        ops = [{
+            "op": "adopt_thread", "reason": "中文 key 接管",
+            "target_memory_id": 14,
+            "target_memory_key": None,
+            "target_continuity_id": "21111111-1111-1111-1111-1111111111a1",
+            "target_content_hash": threads[14]["content_hash"],
+            "target_thread_state": "open",
+            "memory_key": "中文KEY",
+            "evidence_message_ids": [1],
+        }]
         with self.assertRaisesRegex(RuminationPipelineError, "invalid memory_key"):
             parse_rumination_output(
                 json.dumps({"operations": ops}, ensure_ascii=False),
