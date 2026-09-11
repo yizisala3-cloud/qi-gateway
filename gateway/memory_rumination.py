@@ -194,6 +194,19 @@ def _normalize_legacy_operation_fields(
     return normalized
 
 
+_DEFAULT_OPERATION_REASONS = {
+    "ignore": "本批证据未形成可执行记忆操作",
+    "create_memory": "反刍根据本批原文提取的独立记忆",
+    "create_tracked_thread": "反刍根据本批原文发现的长期进程",
+    "adopt_thread": "反刍根据本批原文接管快速路径线索",
+    "evidence_only": "反刍根据本批原文补充线索证据",
+    "update_thread": "反刍根据本批原文更新未完线索",
+    "pause_thread": "反刍根据本批原文暂停未完线索",
+    "resume_thread": "反刍根据本批原文恢复未完线索",
+    "resolve_thread": "反刍根据本批原文结束未完线索",
+    "create_request": "反刍根据本批原文生成审核申请",
+}
+
 RUMINATION_SYSTEM_PROMPT = """你是“反刍连续感”提取器，负责在独立每日管线中回看一段聊天原文，维护长期进程并产出结构化操作。你与“连续感总结”快速路径相互独立，不要模仿它的输出格式。
 
 ## 输入
@@ -704,8 +717,14 @@ def parse_rumination_output(
 
         reason = _clean_text_field(raw.get("reason"), 500)
         if not reason:
-            raise RuminationPipelineError(
-                "model_schema_error", f"op {op_type} is missing a reason",
+            # The model occasionally omits the reason field. For a private
+            # gateway, a default reason is better than killing the batch —
+            # content, continuity_type and evidence_ids are the critical
+            # fields; reason is human-readable metadata only.
+            reason = _DEFAULT_OPERATION_REASONS.get(op_type, "反刍路径自动提取")
+            log.info(
+                "Rumination operation reason missing; using default: op=%s",
+                op_type,
             )
 
         evidence_ids: list[int] = []

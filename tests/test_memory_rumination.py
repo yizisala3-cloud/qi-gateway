@@ -246,9 +246,9 @@ class ParseValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuminationPipelineError, "unsupported fields"):
             self._parse([_op(update_mode="replace")])
 
-    def test_missing_reason_rejected(self):
-        with self.assertRaisesRegex(RuminationPipelineError, "reason"):
-            self._parse([_op(reason="  ")])
+    def test_missing_reason_uses_default(self):
+        parsed = self._parse([_op(reason="  ")])
+        self.assertIn("反刍", parsed[0]["reason"])
 
     def test_pause_requires_open_and_resume_requires_paused(self):
         with self.assertRaisesRegex(RuminationPipelineError, "open thread"):
@@ -2819,6 +2819,229 @@ class KeylessAdoptProductionRegressionTests(unittest.TestCase):
         self.assertEqual(parsed[0]["op"], "ignore")
         self.assertEqual(parsed[0]["evidence_message_ids"], [2133])
         self.assertIn("memory_key", parsed[0]["reason"])
+
+
+
+
+class MissingReasonFallbackTests(unittest.TestCase):
+    """模型输出缺少 reason 字段时使用默认值，不整批拒绝。"""
+
+    def setUp(self):
+        self.threads = _threads_by_id(_thread(memory_id=12, state="open"))
+        self.times = _evidence_times([1, 2])
+
+    def _parse(self, ops):
+        return parse_rumination_output(
+            json.dumps({"operations": ops}, ensure_ascii=False),
+            evidence_times=self.times,
+            threads_by_id=self.threads,
+        )
+
+    def test_create_memory_missing_reason_uses_default(self):
+        op = {
+            "op": "create_memory",
+            "continuity_type": "moment",
+            "content": "一条没有 reason 的记忆正文。",
+            "continuity_data": {"scene": "s", "event": "e", "moment_state": "standalone"},
+            "evidence_message_ids": [1],
+        }
+        parsed = self._parse([op])
+        self.assertEqual(len(parsed), 1)
+        self.assertIn("反刍", parsed[0]["reason"])
+        self.assertEqual(parsed[0]["continuity_type"], "moment")
+        self.assertEqual(parsed[0]["content"], "一条没有 reason 的记忆正文。")
+        self.assertEqual(parsed[0]["evidence_message_ids"], [1])
+
+    def test_create_request_missing_reason_uses_default(self):
+        op = {
+            "op": "create_request",
+            "continuity_type": "episode",
+            "content": "一段没有 reason 的经历正文。",
+            "continuity_data": {
+                "beginning": "b", "development": "d",
+                "outcome": "o", "closure_quality": "complete",
+            },
+            "evidence_message_ids": [1],
+        }
+        parsed = self._parse([op])
+        self.assertEqual(len(parsed), 1)
+        self.assertIn("反刍", parsed[0]["reason"])
+        self.assertEqual(parsed[0]["continuity_type"], "episode")
+
+    def test_update_thread_missing_reason_uses_default(self):
+        op = {
+            "op": "update_thread",
+            "target_memory_id": 12,
+            "target_memory_key": self.threads[12]["memory_key"],
+            "target_continuity_id": self.threads[12]["continuity_id"],
+            "target_content_hash": self.threads[12]["content_hash"],
+            "target_thread_state": "open",
+            "content": "赶海计划当前状态：更新后的正文。",
+            "continuity_data": {
+                "open_question": "q", "current_state": "updated",
+                "closure_criteria": ["done"],
+            },
+            "evidence_message_ids": [1],
+        }
+        parsed = self._parse([op])
+        self.assertEqual(len(parsed), 1)
+        self.assertIn("反刍", parsed[0]["reason"])
+        self.assertEqual(parsed[0]["op"], "update_thread")
+
+    def test_custom_reason_preserved(self):
+        op = {
+            "op": "create_memory", "reason": "自定义审核理由",
+            "continuity_type": "moment",
+            "content": "一条有自定义 reason 的记忆。",
+            "continuity_data": {"scene": "s", "event": "e", "moment_state": "standalone"},
+            "evidence_message_ids": [1],
+        }
+        parsed = self._parse([op])
+        self.assertEqual(parsed[0]["reason"], "自定义审核理由")
+
+    def test_empty_reason_uses_default(self):
+        op = {
+            "op": "create_memory", "reason": "",
+            "continuity_type": "moment",
+            "content": "一条 reason 为空的记忆。",
+            "continuity_data": {"scene": "s", "event": "e", "moment_state": "standalone"},
+            "evidence_message_ids": [1],
+        }
+        parsed = self._parse([op])
+        self.assertIn("反刍", parsed[0]["reason"])
+
+    def test_missing_content_still_rejected(self):
+        op = {
+            "op": "create_memory",
+            "continuity_type": "moment",
+            "continuity_data": {"scene": "s", "event": "e", "moment_state": "standalone"},
+            "evidence_message_ids": [1],
+        }
+        with self.assertRaisesRegex(RuminationPipelineError, "content"):
+            self._parse([op])
+
+    def test_missing_continuity_type_still_rejected(self):
+        op = {
+            "op": "create_memory",
+            "content": "没有 continuity_type 的记忆。",
+            "continuity_data": {"scene": "s", "event": "e", "moment_state": "standalone"},
+            "evidence_message_ids": [1],
+        }
+        with self.assertRaisesRegex(RuminationPipelineError, "moment or inside_joke"):
+            self._parse([op])
+
+    def test_missing_continuity_data_still_rejected(self):
+        op = {
+            "op": "create_memory",
+            "continuity_type": "moment",
+            "content": "没有 continuity_data 的记忆正文。",
+            "evidence_message_ids": [1],
+        }
+        with self.assertRaisesRegex(RuminationPipelineError, "continuity_data"):
+            self._parse([op])
+
+    def test_missing_evidence_still_rejected(self):
+        op = {
+            "op": "create_memory",
+            "continuity_type": "moment",
+            "content": "没有证据的记忆正文。",
+            "continuity_data": {"scene": "s", "event": "e", "moment_state": "standalone"},
+        }
+        with self.assertRaisesRegex(RuminationPipelineError, "evidence_message_ids"):
+            self._parse([op])
+
+    def test_mixed_batch_missing_reason_and_valid_ops(self):
+        ops = [
+            {
+                "op": "create_memory",
+                "continuity_type": "moment",
+                "content": "缺少 reason 的记忆。",
+                "continuity_data": {"scene": "s", "event": "e", "moment_state": "standalone"},
+                "evidence_message_ids": [1],
+            },
+            {
+                "op": "create_request", "reason": "自定义理由",
+                "continuity_type": "episode",
+                "content": "有自定义 reason 的申请。",
+                "continuity_data": {
+                    "beginning": "b", "development": "d",
+                    "outcome": "o", "closure_quality": "complete",
+                },
+                "evidence_message_ids": [2],
+            },
+        ]
+        parsed = self._parse(ops)
+        self.assertEqual(len(parsed), 2)
+        # 第一个 op 缺 reason → 使用默认
+        self.assertIn("反刍", parsed[0]["reason"])
+        # 第二个 op 有自定义 reason → 保留
+        self.assertEqual(parsed[1]["reason"], "自定义理由")
+
+
+class ProductionShapeMissingReasonTests(unittest.TestCase):
+    """生产形状 2133→2458 批次 + create_memory 缺 reason 回归。"""
+
+    def test_production_batch_with_missing_reason_reaches_model(self):
+        cursor = {
+            "assistant_id": "assistant-1", "initialized": True,
+            "last_processed_message_id": 100, "last_scheduled_date": None,
+            "last_success_at": None,
+        }
+        pages = [list(range(2339, 2459)), []]
+        production_rows = [
+            {"id": i, "assistant_id": "assistant-1",
+             "conversation_id": f"conv-{i % 3}", "role": "user" if i % 2 == 0 else "assistant",
+             "content": f"消息 {i}", "created_at": f"2026-09-06T14:{i % 60:02d}:00+08:00"}
+            for i in range(2339, 2459)
+        ]
+        # 模型输出 create_memory 缺少 reason
+        model_output = json.dumps({"operations": [{
+            "op": "create_memory",
+            "continuity_type": "moment",
+            "content": "一条生产记忆正文。",
+            "continuity_data": {"scene": "s", "event": "e", "moment_state": "standalone"},
+            "evidence_message_ids": [2339],
+        }]}, ensure_ascii=False)
+        ops = [{
+            "op": "create_memory", "reason": "反刍根据本批原文提取的独立记忆",
+            "continuity_type": "moment",
+            "content": "一条生产记忆正文。",
+            "continuity_data": {"scene": "s", "event": "e", "moment_state": "standalone"},
+            "evidence_message_ids": [2339],
+        }]
+        rpc_results = [
+            {"status": "claimed", "run_id": 263, "scheduled_execution_id": None},
+            {"run_id": 263, "cursor": {"last_processed_message_id": 2458},
+             "op_counts": {"created_memories": 1}, "preview": [], "inserted_count": 1},
+        ]
+        with (
+            patch("gateway.memory_rumination._rumination_analysis_configured", return_value=True),
+            patch("gateway.memory_rumination.resolve_rumination_assistant_id", return_value="assistant-1"),
+            patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
+            patch("gateway.memory_rumination._mark_stale_rumination_runs"),
+            patch("gateway.memory_rumination._fetch_message_ids",
+                  side_effect=[pages[0], []]),
+            patch("gateway.memory_rumination._fetch_batch_rows", return_value=production_rows),
+            patch("gateway.memory_rumination._normalize_batch_messages", return_value=[
+                {"id": i, "conversation_id": f"conv-{i % 3}",
+                 "role": "user" if i % 2 == 0 else "assistant",
+                 "content": f"消息 {i}", "source_time": f"2026-09-06T14:{i % 60:02d}+08:00"}
+                for i in range(2339, 2459)
+            ]),
+            patch("gateway.memory_rumination._load_unfinished_threads", return_value=[]),
+            patch("gateway.memory_rumination._load_own_requests", return_value=[]),
+            patch("gateway.memory_rumination._load_absorbable_candidates", return_value=[]),
+            patch("gateway.memory_rumination._call_rumination_model", return_value=model_output),
+            patch("gateway.memory_rumination.parse_rumination_output", return_value=ops),
+            patch("gateway.memory_rumination._get_embedding_sync", return_value=[0.1, 0.2]),
+            patch("gateway.memory_rumination._rpc_object", side_effect=rpc_results) as rpc,
+            patch("gateway.memory_rumination._set_run_model_name"),
+            patch("gateway.memory_rumination._update_heartbeat"),
+        ):
+            result = run_rumination_digest("rumination_manual")
+        # 成功到达 model_request 并完成 commit
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["cursor_after"], 2458)
 
 
 if __name__ == "__main__":
