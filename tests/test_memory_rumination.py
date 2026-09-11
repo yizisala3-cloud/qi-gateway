@@ -693,7 +693,7 @@ class RunFlowTests(unittest.TestCase):
 
     def test_scheduled_if_due_treats_already_scheduled_as_quiet_skip(self):
         cursor = {"initialized": True, "last_processed_message_id": 100,
-                  "last_scheduled_date": "2026-09-05"}
+                  "last_scheduled_date": "2099-12-31"}
         with (
             patch("gateway.memory_rumination._rumination_analysis_configured", return_value=True),
             patch("gateway.memory_rumination.resolve_rumination_assistant_id", return_value="assistant-1"),
@@ -1288,7 +1288,7 @@ class SchedulerTests(unittest.TestCase):
 
     def test_scheduled_run_skipped_when_already_done_today(self):
         cursor = {"initialized": True, "last_processed_message_id": 100,
-                  "last_scheduled_date": "2026-09-05"}
+                  "last_scheduled_date": "2099-12-31"}
         patches = self._patches(cursor=cursor)
         with patches[0], patches[1], patches[2], \
                 patch("gateway.memory_rumination.run_rumination_digest") as run:
@@ -2283,6 +2283,247 @@ class RealPostgrestOverlapsSerializationTests(unittest.TestCase):
         self.assertTrue(overlap_values[0].startswith("ov."))
 
 
+
+
+class MemoryTypeCompatTests(unittest.TestCase):
+    """memory_type 退役字段兼容：有合法 continuity_type 时剥离旧字段。"""
+
+    def setUp(self):
+        self.threads = _threads_by_id(_thread(memory_id=12, state="open"))
+        self.times = _evidence_times([1, 2, 3])
+
+    def _parse(self, ops, absorbable_ids=frozenset()):
+        return parse_rumination_output(
+            json.dumps({"operations": ops}, ensure_ascii=False),
+            evidence_times=self.times,
+            threads_by_id=self.threads,
+            absorbable_ids=absorbable_ids,
+        )
+
+    def _moment_op(self, **kwargs):
+        base = {
+            "op": "create_memory", "reason": "普通记忆",
+            "continuity_type": "moment",
+            "content": "一条普通记忆正文。",
+            "continuity_data": {"scene": "s", "event": "e", "moment_state": "standalone"},
+            "evidence_message_ids": [1],
+        }
+        base.update(kwargs)
+        return base
+
+    def test_memory_type_with_valid_continuity_type_stripped(self):
+        op = self._moment_op(memory_type="moment")
+        parsed = self._parse([op])
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["continuity_type"], "moment")
+        self.assertNotIn("memory_type", parsed[0])
+
+    def test_memory_type_without_continuity_type_rejected(self):
+        op = self._moment_op()
+        del op["continuity_type"]
+        op["memory_type"] = "moment"
+        with self.assertRaisesRegex(RuminationPipelineError, "continuity_type"):
+            self._parse([op])
+
+    def test_memory_type_conflict_with_continuity_type_rejected(self):
+        op = self._moment_op(memory_type="episode")
+        with self.assertRaisesRegex(RuminationPipelineError, "conflict"):
+            self._parse([op])
+
+    def test_other_unknown_fields_still_rejected(self):
+        op = self._moment_op(layer="core")
+        with self.assertRaisesRegex(RuminationPipelineError, "unsupported fields"):
+            self._parse([op])
+
+    def test_create_memory_continuity_type_thread_rejected(self):
+        op = self._moment_op(continuity_type="thread")
+        with self.assertRaisesRegex(RuminationPipelineError, "moment or inside_joke"):
+            self._parse([op])
+
+    def test_memory_type_and_memory_key_both_validated(self):
+        # memory_type 兼容不放宽 key 校验。
+        op = self._moment_op(memory_type="moment")
+        op["absorbed_fast_path_memory_ids"] = [999]
+        with self.assertRaisesRegex(
+            RuminationPipelineError, "no absorbable fast-path memories",
+        ):
+            self._parse([op], absorbable_ids=frozenset())
+
+
+class MemoryKeyDiagnosticTests(unittest.TestCase):
+    """memory_key 校验失败时的安全结构化日志。"""
+
+    def setUp(self):
+        self.threads = _threads_by_id(_thread(memory_id=12, state="open"))
+        self.times = _evidence_times([1, 2])
+
+    def _parse(self, ops):
+        return parse_rumination_output(
+            json.dumps({"operations": ops}, ensure_ascii=False),
+            evidence_times=self.times,
+            threads_by_id=self.threads,
+        )
+
+    def test_valid_ascii_key_passes(self):
+        op = {
+            "op": "create_tracked_thread", "reason": "新的长期进程",
+            "content": "新的长期进程需要稳定的主题键。",
+            "memory_key": "topic.valid.key",
+            "thread_state": "open",
+            "continuity_data": {"open_question": "x", "current_state": "y"},
+            "evidence_message_ids": [1],
+        }
+        parsed = self._parse([op])
+        self.assertEqual(parsed[0]["memory_key"], "topic.valid.key")
+
+    def test_chinese_key_rejected_with_op_and_field(self):
+        op = {
+            "op": "create_tracked_thread", "reason": "中文 key 测试",
+            "content": "新的长期进程需要稳定的主题键。",
+            "memory_key": "中文主题键",
+            "thread_state": "open",
+            "continuity_data": {"open_question": "x", "current_state": "y"},
+            "evidence_message_ids": [1],
+        }
+        with self.assertRaisesRegex(RuminationPipelineError, "invalid memory_key.*op=create_tracked_thread.*field=memory_key"):
+            self._parse([op])
+
+    def test_key_with_spaces_rejected(self):
+        op = {
+            "op": "create_tracked_thread", "reason": "空格 key 测试",
+            "content": "新的长期进程需要稳定的主题键。",
+            "memory_key": "has spaces in key",
+            "thread_state": "open",
+            "continuity_data": {"open_question": "x", "current_state": "y"},
+            "evidence_message_ids": [1],
+        }
+        with self.assertRaisesRegex(RuminationPipelineError, "invalid memory_key"):
+            self._parse([op])
+
+    def test_key_over_120_chars_rejected(self):
+        op = {
+            "op": "create_tracked_thread", "reason": "超长 key 测试",
+            "content": "新的长期进程需要稳定的主题键。",
+            "memory_key": "a" * 121,
+            "thread_state": "open",
+            "continuity_data": {"open_question": "x", "current_state": "y"},
+            "evidence_message_ids": [1],
+        }
+        with self.assertRaisesRegex(RuminationPipelineError, "invalid memory_key"):
+            self._parse([op])
+
+    def test_episode_with_key_rejected(self):
+        op = {
+            "op": "create_request", "reason": "episode 不能有 key",
+            "continuity_type": "episode",
+            "content": "一段完整的共同经历。",
+            "continuity_data": {
+                "beginning": "b", "development": "d", "outcome": "o",
+                "closure_quality": "complete",
+            },
+            "memory_key": "topic.should.not.exist",
+            "evidence_message_ids": [1],
+        }
+        with self.assertRaisesRegex(RuminationPipelineError, "must not carry"):
+            self._parse([op])
+
+    def test_interaction_rule_without_key_rejected(self):
+        op = {
+            "op": "create_request", "reason": "规则需要 key",
+            "continuity_type": "interaction_rule",
+            "content": "赶海话题必须提醒防晒。",
+            "continuity_data": {
+                "trigger": "t", "expected_behavior": "e", "scope": "s",
+                "priority": 5, "rule_state": "active",
+                "explicit_instruction": "i",
+            },
+            "evidence_message_ids": [1],
+        }
+        with self.assertRaisesRegex(RuminationPipelineError, "require a stable memory_key"):
+            self._parse([op])
+
+    def test_fast_path_keyless_adopt_without_key_rejected(self):
+        threads = _threads_by_id(
+            _thread(memory_id=14, state="open", maintained_by="fast_path", key=None),
+        )
+        ops = [{
+            "op": "adopt_thread", "reason": "无 key 接管",
+            "target_memory_id": 14,
+            "target_memory_key": None,
+            "target_continuity_id": "21111111-1111-1111-1111-1111111111a1",
+            "target_content_hash": threads[14]["content_hash"],
+            "target_thread_state": "open",
+            "evidence_message_ids": [1],
+        }]
+        # No key provided → parser succeeds (DB fills key in later).
+        # But if we set memory_key to an invalid value, it must reject.
+        ops[0]["memory_key"] = "中文KEY"
+        with self.assertRaisesRegex(RuminationPipelineError, "invalid memory_key"):
+            parse_rumination_output(
+                json.dumps({"operations": ops}, ensure_ascii=False),
+                evidence_times=self.times,
+                threads_by_id=threads,
+            )
+
+    def test_key_safe_summary_never_contains_full_key(self):
+        from gateway.memory_rumination import _key_safe_summary
+
+        summary = _key_safe_summary("a" * 120)
+        self.assertIn("value_length=120", summary)
+        self.assertIn("pattern_valid=True", summary)
+        self.assertNotIn("a" * 120, summary)
+
+        summary_cn = _key_safe_summary("中文主题键")
+        self.assertIn("pattern_valid=False", summary_cn)
+
+
+class ProductionBatchRegressionTests(unittest.TestCase):
+    """生产批次 + 模型输出含 memory_type 时 parser 层面的回归。"""
+
+    def test_parser_strips_memory_type_with_valid_continuity_type(self):
+        """模型输出带 memory_type 时，parser 剥离退役字段，不因该字段整批失败。"""
+        threads = _threads_by_id(_thread(memory_id=12, state="open"))
+        times = _evidence_times([2133])
+        op = {
+            "op": "create_memory", "reason": "普通记忆",
+            "continuity_type": "moment", "memory_type": "moment",
+            "content": "一条生产记忆正文。",
+            "continuity_data": {"scene": "s", "event": "e", "moment_state": "standalone"},
+            "evidence_message_ids": [2133],
+        }
+        parsed = parse_rumination_output(
+            json.dumps({"operations": [op]}, ensure_ascii=False),
+            evidence_times=times,
+            threads_by_id=threads,
+        )
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["continuity_type"], "moment")
+        self.assertNotIn("memory_type", parsed[0])
+
+    def test_parser_invalid_key_includes_op_and_field_in_error(self):
+        """非法 key 时错误信息包含 op 和 field 名。"""
+        threads = _threads_by_id(_thread(memory_id=12, state="open"))
+        times = _evidence_times([101])
+        op = {
+            "op": "create_tracked_thread", "reason": "新进程",
+            "content": "新的长期进程需要稳定的主题键。",
+            "memory_key": "中文标题不是KEY",
+            "thread_state": "open",
+            "continuity_data": {"open_question": "x", "current_state": "y"},
+            "evidence_message_ids": [101],
+        }
+        with self.assertRaisesRegex(
+            RuminationPipelineError,
+            "invalid memory_key.*op=create_tracked_thread.*field=memory_key",
+        ):
+            parse_rumination_output(
+                json.dumps({"operations": [op]}, ensure_ascii=False),
+                evidence_times=times,
+                threads_by_id=threads,
+            )
+
+
 if __name__ == "__main__":
+    unittest.main()
     unittest.main()
     unittest.main()

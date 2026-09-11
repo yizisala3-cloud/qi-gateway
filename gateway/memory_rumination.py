@@ -152,6 +152,48 @@ _OP_FIELDS: dict[str, frozenset[str]] = {
     }),
 }
 
+RETIRED_FIELDS = frozenset({"memory_type"})
+
+
+def _normalize_legacy_operation_fields(
+    raw: dict[str, Any], op_type: str,
+) -> dict[str, Any]:
+    """Strip known retired fields that the model sometimes emits.
+
+    Only handles `memory_type` (retired in favour of `continuity_type`).
+    Other unknown fields are left in place for the strict whitelist check.
+    """
+    normalized = dict(raw)
+    if "memory_type" not in normalized:
+        return normalized
+    if "memory_type" not in RETIRED_FIELDS:
+        return normalized
+
+    continuity_type = normalized.get("continuity_type")
+    memory_type_value = normalized["memory_type"]
+
+    if not continuity_type:
+        raise RuminationPipelineError(
+            "model_schema_error",
+            f"op {op_type}: memory_type is a retired field and no "
+            "continuity_type was provided; use continuity_type instead",
+        )
+
+    normalized_type = str(continuity_type).strip().casefold()
+    legacy_type = str(memory_type_value).strip().casefold()
+    if legacy_type and legacy_type != normalized_type:
+        raise RuminationPipelineError(
+            "model_schema_error",
+            f"op {op_type}: memory_type='{legacy_type}' conflicts with "
+            f"continuity_type='{normalized_type}'; memory_type is retired, "
+            "use continuity_type only",
+        )
+
+    # Compatible: strip the legacy field, keep continuity_type.
+    normalized.pop("memory_type")
+    return normalized
+
+
 RUMINATION_SYSTEM_PROMPT = """你是“反刍连续感”提取器，负责在独立每日管线中回看一段聊天原文，维护长期进程并产出结构化操作。你与“连续感总结”快速路径相互独立，不要模仿它的输出格式。
 
 ## 输入
@@ -188,6 +230,18 @@ RUMINATION_SYSTEM_PROMPT = """你是“反刍连续感”提取器，负责在�
 12. 没有新证据的长期进程不要重写；不确定时选择 ignore 或 evidence_only。
 13. 同一条 thread 在本批出现多个连续进展时（例如上午完成、下午部署、晚上验收），必须把它们合并为一个操作：content 写最终完整当前状态，evidence_message_ids 取各进展消息的并集，按证据时间得到的最终状态决定操作类型；不要为同一 thread 输出多个版本操作。
 14. create_request 与 create_memory（moment/inside_joke）可以带可选的 absorbed_fast_path_memory_ids：仅当该操作明确吸收或覆盖某条快速路径正式记忆时才列出其 memory_id（最多 8 条）。只能引用 <absorbable_fast_path_memories> 中列出的候选 ID——该列表为空时禁止输出任何吸收 ID；候选之外的任何 ID（包括碰巧真实存在的记忆）都会整批拒绝。候选只提供最小元数据（id、类型、标题、证据 ID），不含完整正文；吸收判断以你本批原文证据为准。不得因为 evidence_message_ids 相同就吸收所有候选——相同原文可以合法支撑不同分类和不同语义。不能确定目标时省略该字段。thread 的生命周期请使用专门的 thread 操作，不要通过吸收来处置 thread。
+
+## 字段规则
+- memory_type 是已经退役的旧字段，绝对禁止输出。
+- 只能使用 continuity_type。
+- 不要输出旧版记忆格式中的 memory_type。
+- 不要从聊天原文、代码、旧提示词或示例中复制 memory_type。
+- create_memory 的 continuity_type 只能是 moment 或 inside_joke。
+- create_request 的 continuity_type 只能是 episode、profile 或 interaction_rule。
+- interaction_rule 必须使用符合格式的稳定 memory_key。
+- episode/profile 不得输出 memory_key。
+- thread 的 memory_key 必须是 3-120 位小写 ASCII 稳定主题键，只能包含 a-z、0-9、点、下划线、冒号、斜杠和连字符。
+- 中文标题不能直接当作 memory_key。
 
 ## 输出 JSON
 只返回严格 JSON，不要 Markdown、解释或代码围栏：
@@ -566,13 +620,38 @@ def _clean_text_field(value: Any, limit: int) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
 
 
-def _normalize_memory_key(value: Any) -> str | None:
+def _key_safe_summary(value: Any) -> str:
+    """Safe summary of a memory_key for structured logging — never the full key."""
+    key = str(value or "")
+    import re as _re
+    pattern_ok = bool(_re.fullmatch(
+        r"[a-z0-9][a-z0-9._:/-]{2,119}", key,
+    ))
+    prefix = key[:2] if len(key) >= 2 else key
+    suffix = key[-2:] if len(key) >= 4 else ""
+    return (
+        f"value_length={len(key)} pattern_valid={pattern_ok} "
+        f"prefix='{prefix}' suffix='{suffix}'"
+    )
+
+
+def _log_key_validation_error(op_type: str, field: str, value: Any) -> None:
+    log.warning(
+        "Rumination operation validation failed: stage=parse_output "
+        "op=%s field=%s %s error=invalid_memory_key",
+        op_type, field, _key_safe_summary(value),
+    )
+
+
+def _normalize_memory_key(value: Any, *, op_type: str = "", field: str = "memory_key") -> str | None:
     key = str(value or "").strip().casefold()
     if not key:
         return None
     if not MEMORY_KEY_PATTERN.fullmatch(key):
+        _log_key_validation_error(op_type, field, key)
         raise RuminationPipelineError(
-            "model_schema_error", f"invalid memory_key: {key[:40]}",
+            "model_schema_error",
+            f"invalid memory_key: {key[:40]} (op={op_type} field={field})",
         )
     return key
 
@@ -612,6 +691,7 @@ def parse_rumination_output(
             raise RuminationPipelineError(
                 "model_schema_error", f"unknown rumination op: {op_type or '(missing)'}",
             )
+        raw = _normalize_legacy_operation_fields(raw, op_type)
         unknown = set(raw) - _OP_FIELDS[op_type]
         if unknown:
             raise RuminationPipelineError(
@@ -687,7 +767,7 @@ def parse_rumination_output(
             # A stable key may only accompany a thread op to fill in the key
             # of a fast-path takeover; it never re-keys a rumination thread.
             if raw.get("memory_key"):
-                op["memory_key"] = _normalize_memory_key(raw.get("memory_key"))
+                op["memory_key"] = _normalize_memory_key(raw.get("memory_key"), op_type=op_type)
             if op_type == "pause_thread" and target.get("thread_state") != "open":
                 raise RuminationPipelineError(
                     "model_schema_error", "pause_thread requires an open thread",
@@ -791,7 +871,7 @@ def parse_rumination_output(
                 raw.get("absorbed_fast_path_memory_ids"), absorbable_ids,
             )
         elif op_type == "create_tracked_thread":
-            op["memory_key"] = _require_memory_key(raw.get("memory_key"))
+            op["memory_key"] = _require_memory_key(raw.get("memory_key"), op_type=op_type)
             thread_state = str(raw.get("thread_state") or "").strip().casefold() or "open"
             if thread_state != "open":
                 raise RuminationPipelineError(
@@ -801,7 +881,7 @@ def parse_rumination_output(
                 "thread", "open", raw.get("continuity_data"),
             )
         elif op_type == "adopt_thread":
-            key = _normalize_memory_key(raw.get("memory_key"))
+            key = _normalize_memory_key(raw.get("memory_key"), op_type=op_type)
             if key:
                 op["memory_key"] = key
             state = str(raw.get("thread_state") or "").strip().casefold() or None
@@ -843,7 +923,7 @@ def parse_rumination_output(
             op["continuity_data"] = _validated_continuity_data(
                 continuity_type, None, raw.get("continuity_data"),
             )
-            key = _normalize_memory_key(raw.get("memory_key"))
+            key = _normalize_memory_key(raw.get("memory_key"), op_type=op_type)
             if continuity_type == "interaction_rule":
                 if not key:
                     raise RuminationPipelineError(
@@ -883,8 +963,8 @@ def _validated_continuity_data(
         ) from exc
 
 
-def _require_memory_key(value: Any) -> str:
-    key = _normalize_memory_key(value)
+def _require_memory_key(value: Any, *, op_type: str = "") -> str:
+    key = _normalize_memory_key(value, op_type=op_type)
     if not key:
         raise RuminationPipelineError(
             "model_schema_error", "a stable memory_key is required",
