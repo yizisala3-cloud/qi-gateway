@@ -2592,7 +2592,99 @@ class ProductionBatchRegressionTests(unittest.TestCase):
             )
 
 
+
+
+class KeylessFastPathAdoptEdgeCaseTests(unittest.TestCase):
+    """keyless fast_path adopt_thread 各缺失 key 形式的边界测试。"""
+
+    def setUp(self):
+        self.threads = _threads_by_id(
+            _thread(memory_id=14, state="open", maintained_by="fast_path", key=None),
+        )
+        self.times = _evidence_times([1])
+
+    def _make_adopt_op(self, memory_key_value, include_field=True):
+        op = {
+            "op": "adopt_thread", "reason": "接管",
+            "target_memory_id": 14,
+            "target_memory_key": None,
+            "target_continuity_id": self.threads[14]["continuity_id"],
+            "target_content_hash": self.threads[14]["content_hash"],
+            "target_thread_state": "open",
+            "evidence_message_ids": [1],
+        }
+        if include_field:
+            op["memory_key"] = memory_key_value
+        return op
+
+    def _assert_rejected(self, op):
+        with self.assertRaisesRegex(
+            RuminationPipelineError,
+            r"op=adopt_thread field=memory_key.*memory 14.*no stable key",
+        ):
+            parse_rumination_output(
+                json.dumps({"operations": [op]}, ensure_ascii=False),
+                evidence_times=self.times,
+                threads_by_id=self.threads,
+            )
+
+    def test_key_absent_rejected(self):
+        self._assert_rejected(self._make_adopt_op(None, include_field=False))
+
+    def test_key_none_rejected(self):
+        self._assert_rejected(self._make_adopt_op(None))
+
+    def test_key_empty_string_rejected(self):
+        self._assert_rejected(self._make_adopt_op(""))
+
+    def test_key_whitespace_rejected(self):
+        self._assert_rejected(self._make_adopt_op("   "))
+
+    def test_key_valid_string_passes(self):
+        op = self._make_adopt_op("topic.valid.key")
+        parsed = parse_rumination_output(
+            json.dumps({"operations": [op]}, ensure_ascii=False),
+            evidence_times=self.times,
+            threads_by_id=self.threads,
+        )
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["memory_key"], "topic.valid.key")
+
+
+class RuminationMaintainedTargetAdoptTests(unittest.TestCase):
+    """非 fast_path target 不受 keyless fast_path 限制。"""
+
+    def test_rumination_maintained_keyless_target_adopt_not_blocked(self):
+        """rumination-maintained keyless target（理论上不应存在但防御性测试）
+        不应被 keyless fast_path 检查拦截（检查只针对 fast_path）。"""
+        threads = _threads_by_id(
+            _thread(memory_id=20, state="open", maintained_by="rumination", key=None),
+        )
+        times = _evidence_times([1])
+        op = {
+            "op": "adopt_thread", "reason": "接管",
+            "target_memory_id": 20,
+            "target_memory_key": None,
+            "target_continuity_id": threads[20]["continuity_id"],
+            "target_content_hash": threads[20]["content_hash"],
+            "target_thread_state": "open",
+            "evidence_message_ids": [1],
+        }
+        # rumination-maintained target 没有 keyless fast_path 检查；
+        # 但 adopt_thread 仍不能对非 fast_path target 操作（SQL 层拒绝）。
+        # 在 parser 层，我们验证不会被 fast_path keyless 检查拦截。
+        try:
+            parsed = parse_rumination_output(
+                json.dumps({"operations": [op]}, ensure_ascii=False),
+                evidence_times=times,
+                threads_by_id=threads,
+            )
+            # 如果 parser 通过了（因为 keyless 检查只针对 fast_path），那也没问题。
+            # SQL 层会拒绝（memory_rumination_not_fast_path）。
+        except RuminationPipelineError as exc:
+            # 如果 parser 抛出错误，不应该是因为 keyless fast_path 检查。
+            self.assertNotIn("no stable key", str(exc))
+
+
 if __name__ == "__main__":
-    unittest.main()
-    unittest.main()
     unittest.main()
