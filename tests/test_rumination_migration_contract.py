@@ -593,5 +593,73 @@ class RuminationFinishRpcContractTests(unittest.TestCase):
         self.assertNotIn("memory_relations", self.executable)
 
 
+class RequestTypeExpansionContractTests(unittest.TestCase):
+    """20260912010000: create_request type whitelist expands to five types.
+
+    Forward-only follow-up: the only functional change vs the previous
+    commit_rumination_batch body is the whitelist line; the parser relies on
+    it to file degraded moment/inside_joke requests for human review.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = (
+            ROOT / "supabase/migrations/20260912010000_rumination_request_type_expansion.sql"
+        ).read_text(encoding="utf-8")
+        cls.executable = re.sub(r"--[^\n]*", "", cls.sql)
+        parts = cls.executable.split(
+            "create or replace function public.commit_rumination_batch", 1
+        )
+        assert len(parts) == 2, "commit_rumination_batch must be rebuilt exactly once"
+        cls.commit = parts[1]
+
+    def test_rebuilds_only_commit_rumination_batch(self):
+        # The migration drops and recreates the bigint/jsonb signature inside
+        # a transaction; no DDL touches table structures and no other
+        # function is rebuilt. (DML on memories/memory_requests inside the
+        # function body is the function's contract and stays untouched.)
+        self.assertIn(
+            "drop function if exists public.commit_rumination_batch(bigint, jsonb)",
+            self.executable,
+        )
+        self.assertEqual(self.executable.count("create or replace function"), 1)
+        self.assertNotIn("memory_relations", self.executable)
+        ddl = re.findall(
+            r"(alter\s+table|drop\s+table|create\s+table|create\s+or\s+replace\s+trigger)"
+            r"[\s\S]{0,120}?(chat_messages|memories|memory_requests|"
+            r"memory_rumination_cursors|memory_path_handoffs)",
+            self.executable,
+            re.IGNORECASE,
+        )
+        self.assertEqual(ddl, [])
+
+    def test_request_type_whitelist_expanded_thread_excluded(self):
+        self.assertIn(
+            "if v_continuity_type not in "
+            "('moment', 'inside_joke', 'episode', 'profile', 'interaction_rule') then",
+            self.commit,
+        )
+        self.assertIn("memory_rumination_invalid_request_type", self.commit)
+        # The direct-write whitelist (create_memory) stays moment/inside_joke.
+        self.assertIn(
+            "if v_continuity_type not in ('moment', 'inside_joke') then",
+            self.commit,
+        )
+
+    def test_security_definer_fixed_search_path_and_service_role(self):
+        self.assertIn("security definer", self.commit)
+        self.assertIn("set search_path to 'public', 'extensions'", self.commit)
+        self.assertRegex(
+            self.executable,
+            r"revoke\s+all\s+on\s+function\s+public\.commit_rumination_batch\(bigint,\s*jsonb\)"
+            r"[\s\S]{0,200}?from\s+public,\s*anon,\s*authenticated",
+        )
+        self.assertRegex(
+            self.executable,
+            r"grant\s+execute\s+on\s+function\s+public\.commit_rumination_batch\(bigint,\s*jsonb\)"
+            r"[\s\S]{0,200}?to\s+service_role",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

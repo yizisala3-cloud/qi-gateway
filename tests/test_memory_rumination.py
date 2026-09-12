@@ -274,16 +274,17 @@ class ParseValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuminationPipelineError, "cannot change thread_state"):
             self._parse([_op(thread_state="resolved")])
 
-    def test_resolve_requires_closure_fields(self):
-        with self.assertRaisesRegex(RuminationPipelineError, "continuity_data"):
-            self._parse([{
-                "op": "resolve_thread", "reason": "没有闭合字段的完成",
-                "target_memory_id": 12,
-                **self._snap(12),
-                "content": "赶海计划已完成。",
-                "continuity_data": {"open_question": "赶海是否成行", "current_state": "完成"},
-                "evidence_message_ids": [1],
-            }])
+    def test_resolve_without_closure_fields_degrades_to_ignore(self):
+        parsed = self._parse([{
+            "op": "resolve_thread", "reason": "没有闭合字段的完成",
+            "target_memory_id": 12,
+            **self._snap(12),
+            "content": "赶海计划已完成。",
+            "continuity_data": {"open_question": "赶海是否成行", "current_state": "完成"},
+            "evidence_message_ids": [1],
+        }])
+        self.assertEqual([item["op"] for item in parsed], ["ignore"])
+        self.assertIn("resolve_thread", parsed[0]["reason"])
 
     def test_create_memory_limits_types_and_request_types(self):
         with self.assertRaisesRegex(RuminationPipelineError, "moment or inside_joke"):
@@ -515,7 +516,8 @@ class EnrichmentTests(unittest.TestCase):
                 # 正文向量失败让整批失败。
                 enrich_rumination_ops(ops, 1)
 
-        # 场景非空但召回向量失败：整批失败，绝不留下"有场景无向量"的写入。
+        # 场景非空但召回向量失败：只影响该操作——场景与召回向量同时置空
+        # （保持"有场景必有向量"的不变量），正文向量正常，记忆仍写入。
         def fake_embedding(text):
             from gateway.memory_extract import DigestPipelineError
 
@@ -527,8 +529,12 @@ class EnrichmentTests(unittest.TestCase):
             patch("gateway.memory_rumination._update_heartbeat"),
             patch("gateway.memory_rumination._get_embedding_sync", side_effect=fake_embedding),
         ):
-            with self.assertRaisesRegex(RuminationPipelineError, "Recall scene embedding failed"):
-                enrich_rumination_ops(ops, 1)
+            enriched = enrich_rumination_ops(ops, 1)
+        self.assertEqual(enriched[0]["embedding"], [0.1, 0.2])
+        self.assertIsNone(enriched[0]["recall_scene"])
+        self.assertIsNone(enriched[0]["recall_embedding"])
+        self.assertEqual(enriched[1]["embedding"], [0.1, 0.2])
+        self.assertIsNone(enriched[1].get("recall_scene"))
 
         # 没有可靠场景时显式空场景写入，不调用召回向量。
         sceneless = [dict(ops[1])]
@@ -2930,15 +2936,17 @@ class MissingReasonFallbackTests(unittest.TestCase):
         with self.assertRaisesRegex(RuminationPipelineError, "moment or inside_joke"):
             self._parse([op])
 
-    def test_missing_continuity_data_still_rejected(self):
+    def test_missing_continuity_data_degrades_to_request(self):
         op = {
             "op": "create_memory",
             "continuity_type": "moment",
             "content": "没有 continuity_data 的记忆正文。",
             "evidence_message_ids": [1],
         }
-        with self.assertRaisesRegex(RuminationPipelineError, "continuity_data"):
-            self._parse([op])
+        parsed = self._parse([op])
+        self.assertEqual(parsed[0]["op"], "create_request")
+        self.assertEqual(parsed[0]["continuity_type"], "moment")
+        self.assertIn("待审核申请", parsed[0]["reason"])
 
     def test_missing_evidence_still_rejected(self):
         op = {
@@ -3042,6 +3050,359 @@ class ProductionShapeMissingReasonTests(unittest.TestCase):
         # 成功到达 model_request 并完成 commit
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(result["cursor_after"], 2458)
+
+
+class ContinuityDataDegradationTests(unittest.TestCase):
+    """continuity_data 结构不可用时按操作类型优雅降级（内容不丢失）。
+
+    create_memory → create_request 待审核；create_request → 最小结构替换；
+    create_tracked_thread 与 thread 生命周期操作 → ignore；
+    interaction_rule 结构不可用且无稳定 memory_key → ignore。
+    """
+
+    def setUp(self):
+        self.threads = _threads_by_id(
+            _thread(memory_id=12, state="open"),
+        )
+        self.times = _evidence_times([3, 4, 101, 102, 103])
+
+    def _parse(self, ops, absorbable_ids=frozenset()):
+        return parse_rumination_output(
+            json.dumps({"operations": ops}, ensure_ascii=False),
+            evidence_times=self.times,
+            threads_by_id=self.threads,
+            absorbable_ids=absorbable_ids,
+        )
+
+    @staticmethod
+    def _moment(**kwargs):
+        op = {
+            "op": "create_memory", "reason": "记录一个瞬间",
+            "continuity_type": "moment",
+            "content": "叶子在窗边看潮水漫过礁石，安静了几秒。",
+            "continuity_data": {
+                "scene": "窗边", "event": "潮水漫过礁石", "moment_state": "standalone",
+            },
+            "recall_scene": "窗边看潮", "recall_tags": ["潮汐"],
+            "memory_time": "2026-09-12T10:00+08:00", "time_precision": "minute",
+            "evidence_message_ids": [101, 102],
+        }
+        op.update(kwargs)
+        return op
+
+    # -- 直接写入（结构可用，不降级） ----------------------------------
+
+    def test_valid_dict_writes_directly(self):
+        parsed = self._parse([self._moment()])
+        self.assertEqual([item["op"] for item in parsed], ["create_memory"])
+        self.assertEqual(parsed[0]["continuity_data"]["scene"], "窗边")
+
+    def test_valid_json_string_parses_and_writes_directly(self):
+        raw = self._moment(continuity_data=json.dumps(
+            {"scene": "窗边", "event": "潮水漫过礁石", "moment_state": "standalone"},
+            ensure_ascii=False,
+        ))
+        parsed = self._parse([raw])
+        self.assertEqual([item["op"] for item in parsed], ["create_memory"])
+        self.assertEqual(parsed[0]["continuity_data"]["moment_state"], "standalone")
+
+    # -- create_memory 结构不可用 → create_request ---------------------
+
+    def test_unparsable_string_degrades_to_request_with_category(self):
+        with self.assertLogs("gateway.memory_rumination", level="WARNING") as captured:
+            parsed = self._parse([self._moment(continuity_data="{scene: 不是JSON")])
+        self.assertEqual(parsed[0]["op"], "create_request")
+        self.assertEqual(parsed[0]["continuity_type"], "moment")
+        self.assertIn(
+            "reason_category=continuity_data_unparsable_string",
+            "\n".join(captured.output),
+        )
+
+    def test_null_degrades_to_request(self):
+        parsed = self._parse([self._moment(continuity_data=None)])
+        self.assertEqual(parsed[0]["op"], "create_request")
+        self.assertEqual(parsed[0]["continuity_data"]["moment_state"], "standalone")
+
+    def test_missing_degrades_to_request(self):
+        op = self._moment()
+        del op["continuity_data"]
+        parsed = self._parse([op])
+        self.assertEqual(parsed[0]["op"], "create_request")
+        self.assertTrue(parsed[0]["continuity_data"]["event"])
+
+    def test_dict_missing_scene_degrades_with_category(self):
+        with self.assertLogs("gateway.memory_rumination", level="WARNING") as captured:
+            parsed = self._parse([self._moment(
+                continuity_data={"event": "潮水漫过礁石", "moment_state": "standalone"},
+            )])
+        self.assertEqual(parsed[0]["op"], "create_request")
+        self.assertIn(
+            "reason_category=continuity_data_missing_required_field",
+            "\n".join(captured.output),
+        )
+
+    def test_dict_invalid_enum_degrades_with_category(self):
+        with self.assertLogs("gateway.memory_rumination", level="WARNING") as captured:
+            parsed = self._parse([self._moment(
+                continuity_data={
+                    "scene": "窗边", "event": "潮水漫过礁石", "moment_state": "forever",
+                },
+            )])
+        self.assertEqual(parsed[0]["op"], "create_request")
+        self.assertIn(
+            "reason_category=continuity_data_invalid_enum",
+            "\n".join(captured.output),
+        )
+
+    def test_dict_extra_field_degrades_with_category(self):
+        with self.assertLogs("gateway.memory_rumination", level="WARNING") as captured:
+            parsed = self._parse([self._moment(
+                continuity_data={
+                    "scene": "窗边", "event": "潮水漫过礁石",
+                    "moment_state": "standalone", "open_question": "不属于 moment",
+                },
+            )])
+        self.assertEqual(parsed[0]["op"], "create_request")
+        self.assertIn(
+            "reason_category=continuity_data_invalid_field",
+            "\n".join(captured.output),
+        )
+
+    def test_inside_joke_degrades_with_nonempty_trigger_phrases(self):
+        op = {
+            "op": "create_memory", "reason": "共享梗",
+            "continuity_type": "inside_joke",
+            "title": "赶海梗",
+            "content": "把赶海说成赶海失败收场已经成了两个人的梗。",
+            "continuity_data": "not a json object",
+            "evidence_message_ids": [101],
+        }
+        parsed = self._parse([op])
+        self.assertEqual(parsed[0]["op"], "create_request")
+        self.assertEqual(parsed[0]["continuity_type"], "inside_joke")
+        triggers = parsed[0]["continuity_data"]["trigger_phrases"]
+        self.assertIsInstance(triggers, list)
+        self.assertTrue(triggers)
+
+    # -- create_request 结构不可用 → 最小可用值替换 ---------------------
+
+    def test_episode_request_unusable_replaced_with_minimal(self):
+        op = {
+            "op": "create_request", "reason": "一段经历",
+            "continuity_type": "episode",
+            "content": "周末从早潮等到晚潮最终成行的一次赶海。",
+            "continuity_data": None,
+            "evidence_message_ids": [101, 102],
+        }
+        parsed = self._parse([op])
+        self.assertEqual(parsed[0]["op"], "create_request")
+        self.assertEqual(parsed[0]["continuity_data"]["closure_quality"], "uncertain")
+
+    def test_profile_request_unusable_replaced_with_minimal(self):
+        op = {
+            "op": "create_request", "reason": "偏好画像",
+            "continuity_type": "profile",
+            "content": "叶子偏好安静的清晨时段聊天。",
+            "continuity_data": {"facet": "作息"},
+            "evidence_message_ids": [101],
+        }
+        parsed = self._parse([op])
+        self.assertEqual(parsed[0]["op"], "create_request")
+        self.assertEqual(parsed[0]["continuity_data"]["stability"], "provisional")
+        self.assertEqual(parsed[0]["continuity_data"]["basis"], "reviewed_summary")
+
+    def test_interaction_rule_unusable_with_valid_key_becomes_request(self):
+        op = {
+            "op": "create_request", "reason": "叶子明确要求",
+            "continuity_type": "interaction_rule",
+            "content": "叶子要求提醒时直接给结论不要铺垫。",
+            "continuity_data": "not-json",
+            "memory_key": "rule.direct-answer",
+            "evidence_message_ids": [101],
+        }
+        parsed = self._parse([op])
+        self.assertEqual(parsed[0]["op"], "create_request")
+        self.assertEqual(parsed[0]["memory_key"], "rule.direct-answer")
+        self.assertEqual(parsed[0]["continuity_data"]["priority"], 5)
+
+    def test_interaction_rule_unusable_without_key_degrades_to_ignore(self):
+        op = {
+            "op": "create_request", "reason": "叶子明确要求",
+            "continuity_type": "interaction_rule",
+            "content": "叶子要求提醒时直接给结论不要铺垫。",
+            "continuity_data": "not-json",
+            "evidence_message_ids": [101],
+        }
+        parsed = self._parse([op])
+        self.assertEqual([item["op"] for item in parsed], ["ignore"])
+        self.assertIn("interaction_rule", parsed[0]["reason"])
+
+    def test_interaction_rule_unusable_with_illegal_key_degrades_to_ignore(self):
+        op = {
+            "op": "create_request", "reason": "叶子明确要求",
+            "continuity_type": "interaction_rule",
+            "content": "叶子要求提醒时直接给结论不要铺垫。",
+            "continuity_data": "not-json",
+            "memory_key": "不是合法KEY",
+            "evidence_message_ids": [101],
+        }
+        parsed = self._parse([op])
+        self.assertEqual([item["op"] for item in parsed], ["ignore"])
+
+    def test_interaction_rule_valid_data_without_key_still_rejected(self):
+        # 结构可用但 key 缺失：仍然整批拒绝，不因降级放宽。
+        op = {
+            "op": "create_request", "reason": "叶子明确要求",
+            "continuity_type": "interaction_rule",
+            "content": "叶子要求提醒时直接给结论不要铺垫。",
+            "continuity_data": {
+                "trigger": "提醒", "expected_behavior": "直接给结论",
+                "scope": "全局", "priority": 5, "rule_state": "active",
+                "explicit_instruction": "直接给结论",
+            },
+            "evidence_message_ids": [101],
+        }
+        with self.assertRaises(RuminationPipelineError):
+            self._parse([op])
+
+    # -- thread 操作结构不可用 → ignore --------------------------------
+
+    def test_create_tracked_thread_unusable_degrades_to_ignore(self):
+        op = {
+            "op": "create_tracked_thread", "reason": "追踪一个长期进程",
+            "memory_key": "topic.track-me",
+            "content": "跟踪叶子的赶海计划从构想到成行的全过程。",
+            "continuity_data": None,
+            "evidence_message_ids": [101, 102],
+        }
+        parsed = self._parse([op])
+        self.assertEqual([item["op"] for item in parsed], ["ignore"])
+        self.assertIn("create_tracked_thread", parsed[0]["reason"])
+
+    def test_update_thread_unusable_degrades_to_ignore(self):
+        op = {
+            "op": "update_thread", "reason": "进程有实质进展",
+            "target_memory_id": 12, **_snap(self.threads[12]),
+            "content": "赶海计划当前状态：天气确认，周三成行。",
+            "continuity_data": {"open_question": "缺 current_state"},
+            "evidence_message_ids": [101],
+        }
+        parsed = self._parse([op])
+        self.assertEqual([item["op"] for item in parsed], ["ignore"])
+        self.assertIn("update_thread", parsed[0]["reason"])
+
+    def test_pause_thread_unusable_degrades_to_ignore(self):
+        op = {
+            "op": "pause_thread", "reason": "暂时搁置",
+            "target_memory_id": 12, **_snap(self.threads[12]),
+            "content": "赶海计划当前状态：暂停等待天气。",
+            "continuity_data": "not-json",
+            "evidence_message_ids": [101],
+        }
+        parsed = self._parse([op])
+        self.assertEqual([item["op"] for item in parsed], ["ignore"])
+
+    # -- 转换后的申请保留字段、不带 memory_key、reason 提示人工确认 ------
+
+    def test_converted_request_preserves_fields_and_drops_memory_key(self):
+        op = self._moment(
+            title="窗边看潮", importance=7, confidence=0.8,
+            source_type="natural_chat",
+            absorbed_fast_path_memory_ids=[55],
+            continuity_data="not-json",
+        )
+        parsed = self._parse([op], absorbable_ids={55})
+        request = parsed[0]
+        self.assertEqual(request["op"], "create_request")
+        self.assertEqual(request["content"], "叶子在窗边看潮水漫过礁石，安静了几秒。")
+        self.assertEqual(request["title"], "窗边看潮")
+        self.assertEqual(request["evidence_message_ids"], [101, 102])
+        self.assertEqual(request["importance"], 7)
+        self.assertEqual(request["confidence"], 0.8)
+        self.assertEqual(request["source_type"], "natural_chat")
+        self.assertEqual(request["recall_scene"], "窗边看潮")
+        self.assertEqual(request["recall_tags"], ["潮汐"])
+        self.assertEqual(request["memory_time"], "2026-09-12T10:00+08:00")
+        self.assertEqual(request["time_precision"], "minute")
+        self.assertEqual(request["absorbed_fast_path_memory_ids"], [55])
+        self.assertNotIn("memory_key", request)
+        self.assertNotIn("thread_state", request)
+        self.assertIn("待审核申请", request["reason"])
+        self.assertIn("确认", request["reason"])
+
+    def test_converted_request_absorb_ids_outside_candidates_still_rejected(self):
+        # 降级不放宽 absorbed 候选集合校验：不在候选内的 id 仍整批拒绝。
+        op = self._moment(
+            absorbed_fast_path_memory_ids=[999],
+            continuity_data="not-json",
+        )
+        with self.assertRaises(RuminationPipelineError):
+            self._parse([op], absorbable_ids={55})
+
+    # -- 同批混合与生产形状 --------------------------------------------
+
+    def test_mixed_batch_degrades_one_and_keeps_others(self):
+        batch = [
+            self._moment(continuity_data=None),
+            {
+                "op": "create_tracked_thread", "reason": "追踪进程",
+                "memory_key": "topic.track-fine",
+                "content": "一个结构完好的可追踪进程正文。",
+                "continuity_data": {
+                    "open_question": "是否成行", "current_state": "待确认",
+                    "closure_criteria": ["成行"],
+                },
+                "evidence_message_ids": [102],
+            },
+            _op(),
+            {
+                "op": "create_request", "reason": "episode 申请",
+                "continuity_type": "episode",
+                "content": "一次结构完好的经历申请正文。",
+                "continuity_data": {
+                    "beginning": "b", "development": "d", "outcome": "o",
+                    "closure_quality": "complete",
+                },
+                "evidence_message_ids": [103],
+            },
+        ]
+        parsed = self._parse(batch)
+        self.assertEqual(len(parsed), 4)
+        self.assertEqual(parsed[0]["op"], "create_request")
+        self.assertEqual(parsed[0]["continuity_type"], "moment")
+        self.assertEqual(parsed[1]["op"], "create_tracked_thread")
+        self.assertEqual(parsed[2]["op"], "update_thread")
+        self.assertEqual(parsed[3]["op"], "create_request")
+        self.assertEqual(parsed[3]["continuity_type"], "episode")
+
+    def test_production_shape_2339_2458_with_broken_moment_parses(self):
+        batch = [
+            {
+                "op": "create_memory", "reason": "记录瞬间",
+                "continuity_type": "moment",
+                "content": "生产批次中一条 continuity_data 被写成字符串的瞬间记忆。",
+                "continuity_data": '{"scene": "生产"} 截断',
+                "evidence_message_ids": [2339, 2400],
+            },
+            {
+                "op": "create_request", "reason": "episode 申请",
+                "continuity_type": "episode",
+                "content": "生产批次中一段结构完好的经历申请。",
+                "continuity_data": {
+                    "beginning": "b", "development": "d", "outcome": "o",
+                    "closure_quality": "complete",
+                },
+                "evidence_message_ids": [2458],
+            },
+        ]
+        parsed = parse_rumination_output(
+            json.dumps({"operations": batch}, ensure_ascii=False),
+            evidence_times=_evidence_times(range(2339, 2459)),
+            threads_by_id={},
+        )
+        self.assertEqual([item["op"] for item in parsed], ["create_request", "create_request"])
+        self.assertEqual(parsed[0]["continuity_type"], "moment")
+        self.assertEqual(parsed[1]["continuity_type"], "episode")
 
 
 if __name__ == "__main__":

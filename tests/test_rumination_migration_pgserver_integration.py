@@ -1153,6 +1153,128 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
         self.assertEqual(row[1], "replace")
         self.assertEqual(row[3], "rumination")
 
+    # -- request type expansion (20260912010000) ---------------------------
+    #
+    # The parser degrades malformed continuity_data on create_memory into
+    # pending create_request ops whose continuity_type stays moment /
+    # inside_joke. The commit RPC whitelist must accept those types.
+
+    def test_moment_request_accepted_as_pending_append(self):
+        content = "降级路径里的一条 moment 待审核申请正文。"
+        ops = [{
+            "op": "create_request",
+            "reason": "模型未给出完整 continuity_data，已转为待审核申请",
+            "continuity_type": "moment",
+            "content": content,
+            "title": "装备检查",
+            "continuity_data": {
+                "scene": "聊天窗口", "event": "一起检查赶海装备",
+                "moment_state": "standalone",
+            },
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "importance": 5, "confidence": 0.8,
+            "source_type": "natural_chat",
+            "embedding": "[0.11,0.22,0.33]",
+        }]
+        result = self._claim_and_commit(521, 522, ops)
+        self.assertEqual(result["op_counts"]["created_requests"], 1)
+        row = self._query_row(
+            "select status, update_mode, thread_state, continuity_type, memory_key "
+            "from public.memory_requests where digest_run_id = %s and source = 'rumination'",
+            (result["run_id"],),
+        )
+        self.assertEqual(row[0], "pending")
+        self.assertEqual(row[1], "append")
+        self.assertIsNone(row[2])
+        self.assertEqual(row[3], "moment")
+        self.assertIsNone(row[4])
+
+    def test_inside_joke_request_accepted_as_pending_append(self):
+        content = "降级路径里的一条 inside_joke 待审核申请正文。"
+        ops = [{
+            "op": "create_request",
+            "reason": "模型未给出完整 continuity_data，已转为待审核申请",
+            "continuity_type": "inside_joke",
+            "content": content,
+            "title": "贝壳梗",
+            "continuity_data": {
+                "origin": "把防晒霜叫作贝壳", "trigger_phrases": ["贝壳"],
+                "shared_meaning": "两人的专属代号", "reinforcement_count": 0,
+            },
+            "evidence_message_ids": [521, 522],
+            "content_hash": _sha256(content),
+            "importance": 5, "confidence": 0.8,
+            "embedding": "[0.12,0.23,0.34]",
+        }]
+        result = self._claim_and_commit(521, 522, ops)
+        self.assertEqual(result["op_counts"]["created_requests"], 1)
+        row = self._query_row(
+            "select status, update_mode, thread_state, continuity_type "
+            "from public.memory_requests where content_hash = %s",
+            (_sha256(content),),
+        )
+        self.assertEqual(row[0], "pending")
+        self.assertEqual(row[1], "append")
+        self.assertIsNone(row[2])
+        self.assertEqual(row[3], "inside_joke")
+
+    def test_thread_request_still_rejected(self):
+        content = "把 thread 当申请类型提交会被拒绝。"
+        ops = [{
+            "op": "create_request",
+            "reason": "thread 永远不能走申请",
+            "continuity_type": "thread",
+            "content": content,
+            "continuity_data": {
+                "open_question": "q", "current_state": "s",
+                "closure_criteria": ["c"],
+            },
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "importance": 5, "confidence": 0.8,
+            "embedding": "[0.13,0.24,0.35]",
+        }]
+        with self.assertRaises(Exception):
+            self._claim_and_commit(521, 522, ops)
+        self.assertEqual(
+            self._query_one(
+                "select count(*) from public.memory_requests where content_hash = %s",
+                (_sha256(content),),
+            ),
+            0,
+        )
+
+    def test_profile_request_keeps_append_without_key(self):
+        content = "episode 与 profile 行为不变：profile 申请照常入列。"
+        ops = [{
+            "op": "create_request",
+            "reason": "画像需要叶子确认",
+            "continuity_type": "profile",
+            "content": content,
+            "continuity_data": {
+                "facet": "作息", "statement": "叶子偏好清晨聊天",
+                "scope": "全局", "stability": "stable",
+                "basis": "explicit_self_report",
+            },
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "importance": 5, "confidence": 0.8,
+            "embedding": "[0.14,0.25,0.36]",
+        }]
+        result = self._claim_and_commit(521, 522, ops)
+        self.assertEqual(result["op_counts"]["created_requests"], 1)
+        row = self._query_row(
+            "select status, update_mode, thread_state, continuity_type, memory_key "
+            "from public.memory_requests where content_hash = %s",
+            (_sha256(content),),
+        )
+        self.assertEqual(row[0], "pending")
+        self.assertEqual(row[1], "append")
+        self.assertIsNone(row[2])
+        self.assertEqual(row[3], "profile")
+        self.assertIsNone(row[4])
+
     # -- fast-path gating ---------------------------------------------------
 
     def _thread_candidate_item(self, content, content_hash, thread_state="open"):
