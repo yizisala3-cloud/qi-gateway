@@ -1355,6 +1355,41 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
         self.assertTrue(set(evidence) <= set(stored))
         self.assertEqual(self._cursor(), 530)
 
+    def test_pending_request_keeps_both_absorb_targets_until_review(self):
+        # 同正文重复申请合并为一条后，交接目标并集完整落库；pending
+        # 阶段不得提前停用任何交接目标（停用只发生在审核通过或直接吸收）。
+        first = self._fast_path_moment(
+            "合并交接目标的第一条快速片段。", "21111111-1111-1111-1111-1111111111fa",
+        )
+        second = self._fast_path_moment(
+            "合并交接目标的第二条快速片段。", "21111111-1111-1111-1111-1111111111fb",
+        )
+        content = "带两个交接目标的 episode 申请，正文唯一。"
+        ops = [{
+            "op": "create_request", "reason": "经历需要审核",
+            "continuity_type": "episode",
+            "content": content,
+            "continuity_data": EPISODE_DATA,
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "importance": 5, "confidence": 0.8,
+            "embedding": "[0.16,0.27,0.38]",
+            "absorbed_fast_path_memory_ids": [first, second],
+        }]
+        result = self._claim_and_commit(521, 522, ops)
+        self.assertEqual(result["op_counts"]["created_requests"], 1)
+        row = self._query_row(
+            "select absorbed_fast_path_memory_ids, "
+            "jsonb_array_length(absorbed_fast_path_memory_snapshots), status "
+            "from public.memory_requests where content_hash = %s",
+            (_sha256(content),),
+        )
+        self.assertEqual(sorted(row[0]), sorted([first, second]))
+        self.assertEqual(row[1], 2)
+        self.assertEqual(row[2], "pending")
+        for memory_id in (first, second):
+            self.assertTrue(self._active_memory("id = %s", (memory_id,)))
+
     # -- fast-path gating ---------------------------------------------------
 
     def _thread_candidate_item(self, content, content_hash, thread_state="open"):

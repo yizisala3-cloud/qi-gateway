@@ -714,11 +714,8 @@ def _normalize_memory_key(value: Any, *, op_type: str = "", field: str = "memory
     return key
 
 
-def _continuity_dedupe_shape(op: dict[str, Any]) -> str | None:
-    """结构字段的去重形态：延迟校验的操作取原始值，其余取已验证值。"""
-    value = op.get("continuity_data")
-    if value is None and "_deferred_continuity" in op:
-        value = op.get("_deferred_continuity")
+def _continuity_dedupe_shape(value: Any) -> str | None:
+    """结构字段的去重形态：规范 JSON 串，保证键序无关的相等判断。"""
     if value is None:
         return None
     if isinstance(value, dict):
@@ -729,28 +726,16 @@ def _continuity_dedupe_shape(op: dict[str, Any]) -> str | None:
     return str(value)
 
 
-def _op_dedupe_key(op: dict[str, Any]) -> tuple[Any, ...] | None:
-    """同批去重身份：只有业务结果完全一致的操作才算重复。
-
-    键覆盖所有影响业务结果的字段：语义（op）、正文、目标（memory_id /
-    memory_key）、记忆分类、状态、结构（continuity_data 规范形）、召回
-    信息与展示标量。pause/resume/resolve 是时间线上的状态事件，同正文
-    同操作名不代表跨时间重复——中间发生过状态变化时两次都是有效事件，
-    因此永不参与去重；降级为 ignore 的操作不会走到登记。
-    """
-    content_hash = op.get("content_hash")
-    if not content_hash:
-        return None
-    if op.get("op") in {"pause_thread", "resume_thread", "resolve_thread"}:
-        return None
+def _op_payload_identity(op: dict[str, Any]) -> tuple[Any, ...]:
+    """thread 操作的业务负载身份（含生命周期操作），用于时间歧义判定。"""
     return (
         op.get("op"),
-        content_hash,
+        op.get("content_hash"),
         op.get("target_memory_id"),
         op.get("memory_key"),
         op.get("continuity_type"),
         op.get("thread_state"),
-        _continuity_dedupe_shape(op),
+        _continuity_dedupe_shape(op.get("continuity_data")),
         op.get("title"),
         op.get("importance"),
         op.get("confidence"),
@@ -762,6 +747,20 @@ def _op_dedupe_key(op: dict[str, Any]) -> tuple[Any, ...] | None:
     )
 
 
+def _op_dedupe_key(op: dict[str, Any]) -> tuple[Any, ...] | None:
+    """同批去重身份：只对带正文的最终有效操作登记（时间线解析后调用）。
+
+    pause/resume/resolve 是时间线上的状态事件，永不参与去重；其余操作
+    只有业务负载（含解析后的 thread_state 与结构）完全一致才合并，因此
+    同正文同结构在不同状态阶段出现不会被误判为重复。
+    """
+    if not op.get("content_hash"):
+        return None
+    if op.get("op") in {"pause_thread", "resume_thread", "resolve_thread"}:
+        return None
+    return _op_payload_identity(op)
+
+
 def _merge_evidence_ids(existing: list[int], extra: list[int]) -> list[int]:
     """按首次出现顺序合并证据并集，保留后续操作补充的证据。"""
     merged = list(existing)
@@ -769,6 +768,98 @@ def _merge_evidence_ids(existing: list[int], extra: list[int]) -> list[int]:
         if message_id not in merged:
             merged.append(message_id)
     return merged
+
+
+_STATE_CHANGING_KINDS = frozenset({"pause_thread", "resume_thread", "resolve_thread"})
+
+
+def _ordered_thread_entries(
+    entries: list[tuple[int, dict[str, Any]]],
+    evidence_times: dict[int, str | None],
+    target_id: int,
+) -> list[tuple[int, dict[str, Any]]]:
+    """同一 thread 操作的统一时间排序与歧义裁决（parse 与 merge 共用）。
+
+    排序键 =（真实证据时间, 数组下标）。同一证据时间上，业务负载不同的
+    内容操作、多于一个的状态转换、或多个不同的 memory_key 填充，都会让
+    "谁最终生效"依赖数组顺序——明确拒绝，交换数组顺序结论不变；完全
+    等价的操作与顺序无关，允许并存（由去重安全合并）。
+    """
+    annotated = [
+        (_op_evidence_time(op, evidence_times), index, op)
+        for index, op in entries
+    ]
+    annotated.sort(key=lambda item: (item[0], item[1]))
+    by_time: dict[str, list[dict[str, Any]]] = {}
+    for time, _index, op in annotated:
+        by_time.setdefault(time, []).append(op)
+    for time, group in by_time.items():
+        payloads = {
+            _op_payload_identity(op) for op in group if op.get("content_hash")
+        }
+        state_kinds = {
+            op["op"] for op in group if op["op"] in _STATE_CHANGING_KINDS
+        }
+        fill_keys = {op.get("memory_key") for op in group if op.get("memory_key")}
+        if len(payloads) > 1 or len(state_kinds) > 1 or len(fill_keys) > 1:
+            raise RuminationPipelineError(
+                "model_schema_error",
+                f"ambiguous operations share one evidence time on memory "
+                f"{target_id}: array order would decide the final state; "
+                "cite distinct evidence times",
+            )
+    return [(index, op) for _time, index, op in annotated]
+
+
+def _dedupe_effective_ops(ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """时间线与结构全部解析后的同批去重。
+
+    只有业务负载完全一致的最终有效操作才合并：证据取并集（遵守提交
+    契约上限），交接目标 absorbed_fast_path_memory_ids 取并集（遵守与
+    提交 RPC 相同的 8 个上限，超限明确拒绝而不是静默丢目标——否则
+    数据库的正文去重会吞掉第二个请求里的交接意图）。
+    """
+    registry: dict[tuple[Any, ...], dict[str, Any]] = {}
+    kept: list[dict[str, Any]] = []
+    for op in ops:
+        key = _op_dedupe_key(op)
+        if key is None:
+            kept.append(op)
+            continue
+        prior = registry.get(key)
+        if prior is not None:
+            combined = _merge_evidence_ids(
+                prior["evidence_message_ids"], op["evidence_message_ids"],
+            )
+            if len(combined) > RUMINATION_OP_EVIDENCE_MAX:
+                raise RuminationPipelineError(
+                    "model_schema_error",
+                    "duplicate operations cite more than "
+                    f"{RUMINATION_OP_EVIDENCE_MAX} distinct evidence ids",
+                )
+            prior["evidence_message_ids"] = combined
+            absorbed = _merge_evidence_ids(
+                prior.get("absorbed_fast_path_memory_ids") or [],
+                op.get("absorbed_fast_path_memory_ids") or [],
+            )
+            if len(absorbed) > MAX_EVIDENCE_IDS:
+                raise RuminationPipelineError(
+                    "model_schema_error",
+                    "duplicate operations absorb more than "
+                    f"{MAX_EVIDENCE_IDS} fast-path targets; file them in "
+                    "separate batches",
+                )
+            if absorbed:
+                prior["absorbed_fast_path_memory_ids"] = absorbed
+            log.info(
+                "Rumination duplicate operation merged into prior: "
+                "op=%s combined_evidence=%s",
+                op["op"], len(combined),
+            )
+            continue
+        registry[key] = op
+        kept.append(op)
+    return kept
 
 
 def parse_rumination_output(
@@ -797,11 +888,9 @@ def parse_rumination_output(
     raw_ops = payload["operations"]
 
     validated: list[dict[str, Any]] = []
-    # 同批正文去重只登记业务结果完全一致的最终有效操作；降级为 ignore
-    # 的操作与生命周期状态事件都不登记。状态转换的合法性由循环后的
-    # _resolve_thread_timelines 按真实证据时间重放裁决，数组顺序不承载
-    # 时间语义。
-    dedupe_registry: dict[tuple[Any, ...], dict[str, Any]] = {}
+    # 同批去重在时间线与结构全部解析之后进行（_dedupe_effective_ops）；
+    # 主循环只做与位置无关的校验，状态转换的合法性由
+    # _resolve_thread_timelines 按真实证据时间重放裁决。
     for raw in raw_ops:
         if not isinstance(raw, dict):
             raise RuminationPipelineError("model_schema_error", "operation must be an object")
@@ -1169,31 +1258,10 @@ def parse_rumination_output(
                 raw.get("absorbed_fast_path_memory_ids"), absorbable_ids,
             )
 
-        # 同批正文去重：只发生在业务结果完全一致的最终有效操作之间；
-        # 重复操作保留双方证据，不再静默丢弃。
-        dedupe_key = _op_dedupe_key(op)
-        if dedupe_key is not None:
-            prior = dedupe_registry.get(dedupe_key)
-            if prior is not None:
-                combined = _merge_evidence_ids(
-                    prior["evidence_message_ids"], op["evidence_message_ids"],
-                )
-                if len(combined) > RUMINATION_OP_EVIDENCE_MAX:
-                    raise RuminationPipelineError(
-                        "model_schema_error",
-                        "duplicate operations cite more than "
-                        f"{RUMINATION_OP_EVIDENCE_MAX} distinct evidence ids",
-                    )
-                prior["evidence_message_ids"] = combined
-                log.info(
-                    "Rumination duplicate operation merged into prior: "
-                    "op=%s combined_evidence=%s",
-                    op["op"], len(combined),
-                )
-                continue
-            dedupe_registry[dedupe_key] = op
         validated.append(op)
-    return _resolve_thread_timelines(validated, threads_by_id, evidence_times)
+    return _dedupe_effective_ops(
+        _resolve_thread_timelines(validated, threads_by_id, evidence_times),
+    )
 
 
 def _resolve_thread_timelines(
@@ -1222,10 +1290,9 @@ def _resolve_thread_timelines(
                 f"target_memory_id {target_id} is not an unfinished thread in this input",
             )
         state = str(target.get("thread_state"))
-        for index in sorted(
-            indices, key=lambda i: (_op_evidence_time(ops[i], evidence_times), i),
+        for index, op in _ordered_thread_entries(
+            [(i, ops[i]) for i in indices], evidence_times, target_id,
         ):
-            op = ops[index]
             kind = op["op"]
             if state == "resolved":
                 raise RuminationPipelineError(
@@ -1262,6 +1329,9 @@ def _resolve_thread_timelines(
                     "model_schema_error",
                     f"{kind} cannot change thread_state; use pause/resume/resolve ops",
                 )
+            # 解析后的位置状态是该操作的最终回显（多操作合并时由 merge
+            # 按状态机终点重设）；去重键据此区分不同状态阶段的操作。
+            op["thread_state"] = state
             if "_deferred_continuity" in op:
                 raw_continuity = op.pop("_deferred_continuity")
                 if not op.get("content"):
@@ -1721,10 +1791,7 @@ def merge_thread_operations(
                 "model_schema_error",
                 f"target_memory_id {target_id} is not an unfinished thread",
             )
-        ordered = sorted(
-            entries,
-            key=lambda entry: (_op_evidence_time(entry[1], evidence_times), entry[0]),
-        )
+        ordered = _ordered_thread_entries(entries, evidence_times, target_id)
         first_index, merged = _merged_thread_op(target_id, ordered, target)
         for index, _ in entries:
             replacements[index] = None
