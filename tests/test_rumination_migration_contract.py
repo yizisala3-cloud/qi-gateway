@@ -871,5 +871,97 @@ class StructureUpdateContractTests(unittest.TestCase):
         )
 
 
+class TakeoverAndBaselineContractTests(unittest.TestCase):
+    """20260915010000: complete in-branch takeovers + structure baseline.
+
+    The same-body branches now resolve memory_key / maintained_by exactly
+    like the versioned path (with the handoff recording the effective key
+    and state), and the gateway-attached continuity_baseline is verified
+    under the row lock with the same jsonb_strip_nulls semantics as the
+    in-place structure comparison.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = (
+            ROOT / "supabase/migrations/20260915010000_rumination_takeover_and_baseline.sql"
+        ).read_text(encoding="utf-8")
+        cls.executable = re.sub(r"--[^\n]*", "", cls.sql)
+        cls.previous = re.sub(
+            r"--[^\n]*", "",
+            (
+                ROOT / "supabase/migrations/20260914010000_rumination_structure_update.sql"
+            ).read_text(encoding="utf-8"),
+        )
+        parts = cls.executable.split(
+            "create or replace function public.commit_rumination_batch", 1
+        )
+        assert len(parts) == 2, "commit_rumination_batch must be rebuilt exactly once"
+        cls.commit = parts[1]
+
+    def test_rebuilds_only_commit_rumination_batch_without_ddl(self):
+        self.assertIn(
+            "drop function if exists public.commit_rumination_batch(bigint, jsonb)",
+            self.executable,
+        )
+        self.assertEqual(self.executable.count("create or replace function"), 1)
+        ddl = re.findall(
+            r"(alter\s+table|drop\s+table|create\s+table|"
+            r"create\s+or\s+replace\s+trigger)"
+            r"[\s\S]{0,120}?(chat_messages|memories|memory_requests|"
+            r"memory_rumination_cursors|memory_path_handoffs)",
+            self.executable,
+            re.IGNORECASE,
+        )
+        self.assertEqual(ddl, [])
+        self.assertNotIn("memory_relations", self.executable)
+
+    def test_same_body_branches_complete_takeover(self):
+        # 两个同哈希子分支都回填 key、切换归属，交接记录实际 key 与状态。
+        # （maintained_by 赋值共 4 处：adopt 原地接管、evidence_only 操作
+        # 分支、原地结构更新、只补证据子分支；fast_path 门控同样 4 处。）
+        self.assertEqual(self.commit.count("maintained_by = 'rumination'"), 4)
+        self.assertEqual(
+            self.commit.count("if v_target.maintained_by = 'fast_path' then"), 4,
+        )
+        self.assertGreaterEqual(self.commit.count("memory_key = v_memory_key,"), 2)
+        self.assertGreaterEqual(self.commit.count("memory_rumination_memory_key_conflict"), 4)
+        self.assertGreaterEqual(self.commit.count("structure update takeover; state="), 1)
+        self.assertGreaterEqual(self.commit.count("evidence merge takeover; state="), 1)
+
+    def test_structure_baseline_checked_under_lock(self):
+        self.assertIn("if v_op ? 'continuity_baseline'", self.commit)
+        self.assertIn(
+            "jsonb_strip_nulls(coalesce(v_op->'continuity_baseline', '{}'::jsonb))",
+            self.commit,
+        )
+        self.assertIn("raise exception 'memory_rumination_target_changed';", self.commit)
+        # 基线核对位于同哈希分支之前，覆盖全部生命周期写入路径。
+        baseline_pos = self.commit.find("if v_op ? 'continuity_baseline'")
+        same_hash_pos = self.commit.find("if v_content_hash = v_target.content_hash then")
+        self.assertLess(baseline_pos, same_hash_pos)
+
+    def test_prior_markers_preserved(self):
+        # 0913/0914 的关键语义原样保留。
+        self.assertIn("v_evidence_count not between 1 and 960", self.commit)
+        self.assertIn("jsonb_strip_nulls(coalesce(v_continuity_data, '{}'::jsonb))", self.commit)
+        self.assertIn("'structure_updated_in_place'", self.commit)
+        self.assertIn("'evidence_merged_unchanged'", self.commit)
+
+    def test_security_definer_fixed_search_path_and_service_role(self):
+        self.assertIn("security definer", self.commit)
+        self.assertIn("set search_path to 'public', 'extensions'", self.commit)
+        self.assertRegex(
+            self.executable,
+            r"revoke\s+all\s+on\s+function\s+public\.commit_rumination_batch\(bigint,\s*jsonb\)"
+            r"[\s\S]{0,200}?from\s+public,\s*anon,\s*authenticated",
+        )
+        self.assertRegex(
+            self.executable,
+            r"grant\s+execute\s+on\s+function\s+public\.commit_rumination_batch\(bigint,\s*jsonb\)"
+            r"[\s\S]{0,200}?to\s+service_role",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

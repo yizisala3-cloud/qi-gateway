@@ -4195,6 +4195,39 @@ class StructureChangePreservationTests(unittest.TestCase):
         parsed = self._parse([op])
         self.assertEqual([item["op"] for item in parsed], ["ignore"])
 
+    # -- 服务端结构基线（轮 5）--------------------------------------------
+
+    def test_server_baseline_attached_and_carried_through_merge(self):
+        parsed = self._parse([
+            self._update_op(self.base_content, [3], "进行中"),
+            self._update_op(self.base_content, [4], "实测通过，改造完成"),
+        ])
+        baseline = self.target["continuity_data"]
+        for op in parsed:
+            self.assertEqual(op["continuity_baseline"], baseline)
+        merged = self._merge(parsed)
+        tops = [item for item in merged if item.get("target_memory_id") == 12]
+        self.assertEqual(tops[0]["continuity_baseline"], baseline)
+
+    def test_model_forged_baseline_rejected_as_unknown_field(self):
+        op = self._update_op(self.base_content, [3], "进行中")
+        op["continuity_baseline"] = {"open_question": "伪造"}
+        with self.assertRaisesRegex(RuminationPipelineError, "unsupported fields"):
+            self._parse([op])
+
+    def test_baseline_not_part_of_dedupe_identity(self):
+        # 基线是服务端元数据：同组操作共享同一读取基线，不参与去重键；
+        # 真重复（业务负载一致）仍合并证据。
+        parsed = self._parse([
+            self._update_op(self.base_content, [3], "进行中"),
+            self._update_op(self.base_content, [4], "进行中"),
+        ])
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["evidence_message_ids"], [3, 4])
+        self.assertEqual(
+            parsed[0]["continuity_baseline"], self.target["continuity_data"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1294,6 +1294,11 @@ def _resolve_thread_timelines(
             [(i, ops[i]) for i in indices], evidence_times, target_id,
         ):
             kind = op["op"]
+            # 服务端读取基线：网关读取到的结构原样随操作提交，供提交侧
+            # 在行锁下与当前结构核对（比较语义与原地更新的结构比较一致）。
+            # 模型无需回显也无法伪造——parse 的未知字段白名单会拒绝模型
+            # 输出中的该字段；去重键不含它（服务端元数据，非业务负载）。
+            op["continuity_baseline"] = target.get("continuity_data")
             if state == "resolved":
                 raise RuminationPipelineError(
                     "model_schema_error",
@@ -1750,6 +1755,9 @@ def _merged_thread_op(
     ):
         if entries[0][1].get(key) is not None:
             merged[key] = entries[0][1][key]
+    # 服务端读取基线随合并结果透传（同组操作读自同一份输入，基线一致）。
+    if entries[0][1].get("continuity_baseline") is not None:
+        merged["continuity_baseline"] = entries[0][1]["continuity_baseline"]
     # Body and state data come from the last op that carries them (the latest
     # progress represents the final current state).
     for key in ("content", "continuity_data", "title", "memory_time", "time_precision"):

@@ -1526,6 +1526,272 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
         self.assertEqual(rows[0][1], "paused")
         self.assertEqual(self._cursor(), 522)
 
+    # -- takeover completion + structure baseline (20260915010000) ----------
+
+    def _seed_fast_path_thread(self, key, uuid_text, content, memory_key):
+        self.conn.execute(
+            "insert into public.memory_continuity_objects (continuity_id, assistant_id) "
+            "values (%s::uuid, 'a-rumination') on conflict (continuity_id) do nothing",
+            (uuid_text,),
+        )
+        self.conn.execute(
+            "insert into public.memories ("
+            "content, title, tags, importance, embedding, source, verified, is_active, "
+            "assistant_id, confidence, content_hash, memory_key, "
+            "continuity_id, continuity_schema_version, continuity_data, "
+            "continuity_type, thread_state, evidence_message_ids, "
+            "evidence_start_time, evidence_end_time, evidence_time_precision, "
+            "producer_path, maintained_by"
+            ") values ("
+            "%s, '快速路径线索', '{thread}', 6, '[0.7,0.7,0.7]', 'daily_digest', "
+            "'verified', true, 'a-rumination', 0.9, %s, %s, "
+            "%s::uuid, 1, "
+            "'{\"open_question\": \"快速路径是否成行\", \"current_state\": \"初始状态\", "
+            "\"closure_criteria\": [\"完成\"]}'::jsonb, "
+            "'thread', 'open', '{501,502}', "
+            "'2026-09-01 10:00+08', '2026-09-01 10:01+08', 'minute', "
+            "'fast_path', 'fast_path'"
+            ") on conflict (content_hash) do nothing",
+            (content, _sha256(content), memory_key, uuid_text),
+        )
+        found = self._active_memory("content_hash = %s", (_sha256(content),))
+        assert found is not None, f"thread fixture not seeded: {key}"
+        return found
+
+    def _fast_path_update_op(self, structure_id, current_state, *,
+                             content, memory_key=None, baseline=None):
+        snapshot = self._thread_snapshot(structure_id)
+        op = {
+            "op": "update_thread", "reason": "同正文结构更新",
+            "target_memory_id": structure_id, **snapshot,
+            "thread_state": "open",
+            "content": content,
+            "continuity_data": {
+                "open_question": "快速路径是否成行", "current_state": current_state,
+                "closure_criteria": ["完成"],
+            },
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "importance": 6, "confidence": 0.9,
+            "embedding": "[0.7,0.7,0.7]",
+        }
+        if memory_key is not None:
+            op["memory_key"] = memory_key
+        if baseline is not None:
+            op["continuity_baseline"] = baseline
+        return op
+
+    def test_keyed_fast_path_structure_update_completes_takeover(self):
+        self._set_cursor(initialized=True, value=520)
+        content = "快速路径线程 A：keyed 接管正文。"
+        fp_id = self._seed_fast_path_thread(
+            "topic.fp.keyed", "21111111-1111-1111-1111-1111111112a1",
+            content, "topic.fp.keyed",
+        )
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [self._fast_path_update_op(
+            fp_id, "结构已更新", content=content,
+        )])
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "structure_updated_in_place",
+        )
+        row = self._query_row(
+            "select maintained_by, memory_key, continuity_data->>'current_state' "
+            "from public.memories where id = %s",
+            (fp_id,),
+        )
+        self.assertEqual(row[0], "rumination")
+        self.assertEqual(row[1], "topic.fp.keyed")
+        self.assertEqual(row[2], "结构已更新")
+        handoff = self._query_row(
+            "select kind, memory_key, note from public.memory_path_handoffs "
+            "where run_id = %s",
+            (run_id,),
+        )
+        self.assertEqual(handoff[0], "adopt_thread")
+        self.assertEqual(handoff[1], "topic.fp.keyed")
+        self.assertIn("state=open", handoff[2])
+        self.assertEqual(result["op_counts"]["adopted_threads"], 1)
+
+    def test_keyless_fast_path_backfills_provided_key(self):
+        self._set_cursor(initialized=True, value=520)
+        content = "快速路径线程 B：keyless 回填正文。"
+        fp_id = self._seed_fast_path_thread(
+            "topic.fp.keyless", "21111111-1111-1111-1111-1111111112a2",
+            content, None,
+        )
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [self._fast_path_update_op(
+            fp_id, "结构已更新", content=content, memory_key="topic.fp.filled",
+        )])
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "structure_updated_in_place",
+        )
+        row = self._query_row(
+            "select maintained_by, memory_key from public.memories where id = %s",
+            (fp_id,),
+        )
+        self.assertEqual(row[0], "rumination")
+        self.assertEqual(row[1], "topic.fp.filled")
+        handoff = self._query_row(
+            "select memory_key, note from public.memory_path_handoffs where run_id = %s",
+            (run_id,),
+        )
+        self.assertEqual(handoff[0], "topic.fp.filled")
+        self.assertIn("state=open", handoff[1])
+
+    def test_illegal_or_conflicting_key_rolls_back_without_handoff(self):
+        self._set_cursor(initialized=True, value=520)
+        content = "快速路径线程 C：非法 key 回滚正文。"
+        fp_id = self._seed_fast_path_thread(
+            "topic.fp.illegal", "21111111-1111-1111-1111-1111111112a3",
+            content, None,
+        )
+        run_id = self._claim(521, 522)
+        with self.assertRaises(Exception):
+            self._commit(run_id, [self._fast_path_update_op(
+                fp_id, "结构已更新", content=content, memory_key="不是合法KEY",
+            )])
+        # 冲突 key：与既有活跃线索撞 key，同样整批拒绝。
+        self.conn.execute(
+            "update public.memory_digest_runs set status = 'failed', "
+            "error_code = 'test_cleanup' where id = %s", (run_id,),
+        )
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        with self.assertRaises(Exception):
+            self._commit(run_id, [self._fast_path_update_op(
+                fp_id, "结构已更新", content=content, memory_key="topic.haishan.plan",
+            )])
+        # 两次失败都完整回滚：无交接日志、目标原样、游标不推进。
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_path_handoffs where run_id in "
+            "(select id from public.memory_digest_runs where assistant_id = %s) "
+            "and kind = 'adopt_thread' "
+            "and position('structure update takeover' in note) > 0",
+            (ASSISTANT,),
+        ), 0)
+        row = self._query_row(
+            "select maintained_by, memory_key, continuity_data->>'current_state' "
+            "from public.memories where id = %s",
+            (fp_id,),
+        )
+        self.assertEqual(row[0], "fast_path")
+        self.assertIsNone(row[1])
+        self.assertEqual(row[2], "初始状态")
+        self.assertEqual(self._cursor(), 520)
+
+    def test_rumination_maintained_target_keeps_ownership_without_fake_handoff(self):
+        self._set_cursor(initialized=True, value=520)
+        content = "反刍维护线程 D：归属保持正文。"
+        rum_id = self._seed_structure_thread(
+            "topic.fp.owned", "21111111-1111-1111-1111-1111111112a4", content,
+        )
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [self._fast_path_update_op(
+            rum_id, "结构已更新", content=content,
+        )])
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "structure_updated_in_place",
+        )
+        self.assertEqual(self._query_one(
+            "select maintained_by from public.memories where id = %s", (rum_id,),
+        ), "rumination")
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_path_handoffs where run_id = %s",
+            (run_id,),
+        ), 0)
+
+    def test_stale_structure_baseline_rejected_and_retry_succeeds(self):
+        self._set_cursor(initialized=True, value=520)
+        content = "快速路径线程 E：结构基线正文。"
+        fp_id = self._seed_fast_path_thread(
+            "topic.fp.stale", "21111111-1111-1111-1111-1111111112a5",
+            content, "topic.fp.stale",
+        )
+        seed_continuity = self._query_one(
+            "select continuity_data from public.memories where id = %s", (fp_id,),
+        )
+        # 模型读取之后，另一写入仅修改了结构（正文与状态不变）。
+        self.conn.execute(
+            "update public.memories set continuity_data = "
+            "'{\"open_question\": \"快速路径是否成行\", "
+            "\"current_state\": \"外部结构修改\", "
+            "\"closure_criteria\": [\"完成\"]}'::jsonb where id = %s",
+            (fp_id,),
+        )
+        run_id = self._claim(521, 522)
+        with self.assertRaises(Exception) as raised:
+            self._commit(run_id, [self._fast_path_update_op(
+                fp_id, "结构已更新", content=content, baseline=seed_continuity,
+            )])
+        self.assertIn("memory_rumination_target_changed", str(raised.exception))
+        # 较新结构保留，游标不推进。
+        self.assertEqual(self._query_one(
+            "select continuity_data->>'current_state' from public.memories "
+            "where id = %s",
+            (fp_id,),
+        ), "外部结构修改")
+        self.assertEqual(self._cursor(), 520)
+        # 使用最新读取基线重试：合法提交成功。
+        self.conn.execute(
+            "update public.memory_digest_runs set status = 'failed', "
+            "error_code = 'test_cleanup' where id = %s", (run_id,),
+        )
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        fresh_continuity = self._query_one(
+            "select continuity_data from public.memories where id = %s", (fp_id,),
+        )
+        result = self._commit(run_id, [self._fast_path_update_op(
+            fp_id, "结构已更新", content=content, baseline=fresh_continuity,
+        )])
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "structure_updated_in_place",
+        )
+        self.assertEqual(self._query_one(
+            "select continuity_data->>'current_state' from public.memories "
+            "where id = %s",
+            (fp_id,),
+        ), "结构已更新")
+        self.assertEqual(self._cursor(), 522)
+
+    def test_unchanged_structure_on_fast_path_merges_evidence_and_takes_over(self):
+        self._set_cursor(initialized=True, value=520)
+        content = "快速路径线程 F：真正未变化的重复表达。"
+        fp_id = self._seed_fast_path_thread(
+            "topic.fp.unchanged", "21111111-1111-1111-1111-1111111112a6",
+            content, "topic.fp.unchanged",
+        )
+        seed_continuity = self._query_one(
+            "select continuity_data from public.memories where id = %s", (fp_id,),
+        )
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [self._fast_path_update_op(
+            fp_id, "初始状态", content=content, baseline=seed_continuity,
+        )])
+        self.assertEqual(result["op_counts"]["evidence_only"], 1)
+        self.assertEqual(result["op_counts"]["adopted_threads"], 1)
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "evidence_merged_unchanged",
+        )
+        row = self._query_row(
+            "select maintained_by, memory_key, "
+            "evidence_message_ids @> '{501,502,521}' from public.memories "
+            "where id = %s",
+            (fp_id,),
+        )
+        self.assertEqual(row[0], "rumination")
+        self.assertEqual(row[1], "topic.fp.unchanged")
+        self.assertTrue(row[2])
+        handoff = self._query_row(
+            "select memory_key, note from public.memory_path_handoffs "
+            "where run_id = %s",
+            (run_id,),
+        )
+        self.assertEqual(handoff[0], "topic.fp.unchanged")
+        self.assertIn("evidence merge takeover", handoff[1])
+
     # -- fast-path gating ---------------------------------------------------
 
     def _thread_candidate_item(self, content, content_hash, thread_state="open"):
