@@ -61,17 +61,34 @@ def _candidate():
 
 
 class _RpcClient:
-    def __init__(self, *, commit_data=1, fail_commit=False):
+    def __init__(self, *, commit_data=1, fail_commit=False, fail_message="commit failed",
+                 pause_data=None):
         self.commit_data = commit_data
         self.fail_commit = fail_commit
+        self.fail_message = fail_message
+        self.pause_data = pause_data
         self.rpc_names = []
+        self.table_updates = []
 
     def rpc(self, name, params):
         self.rpc_names.append(name)
         if self.fail_commit and name == "commit_memory_continuity_run":
-            raise RuntimeError("commit failed")
-        data = {} if name == "pause_memory_continuity_empty" else self.commit_data
+            raise RuntimeError(self.fail_message)
+        if name == "pause_memory_continuity_empty" and self.pause_data is not None:
+            data = self.pause_data
+        elif name == "pause_memory_continuity_empty":
+            data = {}
+        else:
+            data = self.commit_data
         return SimpleNamespace(execute=lambda: SimpleNamespace(data=data))
+
+    def table(self, name):
+        table = Mock()
+        table.update.side_effect = lambda payload: (
+            self.table_updates.append((name, payload)),
+            table.update.return_value,
+        )[1]
+        return table
 
 
 class ContinuityBatchTests(unittest.TestCase):
@@ -228,6 +245,41 @@ class ContinuityExecutionTests(unittest.TestCase):
         self.assertEqual(result["cursor_before"], result["cursor_after"])
         self.assertIn("pause_memory_continuity_empty", client.rpc_names)
         self.assertNotIn("commit_memory_continuity_run", client.rpc_names)
+
+    def test_stale_empty_pause_does_not_regress_processed_batch(self):
+        # 陈旧请求的空结果：批次已被其它运行处理 → 不重新 paused_empty，
+        # 游标保持真实推进位置。
+        client = _RpcClient(pause_data={
+            "status": "already_processed",
+            "last_processed_message_id": 2504,
+        })
+        patches = self._patch_success(client, candidates=[])
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9], patches[10]:
+            result = run_continuity_digest()
+        self.assertFalse(result["paused_empty"])
+        self.assertEqual(result["cursor_after"], 2504)
+        self.assertEqual(result["status"], "succeeded")
+
+    def test_stale_commit_finalizes_run_without_write(self):
+        # 陈旧请求带候选提交：RPC 拒绝（already_processed）→ run 按空成功
+        # 收束，不产生写入、不暂停。
+        client = _RpcClient(
+            fail_commit=True,
+            fail_message="psycopg.errors.RaiseException: "
+                         "memory_continuity_batch_already_processed",
+        )
+        patches = self._patch_success(client)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9], patches[10]:
+            result = run_continuity_digest()
+        self.assertTrue(result["already_processed"])
+        self.assertFalse(result["paused_empty"])
+        self.assertEqual(result["inserted_count"], 0)
+        finalize = [
+            payload for name, payload in client.table_updates
+            if payload.get("status") == "succeeded" and payload.get("inserted_count") == 0
+        ]
+        self.assertEqual(len(finalize), 1)
+        self.assertIsNone(finalize[0]["heartbeat_at"])
 
     def test_paused_retry_uses_fixed_batch_even_when_new_messages_exist(self):
         self.cursor.update({

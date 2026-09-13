@@ -459,6 +459,55 @@ class ContinuityRetryIndexTests(unittest.TestCase):
         self._mark_failed(continuity_run)
         self._mark_failed(digest_run)
 
+    # -- phase 3：已完成批次的陈旧请求不得重复处理/重新暂停 ----------------
+
+    def test_phase3_stale_batch_after_completion_cannot_reprocess(self):
+        # A 完成 2465–2466：候选提交、游标推进到 2466 ready。
+        claim = self._claim("continuity_manual")
+        run_a = int(claim["run_id"])
+        self._init(run_a, 2465, 2466)
+        content_a = "验收样例：批次 A 的候选内容，先完成处理。"
+        self.assertEqual(self._commit(run_a, [_candidate(content_a, [2465])]), 1)
+        self.assertEqual(self._cursor_row(), (2466, "ready"))
+
+        # B 陈旧请求持有同一旧批次（A 完成后才领取）：succeeded 不再挡
+        # 领取与初始化，但写入与暂停受陈旧守卫约束。
+        claim = self._claim("continuity_manual")
+        run_b = int(claim["run_id"])
+        self._init(run_b, 2465, 2466)
+
+        # B 带不同候选提交 → 陈旧守卫拒绝：无新候选写入、A 成果保留。
+        content_b = "验收样例：批次 B 陈旧请求的候选内容，不得写入。"
+        with self.assertRaises(psycopg.errors.RaiseException) as raised:
+            self._commit(run_b, [_candidate(content_b, [2466])])
+        self.assertIn(
+            "memory_continuity_batch_already_processed", str(raised.exception),
+        )
+        self.assertEqual(self._query_count(
+            "select count(*) from public.memory_requests where content_hash = %s",
+            (_sha256(content_b),),
+        ), 0)
+        self.assertEqual(self._query_count(
+            "select count(*) from public.memory_requests where content_hash = %s",
+            (_sha256(content_a),),
+        ), 1)
+        self._mark_failed(run_b)
+
+        # B 空结果暂停 → already_processed：游标不回退、不再 paused。
+        claim = self._claim("continuity_manual")
+        run_d = int(claim["run_id"])
+        self._init(run_d, 2465, 2466)
+        pause_result = self._pause_empty(run_d)
+        self.assertEqual(pause_result["status"], "already_processed")
+        self.assertEqual(pause_result["last_processed_message_id"], 2466)
+        self.assertEqual(self._cursor_row(), (2466, "ready"))
+        self.assertEqual(self._run_status(run_d), "succeeded")
+        self.assertEqual(self._query_count(
+            "select status from public.memory_continuity_cursors "
+            "where assistant_id = %s",
+            (ASSISTANT,),
+        ), "ready")
+
     def _query_count(self, sql, params=None):
         with self.conn.cursor() as cur:
             cur.execute(sql, params)
