@@ -992,6 +992,9 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
         current_content = self._query_one(
             "select content from public.memories where id = %s", (watch_id,),
         )
+        current_continuity = self._query_one(
+            "select continuity_data from public.memories where id = %s", (watch_id,),
+        )
         run_id = self._claim(521, 522)
         result = self._commit(run_id, [{
             "op": "update_thread",
@@ -999,16 +1002,15 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "target_memory_id": watch_id,
             **self._thread_snapshot(watch_id),
             "content": current_content,
-            "continuity_data": {
-                "open_question": "夜间观察是否成行",
-                "current_state": "约定观察猎户座，等待晴夜",
-                "closure_criteria": ["观察完成或取消"],
-            },
+            "continuity_data": current_continuity,
             "evidence_message_ids": [521],
             "content_hash": _sha256(current_content),
             "embedding": "[0.7,0.7,0.7]",
         }])
-        self.assertEqual(result["op_counts"]["evidence_only"], 1)
+        self.assertEqual(
+            result["op_counts"]["evidence_only"], 1,
+            f"op_counts={result['op_counts']} preview={result['preview']}",
+        )
         self.assertEqual(result["op_counts"]["updated_versions"], 0)
         self.assertEqual(self._query_one(
             "select count(*) from public.memories where supersedes_memory_id = %s",
@@ -1152,6 +1154,643 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
         self.assertEqual(row[0], "rule.haishan.sunscreen")
         self.assertEqual(row[1], "replace")
         self.assertEqual(row[3], "rumination")
+
+    # -- request type expansion (20260912010000) ---------------------------
+    #
+    # The parser degrades malformed continuity_data on create_memory into
+    # pending create_request ops whose continuity_type stays moment /
+    # inside_joke. The commit RPC whitelist must accept those types.
+
+    def test_moment_request_accepted_as_pending_append(self):
+        content = "降级路径里的一条 moment 待审核申请正文。"
+        ops = [{
+            "op": "create_request",
+            "reason": "模型未给出完整 continuity_data，已转为待审核申请",
+            "continuity_type": "moment",
+            "content": content,
+            "title": "装备检查",
+            "continuity_data": {
+                "scene": "聊天窗口", "event": "一起检查赶海装备",
+                "moment_state": "standalone",
+            },
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "importance": 5, "confidence": 0.8,
+            "source_type": "natural_chat",
+            "embedding": "[0.11,0.22,0.33]",
+        }]
+        result = self._claim_and_commit(521, 522, ops)
+        self.assertEqual(result["op_counts"]["created_requests"], 1)
+        row = self._query_row(
+            "select status, update_mode, thread_state, continuity_type, memory_key "
+            "from public.memory_requests where digest_run_id = %s and source = 'rumination'",
+            (result["run_id"],),
+        )
+        self.assertEqual(row[0], "pending")
+        self.assertEqual(row[1], "append")
+        self.assertIsNone(row[2])
+        self.assertEqual(row[3], "moment")
+        self.assertIsNone(row[4])
+
+    def test_inside_joke_request_accepted_as_pending_append(self):
+        content = "降级路径里的一条 inside_joke 待审核申请正文。"
+        ops = [{
+            "op": "create_request",
+            "reason": "模型未给出完整 continuity_data，已转为待审核申请",
+            "continuity_type": "inside_joke",
+            "content": content,
+            "title": "贝壳梗",
+            "continuity_data": {
+                "origin": "把防晒霜叫作贝壳", "trigger_phrases": ["贝壳"],
+                "shared_meaning": "两人的专属代号", "reinforcement_count": 0,
+            },
+            "evidence_message_ids": [521, 522],
+            "content_hash": _sha256(content),
+            "importance": 5, "confidence": 0.8,
+            "embedding": "[0.12,0.23,0.34]",
+        }]
+        result = self._claim_and_commit(521, 522, ops)
+        self.assertEqual(result["op_counts"]["created_requests"], 1)
+        row = self._query_row(
+            "select status, update_mode, thread_state, continuity_type "
+            "from public.memory_requests where content_hash = %s",
+            (_sha256(content),),
+        )
+        self.assertEqual(row[0], "pending")
+        self.assertEqual(row[1], "append")
+        self.assertIsNone(row[2])
+        self.assertEqual(row[3], "inside_joke")
+
+    def test_thread_request_still_rejected(self):
+        content = "把 thread 当申请类型提交会被拒绝。"
+        ops = [{
+            "op": "create_request",
+            "reason": "thread 永远不能走申请",
+            "continuity_type": "thread",
+            "content": content,
+            "continuity_data": {
+                "open_question": "q", "current_state": "s",
+                "closure_criteria": ["c"],
+            },
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "importance": 5, "confidence": 0.8,
+            "embedding": "[0.13,0.24,0.35]",
+        }]
+        with self.assertRaises(Exception):
+            self._claim_and_commit(521, 522, ops)
+        self.assertEqual(
+            self._query_one(
+                "select count(*) from public.memory_requests where content_hash = %s",
+                (_sha256(content),),
+            ),
+            0,
+        )
+
+    def test_profile_request_keeps_append_without_key(self):
+        content = "episode 与 profile 行为不变：profile 申请照常入列。"
+        ops = [{
+            "op": "create_request",
+            "reason": "画像需要叶子确认",
+            "continuity_type": "profile",
+            "content": content,
+            "continuity_data": {
+                "facet": "作息", "statement": "叶子偏好清晨聊天",
+                "scope": "全局", "stability": "stable",
+                "basis": "explicit_self_report",
+            },
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "importance": 5, "confidence": 0.8,
+            "embedding": "[0.14,0.25,0.36]",
+        }]
+        result = self._claim_and_commit(521, 522, ops)
+        self.assertEqual(result["op_counts"]["created_requests"], 1)
+        row = self._query_row(
+            "select status, update_mode, thread_state, continuity_type, memory_key "
+            "from public.memory_requests where content_hash = %s",
+            (_sha256(content),),
+        )
+        self.assertEqual(row[0], "pending")
+        self.assertEqual(row[1], "append")
+        self.assertIsNone(row[2])
+        self.assertEqual(row[3], "profile")
+        self.assertIsNone(row[4])
+
+    # -- merged evidence contract (20260913010000) --------------------------
+    #
+    # The gateway merges same-thread ops and same-content duplicates; the
+    # merged op can carry an evidence union wider than the old per-op 8-id
+    # ceiling. The commit RPC must accept the merged shape.
+
+    def _seed_merge_contract_thread(self):
+        """Dedicated open rumination thread so the test stays self-sufficient."""
+        key = "topic.merge.contract"
+        content = "合并契约线程的初始状态正文。"
+        uuid_text = "21111111-1111-1111-1111-1111111111f9"
+        self.conn.execute(
+            "insert into public.memory_continuity_objects (continuity_id, assistant_id) "
+            "values (%s::uuid, 'a-rumination') on conflict (continuity_id) do nothing",
+            (uuid_text,),
+        )
+        self.conn.execute(
+            "insert into public.memories ("
+            "content, title, tags, importance, embedding, source, verified, is_active, "
+            "assistant_id, confidence, content_hash, memory_key, "
+            "continuity_id, continuity_schema_version, continuity_data, "
+            "continuity_type, thread_state, evidence_message_ids, "
+            "evidence_start_time, evidence_end_time, evidence_time_precision, "
+            "recall_scene, recall_tags, recall_embedding, "
+            "producer_path, maintained_by"
+            ") values ("
+            "%s, '合并契约', '{thread}', 6, '[0.5,0.5,0.5]', 'rumination', "
+            "'verified', true, 'a-rumination', 0.9, %s, %s, "
+            "%s::uuid, 1, "
+            "'{\"open_question\": \"合并契约是否成行\", \"current_state\": \"初始状态\", "
+            "\"closure_criteria\": [\"完成或取消\"]}'::jsonb, "
+            "'thread', 'open', '{501,502}', "
+            "'2026-09-01 10:00+08', '2026-09-01 10:01+08', 'minute', "
+            "'合并契约场景', '{合并}', '[0.5,0.5,0.5]', "
+            "'rumination', 'rumination'"
+            ") on conflict (content_hash) do nothing",
+            (content, _sha256(content), key, uuid_text),
+        )
+        found = self._active_memory("memory_key = %s", (key,))
+        assert found is not None, f"thread fixture not seeded: {key}"
+        return found
+
+    def test_merged_evidence_union_commits_single_version(self):
+        self._set_cursor(initialized=True, value=520)
+        plan_id = self._seed_merge_contract_thread()
+        snapshot = self._thread_snapshot(plan_id)
+        run_id = self._claim(521, 530)
+        evidence = list(range(521, 531))
+        result = self._commit(run_id, [{
+            "op": "update_thread",
+            "reason": "两段进展合并为最终状态",
+            "target_memory_id": plan_id,
+            **snapshot,
+            "thread_state": "open",
+            "content": "合并契约线程合并后的最终状态正文。",
+            "continuity_data": {
+                "open_question": "合并契约是否成行",
+                "current_state": "两段进展合并后的最终状态",
+                "closure_criteria": ["完成或取消"],
+            },
+            "evidence_message_ids": evidence,
+            "content_hash": _sha256("合并契约线程合并后的最终状态正文。"),
+            "importance": 6, "confidence": 0.9,
+            "embedding": "[0.4,0.4,0.4]",
+        }])
+        self.assertEqual(result["op_counts"]["updated_versions"], 1)
+        versions = self._query(
+            "select id, is_active from public.memories "
+            "where memory_key = 'topic.merge.contract' order by id"
+        )
+        self.assertEqual(len(versions), 2)
+        self.assertFalse(versions[0][1])
+        self.assertTrue(versions[1][1])
+        stored = self._query_one(
+            "select evidence_message_ids from public.memories where id = %s",
+            (versions[1][0],),
+        )
+        self.assertTrue(set(evidence) <= set(stored))
+        self.assertEqual(self._cursor(), 530)
+
+    def test_pending_request_keeps_both_absorb_targets_until_review(self):
+        # 同正文重复申请合并为一条后，交接目标并集完整落库；pending
+        # 阶段不得提前停用任何交接目标（停用只发生在审核通过或直接吸收）。
+        first = self._fast_path_moment(
+            "合并交接目标的第一条快速片段。", "21111111-1111-1111-1111-1111111111fa",
+        )
+        second = self._fast_path_moment(
+            "合并交接目标的第二条快速片段。", "21111111-1111-1111-1111-1111111111fb",
+        )
+        content = "带两个交接目标的 episode 申请，正文唯一。"
+        ops = [{
+            "op": "create_request", "reason": "经历需要审核",
+            "continuity_type": "episode",
+            "content": content,
+            "continuity_data": EPISODE_DATA,
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "importance": 5, "confidence": 0.8,
+            "embedding": "[0.16,0.27,0.38]",
+            "absorbed_fast_path_memory_ids": [first, second],
+        }]
+        result = self._claim_and_commit(521, 522, ops)
+        self.assertEqual(result["op_counts"]["created_requests"], 1)
+        row = self._query_row(
+            "select absorbed_fast_path_memory_ids, "
+            "jsonb_array_length(absorbed_fast_path_memory_snapshots), status "
+            "from public.memory_requests where content_hash = %s",
+            (_sha256(content),),
+        )
+        self.assertEqual(sorted(row[0]), sorted([first, second]))
+        self.assertEqual(row[1], 2)
+        self.assertEqual(row[2], "pending")
+        for memory_id in (first, second):
+            self.assertTrue(self._active_memory("id = %s", (memory_id,)))
+
+    # -- same-body structure updates (20260914010000) -----------------------
+    #
+    # memories.content_hash is unique, so a same-body structural change must
+    # update the current active row in place; "evidence only" now requires
+    # the canonical structure to be unchanged too, and a same-body pause
+    # flips the state in place instead of violating the unique constraint.
+
+    STRUCTURE_CONTENT = "结构更新契约线程的当前正文。"
+
+    def _seed_structure_thread(self, key, uuid_text, content):
+        self.conn.execute(
+            "insert into public.memory_continuity_objects (continuity_id, assistant_id) "
+            "values (%s::uuid, 'a-rumination') on conflict (continuity_id) do nothing",
+            (uuid_text,),
+        )
+        self.conn.execute(
+            "insert into public.memories ("
+            "content, title, tags, importance, embedding, source, verified, is_active, "
+            "assistant_id, confidence, content_hash, memory_key, "
+            "continuity_id, continuity_schema_version, continuity_data, "
+            "continuity_type, thread_state, evidence_message_ids, "
+            "evidence_start_time, evidence_end_time, evidence_time_precision, "
+            "producer_path, maintained_by"
+            ") values ("
+            "%s, '结构更新契约', '{thread}', 6, '[0.6,0.6,0.6]', 'rumination', "
+            "'verified', true, 'a-rumination', 0.9, %s, %s, "
+            "%s::uuid, 1, "
+            "'{\"open_question\": \"结构更新是否生效\", \"current_state\": \"初始状态\", "
+            "\"closure_criteria\": [\"完成\"]}'::jsonb, "
+            "'thread', 'open', '{501,502}', "
+            "'2026-09-01 10:00+08', '2026-09-01 10:01+08', 'minute', "
+            "'rumination', 'rumination'"
+            ") on conflict (content_hash) do nothing",
+            (content, _sha256(content), key, uuid_text),
+        )
+        found = self._active_memory("memory_key = %s", (key,))
+        assert found is not None, f"thread fixture not seeded: {key}"
+        return found
+
+    def _structure_update_op(self, structure_id, snapshot, current_state, *,
+                             op="update_thread", content=None):
+        content = content or self.STRUCTURE_CONTENT
+        continuity = {
+            "open_question": "结构更新是否生效", "current_state": current_state,
+            "closure_criteria": ["完成"],
+        }
+        return {
+            "op": op, "reason": "结构更新" if op == "update_thread" else "暂停",
+            "target_memory_id": structure_id, **snapshot,
+            "thread_state": "open" if op == "update_thread" else "paused",
+            "content": content,
+            "continuity_data": continuity,
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "importance": 6, "confidence": 0.9,
+            "embedding": "[0.6,0.6,0.6]",
+        }
+
+    def test_same_body_structure_change_updates_in_place(self):
+        self._set_cursor(initialized=True, value=520)
+        content = "结构更新契约线程 A 的当前正文。"
+        structure_id = self._seed_structure_thread(
+            "topic.structure.update", "21111111-1111-1111-1111-1111111111fc", content,
+        )
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [self._structure_update_op(
+            structure_id, self._thread_snapshot(structure_id), "结构已更新",
+            content=content,
+        )])
+        self.assertEqual(result["op_counts"]["updated_versions"], 1)
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "structure_updated_in_place",
+        )
+        rows = self._query(
+            "select is_active, thread_state, continuity_data->>'current_state', "
+            "evidence_message_ids from public.memories "
+            "where memory_key = 'topic.structure.update'"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0][0])
+        self.assertEqual(rows[0][1], "open")
+        self.assertEqual(rows[0][2], "结构已更新")
+        self.assertTrue(set(rows[0][3]) >= {501, 502, 521})
+        self.assertEqual(self._cursor(), 522)
+
+    def test_same_body_unchanged_structure_merges_evidence_only(self):
+        self._set_cursor(initialized=True, value=520)
+        content = "结构更新契约线程 B 的当前正文。"
+        structure_id = self._seed_structure_thread(
+            "topic.structure.same", "21111111-1111-1111-1111-1111111111fd", content,
+        )
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [self._structure_update_op(
+            structure_id, self._thread_snapshot(structure_id), "初始状态",
+            content=content,
+        )])
+        self.assertEqual(result["op_counts"]["evidence_only"], 1)
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "evidence_merged_unchanged",
+        )
+        rows = self._query(
+            "select continuity_data->>'current_state', "
+            "evidence_message_ids @> '{501,502,521}' "
+            "from public.memories where memory_key = 'topic.structure.same'"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "初始状态")
+        self.assertTrue(rows[0][1])
+
+    def test_same_body_pause_updates_state_in_place(self):
+        # 修复前：同正文 pause 会插入同哈希新版本行并违反唯一约束。
+        self._set_cursor(initialized=True, value=520)
+        content = "结构更新契约线程 C 的当前正文。"
+        structure_id = self._seed_structure_thread(
+            "topic.structure.pause", "21111111-1111-1111-1111-1111111111fe", content,
+        )
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [self._structure_update_op(
+            structure_id, self._thread_snapshot(structure_id), "暂停",
+            op="pause_thread", content=content,
+        )])
+        self.assertEqual(result["op_counts"]["updated_versions"], 1)
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "structure_updated_in_place",
+        )
+        rows = self._query(
+            "select is_active, thread_state from public.memories "
+            "where memory_key = 'topic.structure.pause'"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0][0])
+        self.assertEqual(rows[0][1], "paused")
+        self.assertEqual(self._cursor(), 522)
+
+    # -- takeover completion + structure baseline (20260915010000) ----------
+
+    def _seed_fast_path_thread(self, key, uuid_text, content, memory_key):
+        self.conn.execute(
+            "insert into public.memory_continuity_objects (continuity_id, assistant_id) "
+            "values (%s::uuid, 'a-rumination') on conflict (continuity_id) do nothing",
+            (uuid_text,),
+        )
+        self.conn.execute(
+            "insert into public.memories ("
+            "content, title, tags, importance, embedding, source, verified, is_active, "
+            "assistant_id, confidence, content_hash, memory_key, "
+            "continuity_id, continuity_schema_version, continuity_data, "
+            "continuity_type, thread_state, evidence_message_ids, "
+            "evidence_start_time, evidence_end_time, evidence_time_precision, "
+            "producer_path, maintained_by"
+            ") values ("
+            "%s, '快速路径线索', '{thread}', 6, '[0.7,0.7,0.7]', 'daily_digest', "
+            "'verified', true, 'a-rumination', 0.9, %s, %s, "
+            "%s::uuid, 1, "
+            "'{\"open_question\": \"快速路径是否成行\", \"current_state\": \"初始状态\", "
+            "\"closure_criteria\": [\"完成\"]}'::jsonb, "
+            "'thread', 'open', '{501,502}', "
+            "'2026-09-01 10:00+08', '2026-09-01 10:01+08', 'minute', "
+            "'fast_path', 'fast_path'"
+            ") on conflict (content_hash) do nothing",
+            (content, _sha256(content), memory_key, uuid_text),
+        )
+        found = self._active_memory("content_hash = %s", (_sha256(content),))
+        assert found is not None, f"thread fixture not seeded: {key}"
+        return found
+
+    def _fast_path_update_op(self, structure_id, current_state, *,
+                             content, memory_key=None, baseline=None):
+        snapshot = self._thread_snapshot(structure_id)
+        op = {
+            "op": "update_thread", "reason": "同正文结构更新",
+            "target_memory_id": structure_id, **snapshot,
+            "thread_state": "open",
+            "content": content,
+            "continuity_data": {
+                "open_question": "快速路径是否成行", "current_state": current_state,
+                "closure_criteria": ["完成"],
+            },
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "importance": 6, "confidence": 0.9,
+            "embedding": "[0.7,0.7,0.7]",
+        }
+        if memory_key is not None:
+            op["memory_key"] = memory_key
+        if baseline is not None:
+            op["continuity_baseline"] = baseline
+        return op
+
+    def test_keyed_fast_path_structure_update_completes_takeover(self):
+        self._set_cursor(initialized=True, value=520)
+        content = "快速路径线程 A：keyed 接管正文。"
+        fp_id = self._seed_fast_path_thread(
+            "topic.fp.keyed", "21111111-1111-1111-1111-1111111112a1",
+            content, "topic.fp.keyed",
+        )
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [self._fast_path_update_op(
+            fp_id, "结构已更新", content=content,
+        )])
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "structure_updated_in_place",
+        )
+        row = self._query_row(
+            "select maintained_by, memory_key, continuity_data->>'current_state' "
+            "from public.memories where id = %s",
+            (fp_id,),
+        )
+        self.assertEqual(row[0], "rumination")
+        self.assertEqual(row[1], "topic.fp.keyed")
+        self.assertEqual(row[2], "结构已更新")
+        handoff = self._query_row(
+            "select kind, memory_key, note from public.memory_path_handoffs "
+            "where run_id = %s",
+            (run_id,),
+        )
+        self.assertEqual(handoff[0], "adopt_thread")
+        self.assertEqual(handoff[1], "topic.fp.keyed")
+        self.assertIn("state=open", handoff[2])
+        self.assertEqual(result["op_counts"]["adopted_threads"], 1)
+
+    def test_keyless_fast_path_backfills_provided_key(self):
+        self._set_cursor(initialized=True, value=520)
+        content = "快速路径线程 B：keyless 回填正文。"
+        fp_id = self._seed_fast_path_thread(
+            "topic.fp.keyless", "21111111-1111-1111-1111-1111111112a2",
+            content, None,
+        )
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [self._fast_path_update_op(
+            fp_id, "结构已更新", content=content, memory_key="topic.fp.filled",
+        )])
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "structure_updated_in_place",
+        )
+        row = self._query_row(
+            "select maintained_by, memory_key from public.memories where id = %s",
+            (fp_id,),
+        )
+        self.assertEqual(row[0], "rumination")
+        self.assertEqual(row[1], "topic.fp.filled")
+        handoff = self._query_row(
+            "select memory_key, note from public.memory_path_handoffs where run_id = %s",
+            (run_id,),
+        )
+        self.assertEqual(handoff[0], "topic.fp.filled")
+        self.assertIn("state=open", handoff[1])
+
+    def test_illegal_or_conflicting_key_rolls_back_without_handoff(self):
+        self._set_cursor(initialized=True, value=520)
+        content = "快速路径线程 C：非法 key 回滚正文。"
+        fp_id = self._seed_fast_path_thread(
+            "topic.fp.illegal", "21111111-1111-1111-1111-1111111112a3",
+            content, None,
+        )
+        run_id = self._claim(521, 522)
+        with self.assertRaises(Exception):
+            self._commit(run_id, [self._fast_path_update_op(
+                fp_id, "结构已更新", content=content, memory_key="不是合法KEY",
+            )])
+        # 冲突 key：与既有活跃线索撞 key，同样整批拒绝。
+        self.conn.execute(
+            "update public.memory_digest_runs set status = 'failed', "
+            "error_code = 'test_cleanup' where id = %s", (run_id,),
+        )
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        with self.assertRaises(Exception):
+            self._commit(run_id, [self._fast_path_update_op(
+                fp_id, "结构已更新", content=content, memory_key="topic.haishan.plan",
+            )])
+        # 两次失败都完整回滚：无交接日志、目标原样、游标不推进。
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_path_handoffs where run_id in "
+            "(select id from public.memory_digest_runs where assistant_id = %s) "
+            "and kind = 'adopt_thread' "
+            "and position('structure update takeover' in note) > 0",
+            (ASSISTANT,),
+        ), 0)
+        row = self._query_row(
+            "select maintained_by, memory_key, continuity_data->>'current_state' "
+            "from public.memories where id = %s",
+            (fp_id,),
+        )
+        self.assertEqual(row[0], "fast_path")
+        self.assertIsNone(row[1])
+        self.assertEqual(row[2], "初始状态")
+        self.assertEqual(self._cursor(), 520)
+
+    def test_rumination_maintained_target_keeps_ownership_without_fake_handoff(self):
+        self._set_cursor(initialized=True, value=520)
+        content = "反刍维护线程 D：归属保持正文。"
+        rum_id = self._seed_structure_thread(
+            "topic.fp.owned", "21111111-1111-1111-1111-1111111112a4", content,
+        )
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [self._fast_path_update_op(
+            rum_id, "结构已更新", content=content,
+        )])
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "structure_updated_in_place",
+        )
+        self.assertEqual(self._query_one(
+            "select maintained_by from public.memories where id = %s", (rum_id,),
+        ), "rumination")
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_path_handoffs where run_id = %s",
+            (run_id,),
+        ), 0)
+
+    def test_stale_structure_baseline_rejected_and_retry_succeeds(self):
+        self._set_cursor(initialized=True, value=520)
+        content = "快速路径线程 E：结构基线正文。"
+        fp_id = self._seed_fast_path_thread(
+            "topic.fp.stale", "21111111-1111-1111-1111-1111111112a5",
+            content, "topic.fp.stale",
+        )
+        seed_continuity = self._query_one(
+            "select continuity_data from public.memories where id = %s", (fp_id,),
+        )
+        # 模型读取之后，另一写入仅修改了结构（正文与状态不变）。
+        self.conn.execute(
+            "update public.memories set continuity_data = "
+            "'{\"open_question\": \"快速路径是否成行\", "
+            "\"current_state\": \"外部结构修改\", "
+            "\"closure_criteria\": [\"完成\"]}'::jsonb where id = %s",
+            (fp_id,),
+        )
+        run_id = self._claim(521, 522)
+        with self.assertRaises(Exception) as raised:
+            self._commit(run_id, [self._fast_path_update_op(
+                fp_id, "结构已更新", content=content, baseline=seed_continuity,
+            )])
+        self.assertIn("memory_rumination_target_changed", str(raised.exception))
+        # 较新结构保留，游标不推进。
+        self.assertEqual(self._query_one(
+            "select continuity_data->>'current_state' from public.memories "
+            "where id = %s",
+            (fp_id,),
+        ), "外部结构修改")
+        self.assertEqual(self._cursor(), 520)
+        # 使用最新读取基线重试：合法提交成功。
+        self.conn.execute(
+            "update public.memory_digest_runs set status = 'failed', "
+            "error_code = 'test_cleanup' where id = %s", (run_id,),
+        )
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        fresh_continuity = self._query_one(
+            "select continuity_data from public.memories where id = %s", (fp_id,),
+        )
+        result = self._commit(run_id, [self._fast_path_update_op(
+            fp_id, "结构已更新", content=content, baseline=fresh_continuity,
+        )])
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "structure_updated_in_place",
+        )
+        self.assertEqual(self._query_one(
+            "select continuity_data->>'current_state' from public.memories "
+            "where id = %s",
+            (fp_id,),
+        ), "结构已更新")
+        self.assertEqual(self._cursor(), 522)
+
+    def test_unchanged_structure_on_fast_path_merges_evidence_and_takes_over(self):
+        self._set_cursor(initialized=True, value=520)
+        content = "快速路径线程 F：真正未变化的重复表达。"
+        fp_id = self._seed_fast_path_thread(
+            "topic.fp.unchanged", "21111111-1111-1111-1111-1111111112a6",
+            content, "topic.fp.unchanged",
+        )
+        seed_continuity = self._query_one(
+            "select continuity_data from public.memories where id = %s", (fp_id,),
+        )
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [self._fast_path_update_op(
+            fp_id, "初始状态", content=content, baseline=seed_continuity,
+        )])
+        self.assertEqual(result["op_counts"]["evidence_only"], 1)
+        self.assertEqual(result["op_counts"]["adopted_threads"], 1)
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "evidence_merged_unchanged",
+        )
+        row = self._query_row(
+            "select maintained_by, memory_key, "
+            "evidence_message_ids @> '{501,502,521}' from public.memories "
+            "where id = %s",
+            (fp_id,),
+        )
+        self.assertEqual(row[0], "rumination")
+        self.assertEqual(row[1], "topic.fp.unchanged")
+        self.assertTrue(row[2])
+        handoff = self._query_row(
+            "select memory_key, note from public.memory_path_handoffs "
+            "where run_id = %s",
+            (run_id,),
+        )
+        self.assertEqual(handoff[0], "topic.fp.unchanged")
+        self.assertIn("evidence merge takeover", handoff[1])
 
     # -- fast-path gating ---------------------------------------------------
 
@@ -1743,7 +2382,8 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
         ), 0)
         self.assertEqual(self._cursor(), 520)
 
-        # 重试携带最新快照可以正常推进。
+        # 重试携带最新快照可以正常推进。重试的结构与当前版本不同，按新
+        # 语义走原地结构更新（不再降级为只补证据）。
         result = self._commit(run_id, [{
             "op": "update_thread",
             "reason": "使用最新快照重试",
@@ -1759,7 +2399,10 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "content_hash": _sha256(changed),
             "embedding": "[0.72,0.72,0.72]",
         }])
-        self.assertEqual(result["op_counts"]["evidence_only"], 1)
+        self.assertEqual(result["op_counts"]["updated_versions"], 1)
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "structure_updated_in_place",
+        )
         self.assertEqual(self._cursor(), 522)
 
     # -- absorption handoff ---------------------------------------------------

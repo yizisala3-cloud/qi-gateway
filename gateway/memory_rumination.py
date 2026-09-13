@@ -57,6 +57,11 @@ FIRST_RUN_MAX_MESSAGES = 120
 RUMINATION_BATCH_MAX = 120
 RUMINATION_BATCH_MIN = 60
 MAX_EVIDENCE_IDS = 8
+# 合并后的最终操作可能携带同批同目标全部操作的证据并集。提交 RPC
+# （migration 20260913010000）按同一上限校验，两侧契约保持一致：
+# 单条模型操作仍受 MAX_EVIDENCE_IDS 约束，合并并集最坏情况是
+# 批内每条操作各带满额证据。
+RUMINATION_OP_EVIDENCE_MAX = RUMINATION_BATCH_MAX * MAX_EVIDENCE_IDS
 STALE_RUN_MINUTES = 30
 REQUEST_INPUT_LIMIT = 50
 
@@ -258,6 +263,43 @@ RUMINATION_SYSTEM_PROMPT = """你是“反刍连续感”提取器，负责在�
 - 如果 unfinished_threads 中的 fast_path thread 的 memory_key 为 null，
   而你无法根据聊天内容确定稳定的 ASCII memory_key，
   不要输出 adopt_thread。请选择 ignore。
+
+## continuity_data 结构
+continuity_data 必须是内联 JSON 对象，不能是字符串、不能是转义后的 JSON 文本、不能是 null。
+必须包含该类型全部必填字段，只能使用该类型允许的字段，多一个字段都会被拒绝。
+不要把 thread 的 open_question 放进 moment。枚举字段只能使用列出的值。priority 必须是 1-10 的整数。
+
+### create_memory + moment
+```json
+{"scene": "聊天窗口", "event": "具体发生了什么", "moment_state": "standalone", "response": "可选", "outcome": "可选", "salience_reason": "可选"}
+```
+
+### create_memory + inside_joke
+```json
+{"origin": "如何产生", "trigger_phrases": ["触发短语"], "shared_meaning": "共享含义", "reinforcement_count": 0, "usage_context": ["可选"], "avoid_context": ["可选"], "response_style": "可选"}
+```
+
+### create_tracked_thread
+必须同时提供顶层稳定 memory_key（小写 ASCII 主题键），示例：
+```json
+{"memory_key": "topic.某进程", "continuity_data": {"open_question": "要解决什么", "current_state": "当前进展", "next_expected": "可选", "closure_criteria": ["关闭条件"], "opened_at": "可选", "closed_at": "可选", "closure_summary": "可选", "closure_reason": "可选", "abstract_retrieval_hints": ["可选"], "concrete_retrieval_hints": ["可选"]}}
+```
+
+### create_request + episode
+```json
+{"beginning": "开端", "development": "发展", "turning_point": "可选", "outcome": "结果", "aftereffect": "可选", "episode_start_time": "可选", "episode_end_time": "可选", "closure_quality": "complete"}
+```
+
+### create_request + profile
+```json
+{"facet": "哪个方面", "statement": "具体内容", "scope": "适用范围", "stability": "stable", "effective_from": "可选", "effective_until": "可选", "exceptions": ["可选"], "basis": "explicit_self_report"}
+```
+
+### create_request + interaction_rule
+必须同时提供顶层稳定 memory_key（小写 ASCII 主题键），示例：
+```json
+{"memory_key": "rule.某规则", "continuity_data": {"trigger": "触发条件", "expected_behavior": "期望行为", "forbidden_behavior": ["可选"], "scope": "适用范围", "priority": 5, "rule_state": "active", "effective_from": "可选", "effective_until": "可选", "exceptions": ["可选"], "explicit_instruction": "叶子的明确原话"}}
+```
 
 ## 输出 JSON
 只返回严格 JSON，不要 Markdown、解释或代码围栏：
@@ -672,6 +714,154 @@ def _normalize_memory_key(value: Any, *, op_type: str = "", field: str = "memory
     return key
 
 
+def _continuity_dedupe_shape(value: Any) -> str | None:
+    """结构字段的去重形态：规范 JSON 串，保证键序无关的相等判断。"""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        try:
+            return json.dumps(value, sort_keys=True, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return repr(value)
+    return str(value)
+
+
+def _op_payload_identity(op: dict[str, Any]) -> tuple[Any, ...]:
+    """thread 操作的业务负载身份（含生命周期操作），用于时间歧义判定。"""
+    return (
+        op.get("op"),
+        op.get("content_hash"),
+        op.get("target_memory_id"),
+        op.get("memory_key"),
+        op.get("continuity_type"),
+        op.get("thread_state"),
+        _continuity_dedupe_shape(op.get("continuity_data")),
+        op.get("title"),
+        op.get("importance"),
+        op.get("confidence"),
+        op.get("source_type"),
+        op.get("recall_scene"),
+        tuple(op.get("recall_tags") or ()),
+        str(op.get("memory_time")),
+        op.get("time_precision"),
+    )
+
+
+def _op_dedupe_key(op: dict[str, Any]) -> tuple[Any, ...] | None:
+    """同批去重身份：只对带正文的最终有效操作登记（时间线解析后调用）。
+
+    pause/resume/resolve 是时间线上的状态事件，永不参与去重；其余操作
+    只有业务负载（含解析后的 thread_state 与结构）完全一致才合并，因此
+    同正文同结构在不同状态阶段出现不会被误判为重复。
+    """
+    if not op.get("content_hash"):
+        return None
+    if op.get("op") in {"pause_thread", "resume_thread", "resolve_thread"}:
+        return None
+    return _op_payload_identity(op)
+
+
+def _merge_evidence_ids(existing: list[int], extra: list[int]) -> list[int]:
+    """按首次出现顺序合并证据并集，保留后续操作补充的证据。"""
+    merged = list(existing)
+    for message_id in extra:
+        if message_id not in merged:
+            merged.append(message_id)
+    return merged
+
+
+_STATE_CHANGING_KINDS = frozenset({"pause_thread", "resume_thread", "resolve_thread"})
+
+
+def _ordered_thread_entries(
+    entries: list[tuple[int, dict[str, Any]]],
+    evidence_times: dict[int, str | None],
+    target_id: int,
+) -> list[tuple[int, dict[str, Any]]]:
+    """同一 thread 操作的统一时间排序与歧义裁决（parse 与 merge 共用）。
+
+    排序键 =（真实证据时间, 数组下标）。同一证据时间上，业务负载不同的
+    内容操作、多于一个的状态转换、或多个不同的 memory_key 填充，都会让
+    "谁最终生效"依赖数组顺序——明确拒绝，交换数组顺序结论不变；完全
+    等价的操作与顺序无关，允许并存（由去重安全合并）。
+    """
+    annotated = [
+        (_op_evidence_time(op, evidence_times), index, op)
+        for index, op in entries
+    ]
+    annotated.sort(key=lambda item: (item[0], item[1]))
+    by_time: dict[str, list[dict[str, Any]]] = {}
+    for time, _index, op in annotated:
+        by_time.setdefault(time, []).append(op)
+    for time, group in by_time.items():
+        payloads = {
+            _op_payload_identity(op) for op in group if op.get("content_hash")
+        }
+        state_kinds = {
+            op["op"] for op in group if op["op"] in _STATE_CHANGING_KINDS
+        }
+        fill_keys = {op.get("memory_key") for op in group if op.get("memory_key")}
+        if len(payloads) > 1 or len(state_kinds) > 1 or len(fill_keys) > 1:
+            raise RuminationPipelineError(
+                "model_schema_error",
+                f"ambiguous operations share one evidence time on memory "
+                f"{target_id}: array order would decide the final state; "
+                "cite distinct evidence times",
+            )
+    return [(index, op) for _time, index, op in annotated]
+
+
+def _dedupe_effective_ops(ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """时间线与结构全部解析后的同批去重。
+
+    只有业务负载完全一致的最终有效操作才合并：证据取并集（遵守提交
+    契约上限），交接目标 absorbed_fast_path_memory_ids 取并集（遵守与
+    提交 RPC 相同的 8 个上限，超限明确拒绝而不是静默丢目标——否则
+    数据库的正文去重会吞掉第二个请求里的交接意图）。
+    """
+    registry: dict[tuple[Any, ...], dict[str, Any]] = {}
+    kept: list[dict[str, Any]] = []
+    for op in ops:
+        key = _op_dedupe_key(op)
+        if key is None:
+            kept.append(op)
+            continue
+        prior = registry.get(key)
+        if prior is not None:
+            combined = _merge_evidence_ids(
+                prior["evidence_message_ids"], op["evidence_message_ids"],
+            )
+            if len(combined) > RUMINATION_OP_EVIDENCE_MAX:
+                raise RuminationPipelineError(
+                    "model_schema_error",
+                    "duplicate operations cite more than "
+                    f"{RUMINATION_OP_EVIDENCE_MAX} distinct evidence ids",
+                )
+            prior["evidence_message_ids"] = combined
+            absorbed = _merge_evidence_ids(
+                prior.get("absorbed_fast_path_memory_ids") or [],
+                op.get("absorbed_fast_path_memory_ids") or [],
+            )
+            if len(absorbed) > MAX_EVIDENCE_IDS:
+                raise RuminationPipelineError(
+                    "model_schema_error",
+                    "duplicate operations absorb more than "
+                    f"{MAX_EVIDENCE_IDS} fast-path targets; file them in "
+                    "separate batches",
+                )
+            if absorbed:
+                prior["absorbed_fast_path_memory_ids"] = absorbed
+            log.info(
+                "Rumination duplicate operation merged into prior: "
+                "op=%s combined_evidence=%s",
+                op["op"], len(combined),
+            )
+            continue
+        registry[key] = op
+        kept.append(op)
+    return kept
+
+
 def parse_rumination_output(
     text: str,
     *,
@@ -698,7 +888,9 @@ def parse_rumination_output(
     raw_ops = payload["operations"]
 
     validated: list[dict[str, Any]] = []
-    seen_content_hashes: set[str] = set()
+    # 同批去重在时间线与结构全部解析之后进行（_dedupe_effective_ops）；
+    # 主循环只做与位置无关的校验，状态转换的合法性由
+    # _resolve_thread_timelines 按真实证据时间重放裁决。
     for raw in raw_ops:
         if not isinstance(raw, dict):
             raise RuminationPipelineError("model_schema_error", "operation must be an object")
@@ -790,14 +982,6 @@ def parse_rumination_output(
             # of a fast-path takeover; it never re-keys a rumination thread.
             if raw.get("memory_key"):
                 op["memory_key"] = _normalize_memory_key(raw.get("memory_key"), op_type=op_type)
-            if op_type == "pause_thread" and target.get("thread_state") != "open":
-                raise RuminationPipelineError(
-                    "model_schema_error", "pause_thread requires an open thread",
-                )
-            if op_type == "resume_thread" and target.get("thread_state") != "paused":
-                raise RuminationPipelineError(
-                    "model_schema_error", "resume_thread requires a paused thread",
-                )
 
         if op_type == "ignore":
             validated.append(op)
@@ -819,8 +1003,6 @@ def parse_rumination_output(
             hashlib.sha256(content.casefold().encode("utf-8")).hexdigest()
             if content else None
         )
-        if op_content_hash and op_content_hash in seen_content_hashes:
-            continue
         if _contains_secret(content, title, reason):
             raise RuminationPipelineError(
                 "model_schema_error", "rumination output contains a suspected secret",
@@ -876,7 +1058,6 @@ def parse_rumination_output(
         })
         if op_content_hash:
             op["content_hash"] = op_content_hash
-            seen_content_hashes.add(op_content_hash)
 
         if op_type == "create_memory":
             continuity_type = str(raw.get("continuity_type") or "").strip().casefold()
@@ -886,9 +1067,31 @@ def parse_rumination_output(
                     "create_memory only supports moment or inside_joke",
                 )
             op["continuity_type"] = continuity_type
-            op["continuity_data"] = _validated_continuity_data(
+            continuity_data = _try_validate_continuity_data(
                 continuity_type, None, raw.get("continuity_data"),
             )
+            if continuity_data is not None:
+                op["continuity_data"] = continuity_data
+            else:
+                # continuity_data 结构不可用 → 降级为 create_request
+                # 待审核申请，内容不丢失。
+                category = _continuity_data_warning_category(
+                    continuity_type, None, raw.get("continuity_data"),
+                )
+                minimal = _minimal_continuity_data(
+                    continuity_type, title=title, content=content,
+                )
+                op["op"] = "create_request"
+                op["continuity_data"] = minimal
+                op["reason"] = (
+                    "模型未给出完整 continuity_data，已转为待审核申请，"
+                    "请在通过前确认结构字段"
+                )
+                log.warning(
+                    "Rumination continuity_data degraded to create_request: "
+                    "op=create_memory continuity_type=%s reason_category=%s",
+                    continuity_type, category,
+                )
             op["absorbed_fast_path_memory_ids"] = _validated_absorb_targets(
                 raw.get("absorbed_fast_path_memory_ids"), absorbable_ids,
             )
@@ -899,9 +1102,27 @@ def parse_rumination_output(
                 raise RuminationPipelineError(
                     "model_schema_error", "create_tracked_thread must start as open",
                 )
-            op["continuity_data"] = _validated_continuity_data(
+            continuity_data = _try_validate_continuity_data(
                 "thread", "open", raw.get("continuity_data"),
             )
+            if continuity_data is None:
+                # continuity_data 结构不可用 → 降级为 ignore
+                category = _continuity_data_warning_category(
+                    "thread", "open", raw.get("continuity_data"),
+                )
+                log.warning(
+                    "Rumination continuity_data degraded to ignore: "
+                    "op=create_tracked_thread reason_category=%s",
+                    category,
+                )
+                validated.append({
+                    "op": "ignore",
+                    "reason": "反刍路径：create_tracked_thread 的 continuity_data "
+                              "结构不可用，本批跳过该操作",
+                    "evidence_message_ids": list(op["evidence_message_ids"]),
+                })
+                continue
+            op["continuity_data"] = continuity_data
         elif op_type == "adopt_thread":
             key = _normalize_memory_key(raw.get("memory_key"), op_type=op_type)
             if key:
@@ -924,33 +1145,50 @@ def parse_rumination_output(
                     "evidence_message_ids": list(op["evidence_message_ids"]),
                 })
                 continue
-            state = str(raw.get("thread_state") or "").strip().casefold() or None
-            if state and state != target.get("thread_state"):
-                raise RuminationPipelineError(
-                    "model_schema_error",
-                    "adopt_thread cannot change thread_state; use pause/resume/resolve ops",
-                )
-            if content:
-                op["continuity_data"] = _validated_continuity_data(
-                    "thread", target.get("thread_state"), raw.get("continuity_data"),
-                )
-        elif op_type in {"update_thread", "pause_thread", "resume_thread", "resolve_thread"}:
+            # 状态回显与结构基准是证据时间线上的位置状态，统一延迟到
+            # _resolve_thread_timelines 按时间序裁决；此处只保留与位置
+            # 无关的校验（目标、快照、key 格式）。
+            op["_deferred_continuity"] = raw.get("continuity_data")
+            op["_raw_thread_state"] = (
+                str(raw.get("thread_state") or "").strip().casefold() or None
+            )
+        elif op_type in {"pause_thread", "resume_thread", "resolve_thread"}:
+            # 结构基准是该操作的目标状态（kind-fixed），与时间线位置无关；
+            # 转换合法性由循环后的 _resolve_thread_timelines 按证据时间
+            # 统一裁决，数组顺序不提前拒绝。
             expected_state = {
-                "update_thread": target.get("thread_state"),
                 "pause_thread": "paused",
                 "resume_thread": "open",
                 "resolve_thread": "resolved",
             }[op_type]
-            if op_type == "update_thread":
-                state = str(raw.get("thread_state") or "").strip().casefold() or None
-                if state and state != target.get("thread_state"):
-                    raise RuminationPipelineError(
-                        "model_schema_error",
-                        "update_thread cannot change thread_state; use pause/resume/resolve ops",
-                    )
             op["thread_state"] = expected_state
-            op["continuity_data"] = _validated_continuity_data(
+            continuity_data = _try_validate_continuity_data(
                 "thread", expected_state, raw.get("continuity_data"),
+            )
+            if continuity_data is None:
+                category = _continuity_data_warning_category(
+                    "thread", expected_state, raw.get("continuity_data"),
+                )
+                log.warning(
+                    "Rumination continuity_data degraded to ignore: "
+                    "op=%s reason_category=%s",
+                    op_type, category,
+                )
+                validated.append({
+                    "op": "ignore",
+                    "reason": f"反刍路径：{op_type} 的 continuity_data "
+                              "结构不可用，本批跳过该操作",
+                    "evidence_message_ids": list(op["evidence_message_ids"]),
+                })
+                continue
+            op["continuity_data"] = continuity_data
+        elif op_type == "update_thread":
+            # 结构基准是该操作在证据时间线上的位置状态，须等整批时间线
+            # 确定后判定；先原样保留，由 _resolve_thread_timelines 校验。
+            op["thread_state"] = str(target.get("thread_state"))
+            op["_deferred_continuity"] = raw.get("continuity_data")
+            op["_raw_thread_state"] = (
+                str(raw.get("thread_state") or "").strip().casefold() or None
             )
         elif op_type == "create_request":
             continuity_type = str(raw.get("continuity_type") or "").strip().casefold()
@@ -960,9 +1198,49 @@ def parse_rumination_output(
                     "create_request only supports episode, profile or interaction_rule",
                 )
             op["continuity_type"] = continuity_type
-            op["continuity_data"] = _validated_continuity_data(
+            continuity_data = _try_validate_continuity_data(
                 continuity_type, None, raw.get("continuity_data"),
             )
+            if continuity_data is None:
+                # continuity_data 结构不可用 → 使用最小可用值替换。
+                # interaction_rule 例外：结构不可用且 memory_key 缺失或非法
+                # 时降级为 ignore——没有稳定 key 的规则申请无法落库。
+                category = _continuity_data_warning_category(
+                    continuity_type, None, raw.get("continuity_data"),
+                )
+                if continuity_type == "interaction_rule":
+                    try:
+                        degrade_key = _normalize_memory_key(
+                            raw.get("memory_key"), op_type=op_type,
+                        )
+                    except RuminationPipelineError:
+                        degrade_key = None
+                    if not degrade_key:
+                        log.warning(
+                            "Rumination continuity_data degraded to ignore: "
+                            "op=create_request continuity_type=interaction_rule "
+                            "reason_category=%s",
+                            category,
+                        )
+                        validated.append({
+                            "op": "ignore",
+                            "reason": "反刍路径：interaction_rule 申请的 "
+                                      "continuity_data 结构不可用且缺少稳定 "
+                                      "memory_key，本批跳过该操作",
+                            "evidence_message_ids": list(op["evidence_message_ids"]),
+                        })
+                        continue
+                minimal = _minimal_continuity_data(
+                    continuity_type, title=title, content=content,
+                )
+                op["continuity_data"] = minimal
+                log.warning(
+                    "Rumination continuity_data replaced with minimal: "
+                    "op=create_request continuity_type=%s reason_category=%s",
+                    continuity_type, category,
+                )
+            else:
+                op["continuity_data"] = continuity_data
             key = _normalize_memory_key(raw.get("memory_key"), op_type=op_type)
             if continuity_type == "interaction_rule":
                 if not key:
@@ -981,7 +1259,113 @@ def parse_rumination_output(
             )
 
         validated.append(op)
-    return validated
+    return _dedupe_effective_ops(
+        _resolve_thread_timelines(validated, threads_by_id, evidence_times),
+    )
+
+
+def _resolve_thread_timelines(
+    ops: list[dict[str, Any]],
+    threads_by_id: dict[int, dict[str, Any]],
+    evidence_times: dict[int, str | None],
+) -> list[dict[str, Any]]:
+    """按真实证据时间重放同批 thread 状态机，并校验延迟的结构字段。
+
+    模型数组顺序不承载时间语义：pause/resume/resolve 的转换合法性、
+    update/adopt 的状态回显与结构校验基准，都以（证据时间, 数组下标）
+    排序后的位置为准，与 merge 阶段使用同一排序规则。update/adopt 不
+    改变状态，其结构不可用时原位降级为 ignore，不影响后续位置的状态。
+    """
+    by_target: dict[int, list[int]] = {}
+    for index, op in enumerate(ops):
+        kind = op.get("op")
+        if kind in THREAD_OP_TYPES and kind != "evidence_only":
+            by_target.setdefault(op["target_memory_id"], []).append(index)
+
+    for target_id, indices in by_target.items():
+        target = threads_by_id.get(target_id)
+        if target is None:  # pragma: no cover - coerce block already validated
+            raise RuminationPipelineError(
+                "model_schema_error",
+                f"target_memory_id {target_id} is not an unfinished thread in this input",
+            )
+        state = str(target.get("thread_state"))
+        for index, op in _ordered_thread_entries(
+            [(i, ops[i]) for i in indices], evidence_times, target_id,
+        ):
+            kind = op["op"]
+            # 服务端读取基线：网关读取到的结构原样随操作提交，供提交侧
+            # 在行锁下与当前结构核对（比较语义与原地更新的结构比较一致）。
+            # 模型无需回显也无法伪造——parse 的未知字段白名单会拒绝模型
+            # 输出中的该字段；去重键不含它（服务端元数据，非业务负载）。
+            op["continuity_baseline"] = target.get("continuity_data")
+            if state == "resolved":
+                raise RuminationPipelineError(
+                    "model_schema_error",
+                    f"contradictory operations: progress after resolve_thread "
+                    f"on memory {target_id}",
+                )
+            if kind == "pause_thread":
+                if state != "open":
+                    raise RuminationPipelineError(
+                        "model_schema_error", "pause_thread requires an open thread",
+                    )
+                state = "paused"
+                continue
+            if kind == "resume_thread":
+                if state != "paused":
+                    raise RuminationPipelineError(
+                        "model_schema_error", "resume_thread requires a paused thread",
+                    )
+                state = "open"
+                continue
+            if kind == "resolve_thread":
+                if state not in ("open", "paused"):
+                    raise RuminationPipelineError(
+                        "model_schema_error",
+                        f"resolve_thread requires an open or paused thread "
+                        f"(memory {target_id})",
+                    )
+                state = "resolved"
+                continue
+            raw_state = op.pop("_raw_thread_state", None)
+            if raw_state and raw_state != state:
+                raise RuminationPipelineError(
+                    "model_schema_error",
+                    f"{kind} cannot change thread_state; use pause/resume/resolve ops",
+                )
+            # 解析后的位置状态是该操作的最终回显（多操作合并时由 merge
+            # 按状态机终点重设）；去重键据此区分不同状态阶段的操作。
+            op["thread_state"] = state
+            if "_deferred_continuity" in op:
+                raw_continuity = op.pop("_deferred_continuity")
+                if not op.get("content"):
+                    continue
+                validated_data = _try_validate_continuity_data(
+                    "thread", state, raw_continuity,
+                )
+                if validated_data is None:
+                    category = _continuity_data_warning_category(
+                        "thread", state, raw_continuity,
+                    )
+                    log.warning(
+                        "Rumination continuity_data degraded to ignore: "
+                        "op=%s reason_category=%s",
+                        kind, category,
+                    )
+                    skip = {
+                        "op": "ignore",
+                        "reason": (
+                            f"反刍路径：{kind} 的 continuity_data 结构不可用，"
+                            "本批跳过该操作"
+                        ),
+                        "evidence_message_ids": list(op["evidence_message_ids"]),
+                    }
+                    op.clear()
+                    op.update(skip)
+                else:
+                    op["continuity_data"] = validated_data
+    return ops
 
 
 def _validated_continuity_data(
@@ -1001,6 +1385,125 @@ def _validated_continuity_data(
         raise RuminationPipelineError(
             "model_schema_error", f"invalid {continuity_type} continuity_data: {exc}",
         ) from exc
+
+
+STRUCTURE_FALLBACK_TYPES = frozenset(
+    {"moment", "inside_joke", "episode", "profile", "interaction_rule"}
+)
+
+
+def _coerce_continuity_data(value: Any) -> dict[str, Any] | None:
+    """Normalise dict or JSON string to dict; return None for anything else."""
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return None
+
+
+def _try_validate_continuity_data(
+    continuity_type: str, thread_state: str | None, value: Any,
+) -> dict[str, Any] | None:
+    """Coerce and validate; return None if unusable (no exception)."""
+    coerced = _coerce_continuity_data(value)
+    if coerced is None:
+        return None
+    try:
+        return validate_continuity_data(
+            continuity_type, thread_state, coerced, automatic=False,
+        )
+    except ContinuityDataError:
+        return None
+
+
+def _continuity_data_warning_category(
+    continuity_type: str, thread_state: str | None, value: Any,
+) -> str:
+    """Coarse failure category for degrade warnings; never carries content."""
+    if not isinstance(value, dict):
+        if not isinstance(value, str) or not value.strip():
+            return "continuity_data_not_object"
+        try:
+            parsed = json.loads(value.strip())
+        except (json.JSONDecodeError, ValueError):
+            return "continuity_data_unparsable_string"
+        if not isinstance(parsed, dict):
+            return "continuity_data_not_object"
+    try:
+        validate_continuity_data(
+            continuity_type, thread_state, _coerce_continuity_data(value),
+            automatic=False,
+        )
+    except ContinuityDataError as exc:
+        message = str(exc).casefold()
+        if "is required" in message:
+            return "continuity_data_missing_required_field"
+        if "unsupported continuity_data fields" in message:
+            return "continuity_data_invalid_field"
+        if message.startswith("invalid") or "priority must be" in message:
+            return "continuity_data_invalid_enum"
+        return "continuity_data_invalid_field"
+    return "continuity_data_not_object"
+
+
+def _minimal_continuity_data(
+    continuity_type: str, *, title: str | None, content: str,
+) -> dict[str, Any]:
+    """Build minimal valid continuity_data from title/content for pending review."""
+    if continuity_type not in STRUCTURE_FALLBACK_TYPES:
+        raise RuminationPipelineError(
+            "model_schema_error", f"unknown continuity_type for minimal data: {continuity_type}",
+        )
+    safe_title = (title or "").strip() or None
+    safe_content = (content or "").strip()
+    if continuity_type == "moment":
+        return {
+            "scene": safe_title or safe_content[:80] or "未分类",
+            "event": safe_content[:300] or "未记录",
+            "moment_state": "standalone",
+        }
+    if continuity_type == "inside_joke":
+        return {
+            "origin": safe_content[:300] or "未记录",
+            "trigger_phrases": [safe_title or "未明确"],
+            "shared_meaning": safe_content[:300] or "未记录",
+            "reinforcement_count": 0,
+        }
+    if continuity_type == "episode":
+        return {
+            "beginning": safe_content[:200] or "未记录",
+            "development": safe_content[:200] or "未记录",
+            "outcome": safe_content[:200] or "未记录",
+            "closure_quality": "uncertain",
+        }
+    if continuity_type == "profile":
+        return {
+            "facet": safe_title or "未分类",
+            "statement": safe_content[:300] or "未记录",
+            "scope": "全局",
+            "stability": "provisional",
+            "basis": "reviewed_summary",
+        }
+    if continuity_type == "interaction_rule":
+        return {
+            "trigger": safe_title or "未明确",
+            "expected_behavior": safe_content[:300] or "未记录",
+            "scope": "全局",
+            "priority": 5,
+            "rule_state": "active",
+            "explicit_instruction": safe_content[:300] or "未记录",
+        }
+    raise RuminationPipelineError(
+        "model_schema_error", f"unknown continuity_type for minimal data: {continuity_type}",
+    )
 
 
 def _require_memory_key(value: Any, *, op_type: str = "") -> str:
@@ -1143,6 +1646,30 @@ def _op_evidence_time(op: dict[str, Any], evidence_times: dict[int, str | None])
     return max(valid)
 
 
+def _strip_null_values(value: Any) -> Any:
+    """递归剥离对象里的显式 null 字段；数组元素原样保留。"""
+    if isinstance(value, dict):
+        return {
+            key: _strip_null_values(item)
+            for key, item in value.items()
+            if item is not None
+        }
+    if isinstance(value, list):
+        return list(value)
+    return value
+
+
+def _canonical_continuity(value: Any) -> str:
+    """continuity_data 规范形：剥离显式 null 后按键序序列化。
+
+    与 SQL jsonb_strip_nulls 一致：键序无关、null 字段视为未提供、数组
+    元素原样保留。用于"正文未变时结构是否真的变了"的判定。
+    """
+    if not isinstance(value, dict):
+        return ""
+    return json.dumps(_strip_null_values(value), sort_keys=True, ensure_ascii=False)
+
+
 def _merged_thread_op(
     target_id: int,
     entries: list[tuple[int, dict[str, Any]]],
@@ -1206,6 +1733,12 @@ def _merged_thread_op(
         for _, op in entries
         for message_id in op["evidence_message_ids"]
     })
+    if len(evidence_union) > RUMINATION_OP_EVIDENCE_MAX:
+        # 与提交 RPC（migration 20260913010000）的每操作证据上限一致。
+        raise RuminationPipelineError(
+            "model_schema_error",
+            f"merged evidence union exceeds {RUMINATION_OP_EVIDENCE_MAX} ids",
+        )
     merged: dict[str, Any] = {
         "op": merged_kind,
         "target_memory_id": target_id,
@@ -1222,6 +1755,9 @@ def _merged_thread_op(
     ):
         if entries[0][1].get(key) is not None:
             merged[key] = entries[0][1][key]
+    # 服务端读取基线随合并结果透传（同组操作读自同一份输入，基线一致）。
+    if entries[0][1].get("continuity_baseline") is not None:
+        merged["continuity_baseline"] = entries[0][1]["continuity_baseline"]
     # Body and state data come from the last op that carries them (the latest
     # progress represents the final current state).
     for key in ("content", "continuity_data", "title", "memory_time", "time_precision"):
@@ -1244,12 +1780,16 @@ def _merged_thread_op(
         merged["content_hash"] = hashlib.sha256(
             merged["content"].casefold().encode("utf-8"),
         ).hexdigest()
-    # 状态未变且最终正文与当前版本相同：不重写正文，只合并证据。
+    # 状态未变、正文未变且结构规范形未变：不重写，只合并证据。结构有
+    # 变化时保留完整操作，由提交侧在 content_hash 唯一约束下原地更新
+    # 当前版本（普通字段无模型基线，不参与变化判定）。
     if (
         merged_kind == "update_thread"
         and merged.get("content")
         and str(target.get("content") or "")
         and merged["content"].casefold() == str(target["content"]).casefold()
+        and _canonical_continuity(merged.get("continuity_data"))
+            == _canonical_continuity(target.get("continuity_data"))
     ):
         merged_kind = "evidence_only"
         merged["op"] = merged_kind
@@ -1287,10 +1827,7 @@ def merge_thread_operations(
                 "model_schema_error",
                 f"target_memory_id {target_id} is not an unfinished thread",
             )
-        ordered = sorted(
-            entries,
-            key=lambda entry: (_op_evidence_time(entry[1], evidence_times), entry[0]),
-        )
+        ordered = _ordered_thread_entries(entries, evidence_times, target_id)
         first_index, merged = _merged_thread_op(target_id, ordered, target)
         for index, _ in entries:
             replacements[index] = None
@@ -1385,12 +1922,12 @@ def _call_rumination_model(model_input: str) -> str:
 # ---------------------------------------------------------------------------
 
 def enrich_rumination_ops(ops: list[dict[str, Any]], run_id: int) -> list[dict[str, Any]]:
-    """正文向量失败或非空场景的召回向量失败都让整批失败。
+    """正文向量失败让整批失败；recall_scene 向量失败只影响该操作。
 
-    召回向量只服务于 recall_scene；正式写入绝不允许出现"场景已写入但向量
-    永久缺失"的半完成状态。整批在同一事务内提交，任何失败都不会留下记忆行、
-    continuity 对象、交接记录，也不会推进游标。没有可靠场景的操作显式写入
-    空场景（recall_scene=None 且 recall_embedding=None）。
+    召回向量只服务于 recall_scene。recall_scene 向量失败时，该操作的
+    recall_scene 和 recall_embedding 同时置为 null（保持"有场景必有向量"
+    的不变量），记忆仍写入（关键词召回可用），记录 warning。正文向量
+    失败仍然整批失败（embedding 是记忆被召回的基础）。
     """
     enriched: list[dict[str, Any]] = []
     for op in ops:
@@ -1403,14 +1940,16 @@ def enrich_rumination_ops(ops: list[dict[str, Any]], run_id: int) -> list[dict[s
             if recall_scene:
                 try:
                     item["recall_embedding"] = _get_embedding_sync(recall_scene)
-                except DigestPipelineError as exc:
-                    # 场景非空必须有向量：失败让整批失败并回滚，等待重试。
-                    raise RuminationPipelineError(
-                        "recall_embedding_failed",
-                        f"Recall scene embedding failed ({exc.code}); "
-                        "the batch was not committed",
-                    ) from exc
-                item["recall_embedding"] = item.get("recall_embedding")
+                except DigestPipelineError:
+                    # recall_scene 向量失败只影响该操作的向量召回；
+                    # 关键词召回和 DB 存储不受影响。清空场景和向量。
+                    log.warning(
+                        "Rumination recall_scene embedding failed, "
+                        "clearing recall_scene: op=%s run_id=%s",
+                        item.get("op"), run_id,
+                    )
+                    item["recall_scene"] = None
+                    item["recall_embedding"] = None
         enriched.append(item)
     return enriched
 
