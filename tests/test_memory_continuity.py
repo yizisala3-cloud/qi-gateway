@@ -61,17 +61,34 @@ def _candidate():
 
 
 class _RpcClient:
-    def __init__(self, *, commit_data=1, fail_commit=False):
+    def __init__(self, *, commit_data=1, fail_commit=False, fail_message="commit failed",
+                 pause_data=None):
         self.commit_data = commit_data
         self.fail_commit = fail_commit
+        self.fail_message = fail_message
+        self.pause_data = pause_data
         self.rpc_names = []
+        self.table_updates = []
 
     def rpc(self, name, params):
         self.rpc_names.append(name)
         if self.fail_commit and name == "commit_memory_continuity_run":
-            raise RuntimeError("commit failed")
-        data = {} if name == "pause_memory_continuity_empty" else self.commit_data
+            raise RuntimeError(self.fail_message)
+        if name == "pause_memory_continuity_empty" and self.pause_data is not None:
+            data = self.pause_data
+        elif name == "pause_memory_continuity_empty":
+            data = {}
+        else:
+            data = self.commit_data
         return SimpleNamespace(execute=lambda: SimpleNamespace(data=data))
+
+    def table(self, name):
+        table = Mock()
+        table.update.side_effect = lambda payload: (
+            self.table_updates.append((name, payload)),
+            table.update.return_value,
+        )[1]
+        return table
 
 
 class ContinuityBatchTests(unittest.TestCase):
@@ -228,6 +245,41 @@ class ContinuityExecutionTests(unittest.TestCase):
         self.assertEqual(result["cursor_before"], result["cursor_after"])
         self.assertIn("pause_memory_continuity_empty", client.rpc_names)
         self.assertNotIn("commit_memory_continuity_run", client.rpc_names)
+
+    def test_stale_empty_pause_does_not_regress_processed_batch(self):
+        # 陈旧请求的空结果：批次已被其它运行处理 → 不重新 paused_empty，
+        # 游标保持真实推进位置。
+        client = _RpcClient(pause_data={
+            "status": "already_processed",
+            "last_processed_message_id": 2504,
+        })
+        patches = self._patch_success(client, candidates=[])
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9], patches[10]:
+            result = run_continuity_digest()
+        self.assertFalse(result["paused_empty"])
+        self.assertEqual(result["cursor_after"], 2504)
+        self.assertEqual(result["status"], "succeeded")
+
+    def test_stale_commit_finalizes_run_without_write(self):
+        # 陈旧请求带候选提交：RPC 拒绝（already_processed）→ run 按空成功
+        # 收束，不产生写入、不暂停。
+        client = _RpcClient(
+            fail_commit=True,
+            fail_message="psycopg.errors.RaiseException: "
+                         "memory_continuity_batch_already_processed",
+        )
+        patches = self._patch_success(client)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9], patches[10]:
+            result = run_continuity_digest()
+        self.assertTrue(result["already_processed"])
+        self.assertFalse(result["paused_empty"])
+        self.assertEqual(result["inserted_count"], 0)
+        finalize = [
+            payload for name, payload in client.table_updates
+            if payload.get("status") == "succeeded" and payload.get("inserted_count") == 0
+        ]
+        self.assertEqual(len(finalize), 1)
+        self.assertIsNone(finalize[0]["heartbeat_at"])
 
     def test_paused_retry_uses_fixed_batch_even_when_new_messages_exist(self):
         self.cursor.update({
@@ -405,6 +457,64 @@ class ContinuityApiTests(unittest.TestCase):
             response = asyncio.run(continuity_skip_blocked(_Request()))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(json.loads(response.body), expected)
+
+
+class ContinuityInitFailureTests(unittest.TestCase):
+    """领取成功后的批次初始化失败：记失败、结束占用、不残留 claimed。
+
+    生产事故：run 267 succeeded 占据窗口（旧唯一索引含 succeeded），
+    run 268 重试初始化撞 memory_digest_runs_active_batch_uidx，
+    异常发生在 try 之外导致残留 claimed。
+    """
+
+    def test_init_failure_records_failure_and_raises(self):
+        with (
+            patch("gateway.memory_continuity._continuity_analysis_configured", return_value=True),
+            patch("gateway.memory_continuity.resolve_continuity_assistant_id", return_value="assistant-1"),
+            patch("gateway.memory_continuity._get_cursor", return_value={
+                "status": "paused_empty",
+                "last_processed_message_id": 2460,
+                "manual_cooldown_until": None,
+                "auto_cooldown_until": None,
+            }),
+            patch(
+                "gateway.memory_continuity._fetch_blocked_rows",
+                return_value=[_row(2461), _row(2462, "assistant", "回应")],
+            ),
+            patch(
+                "gateway.memory_continuity._claim_slot",
+                return_value={"status": "claimed", "run_id": 268},
+            ),
+            patch(
+                "gateway.memory_continuity._set_running_run",
+                side_effect=Exception(
+                    'duplicate key value violates unique constraint '
+                    '"memory_digest_runs_active_batch_uidx"'
+                ),
+            ),
+            patch("gateway.memory_continuity._record_failure") as record_failure,
+        ):
+            with self.assertRaises(ContinuityPipelineError) as raised:
+                run_continuity_digest(automatic=False)
+        self.assertEqual(raised.exception.code, "batch_init_failed")
+        record_failure.assert_called_once()
+        self.assertEqual(record_failure.call_args.args[0], 268)
+        self.assertEqual(record_failure.call_args.args[1], "batch_init_failed")
+        self.assertIn("memory_digest_runs_active_batch_uidx", record_failure.call_args.args[2])
+
+    def test_record_failure_marks_run_failed_and_clears_heartbeat(self):
+        client = Mock()
+        client.table.return_value.update.return_value.eq.return_value.execute.return_value = (
+            SimpleNamespace(data=[{"id": 268}])
+        )
+        from gateway.memory_continuity import _record_failure
+
+        with patch("gateway.memory_continuity._client", return_value=client):
+            _record_failure(268, "batch_init_failed", "boom")
+        payload = client.table.return_value.update.call_args.args[0]
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["error_code"], "batch_init_failed")
+        self.assertIsNone(payload["heartbeat_at"])
 
 
 def _now():

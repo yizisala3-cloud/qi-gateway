@@ -398,6 +398,20 @@ def _record_failure(run_id: int, code: str, message: str) -> None:
         log.exception("Failed to persist continuity run failure: run_id=%s code=%s", run_id, code)
 
 
+def _finalize_stale_run(run_id: int) -> None:
+    """陈旧运行收束：窗口已被其它运行处理，按空成功结束，不触碰游标。"""
+    _client().table("memory_digest_runs").update({
+        "status": "succeeded",
+        "extracted_count": 0,
+        "inserted_count": 0,
+        "preview_memories": [],
+        "completed_at": _now().isoformat(),
+        "heartbeat_at": None,
+        "error_code": None,
+        "error_message": None,
+    }).eq("id", run_id).execute()
+
+
 def _enrich_candidates(candidates: list[dict[str, Any]], run_id: int) -> list[dict[str, Any]]:
     enriched: list[dict[str, Any]] = []
     for candidate in candidates:
@@ -484,7 +498,15 @@ def run_continuity_digest(*, automatic: bool = False) -> dict[str, Any]:
     if claim.get("status") != "claimed":
         raise ContinuityPipelineError("commit_failed", "Failed to claim a digest execution slot", 500)
     run_id = int(claim["run_id"])
-    run = _set_running_run(run_id, raw_rows)
+    try:
+        run = _set_running_run(run_id, raw_rows)
+    except Exception as exc:
+        # 初始化失败（如活跃批次唯一索引冲突）必须结束占用并记失败，
+        # 不能残留 claimed 阻塞后续运行；游标保持 paused_empty 可重试。
+        _record_failure(run_id, "batch_init_failed", f"{type(exc).__name__}: {str(exc)[:1200]}")
+        raise ContinuityPipelineError(
+            "batch_init_failed", "Failed to initialize the claimed batch", 500,
+        ) from exc
 
     try:
         evidence_times = {message["id"]: message["source_time"] for message in messages}
@@ -500,10 +522,12 @@ def run_continuity_digest(*, automatic: bool = False) -> dict[str, Any]:
         _update_heartbeat(run_id)
 
         if not candidates:
-            _client().rpc(
+            paused = _client().rpc(
                 "pause_memory_continuity_empty",
                 {"p_run_id": run_id},
             ).execute()
+            paused_row = paused.data if isinstance(paused.data, dict) else {}
+            already_processed = paused_row.get("status") == "already_processed"
             try:
                 saved = _load_run(run_id, run)
             except Exception:
@@ -517,8 +541,13 @@ def run_continuity_digest(*, automatic: bool = False) -> dict[str, Any]:
             result = _public_run(saved)
             result.update({
                 "cursor_before": int(cursor.get("last_processed_message_id") or INITIAL_CURSOR),
-                "cursor_after": int(cursor.get("last_processed_message_id") or INITIAL_CURSOR),
-                "paused_empty": True,
+                "cursor_after": int(
+                    paused_row.get("last_processed_message_id")
+                    or cursor.get("last_processed_message_id")
+                    or INITIAL_CURSOR
+                ),
+                # 陈旧运行（批次已被其它运行处理）不重新暂停。
+                "paused_empty": not already_processed,
             })
             return result
 
@@ -530,6 +559,22 @@ def run_continuity_digest(*, automatic: bool = False) -> dict[str, Any]:
             ).execute()
             inserted_count = int(response.data or 0)
         except Exception as exc:
+            if "memory_continuity_batch_already_processed" in str(exc):
+                # 陈旧运行：窗口已被其它运行处理，安全收束为空成功，
+                # 不重复写入、不触碰游标。
+                _finalize_stale_run(run_id)
+                result = _public_run(_load_run(run_id, run))
+                result.update({
+                    "cursor_before": int(cursor.get("last_processed_message_id") or INITIAL_CURSOR),
+                    "cursor_after": int(
+                        _get_cursor(assistant_id).get("last_processed_message_id")
+                        or INITIAL_CURSOR
+                    ),
+                    "inserted_count": 0,
+                    "paused_empty": False,
+                    "already_processed": True,
+                })
+                return result
             raise ContinuityPipelineError("commit_failed", "Continuity commit failed", 500) from exc
 
         try:

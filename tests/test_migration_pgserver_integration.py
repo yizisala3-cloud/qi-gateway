@@ -836,6 +836,11 @@ class MigrationExecutionOnPostgresTests(unittest.TestCase):
     def test_continuity_commit_accepts_null_and_legal_source_type(self):
         null_content = "叶子和栖确认了周五上午十点的发布窗口。"
         legal_content = "叶子在排练里说过想保留这句台词。"
+        # 陈旧批次守卫按游标判定：活跃助手存在游标行，本批窗口在其前方。
+        self.conn.execute(
+            "insert into public.memory_continuity_cursors "
+            "(assistant_id, last_processed_message_id) values ('a-cont', 4)"
+        )
         run_id = self._query_one(
             "insert into public.memory_digest_runs "
             "(assistant_id, mode, status, trigger, "

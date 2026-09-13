@@ -24,6 +24,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATIONS_DIR = ROOT / "supabase" / "migrations"
@@ -1792,6 +1793,67 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
         self.assertEqual(handoff[0], "topic.fp.unchanged")
         self.assertIn("evidence merge takeover", handoff[1])
 
+    # -- real parse -> merge -> enrich -> commit (create_tracked_thread) ----
+    #
+    # 生产故障回归：parse 曾只校验 thread_state 而不写入，提交 RPC 因缺
+    # thread_state 拒绝整批。这里只模拟模型输出与向量服务，其余链路真实。
+
+    def test_create_tracked_thread_real_parse_merge_enrich_commit(self):
+        from gateway.memory_rumination import (
+            enrich_rumination_ops,
+            merge_thread_operations,
+            parse_rumination_output,
+        )
+
+        for label, thread_state in (("omitted", None), ("explicit_open", "open")):
+            with self.subTest(variant=label):
+                self._set_cursor(initialized=True, value=520)
+                run_id = self._claim(521, 522)
+                memory_key = f"topic.parse.{label}"
+                raw_op = {
+                    "op": "create_tracked_thread", "reason": "追踪新进程",
+                    "memory_key": memory_key,
+                    "content": f"通过真实解析链创建的长期线索正文（{label}）。",
+                    "continuity_data": {
+                        "open_question": "线索是否推进", "current_state": "初始状态",
+                        "closure_criteria": ["完成"],
+                    },
+                    "evidence_message_ids": [521, 522],
+                }
+                if thread_state is not None:
+                    raw_op["thread_state"] = thread_state
+                model_output = json.dumps({"operations": [raw_op]}, ensure_ascii=False)
+                evidence_times = {
+                    521: "2026-09-06T09:00+08:00",
+                    522: "2026-09-06T09:01+08:00",
+                }
+                with (
+                    patch(
+                        "gateway.memory_rumination._get_embedding_sync",
+                        return_value=[0.2, 0.2, 0.2],
+                    ),
+                    patch("gateway.memory_rumination._update_heartbeat"),
+                ):
+                    ops = parse_rumination_output(
+                        model_output,
+                        evidence_times=evidence_times,
+                        threads_by_id={},
+                    )
+                    ops = merge_thread_operations(
+                        ops, evidence_times=evidence_times, threads_by_id={},
+                    )
+                    ops = enrich_rumination_ops(ops, run_id)
+                self.assertEqual(ops[0]["thread_state"], "open")
+                result = self._commit(run_id, ops)
+                self.assertEqual(result["op_counts"]["created_threads"], 1)
+                row = self._query_row(
+                    "select thread_state, is_active from public.memories "
+                    "where memory_key = %s",
+                    (memory_key,),
+                )
+                self.assertEqual((row[0], row[1]), ("open", True))
+                self.assertEqual(self._cursor(), 522)
+
     # -- fast-path gating ---------------------------------------------------
 
     def _thread_candidate_item(self, content, content_hash, thread_state="open"):
@@ -1818,6 +1880,14 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
         }
 
     def _staged_continuity_run(self):
+        # 0916 起活跃批次唯一索引覆盖 claimed/running：先结束本助手残留的
+        # continuity 占用，保证各测试自足。
+        self.conn.execute(
+            "update public.memory_digest_runs set status = 'failed', "
+            "error_code = 'test_cleanup', heartbeat_at = null "
+            "where assistant_id = 'a-rumination' and pipeline = 'continuity' "
+            "and status in ('claimed', 'running')"
+        )
         self.conn.execute(
             "insert into public.memory_digest_runs (assistant_id, pipeline, trigger, "
             "mode, status, source_first_message_id, source_last_message_id, message_count) "

@@ -3873,6 +3873,52 @@ class TimelineConsistencyTests(unittest.TestCase):
             self.assertNotIn("_raw_thread_state", op)
 
 
+class CreateTrackedThreadStateTests(unittest.TestCase):
+    """create_tracked_thread 必须把规范化后的 thread_state='open' 写入 op。
+
+    生产故障：parse 只校验未写入，提交 RPC 因缺 thread_state 拒绝整批。
+    """
+
+    def setUp(self):
+        self.threads = _threads_by_id(_thread(memory_id=12, state="open"))
+        self.times = _staggered_evidence_times(range(1, 20))
+
+    def _parse(self, ops):
+        return parse_rumination_output(
+            json.dumps({"operations": ops}, ensure_ascii=False),
+            evidence_times=self.times,
+            threads_by_id=self.threads,
+        )
+
+    @staticmethod
+    def _thread_op(**kwargs):
+        op = {
+            "op": "create_tracked_thread", "reason": "追踪进程",
+            "memory_key": "topic.brand-new",
+            "content": "跟踪一个全新的长期进程正文。",
+            "continuity_data": {
+                "open_question": "是否成行", "current_state": "待确认",
+                "closure_criteria": ["成行"],
+            },
+            "evidence_message_ids": [3],
+        }
+        op.update(kwargs)
+        return op
+
+    def test_explicit_open_is_normalized_into_op(self):
+        parsed = self._parse([self._thread_op(thread_state="open")])
+        self.assertEqual(parsed[0]["op"], "create_tracked_thread")
+        self.assertEqual(parsed[0]["thread_state"], "open")
+
+    def test_omitted_state_defaults_to_open_in_op(self):
+        parsed = self._parse([self._thread_op()])
+        self.assertEqual(parsed[0]["thread_state"], "open")
+
+    def test_non_open_state_still_rejected(self):
+        with self.assertRaisesRegex(RuminationPipelineError, "must start as open"):
+            self._parse([self._thread_op(thread_state="resolved")])
+
+
 class ResolvedTimelineDedupeTests(unittest.TestCase):
     """复审轮 3 回归：去重后置于时间线解析、同时间歧义裁决、交接目标并集。
 
