@@ -29,7 +29,7 @@ from .memory_requests import MemoryRequestError, _recall_embedding
 log = logging.getLogger("gateway.admin_memory")
 
 MIN_CONTENT_LENGTH = 5
-MAX_CONTENT_LENGTH = 600
+MAX_CONTENT_LENGTH = 3000
 MAX_TITLE_LENGTH = 100
 MAX_TAG_LENGTH = 200
 
@@ -330,7 +330,7 @@ _RPC_ERROR_MESSAGES: dict[str, tuple[str, int]] = {
     "admin_memory_content_exists": ("相同内容的记忆已存在", 409),
     "admin_memory_recall_vector_missing": ("召回向量缺失，属于内部状态异常", 500),
     "admin_memory_assistant_required": ("无法确定助手身份", 503),
-    "admin_memory_invalid_content": ("正文长度必须在 5 到 600 个字符之间", 400),
+    "admin_memory_invalid_content": ("正文长度必须在 5 到 3000 个字符之间", 400),
     "admin_memory_invalid_title": ("标题格式不正确", 400),
     "admin_memory_invalid_tags": ("标签格式不正确（每条不超过 200 字符，组内不重复）", 400),
     "admin_memory_invalid_importance": ("重要性必须是 1 到 10 的整数", 400),

@@ -14,7 +14,9 @@
 -- received here.
 --
 -- The review chain's shared content validation (review_memory_request_v2,
--- v3) is realigned to the same range so >600-char requests can be approved.
+-- v3) and the admin lifecycle entries (create/edit/change_type) are
+-- realigned to the same range so >600-char requests and memories can be
+-- approved and edited without truncation.
 -- memory_requests' content-length CHECK constraint is realigned to the same
 -- 5-3000 range (constraint swap only; the column itself is unchanged), and
 -- downstream review approval (review_memory_request_v5) stores the request
@@ -1357,6 +1359,680 @@ alter table public.memory_requests
 alter table public.memory_requests
     add constraint memory_requests_content_length
         check (char_length(content) between 5 and 3000);
+
+-- 管理编辑/新建/换型入口的正文校验同步对齐（基于 20260902010000 的现定义
+-- 逐字重建，仅改范围），避免长记忆无法在管理后台编辑保存。
+
+create or replace function public.create_admin_memory_v1(
+    p_assistant_id text,
+    p_content text,
+    p_content_hash text,
+    p_title text,
+    p_tags text[],
+    p_importance integer,
+    p_source_type text,
+    p_memory_time text,
+    p_time_precision text,
+    p_recall_scene text,
+    p_recall_tags text[],
+    p_recall_embedding extensions.vector,
+    p_continuity_type text,
+    p_thread_state text,
+    p_continuity_data jsonb,
+    p_evidence_message_ids bigint[]
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path to 'public'
+as $function$
+declare
+    v_assistant_id text := nullif(btrim(coalesce(p_assistant_id, '')), '');
+    v_content text := btrim(coalesce(p_content, ''));
+    v_title text := nullif(left(btrim(coalesce(p_title, '')), 100), '');
+    v_recall_scene text := nullif(btrim(coalesce(p_recall_scene, '')), '');
+    v_continuity_id uuid;
+    v_evidence jsonb;
+    v_memory public.memories%rowtype;
+    v_memory_time timestamptz;
+    v_time_precision text;
+begin
+    if v_assistant_id is null then
+        raise exception 'admin_memory_assistant_required';
+    end if;
+    if char_length(v_content) not between 5 and 3000 then
+        raise exception 'admin_memory_invalid_content';
+    end if;
+    if p_content_hash is null or p_content_hash !~ '^[0-9a-f]{64}$' then
+        raise exception 'admin_memory_invalid_content_hash';
+    end if;
+    if p_importance is null or p_importance not between 1 and 10 then
+        raise exception 'admin_memory_invalid_importance';
+    end if;
+    if not public.admin_memory_tags_ok(p_tags)
+       or not public.admin_memory_tags_ok(p_recall_tags) then
+        raise exception 'admin_memory_invalid_tags';
+    end if;
+    if p_continuity_type not in (
+        'moment', 'thread', 'episode', 'inside_joke', 'profile', 'interaction_rule'
+    ) then
+        raise exception 'admin_memory_invalid_type';
+    end if;
+    -- Six-class memories always carry a fully validated v1 structure; the
+    -- admin console never creates unclassified rows.
+    if not public.validate_continuity_data(p_continuity_type, p_thread_state, p_continuity_data) then
+        raise exception 'admin_memory_invalid_continuity_data';
+    end if;
+    if p_time_precision is not null
+       and p_time_precision not in ('minute', 'hour', 'day', 'approximate', 'unknown') then
+        raise exception 'admin_memory_invalid_time_precision';
+    end if;
+    if p_source_type is not null
+       and p_source_type not in (
+           'natural_chat', 'persona_prompt', 'code', 'document', 'quote',
+           'roleplay', 'tool_result', 'system_meta', 'unknown'
+       ) then
+        raise exception 'admin_memory_invalid_source_type';
+    end if;
+    -- A scene-carrying write must arrive with its vector: the gateway embeds
+    -- before this transaction, so a null vector under a live scene means the
+    -- caller tried to skip generation.
+    if v_recall_scene is not null and p_recall_embedding is null then
+        raise exception 'admin_memory_recall_vector_missing';
+    end if;
+
+    perform pg_advisory_xact_lock(hashtextextended(v_assistant_id, 0));
+
+    -- content_hash carries a table-wide unique constraint: refuse a
+    -- duplicate with the stable business code before anything is written,
+    -- so a rejected create never leaves rows or continuity objects behind.
+    -- Other rows' hashes are never cleared here: hash release belongs
+    -- exclusively to the confirmed same-chain type-change flow.
+    if exists (
+        select 1 from public.memories as other
+        where other.content_hash = p_content_hash
+    ) then
+        raise exception 'admin_memory_content_exists';
+    end if;
+
+    insert into public.memory_continuity_objects (assistant_id)
+    values (v_assistant_id)
+    returning continuity_id into v_continuity_id;
+
+    v_evidence := public.admin_memory_resolve_evidence(v_assistant_id, p_evidence_message_ids);
+
+    -- Empty event time always stores precision 'unknown': claiming minute,
+    -- hour, or day accuracy for a time that does not exist is inconsistent.
+    v_memory_time := public.admin_memory_normalize_event_time(p_memory_time, p_time_precision);
+    v_time_precision := coalesce(nullif(btrim(coalesce(p_time_precision, '')), ''), 'unknown');
+    if v_memory_time is null then
+        v_time_precision := 'unknown';
+    end if;
+
+    insert into public.memories (
+        content, title, tags, heat, importance, embedding,
+        source, verified, is_active, recall_count,
+        assistant_id, digest_run_id, confidence, content_hash,
+        memory_key, supersedes_memory_id, superseded_by_memory_id, superseded_at,
+        continuity_id, continuity_type, continuity_schema_version, continuity_data,
+        source_type, thread_state,
+        evidence_message_ids, source_time,
+        memory_time, time_precision,
+        evidence_start_time, evidence_end_time, evidence_time_precision,
+        recall_scene, recall_tags, recall_embedding
+    ) values (
+        v_content, v_title,
+        coalesce(p_tags, '{}'::text[]),
+        50.0, p_importance, null,
+        'manual', 'verified', true, 0,
+        v_assistant_id, null, 1.0, p_content_hash,
+        null, null, null, null,
+        v_continuity_id, p_continuity_type, 1, p_continuity_data,
+        nullif(btrim(coalesce(p_source_type, '')), ''),
+        case when p_continuity_type = 'thread' then p_thread_state else null end,
+        public.admin_memory_ids_from_evidence(v_evidence),
+        -- source_time is the AI pipeline's own evidence clock; the admin
+        -- console has no AI source, so it always stays NULL.
+        null,
+        v_memory_time,
+        v_time_precision,
+        (v_evidence->>'start')::timestamptz,
+        (v_evidence->>'end')::timestamptz,
+        (v_evidence->>'precision'),
+        v_recall_scene,
+        p_recall_tags,
+        case when v_recall_scene is null then null else p_recall_embedding end
+    )
+    returning * into v_memory;
+
+    return jsonb_build_object(
+        'memory_id', v_memory.id,
+        'continuity_id', v_memory.continuity_id,
+        'source', v_memory.source,
+        'verified', v_memory.verified,
+        'is_active', v_memory.is_active,
+        'heat', v_memory.heat
+    );
+end;
+$function$;
+
+revoke all on function public.create_admin_memory_v1(text, text, text, text, text[], integer, text, text, text, text, text[], extensions.vector, text, text, jsonb, bigint[]) from public, anon, authenticated;
+grant execute on function public.create_admin_memory_v1(text, text, text, text, text[], integer, text, text, text, text, text[], extensions.vector, text, text, jsonb, bigint[]) to service_role;
+
+create or replace function public.edit_admin_memory_v1(
+    p_memory_id integer,
+    p_patch jsonb,
+    p_content_hash text,
+    p_recall_embedding extensions.vector,
+    p_assistant_id text default null
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path to 'public'
+as $function$
+declare
+    v_memory public.memories%rowtype;
+    v_new_type text;
+    v_new_thread_state text;
+    v_continuity_data jsonb;
+    v_write_continuity boolean := false;
+    v_content text;
+    v_evidence jsonb;
+    v_memory_time timestamptz;
+    v_time_precision text;
+    v_updated public.memories%rowtype;
+    v_new_continuity_id uuid;
+begin
+    if p_patch is null or jsonb_typeof(p_patch) <> 'object' then
+        raise exception 'admin_memory_invalid_patch';
+    end if;
+
+    select * into v_memory
+    from public.memories as memory
+    where memory.id = p_memory_id
+    for update;
+
+    if not found then
+        raise exception 'admin_memory_not_found';
+    end if;
+    if not public.admin_memory_is_current(v_memory) then
+        raise exception 'admin_memory_not_editable';
+    end if;
+
+    v_new_type := nullif(btrim(coalesce(p_patch->>'continuity_type', '')), '');
+    if v_new_type is not null
+       and v_new_type not in (
+           'moment', 'thread', 'episode', 'inside_joke', 'profile', 'interaction_rule'
+       ) then
+        raise exception 'admin_memory_invalid_type';
+    end if;
+    if v_new_type is not null and v_memory.continuity_type is not null
+       and v_new_type <> v_memory.continuity_type then
+        -- Switching an existing class must go through the versioned
+        -- type-change flow, never through an in-place edit.
+        raise exception 'admin_memory_type_change_forbidden';
+    end if;
+    v_new_type := coalesce(v_new_type, v_memory.continuity_type);
+
+    if v_new_type is null then
+        -- Unclassified legacy row: ordinary-field edits never trigger
+        -- continuity validation, and continuity structure cannot be
+        -- attached without adopting a class first.
+        if p_patch ? 'continuity_data' or p_patch ? 'thread_state' then
+            raise exception 'admin_memory_class_required';
+        end if;
+    elsif p_patch ? 'continuity_data'
+       or p_patch ? 'thread_state'
+       or (p_patch ? 'continuity_type' and v_memory.continuity_type is null) then
+        -- The continuity structure is being written (same-type edit or a
+        -- one-time class adoption), so the complete type validation runs.
+        v_write_continuity := true;
+        v_new_thread_state := coalesce(
+            nullif(btrim(coalesce(p_patch->>'thread_state', '')), ''),
+            v_memory.thread_state
+        );
+        if p_patch ? 'continuity_data' then
+            v_continuity_data := p_patch->'continuity_data';
+        elsif v_memory.continuity_data is not null then
+            v_continuity_data := v_memory.continuity_data;
+        else
+            raise exception 'admin_memory_invalid_continuity_data';
+        end if;
+        if not public.validate_continuity_data(v_new_type, v_new_thread_state, v_continuity_data) then
+            raise exception 'admin_memory_invalid_continuity_data';
+        end if;
+    end if;
+    -- else: ordinary fields only -- continuity fields are left untouched and
+    -- unvalidated, so incomplete legacy rows are never forced to complete.
+
+    if p_patch ? 'content' then
+        v_content := btrim(coalesce(p_patch->>'content', ''));
+        if char_length(v_content) not between 5 and 3000 then
+            raise exception 'admin_memory_invalid_content';
+        end if;
+        if p_content_hash is null or p_content_hash !~ '^[0-9a-f]{64}$' then
+            raise exception 'admin_memory_invalid_content_hash';
+        end if;
+        -- An in-place edit must not steal another memory's content_hash
+        -- (table-wide unique constraint); refuse with a stable code.
+        if exists (
+            select 1 from public.memories as other
+            where other.content_hash = p_content_hash
+              and other.id <> v_memory.id
+        ) then
+            raise exception 'admin_memory_content_exists';
+        end if;
+    elsif p_content_hash is not null then
+        raise exception 'admin_memory_invalid_content_hash';
+    end if;
+
+    if p_patch ? 'recall_scene' then
+        -- The patch is authoritative for the whole recall pair: an empty
+        -- scene clears the vector, a live scene must arrive embedded.
+        if nullif(btrim(coalesce(p_patch->>'recall_scene', '')), '') is not null
+           and p_recall_embedding is null then
+            raise exception 'admin_memory_recall_vector_missing';
+        end if;
+    elsif p_recall_embedding is not null then
+        raise exception 'admin_memory_recall_vector_missing';
+    end if;
+
+    if p_patch ? 'importance'
+       and (p_patch->>'importance')::integer not between 1 and 10 then
+        raise exception 'admin_memory_invalid_importance';
+    end if;
+    if p_patch ? 'time_precision'
+       and nullif(btrim(coalesce(p_patch->>'time_precision', '')), '') is not null
+       and p_patch->>'time_precision' not in ('minute', 'hour', 'day', 'approximate', 'unknown') then
+        raise exception 'admin_memory_invalid_time_precision';
+    end if;
+    if p_patch ? 'source_type'
+       and nullif(btrim(coalesce(p_patch->>'source_type', '')), '') is not null
+       and p_patch->>'source_type' not in (
+           'natural_chat', 'persona_prompt', 'code', 'document', 'quote',
+           'roleplay', 'tool_result', 'system_meta', 'unknown'
+       ) then
+        raise exception 'admin_memory_invalid_source_type';
+    end if;
+    if (p_patch ? 'tags'
+        and not public.admin_memory_tags_ok((
+            select array_agg(t.value order by t.value)
+            from jsonb_array_elements_text(p_patch->'tags') as t(value)
+       )))
+       or (p_patch ? 'recall_tags'
+        and not public.admin_memory_tags_ok((
+            select array_agg(t.value order by t.value)
+            from jsonb_array_elements_text(p_patch->'recall_tags') as t(value)
+       ))) then
+        raise exception 'admin_memory_invalid_tags';
+    end if;
+
+    -- Event time and precision are decided together: clearing the time
+    -- always stores 'unknown', and a time-less row can never claim
+    -- minute/hour/day accuracy, on every write path alike.
+    v_memory_time := v_memory.memory_time;
+    v_time_precision := v_memory.time_precision;
+    if p_patch ? 'memory_time' then
+        v_memory_time := public.admin_memory_normalize_event_time(
+            p_patch->>'memory_time',
+            case when p_patch ? 'time_precision'
+                 then nullif(btrim(coalesce(p_patch->>'time_precision', '')), '')
+                 else v_memory.time_precision end);
+        if v_memory_time is null then
+            v_time_precision := 'unknown';
+        elsif p_patch ? 'time_precision' then
+            v_time_precision := coalesce(
+                nullif(btrim(coalesce(p_patch->>'time_precision', '')), ''), 'unknown');
+        end if;
+    elsif p_patch ? 'time_precision' then
+        v_time_precision := coalesce(
+            nullif(btrim(coalesce(p_patch->>'time_precision', '')), ''), 'unknown');
+        if v_memory_time is null then
+            v_time_precision := 'unknown';
+        end if;
+    end if;
+
+    if p_patch ? 'evidence_message_ids' then
+        v_evidence := public.admin_memory_resolve_evidence(
+            coalesce(v_memory.assistant_id, nullif(btrim(coalesce(p_assistant_id, '')), '')),
+            (select array_agg((value)::bigint order by (value)::bigint)
+             from jsonb_array_elements_text(p_patch->'evidence_message_ids') as entry(value)
+             where entry.value ~ '^[0-9]+$')
+        );
+        -- Re-derived evidence replaces the old window wholesale; an empty
+        -- list leaves no times behind.
+    else
+        v_evidence := null;
+    end if;
+
+    update public.memories as memory set
+        title = case
+            when p_patch ? 'title'
+            then nullif(left(btrim(coalesce(p_patch->>'title', '')), 100), '')
+            else memory.title end,
+        content = case
+            when p_patch ? 'content' then btrim(p_patch->>'content')
+            else memory.content end,
+        content_hash = case
+            when p_patch ? 'content' then p_content_hash
+            else memory.content_hash end,
+        tags = case
+            when p_patch ? 'tags'
+            then coalesce((
+                    select array_agg(distinct t.value)
+                    from jsonb_array_elements_text(p_patch->'tags') as t(value)
+                    where nullif(btrim(t.value), '') is not null
+                 ), '{}'::text[])
+            else memory.tags end,
+        importance = case
+            when p_patch ? 'importance' then (p_patch->>'importance')::integer
+            else memory.importance end,
+        source_type = case
+            when p_patch ? 'source_type'
+            then nullif(btrim(coalesce(p_patch->>'source_type', '')), '')
+            else memory.source_type end,
+        memory_time = v_memory_time,
+        time_precision = v_time_precision,
+        recall_scene = case
+            when p_patch ? 'recall_scene'
+            then nullif(btrim(coalesce(p_patch->>'recall_scene', '')), '')
+            else memory.recall_scene end,
+        recall_tags = case
+            when p_patch ? 'recall_tags'
+            then coalesce((
+                    select array_agg(distinct t.value)
+                    from jsonb_array_elements_text(p_patch->'recall_tags') as t(value)
+                    where nullif(btrim(t.value), '') is not null
+                 ), '{}'::text[])
+            else memory.recall_tags end,
+        recall_embedding = case
+            when p_patch ? 'recall_scene'
+            then case
+                when nullif(btrim(coalesce(p_patch->>'recall_scene', '')), '') is null
+                then null
+                else p_recall_embedding end
+            else memory.recall_embedding end,
+        evidence_message_ids = case
+            when p_patch ? 'evidence_message_ids' then public.admin_memory_ids_from_evidence(v_evidence)
+            else memory.evidence_message_ids end,
+        evidence_start_time = case
+            when p_patch ? 'evidence_message_ids' then (v_evidence->>'start')::timestamptz
+            else memory.evidence_start_time end,
+        evidence_end_time = case
+            when p_patch ? 'evidence_message_ids' then (v_evidence->>'end')::timestamptz
+            else memory.evidence_end_time end,
+        evidence_time_precision = case
+            when p_patch ? 'evidence_message_ids' then (v_evidence->>'precision')
+            else memory.evidence_time_precision end,
+        thread_state = case
+            when not v_write_continuity then memory.thread_state
+            when v_new_type is distinct from 'thread' then null
+            else nullif(btrim(coalesce(p_patch->>'thread_state', '')), '') end,
+        continuity_type = case
+            when v_write_continuity then v_new_type
+            else memory.continuity_type end,
+        continuity_schema_version = case
+            when v_write_continuity then 1
+            else memory.continuity_schema_version end,
+        continuity_data = case
+            when v_write_continuity then v_continuity_data
+            else memory.continuity_data end
+    where memory.id = v_memory.id
+    returning * into v_updated;
+
+    -- A newly adopted class needs a continuity identity allocated here. The
+    -- gateway resolves the assistant for this purpose; nothing is invented.
+    if v_write_continuity and v_updated.continuity_id is null then
+        insert into public.memory_continuity_objects (assistant_id)
+        values (coalesce(
+            v_updated.assistant_id,
+            nullif(btrim(coalesce(p_assistant_id, '')), ''),
+            ''
+        ))
+        returning continuity_id into v_new_continuity_id;
+        update public.memories
+            set continuity_id = v_new_continuity_id
+            where id = v_updated.id
+            returning * into v_updated;
+    end if;
+
+    if v_updated.continuity_id is not null then
+        update public.memory_continuity_objects
+            set updated_at = now()
+            where continuity_id = v_updated.continuity_id;
+    end if;
+
+    return jsonb_build_object('memory', to_jsonb(v_updated));
+end;
+$function$;
+
+revoke all on function public.edit_admin_memory_v1(integer, jsonb, text, extensions.vector, text) from public, anon, authenticated;
+grant execute on function public.edit_admin_memory_v1(integer, jsonb, text, extensions.vector, text) to service_role;
+
+create or replace function public.change_memory_type_v1(
+    p_memory_id integer,
+    p_content text,
+    p_content_hash text,
+    p_title text,
+    p_tags text[],
+    p_importance integer,
+    p_source_type text,
+    p_memory_time text,
+    p_time_precision text,
+    p_recall_scene text,
+    p_recall_tags text[],
+    p_recall_embedding extensions.vector,
+    p_continuity_type text,
+    p_thread_state text,
+    p_continuity_data jsonb,
+    p_evidence_message_ids bigint[]
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path to 'public'
+as $function$
+declare
+    v_source public.memories%rowtype;
+    v_earlier public.memories%rowtype;
+    v_new public.memories%rowtype;
+    v_continuity_id uuid;
+    v_content text := btrim(coalesce(p_content, ''));
+    v_recall_scene text := nullif(btrim(coalesce(p_recall_scene, '')), '');
+    v_evidence jsonb;
+    v_removed_earlier boolean := false;
+    v_same_hash boolean := false;
+    v_memory_time timestamptz;
+    v_time_precision text;
+begin
+    if char_length(v_content) not between 5 and 3000 then
+        raise exception 'admin_memory_invalid_content';
+    end if;
+    if p_content_hash is null or p_content_hash !~ '^[0-9a-f]{64}$' then
+        raise exception 'admin_memory_invalid_content_hash';
+    end if;
+    if p_importance is null or p_importance not between 1 and 10 then
+        raise exception 'admin_memory_invalid_importance';
+    end if;
+    if not public.admin_memory_tags_ok(p_tags)
+       or not public.admin_memory_tags_ok(p_recall_tags) then
+        raise exception 'admin_memory_invalid_tags';
+    end if;
+    if p_continuity_type not in (
+        'moment', 'thread', 'episode', 'inside_joke', 'profile', 'interaction_rule'
+    ) then
+        raise exception 'admin_memory_invalid_type';
+    end if;
+    if not public.validate_continuity_data(p_continuity_type, p_thread_state, p_continuity_data) then
+        raise exception 'admin_memory_invalid_continuity_data';
+    end if;
+    if p_time_precision is not null
+       and p_time_precision not in ('minute', 'hour', 'day', 'approximate', 'unknown') then
+        raise exception 'admin_memory_invalid_time_precision';
+    end if;
+    if p_source_type is not null
+       and p_source_type not in (
+           'natural_chat', 'persona_prompt', 'code', 'document', 'quote',
+           'roleplay', 'tool_result', 'system_meta', 'unknown'
+       ) then
+        raise exception 'admin_memory_invalid_source_type';
+    end if;
+    if v_recall_scene is not null and p_recall_embedding is null then
+        raise exception 'admin_memory_recall_vector_missing';
+    end if;
+
+    select * into v_source
+    from public.memories as memory
+    where memory.id = p_memory_id
+    for update;
+
+    if not found then
+        raise exception 'admin_memory_not_found';
+    end if;
+    if not public.admin_memory_is_current(v_source) then
+        raise exception 'admin_memory_not_editable';
+    end if;
+    if v_source.continuity_type is null then
+        raise exception 'admin_memory_source_unclassified';
+    end if;
+    if p_continuity_type = v_source.continuity_type then
+        raise exception 'admin_memory_type_unchanged';
+    end if;
+
+    -- Serialize same-identity operations (change/undo/restore) so two
+    -- concurrent flows can never both believe they own the single active
+    -- slot for this continuity identity.
+    if v_source.continuity_id is null then
+        insert into public.memory_continuity_objects (assistant_id)
+        values (coalesce(v_source.assistant_id, ''))
+        returning continuity_id into v_continuity_id;
+        update public.memories
+            set continuity_id = v_continuity_id
+            where id = v_source.id;
+    else
+        v_continuity_id := v_source.continuity_id;
+    end if;
+    perform pg_advisory_xact_lock(hashtextextended(v_continuity_id::text, 0));
+
+    -- content_hash carries a table-wide unique constraint. A type change may
+    -- keep the content untouched, so the new version legitimately reuses the
+    -- source hash. Occupation by unrelated memories is still refused; the
+    -- source itself and the to-be-deleted parent are handled below inside
+    -- this same transaction.
+    v_same_hash := (p_content_hash = v_source.content_hash);
+    if exists (
+        select 1 from public.memories as other
+        where other.content_hash = p_content_hash
+          and other.id <> v_source.id
+          and (v_source.supersedes_memory_id is null
+               or other.id <> v_source.supersedes_memory_id)
+    ) then
+        raise exception 'admin_memory_content_exists';
+    end if;
+
+    v_evidence := public.admin_memory_resolve_evidence(
+        v_source.assistant_id, p_evidence_message_ids
+    );
+
+    -- Empty event time always stores precision 'unknown', matching create.
+    v_memory_time := public.admin_memory_normalize_event_time(p_memory_time, p_time_precision);
+    v_time_precision := coalesce(nullif(btrim(coalesce(p_time_precision, '')), ''), 'unknown');
+    if v_memory_time is null then
+        v_time_precision := 'unknown';
+    end if;
+
+    -- Retire the source version FIRST: the one-active-per-identity index
+    -- must never see two active rows, even inside this transaction.
+    update public.memories
+        set is_active = false,
+            superseded_at = now()
+        where id = v_source.id;
+
+    -- Same-content type change: the retired source temporarily releases the
+    -- hash so the new version can hold the real value; the undo hands it
+    -- back. Any failure rolls the whole release back with the transaction.
+    if v_same_hash then
+        update public.memories
+            set content_hash = null
+            where id = v_source.id;
+    end if;
+
+    -- Keep exactly two generations, and free the parent BEFORE the insert:
+    -- deleting it releases a chain-internal hash occupation (A -> B -> C
+    -- with unchanged content) and nulls every dangling reference through
+    -- the on-delete set null foreign keys.
+    if v_source.supersedes_memory_id is not null then
+        select * into v_earlier
+        from public.memories as memory
+        where memory.id = v_source.supersedes_memory_id
+        for update;
+        if found then
+            if v_earlier.is_active is true then
+                raise exception 'admin_memory_chain_conflict';
+            end if;
+            delete from public.memories where id = v_earlier.id;
+            v_removed_earlier := true;
+            if v_earlier.continuity_id is not null
+               and v_earlier.continuity_id <> v_continuity_id then
+                perform public.admin_memory_reap_continuity_object(v_earlier.continuity_id);
+            end if;
+        end if;
+    end if;
+
+    insert into public.memories (
+        content, title, tags, heat, importance, embedding,
+        source, verified, is_active, recall_count,
+        assistant_id, digest_run_id, confidence, content_hash,
+        memory_key, supersedes_memory_id, superseded_by_memory_id, superseded_at,
+        continuity_id, continuity_type, continuity_schema_version, continuity_data,
+        source_type, thread_state,
+        evidence_message_ids, source_time,
+        memory_time, time_precision,
+        evidence_start_time, evidence_end_time, evidence_time_precision,
+        recall_scene, recall_tags, recall_embedding
+    ) values (
+        v_content,
+        nullif(left(btrim(coalesce(p_title, '')), 100), ''),
+        coalesce(p_tags, '{}'::text[]),
+        50.0, p_importance, null,
+        'manual', 'verified', true, 0,
+        v_source.assistant_id, null, 1.0, p_content_hash,
+        null, v_source.id, null, null,
+        v_continuity_id, p_continuity_type, 1, p_continuity_data,
+        nullif(btrim(coalesce(p_source_type, '')), ''),
+        case when p_continuity_type = 'thread' then p_thread_state else null end,
+        public.admin_memory_ids_from_evidence(v_evidence),
+        null,
+        v_memory_time,
+        v_time_precision,
+        (v_evidence->>'start')::timestamptz,
+        (v_evidence->>'end')::timestamptz,
+        (v_evidence->>'precision'),
+        v_recall_scene,
+        p_recall_tags,
+        case when v_recall_scene is null then null else p_recall_embedding end
+    )
+    returning * into v_new;
+
+    update public.memories
+        set superseded_by_memory_id = v_new.id
+        where id = v_source.id;
+
+    update public.memory_continuity_objects
+        set updated_at = now()
+        where continuity_id = v_continuity_id;
+
+    return jsonb_build_object(
+        'memory', to_jsonb(v_new),
+        'previous_version_id', v_source.id,
+        'removed_version_id', case when v_removed_earlier then v_earlier.id else null end
+    );
+end;
+$function$;
+
+revoke all on function public.change_memory_type_v1(integer, text, text, text, text[], integer, text, text, text, text, text[], extensions.vector, text, text, jsonb, bigint[]) from public, anon, authenticated;
+grant execute on function public.change_memory_type_v1(integer, text, text, text, text[], integer, text, text, text, text, text[], extensions.vector, text, text, jsonb, bigint[]) to service_role;
 
 -- 审核链的共享内容校验同样对齐到 5–3000（v2 是链底门禁，v3 有第二处
 -- 检查；两处均基于 20260831010000 的现定义逐字重建，仅改范围）。

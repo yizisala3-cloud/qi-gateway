@@ -675,7 +675,7 @@ export function createMemoryBrowser({
       badges: tag('审核表单', 'gold') + typeTag(r.continuity_type),
       html: `
         <div class="field"><label>标题</label><input type="text" id="rv-title" maxlength="100" value="${esc(r.title || '')}"></div>
-        <div class="field"><label>记忆内容</label><textarea id="rv-content" rows="7" maxlength="600">${esc(r.content || '')}</textarea></div>
+        <div class="field"><label>记忆内容</label><textarea id="rv-content" rows="7" maxlength="3000">${esc(r.content || '')}</textarea></div>
         <div class="field"><label>标签（逗号分隔，最多 5 个）</label><input type="text" id="rv-tags" value="${esc((r.tags || []).join(', '))}"></div>
         <div class="field"><label>重要性（1-10）</label><input type="number" id="rv-importance" min="1" max="10" value="${esc(Number(r.importance) || 5)}"></div>
         <div class="field"><label>写入方式</label><select id="rv-update-mode">
@@ -876,7 +876,7 @@ export function createMemoryBrowser({
       mergeFields.innerHTML = `
         ${banner(`请把两条内容整理成一条自然、准确的最终记忆。保存后旧 memory #${esc(selected.id)} 会软失效，但仍保留历史链接。`, 'danger')}
         <div class="field"><label>合并后标题</label><input type="text" id="merge-title" maxlength="100" value="${esc(request.title || selected.title || '')}"></div>
-        <div class="field"><label>合并后内容</label><textarea id="merge-content" rows="8" maxlength="600">${esc(mergedContent)}</textarea></div>
+        <div class="field"><label>合并后内容</label><textarea id="merge-content" rows="8" maxlength="3000">${esc(mergedContent)}</textarea></div>
         <div class="field"><label>标签（逗号分隔，最多 5 个）</label><input type="text" id="merge-tags" value="${esc(tags.join(', '))}"></div>
         <div class="field"><label>重要性（1-10）</label><input type="number" id="merge-importance" min="1" max="10" value="${Math.max(Number(selected.importance) || 5, Number(request.importance) || 5)}"></div>`;
     };

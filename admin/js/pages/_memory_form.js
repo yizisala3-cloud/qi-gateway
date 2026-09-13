@@ -347,8 +347,8 @@ function commonSectionHtml(mode, memory) {
       <div class="field"><label>标题<span class="field-hint-inline">（可空，最多 100 字）</span></label>
         <input type="text" id="mf-title" maxlength="100" value="${esc(memory ? memory.title || '' : '')}"></div>
       <div class="field"><label>正文<span class="req-mark" title="必填">*</span><span class="char-count" id="mf-content-count"></span></label>
-        <textarea id="mf-content" rows="6" maxlength="600">${esc(memory ? memory.content || '' : '')}</textarea>
-        <div class="field-hint">5 到 600 个字符；修改正文后服务端会重新计算内容哈希并按现有规则处理向量</div></div>
+        <textarea id="mf-content" rows="6" maxlength="3000">${esc(memory ? memory.content || '' : '')}</textarea>
+        <div class="field-hint">5 到 3000 个字符；修改正文后服务端会重新计算内容哈希并按现有规则处理向量</div></div>
       <div class="field"><label>标签<span class="field-hint-inline">（普通标签，回车添加，可空）</span></label>
         <div id="mf-tags"></div></div>
       <div class="grid grid-2">
@@ -734,7 +734,7 @@ export async function openMemoryForm({ mode = 'create', memory = null, onSaved =
   rootEl.querySelectorAll('.retro-time[data-retro-for]').forEach(initRetroTime);
 
   const updateCount = () => {
-    contentCount.textContent = `${contentEl.value.length}/600`;
+    contentCount.textContent = `${contentEl.value.length}/3000`;
   };
   contentEl.addEventListener('input', updateCount);
   updateCount();
@@ -768,8 +768,8 @@ export async function openMemoryForm({ mode = 'create', memory = null, onSaved =
   };
 
   const validateCommon = (values) => {
-    if (values.content.length < 5 || values.content.length > 600) {
-      return '正文长度必须在 5 到 600 个字符之间';
+    if (values.content.length < 5 || values.content.length > 3000) {
+      return '正文长度必须在 5 到 3000 个字符之间';
     }
     if (!Number.isInteger(values.importance) || values.importance < 1 || values.importance > 10) {
       return '重要性必须是 1 到 10 的整数';

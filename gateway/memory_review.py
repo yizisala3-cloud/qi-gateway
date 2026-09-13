@@ -209,7 +209,7 @@ def validate_review(request_id: Any, payload: Any) -> dict[str, Any]:
             )
         related_memory_id = _related_memory_id(payload.get("related_memory_id"))
 
-    content = _text(payload.get("content"), "content", 600, required=True)
+    content = _text(payload.get("content"), "content", 3000, required=True)
     title = _text(payload.get("title"), "title", 100)
     importance = _importance(payload.get("importance", 5))
     memory_key = None

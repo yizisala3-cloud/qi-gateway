@@ -24,6 +24,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1899,16 +1900,6 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
                 )
                 return enrich_rumination_ops(ops, run_id)
 
-        leftovers = self._query(
-            "select coalesce(string_agg(id || ':' || pipeline || ':' || status "
-            "|| ':' || coalesce(source_first_message_id::text,'') || '-' || "
-            "coalesce(source_last_message_id::text,''), ' | '), 'none') "
-            "from public.memory_digest_runs where status in ('claimed', 'running')"
-        )
-        print("DEBUG all active runs:", leftovers)
-        print("DEBUG run2:", self._query(
-            "select id, assistant_id, pipeline, status, trigger, claimed_at, "
-            "heartbeat_at from public.memory_digest_runs where id = 2"))
         # 拒绝边界：解析阶段整批拒绝，不产生任何提交或部分写入。
         for raw_content in ("x" * 4, "x" * 3001, 123):
             label = (
@@ -1919,21 +1910,89 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
                 with self.assertRaises(Exception):
                     chain(build(raw_content), 1)
 
-        # 允许边界：全文落库、哈希与网关规范化全文一致。
+        class _ReviewTableQuery:
+            def __init__(self, conn, table):
+                self.conn = conn
+                self.table = table
+                self._columns = "*"
+                self._filters = []
+                self._limit = None
+
+            def select(self, columns):
+                self._columns = columns
+                return self
+
+            def eq(self, column, value):
+                self._filters.append((column, value))
+                return self
+
+            def limit(self, n):
+                self._limit = n
+                return self
+
+            def execute(self):
+                sql = f"select {self._columns} from public.{self.table}"
+                params = []
+                if self._filters:
+                    clauses = []
+                    for column, value in self._filters:
+                        clauses.append(f"{column} = %s")
+                        params.append(value)
+                    sql += " where " + " and ".join(clauses)
+                if self._limit:
+                    sql += f" limit {int(self._limit)}"
+                with self.conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                    cur.execute(sql, params)
+                    return SimpleNamespace(data=cur.fetchall())
+
+        class _ReviewClientAdapter:
+            """memory_review 所需的最小客户端面，桥接测试 PostgreSQL。"""
+
+            def __init__(self, conn):
+                self.conn = conn
+                self.rpc_names = []
+
+            PARAM_TYPES = {
+                "p_request_id": "integer",
+                "p_importance": "integer",
+                "p_related_memory_id": "integer",
+                "p_tags": "text[]",
+                "p_recall_tags": "text[]",
+                "p_recall_embedding": "extensions.vector",
+                "p_evidence_end_time": "timestamptz",
+            }
+
+            def rpc(self, name, params):
+                self.rpc_names.append(name)
+                parts, values = [], []
+                for key, value in params.items():
+                    cast = self.PARAM_TYPES.get(key, "text")
+                    parts.append(f"%s::{cast}")
+                    values.append(value)
+                sql = f"select public.{name}({', '.join(parts)})"
+                with self.conn.cursor() as cur:
+                    cur.execute(sql, values)
+                    row = cur.fetchall()[0][0]
+                return SimpleNamespace(execute=lambda: SimpleNamespace(data=row))
+
+            def table(self, name):
+                return _ReviewTableQuery(self.conn, name)
+
+        # 允许边界：全文落库、哈希与网关规范化全文一致。构造长度必须先
+        # 断言等于目标边界，再测试提交。填充字符按用例区分，避免触发
+        # 相似度查重。
+        fillers = {5: "x", 600: "a", 601: "b", 3000: "c"}
         for length in (5, 600, 601, 3000):
             with self.subTest(case="accept", length=length):
                 self._set_cursor(initialized=True, value=520)
-                try:
-                    run_id = self._claim(521, 522)
-                except AssertionError:
-                    print("DEBUG runs at failed claim:", self._query(
-                        "select id || ':' || pipeline || ':' || status "
-                        "|| ':hb=' || coalesce(heartbeat_at::text, 'null') "
-                        "from public.memory_digest_runs order by id"))
-                    raise
-                content = f"长度契约 {length}：" + "x" * length
                 prefix = f"长度契约 {length}："
-                content = prefix + "x" * (length - len(prefix))
+                filler = fillers[length]
+                content = (
+                    prefix + filler * (length - len(prefix))
+                    if length > len(prefix) else filler * length
+                )
+                self.assertEqual(len(content), length)
+                run_id = self._claim(521, 522)
                 ops = chain(build(content), run_id)
                 result = self._commit(run_id, ops)
                 self.assertEqual(result["op_counts"]["created_requests"], 1)
@@ -1946,20 +2005,27 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
                 self.assertEqual(row[0], len(content))
                 self.assertEqual(row[1], _sha256(content))
 
-        # >600 的申请审核通过后仍完整保存（审核与落库路径不再截断）。
+        # >600 的申请经真实网关审核入口（validate_review → v5）通过并全文
+        # 落库；Python 校验不得被绕过。
+        from gateway import memory_review as review_module
+
+        adapter = _ReviewClientAdapter(self.conn)
         prefix = "长度契约 审核："
-        content = prefix + "x" * (601 - len(prefix))
+        content = prefix + "b" * (601 - len(prefix))
         self._set_cursor(initialized=True, value=520)
         run_id = self._claim(521, 522)
         ops = chain(build(content), run_id)
         result = self._commit(run_id, ops)
         request_id = result["preview"][0]["request_id"]
-        with self.conn.cursor() as cur:
-            cur.execute(
-                "select public.review_memory_request_v5(%s, %s)",
-                (request_id, "approve"),
+        with (
+            patch.object(review_module, "get_client", return_value=adapter),
+            patch.object(review_module, "_server_writes_allowed", return_value=True),
+            patch.object(review_module, "_recall_embedding", return_value=None),
+        ):
+            review_module.review_memory_request(
+                request_id, {"action": "approve", "content": content},
             )
-            cur.fetchall()
+        self.assertEqual(adapter.rpc_names, ["review_memory_request_v5"])
         row = self._query_row(
             "select length(m.content), m.content_hash "
             "from public.memories m "
@@ -1969,6 +2035,55 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
         )
         self.assertEqual(row[0], len(content))
         self.assertEqual(row[1], _sha256(content))
+
+        # 3000 字符编辑内容经网关入口完整落库。
+        content_3000 = "长度契约 审核 3000：" + "c" * (3000 - len("长度契约 审核 3000："))
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        ops = chain(build("长度契约 审核 3000：占位申请正文。"), run_id)
+        result = self._commit(run_id, ops)
+        request_id = result["preview"][0]["request_id"]
+        with (
+            patch.object(review_module, "get_client", return_value=adapter),
+            patch.object(review_module, "_server_writes_allowed", return_value=True),
+            patch.object(review_module, "_recall_embedding", return_value=None),
+        ):
+            review_module.review_memory_request(
+                request_id, {"action": "approve", "content": content_3000},
+            )
+        row = self._query_row(
+            "select length(m.content), m.content_hash "
+            "from public.memories m "
+            "join public.memory_requests r on r.memory_id = m.id "
+            "where r.id = %s",
+            (request_id,),
+        )
+        self.assertEqual(row[0], len(content_3000))
+        self.assertEqual(row[1], _sha256(content_3000))
+
+        # 3001 在网关入口即被拒绝：不触达数据库 RPC，申请保持 pending。
+        content_3001 = "长度契约 超限：" + "d" * (3001 - len("长度契约 超限："))
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        ops = chain(build("长度契约 超限：占位申请正文。"), run_id)
+        result = self._commit(run_id, ops)
+        request_id = result["preview"][0]["request_id"]
+        rpc_calls_before = len(adapter.rpc_names)
+        with (
+            patch.object(review_module, "get_client", return_value=adapter),
+            patch.object(review_module, "_server_writes_allowed", return_value=True),
+        ):
+            with self.assertRaises(review_module.MemoryRequestError) as raised:
+                review_module.review_memory_request(
+                    request_id, {"action": "approve", "content": content_3001},
+                )
+        self.assertIn("3000", str(raised.exception))
+        # 未触达数据库 RPC：申请保持 pending。
+        self.assertEqual(len(adapter.rpc_names), rpc_calls_before)
+        self.assertEqual(self._query_one(
+            "select status from public.memory_requests where id = %s",
+            (request_id,),
+        ), "pending")
 
     # -- fast-path gating ---------------------------------------------------
 
