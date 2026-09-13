@@ -407,6 +407,64 @@ class ContinuityApiTests(unittest.TestCase):
         self.assertEqual(json.loads(response.body), expected)
 
 
+class ContinuityInitFailureTests(unittest.TestCase):
+    """领取成功后的批次初始化失败：记失败、结束占用、不残留 claimed。
+
+    生产事故：run 267 succeeded 占据窗口（旧唯一索引含 succeeded），
+    run 268 重试初始化撞 memory_digest_runs_active_batch_uidx，
+    异常发生在 try 之外导致残留 claimed。
+    """
+
+    def test_init_failure_records_failure_and_raises(self):
+        with (
+            patch("gateway.memory_continuity._continuity_analysis_configured", return_value=True),
+            patch("gateway.memory_continuity.resolve_continuity_assistant_id", return_value="assistant-1"),
+            patch("gateway.memory_continuity._get_cursor", return_value={
+                "status": "paused_empty",
+                "last_processed_message_id": 2460,
+                "manual_cooldown_until": None,
+                "auto_cooldown_until": None,
+            }),
+            patch(
+                "gateway.memory_continuity._fetch_blocked_rows",
+                return_value=[_row(2461), _row(2462, "assistant", "回应")],
+            ),
+            patch(
+                "gateway.memory_continuity._claim_slot",
+                return_value={"status": "claimed", "run_id": 268},
+            ),
+            patch(
+                "gateway.memory_continuity._set_running_run",
+                side_effect=Exception(
+                    'duplicate key value violates unique constraint '
+                    '"memory_digest_runs_active_batch_uidx"'
+                ),
+            ),
+            patch("gateway.memory_continuity._record_failure") as record_failure,
+        ):
+            with self.assertRaises(ContinuityPipelineError) as raised:
+                run_continuity_digest(automatic=False)
+        self.assertEqual(raised.exception.code, "batch_init_failed")
+        record_failure.assert_called_once()
+        self.assertEqual(record_failure.call_args.args[0], 268)
+        self.assertEqual(record_failure.call_args.args[1], "batch_init_failed")
+        self.assertIn("memory_digest_runs_active_batch_uidx", record_failure.call_args.args[2])
+
+    def test_record_failure_marks_run_failed_and_clears_heartbeat(self):
+        client = Mock()
+        client.table.return_value.update.return_value.eq.return_value.execute.return_value = (
+            SimpleNamespace(data=[{"id": 268}])
+        )
+        from gateway.memory_continuity import _record_failure
+
+        with patch("gateway.memory_continuity._client", return_value=client):
+            _record_failure(268, "batch_init_failed", "boom")
+        payload = client.table.return_value.update.call_args.args[0]
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["error_code"], "batch_init_failed")
+        self.assertIsNone(payload["heartbeat_at"])
+
+
 def _now():
     return datetime.now(timezone.utc)
 

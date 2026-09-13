@@ -1102,6 +1102,9 @@ def parse_rumination_output(
                 raise RuminationPipelineError(
                     "model_schema_error", "create_tracked_thread must start as open",
                 )
+            # 提交 RPC 要求显式 thread_state='open'：校验通过后必须写入
+            # 规范化对象，否则整批在 commit 阶段被拒。
+            op["thread_state"] = "open"
             continuity_data = _try_validate_continuity_data(
                 "thread", "open", raw.get("continuity_data"),
             )

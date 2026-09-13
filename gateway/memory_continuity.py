@@ -484,7 +484,15 @@ def run_continuity_digest(*, automatic: bool = False) -> dict[str, Any]:
     if claim.get("status") != "claimed":
         raise ContinuityPipelineError("commit_failed", "Failed to claim a digest execution slot", 500)
     run_id = int(claim["run_id"])
-    run = _set_running_run(run_id, raw_rows)
+    try:
+        run = _set_running_run(run_id, raw_rows)
+    except Exception as exc:
+        # 初始化失败（如活跃批次唯一索引冲突）必须结束占用并记失败，
+        # 不能残留 claimed 阻塞后续运行；游标保持 paused_empty 可重试。
+        _record_failure(run_id, "batch_init_failed", f"{type(exc).__name__}: {str(exc)[:1200]}")
+        raise ContinuityPipelineError(
+            "batch_init_failed", "Failed to initialize the claimed batch", 500,
+        ) from exc
 
     try:
         evidence_times = {message["id"]: message["source_time"] for message in messages}
