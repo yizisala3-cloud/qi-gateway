@@ -1275,6 +1275,86 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
         self.assertEqual(row[3], "profile")
         self.assertIsNone(row[4])
 
+    # -- merged evidence contract (20260913010000) --------------------------
+    #
+    # The gateway merges same-thread ops and same-content duplicates; the
+    # merged op can carry an evidence union wider than the old per-op 8-id
+    # ceiling. The commit RPC must accept the merged shape.
+
+    def _seed_merge_contract_thread(self):
+        """Dedicated open rumination thread so the test stays self-sufficient."""
+        key = "topic.merge.contract"
+        content = "合并契约线程的初始状态正文。"
+        uuid_text = "21111111-1111-1111-1111-1111111111f9"
+        self.conn.execute(
+            "insert into public.memory_continuity_objects (continuity_id, assistant_id) "
+            "values (%s::uuid, 'a-rumination') on conflict (continuity_id) do nothing",
+            (uuid_text,),
+        )
+        self.conn.execute(
+            "insert into public.memories ("
+            "content, title, tags, importance, embedding, source, verified, is_active, "
+            "assistant_id, confidence, content_hash, memory_key, "
+            "continuity_id, continuity_schema_version, continuity_data, "
+            "continuity_type, thread_state, evidence_message_ids, "
+            "evidence_start_time, evidence_end_time, evidence_time_precision, "
+            "recall_scene, recall_tags, recall_embedding, "
+            "producer_path, maintained_by"
+            ") values ("
+            "%s, '合并契约', '{thread}', 6, '[0.5,0.5,0.5]', 'rumination', "
+            "'verified', true, 'a-rumination', 0.9, %s, %s, "
+            "%s::uuid, 1, "
+            "'{\"open_question\": \"合并契约是否成行\", \"current_state\": \"初始状态\", "
+            "\"closure_criteria\": [\"完成或取消\"]}'::jsonb, "
+            "'thread', 'open', '{501,502}', "
+            "'2026-09-01 10:00+08', '2026-09-01 10:01+08', 'minute', "
+            "'合并契约场景', '{合并}', '[0.5,0.5,0.5]', "
+            "'rumination', 'rumination'"
+            ") on conflict (content_hash) do nothing",
+            (content, _sha256(content), key, uuid_text),
+        )
+        found = self._active_memory("memory_key = %s", (key,))
+        assert found is not None, f"thread fixture not seeded: {key}"
+        return found
+
+    def test_merged_evidence_union_commits_single_version(self):
+        self._set_cursor(initialized=True, value=520)
+        plan_id = self._seed_merge_contract_thread()
+        snapshot = self._thread_snapshot(plan_id)
+        run_id = self._claim(521, 530)
+        evidence = list(range(521, 531))
+        result = self._commit(run_id, [{
+            "op": "update_thread",
+            "reason": "两段进展合并为最终状态",
+            "target_memory_id": plan_id,
+            **snapshot,
+            "thread_state": "open",
+            "content": "合并契约线程合并后的最终状态正文。",
+            "continuity_data": {
+                "open_question": "合并契约是否成行",
+                "current_state": "两段进展合并后的最终状态",
+                "closure_criteria": ["完成或取消"],
+            },
+            "evidence_message_ids": evidence,
+            "content_hash": _sha256("合并契约线程合并后的最终状态正文。"),
+            "importance": 6, "confidence": 0.9,
+            "embedding": "[0.4,0.4,0.4]",
+        }])
+        self.assertEqual(result["op_counts"]["updated_versions"], 1)
+        versions = self._query(
+            "select id, is_active from public.memories "
+            "where memory_key = 'topic.merge.contract' order by id"
+        )
+        self.assertEqual(len(versions), 2)
+        self.assertFalse(versions[0][1])
+        self.assertTrue(versions[1][1])
+        stored = self._query_one(
+            "select evidence_message_ids from public.memories where id = %s",
+            (versions[1][0],),
+        )
+        self.assertTrue(set(evidence) <= set(stored))
+        self.assertEqual(self._cursor(), 530)
+
     # -- fast-path gating ---------------------------------------------------
 
     def _thread_candidate_item(self, content, content_hash, thread_state="open"):

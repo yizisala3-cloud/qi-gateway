@@ -661,5 +661,83 @@ class RequestTypeExpansionContractTests(unittest.TestCase):
         )
 
 
+class MergedEvidenceLimitContractTests(unittest.TestCase):
+    """20260913010000: per-op evidence ceiling raised to the merged-union bound.
+
+    The gateway merges same-thread ops (and same-content duplicates), and the
+    merged op legitimately carries the evidence union of everything it
+    absorbed. The commit RPC must accept that shape while still validating
+    each id against the batch window; the gateway enforces the same
+    RUMINATION_BATCH_MAX * MAX_EVIDENCE_IDS = 960 bound before commit.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = (
+            ROOT / "supabase/migrations/20260913010000_rumination_merged_evidence_limit.sql"
+        ).read_text(encoding="utf-8")
+        cls.executable = re.sub(r"--[^\n]*", "", cls.sql)
+        cls.previous = re.sub(
+            r"--[^\n]*", "",
+            (
+                ROOT / "supabase/migrations/20260912010000_rumination_request_type_expansion.sql"
+            ).read_text(encoding="utf-8"),
+        )
+        parts = cls.executable.split(
+            "create or replace function public.commit_rumination_batch", 1
+        )
+        assert len(parts) == 2, "commit_rumination_batch must be rebuilt exactly once"
+        cls.commit = parts[1]
+
+    @staticmethod
+    def _function_body(text):
+        return text.split(
+            "create or replace function public.commit_rumination_batch", 1
+        )[1].split("$function$;", 1)[0]
+
+    def test_rebuilds_only_commit_rumination_batch_without_ddl(self):
+        self.assertIn(
+            "drop function if exists public.commit_rumination_batch(bigint, jsonb)",
+            self.executable,
+        )
+        self.assertEqual(self.executable.count("create or replace function"), 1)
+        ddl = re.findall(
+            r"(alter\s+table|drop\s+table|create\s+table|"
+            r"create\s+or\s+replace\s+trigger)"
+            r"[\s\S]{0,120}?(chat_messages|memories|memory_requests|"
+            r"memory_rumination_cursors|memory_path_handoffs)",
+            self.executable,
+            re.IGNORECASE,
+        )
+        self.assertEqual(ddl, [])
+        self.assertNotIn("memory_relations", self.executable)
+
+    def test_body_differs_from_0912_only_in_evidence_bound(self):
+        old_lines = self._function_body(self.previous).splitlines()
+        new_lines = self._function_body(self.executable).splitlines()
+        self.assertEqual(len(old_lines), len(new_lines))
+        diffs = [
+            (old, new) for old, new in zip(old_lines, new_lines) if old != new
+        ]
+        self.assertEqual(len(diffs), 1, diffs)
+        old_line, new_line = diffs[0]
+        self.assertIn("v_evidence_count not between 1 and 8", old_line)
+        self.assertIn("v_evidence_count not between 1 and 960", new_line)
+
+    def test_security_definer_fixed_search_path_and_service_role(self):
+        self.assertIn("security definer", self.commit)
+        self.assertIn("set search_path to 'public', 'extensions'", self.commit)
+        self.assertRegex(
+            self.executable,
+            r"revoke\s+all\s+on\s+function\s+public\.commit_rumination_batch\(bigint,\s*jsonb\)"
+            r"[\s\S]{0,200}?from\s+public,\s*anon,\s*authenticated",
+        )
+        self.assertRegex(
+            self.executable,
+            r"grant\s+execute\s+on\s+function\s+public\.commit_rumination_batch\(bigint,\s*jsonb\)"
+            r"[\s\S]{0,200}?to\s+service_role",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

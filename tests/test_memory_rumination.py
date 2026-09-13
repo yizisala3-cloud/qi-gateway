@@ -20,6 +20,7 @@ from gateway.memory_rumination import (
     FIRST_RUN_MAX_MESSAGES,
     RUMINATION_BATCH_MAX,
     RUMINATION_BATCH_MIN,
+    RUMINATION_OP_EVIDENCE_MAX,
     RuminationPipelineError,
     build_model_input,
     enrich_rumination_ops,
@@ -3403,6 +3404,260 @@ class ContinuityDataDegradationTests(unittest.TestCase):
         self.assertEqual([item["op"] for item in parsed], ["create_request", "create_request"])
         self.assertEqual(parsed[0]["continuity_type"], "moment")
         self.assertEqual(parsed[1]["continuity_type"], "episode")
+
+
+class SameBatchDedupeStateMergeTests(unittest.TestCase):
+    """复审修复回归：语义化正文去重 + 同批状态机 + 合并证据契约。
+
+    覆盖完整处理链 parse → merge，而不是只单测合并函数。
+    """
+
+    def setUp(self):
+        self.threads = _threads_by_id(
+            _thread(memory_id=12, state="open"),
+            _thread(memory_id=13, state="paused", key="topic.paused"),
+        )
+        self.times = _evidence_times(range(1, 30))
+
+    def _parse(self, ops, threads=None):
+        return parse_rumination_output(
+            json.dumps({"operations": ops}, ensure_ascii=False),
+            evidence_times=self.times,
+            threads_by_id=threads if threads is not None else self.threads,
+        )
+
+    def _merge(self, parsed, threads=None):
+        return merge_thread_operations(
+            parsed,
+            evidence_times=self.times,
+            threads_by_id=threads if threads is not None else self.threads,
+        )
+
+    def _update(self, target_id, content, evidence, *, state=None):
+        target = self.threads[target_id]
+        op = {
+            "op": "update_thread", "reason": "进程有实质进展",
+            "target_memory_id": target_id, **_snap(target),
+            "content": content,
+            "continuity_data": {
+                "open_question": "赶海是否成行", "current_state": content[8:],
+                "closure_criteria": ["成行或改期"],
+            },
+            "evidence_message_ids": list(evidence),
+        }
+        if state:
+            op["thread_state"] = state
+        return op
+
+    # -- 问题 1：去重只作用于最终有效操作 --------------------------------
+
+    def test_ignored_degrade_does_not_block_same_content_request(self):
+        content = "赶海计划有了新进展，装备已经备齐。"
+        parsed = self._parse([
+            {"op": "create_tracked_thread", "reason": "追踪",
+             "memory_key": "topic.new", "content": content,
+             "continuity_data": "not-json", "evidence_message_ids": [3]},
+            {"op": "create_request", "reason": "画像",
+             "continuity_type": "profile", "content": content,
+             "continuity_data": {
+                 "facet": "装备习惯", "statement": "提前一天备齐装备",
+                 "scope": "赶海", "stability": "stable",
+                 "basis": "repeated_observation",
+             },
+             "evidence_message_ids": [4]},
+        ])
+        self.assertEqual(
+            [(item["op"], item.get("continuity_type")) for item in parsed],
+            [("ignore", None), ("create_request", "profile")],
+        )
+
+    def test_same_content_different_targets_not_swallowed(self):
+        content = "同正文出现在两个目标上的进展，语义各自成立。"
+        parsed = self._parse([
+            self._update(12, content, [3, 4, 5, 6, 7]),
+            self._update(13, content, [8, 9, 10, 11, 12]),
+        ])
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(
+            [item["target_memory_id"] for item in parsed], [12, 13],
+        )
+
+    def test_same_content_different_memory_class_survives(self):
+        content = "同一句正文分别作为瞬间与画像提交，分类不同。"
+        parsed = self._parse([
+            {"op": "create_memory", "reason": "瞬间", "continuity_type": "moment",
+             "content": content,
+             "continuity_data": {
+                 "scene": "窗边", "event": "潮水漫过礁石",
+                 "moment_state": "standalone",
+             },
+             "evidence_message_ids": [3]},
+            {"op": "create_request", "reason": "画像",
+             "continuity_type": "profile", "content": content,
+             "continuity_data": {
+                 "facet": "装备习惯", "statement": "提前一天备齐装备",
+                 "scope": "赶海", "stability": "stable",
+                 "basis": "repeated_observation",
+             },
+             "evidence_message_ids": [4]},
+        ])
+        self.assertEqual(
+            [(item["op"], item.get("continuity_type")) for item in parsed],
+            [("create_memory", "moment"), ("create_request", "profile")],
+        )
+
+    def test_true_duplicates_merge_evidence_instead_of_dropping(self):
+        content = "赶海计划当前状态：重复正文的同一进展。"
+        evidence_sets = ([3, 4], [5, 6])
+        parsed = self._parse([
+            self._update(12, content, evidence) for evidence in evidence_sets
+        ])
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["evidence_message_ids"], [3, 4, 5, 6])
+
+    # -- 问题 2：同批 pause/resume 按 running-state 校验 ------------------
+
+    def test_open_pause_then_resume_survives_parse_and_merges(self):
+        snap12 = _snap(self.threads[12])
+        parsed = self._parse([
+            {"op": "pause_thread", "reason": "下雨暂停", "target_memory_id": 12,
+             **snap12, "content": "赶海计划当前状态：因下雨暂停。",
+             "continuity_data": {
+                 "open_question": "赶海是否成行", "current_state": "因下雨暂停",
+             },
+             "evidence_message_ids": [3]},
+            {"op": "resume_thread", "reason": "转晴恢复", "target_memory_id": 12,
+             **snap12, "content": "赶海计划当前状态：天气转晴恢复推进。",
+             "continuity_data": {
+                 "open_question": "赶海是否成行", "current_state": "天气转晴恢复推进",
+             },
+             "evidence_message_ids": [4]},
+        ])
+        self.assertEqual([item["op"] for item in parsed], ["pause_thread", "resume_thread"])
+        merged = self._merge(parsed)
+        thread_ops = [item for item in merged if item.get("target_memory_id") == 12]
+        self.assertEqual(len(thread_ops), 1)
+        merged_op = thread_ops[0]
+        self.assertEqual(merged_op["op"], "update_thread")
+        self.assertEqual(merged_op["thread_state"], "open")
+        self.assertEqual(merged_op["evidence_message_ids"], [3, 4])
+        self.assertEqual(merged_op["content"], "赶海计划当前状态：天气转晴恢复推进。")
+        self.assertEqual(
+            merged_op["continuity_data"]["current_state"], "天气转晴恢复推进",
+        )
+
+    def test_paused_resume_then_pause_survives_parse_and_merges(self):
+        snap13 = _snap(self.threads[13])
+        parsed = self._parse([
+            {"op": "resume_thread", "reason": "出差回来恢复", "target_memory_id": 13,
+             **snap13, "content": "暂停进程当前状态：恢复推进。",
+             "continuity_data": {
+                 "open_question": "是否继续", "current_state": "恢复推进",
+             },
+             "evidence_message_ids": [3]},
+            {"op": "pause_thread", "reason": "再次暂停", "target_memory_id": 13,
+             **snap13, "content": "暂停进程当前状态：重新暂停等待。",
+             "continuity_data": {
+                 "open_question": "是否继续", "current_state": "重新暂停等待",
+             },
+             "evidence_message_ids": [4]},
+        ])
+        self.assertEqual([item["op"] for item in parsed], ["resume_thread", "pause_thread"])
+        merged = self._merge(parsed)
+        thread_ops = [item for item in merged if item.get("target_memory_id") == 13]
+        self.assertEqual(len(thread_ops), 1)
+        merged_op = thread_ops[0]
+        self.assertEqual(merged_op["op"], "update_thread")
+        self.assertEqual(merged_op["thread_state"], "paused")
+        self.assertEqual(merged_op["evidence_message_ids"], [3, 4])
+        self.assertEqual(merged_op["content"], "暂停进程当前状态：重新暂停等待。")
+
+    def test_illegal_state_transitions_still_rejected(self):
+        snap12 = _snap(self.threads[12])
+        snap13 = _snap(self.threads[13])
+        resume_on_open = {
+            "op": "resume_thread", "reason": "还没暂停就想恢复",
+            "target_memory_id": 12, **snap12,
+            "content": "赶海计划当前状态：恢复。",
+            "continuity_data": {"open_question": "q", "current_state": "恢复"},
+            "evidence_message_ids": [3],
+        }
+        with self.assertRaisesRegex(RuminationPipelineError, "paused thread"):
+            self._parse([resume_on_open])
+        pause_on_paused = {
+            "op": "pause_thread", "reason": "还没打开就想暂停",
+            "target_memory_id": 13, **snap13,
+            "content": "暂停进程当前状态：暂停。",
+            "continuity_data": {"open_question": "q", "current_state": "暂停"},
+            "evidence_message_ids": [3],
+        }
+        with self.assertRaisesRegex(RuminationPipelineError, "open thread"):
+            self._parse([pause_on_paused])
+        # 同批 pause → pause：第二条在推进后的状态上非法。
+        pause_then_pause = [
+            {
+                "op": "pause_thread", "reason": "第一次暂停",
+                "target_memory_id": 12, **snap12,
+                "content": "赶海计划当前状态：第一次暂停。",
+                "continuity_data": {"open_question": "q", "current_state": "暂停一"},
+                "evidence_message_ids": [3],
+            },
+            {
+                "op": "pause_thread", "reason": "第二次暂停",
+                "target_memory_id": 12, **snap12,
+                "content": "赶海计划当前状态：第二次暂停。",
+                "continuity_data": {"open_question": "q", "current_state": "暂停二"},
+                "evidence_message_ids": [4],
+            },
+        ]
+        with self.assertRaisesRegex(RuminationPipelineError, "open thread"):
+            self._parse(pause_then_pause)
+        # resolve 之后继续推进：矛盾操作拒绝。
+        resolve_op = {
+            "op": "resolve_thread", "reason": "完成", "target_memory_id": 12,
+            **snap12, "content": "赶海计划已经完成。",
+            "continuity_data": {
+                "open_question": "赶海是否成行", "current_state": "已完成",
+                "closure_summary": "顺利成行", "closure_reason": "原文明确完成",
+                "closed_at": "2026-09-12",
+            },
+            "evidence_message_ids": [4],
+        }
+        with self.assertRaisesRegex(RuminationPipelineError, "resolve_thread"):
+            self._parse([self._update(12, "赶海计划当前状态：推进中的正文。", [3]), resolve_op,
+                         self._update(12, "赶海计划当前状态：关闭后又推进的正文。", [5])])
+
+    # -- 问题 3：合并证据并集与提交契约一致 -------------------------------
+
+    def test_five_plus_five_evidence_merge_keeps_union_within_contract(self):
+        parsed = self._parse([
+            self._update(12, "赶海计划当前状态：第一阶段完成，正文各不相同。", [3, 4, 5, 6, 7]),
+            self._update(12, "赶海计划当前状态：第二阶段完成，正文各不相同。", [8, 9, 10, 11, 12]),
+        ])
+        merged = self._merge(parsed)
+        thread_ops = [item for item in merged if item.get("target_memory_id") == 12]
+        self.assertEqual(len(thread_ops), 1)
+        self.assertEqual(thread_ops[0]["evidence_message_ids"], list(range(3, 13)))
+        self.assertLessEqual(
+            len(thread_ops[0]["evidence_message_ids"]), RUMINATION_OP_EVIDENCE_MAX,
+        )
+        self.assertEqual(RUMINATION_OP_EVIDENCE_MAX, RUMINATION_BATCH_MAX * 8)
+
+    def test_merged_op_shape_is_commit_ready(self):
+        parsed = self._parse([
+            self._update(12, "赶海计划当前状态：第一段进展的完整正文。", [3, 4]),
+            self._update(12, "赶海计划当前状态：第二段进展的完整正文。", [5, 6]),
+        ])
+        merged = self._merge(parsed)
+        merged_op = [item for item in merged if item.get("target_memory_id") == 12][0]
+        # 合并结果保留快照回显与目标，正文哈希重算，可直接进入 enrich/commit。
+        self.assertEqual(merged_op["target_memory_id"], 12)
+        self.assertEqual(
+            merged_op["target_continuity_id"], self.threads[12]["continuity_id"],
+        )
+        self.assertIn("content_hash", merged_op)
+        for key in ("target_memory_key", "target_thread_state"):
+            self.assertIn(key, merged_op)
 
 
 if __name__ == "__main__":
