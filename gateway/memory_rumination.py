@@ -714,15 +714,34 @@ def _normalize_memory_key(value: Any, *, op_type: str = "", field: str = "memory
     return key
 
 
-def _op_dedupe_key(op: dict[str, Any]) -> tuple[Any, ...] | None:
-    """同批去重身份：只对带正文的最终有效操作登记。
+def _continuity_dedupe_shape(op: dict[str, Any]) -> str | None:
+    """结构字段的去重形态：延迟校验的操作取原始值，其余取已验证值。"""
+    value = op.get("continuity_data")
+    if value is None and "_deferred_continuity" in op:
+        value = op.get("_deferred_continuity")
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        try:
+            return json.dumps(value, sort_keys=True, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return repr(value)
+    return str(value)
 
-    键 =（操作语义、正文哈希、目标 memory_id、memory_key、记忆分类）。
-    降级为 ignore 的操作不会走到登记，因此不占用去重资格；不同目标或
-    不同分类的同正文操作键不同，不会相互覆盖。
+
+def _op_dedupe_key(op: dict[str, Any]) -> tuple[Any, ...] | None:
+    """同批去重身份：只有业务结果完全一致的操作才算重复。
+
+    键覆盖所有影响业务结果的字段：语义（op）、正文、目标（memory_id /
+    memory_key）、记忆分类、状态、结构（continuity_data 规范形）、召回
+    信息与展示标量。pause/resume/resolve 是时间线上的状态事件，同正文
+    同操作名不代表跨时间重复——中间发生过状态变化时两次都是有效事件，
+    因此永不参与去重；降级为 ignore 的操作不会走到登记。
     """
     content_hash = op.get("content_hash")
     if not content_hash:
+        return None
+    if op.get("op") in {"pause_thread", "resume_thread", "resolve_thread"}:
         return None
     return (
         op.get("op"),
@@ -730,6 +749,16 @@ def _op_dedupe_key(op: dict[str, Any]) -> tuple[Any, ...] | None:
         op.get("target_memory_id"),
         op.get("memory_key"),
         op.get("continuity_type"),
+        op.get("thread_state"),
+        _continuity_dedupe_shape(op),
+        op.get("title"),
+        op.get("importance"),
+        op.get("confidence"),
+        op.get("source_type"),
+        op.get("recall_scene"),
+        tuple(op.get("recall_tags") or ()),
+        str(op.get("memory_time")),
+        op.get("time_precision"),
     )
 
 
@@ -768,11 +797,11 @@ def parse_rumination_output(
     raw_ops = payload["operations"]
 
     validated: list[dict[str, Any]] = []
-    # 同批正文去重只登记最终有效操作（语义+目标+分类+正文）；降级为
-    # ignore 的操作不登记。同批 thread 状态机按输出顺序推进，最终仍由
-    # merge 阶段按真实证据时间重放裁决。
+    # 同批正文去重只登记业务结果完全一致的最终有效操作；降级为 ignore
+    # 的操作与生命周期状态事件都不登记。状态转换的合法性由循环后的
+    # _resolve_thread_timelines 按真实证据时间重放裁决，数组顺序不承载
+    # 时间语义。
     dedupe_registry: dict[tuple[Any, ...], dict[str, Any]] = {}
-    thread_running_states: dict[int, str] = {}
     for raw in raw_ops:
         if not isinstance(raw, dict):
             raise RuminationPipelineError("model_schema_error", "operation must be an object")
@@ -1027,57 +1056,22 @@ def parse_rumination_output(
                     "evidence_message_ids": list(op["evidence_message_ids"]),
                 })
                 continue
-            running_state = thread_running_states.setdefault(
-                target_id, str(target.get("thread_state")),
+            # 状态回显与结构基准是证据时间线上的位置状态，统一延迟到
+            # _resolve_thread_timelines 按时间序裁决；此处只保留与位置
+            # 无关的校验（目标、快照、key 格式）。
+            op["_deferred_continuity"] = raw.get("continuity_data")
+            op["_raw_thread_state"] = (
+                str(raw.get("thread_state") or "").strip().casefold() or None
             )
-            if running_state == "resolved":
-                raise RuminationPipelineError(
-                    "model_schema_error",
-                    f"contradictory operations: progress after resolve_thread on memory {target_id}",
-                )
-            state = str(raw.get("thread_state") or "").strip().casefold() or None
-            if state and state != running_state:
-                raise RuminationPipelineError(
-                    "model_schema_error",
-                    "adopt_thread cannot change thread_state; use pause/resume/resolve ops",
-                )
-            if content:
-                op["continuity_data"] = _validated_continuity_data(
-                    "thread", running_state, raw.get("continuity_data"),
-                )
-        elif op_type in {"update_thread", "pause_thread", "resume_thread", "resolve_thread"}:
-            # 同批状态机：以本批先前操作推进后的 running state 为基准，
-            # 而不是数据库初始状态——先 pause 再 resume 这类连续推进
-            # 在 parse 期即可合法通过，最终由 merge 按证据时间重放裁决。
-            running_state = thread_running_states.setdefault(
-                target_id, str(target.get("thread_state")),
-            )
-            if running_state == "resolved":
-                raise RuminationPipelineError(
-                    "model_schema_error",
-                    f"contradictory operations: progress after resolve_thread on memory {target_id}",
-                )
+        elif op_type in {"pause_thread", "resume_thread", "resolve_thread"}:
+            # 结构基准是该操作的目标状态（kind-fixed），与时间线位置无关；
+            # 转换合法性由循环后的 _resolve_thread_timelines 按证据时间
+            # 统一裁决，数组顺序不提前拒绝。
             expected_state = {
-                "update_thread": running_state,
                 "pause_thread": "paused",
                 "resume_thread": "open",
                 "resolve_thread": "resolved",
             }[op_type]
-            if op_type == "pause_thread" and running_state != "open":
-                raise RuminationPipelineError(
-                    "model_schema_error", "pause_thread requires an open thread",
-                )
-            if op_type == "resume_thread" and running_state != "paused":
-                raise RuminationPipelineError(
-                    "model_schema_error", "resume_thread requires a paused thread",
-                )
-            if op_type == "update_thread":
-                state = str(raw.get("thread_state") or "").strip().casefold() or None
-                if state and state != running_state:
-                    raise RuminationPipelineError(
-                        "model_schema_error",
-                        "update_thread cannot change thread_state; use pause/resume/resolve ops",
-                    )
             op["thread_state"] = expected_state
             continuity_data = _try_validate_continuity_data(
                 "thread", expected_state, raw.get("continuity_data"),
@@ -1099,6 +1093,14 @@ def parse_rumination_output(
                 })
                 continue
             op["continuity_data"] = continuity_data
+        elif op_type == "update_thread":
+            # 结构基准是该操作在证据时间线上的位置状态，须等整批时间线
+            # 确定后判定；先原样保留，由 _resolve_thread_timelines 校验。
+            op["thread_state"] = str(target.get("thread_state"))
+            op["_deferred_continuity"] = raw.get("continuity_data")
+            op["_raw_thread_state"] = (
+                str(raw.get("thread_state") or "").strip().casefold() or None
+            )
         elif op_type == "create_request":
             continuity_type = str(raw.get("continuity_type") or "").strip().casefold()
             if continuity_type not in REQUEST_TYPES:
@@ -1167,12 +1169,8 @@ def parse_rumination_output(
                 raw.get("absorbed_fast_path_memory_ids"), absorbable_ids,
             )
 
-        # 操作真正生效（未被降级为 ignore）后才推进同批状态机。
-        if op_type in {"pause_thread", "resume_thread", "resolve_thread"}:
-            thread_running_states[target_id] = expected_state
-
-        # 同批正文去重：只发生在最终有效操作之间（语义+目标+分类+正文
-        # 全部一致才算重复）；重复操作保留双方证据，不再静默丢弃。
+        # 同批正文去重：只发生在业务结果完全一致的最终有效操作之间；
+        # 重复操作保留双方证据，不再静默丢弃。
         dedupe_key = _op_dedupe_key(op)
         if dedupe_key is not None:
             prior = dedupe_registry.get(dedupe_key)
@@ -1195,7 +1193,104 @@ def parse_rumination_output(
                 continue
             dedupe_registry[dedupe_key] = op
         validated.append(op)
-    return validated
+    return _resolve_thread_timelines(validated, threads_by_id, evidence_times)
+
+
+def _resolve_thread_timelines(
+    ops: list[dict[str, Any]],
+    threads_by_id: dict[int, dict[str, Any]],
+    evidence_times: dict[int, str | None],
+) -> list[dict[str, Any]]:
+    """按真实证据时间重放同批 thread 状态机，并校验延迟的结构字段。
+
+    模型数组顺序不承载时间语义：pause/resume/resolve 的转换合法性、
+    update/adopt 的状态回显与结构校验基准，都以（证据时间, 数组下标）
+    排序后的位置为准，与 merge 阶段使用同一排序规则。update/adopt 不
+    改变状态，其结构不可用时原位降级为 ignore，不影响后续位置的状态。
+    """
+    by_target: dict[int, list[int]] = {}
+    for index, op in enumerate(ops):
+        kind = op.get("op")
+        if kind in THREAD_OP_TYPES and kind != "evidence_only":
+            by_target.setdefault(op["target_memory_id"], []).append(index)
+
+    for target_id, indices in by_target.items():
+        target = threads_by_id.get(target_id)
+        if target is None:  # pragma: no cover - coerce block already validated
+            raise RuminationPipelineError(
+                "model_schema_error",
+                f"target_memory_id {target_id} is not an unfinished thread in this input",
+            )
+        state = str(target.get("thread_state"))
+        for index in sorted(
+            indices, key=lambda i: (_op_evidence_time(ops[i], evidence_times), i),
+        ):
+            op = ops[index]
+            kind = op["op"]
+            if state == "resolved":
+                raise RuminationPipelineError(
+                    "model_schema_error",
+                    f"contradictory operations: progress after resolve_thread "
+                    f"on memory {target_id}",
+                )
+            if kind == "pause_thread":
+                if state != "open":
+                    raise RuminationPipelineError(
+                        "model_schema_error", "pause_thread requires an open thread",
+                    )
+                state = "paused"
+                continue
+            if kind == "resume_thread":
+                if state != "paused":
+                    raise RuminationPipelineError(
+                        "model_schema_error", "resume_thread requires a paused thread",
+                    )
+                state = "open"
+                continue
+            if kind == "resolve_thread":
+                if state not in ("open", "paused"):
+                    raise RuminationPipelineError(
+                        "model_schema_error",
+                        f"resolve_thread requires an open or paused thread "
+                        f"(memory {target_id})",
+                    )
+                state = "resolved"
+                continue
+            raw_state = op.pop("_raw_thread_state", None)
+            if raw_state and raw_state != state:
+                raise RuminationPipelineError(
+                    "model_schema_error",
+                    f"{kind} cannot change thread_state; use pause/resume/resolve ops",
+                )
+            if "_deferred_continuity" in op:
+                raw_continuity = op.pop("_deferred_continuity")
+                if not op.get("content"):
+                    continue
+                validated_data = _try_validate_continuity_data(
+                    "thread", state, raw_continuity,
+                )
+                if validated_data is None:
+                    category = _continuity_data_warning_category(
+                        "thread", state, raw_continuity,
+                    )
+                    log.warning(
+                        "Rumination continuity_data degraded to ignore: "
+                        "op=%s reason_category=%s",
+                        kind, category,
+                    )
+                    skip = {
+                        "op": "ignore",
+                        "reason": (
+                            f"反刍路径：{kind} 的 continuity_data 结构不可用，"
+                            "本批跳过该操作"
+                        ),
+                        "evidence_message_ids": list(op["evidence_message_ids"]),
+                    }
+                    op.clear()
+                    op.update(skip)
+                else:
+                    op["continuity_data"] = validated_data
+    return ops
 
 
 def _validated_continuity_data(
