@@ -1515,7 +1515,13 @@ class MergeThreadOperationsTests(unittest.TestCase):
             {"op": "evidence_only", "reason": "只补证据",
              "target_memory_id": 12, **self._snap(12),
              "evidence_message_ids": [101]},
-            self._update([201], "叶子和栖约定下周三赶海。"),  # 与目标正文相同
+            # 与目标正文、结构规范形都相同（只有正文相同时结构变化会被
+            # 保留为原地更新，不再降级为只补证据）。
+            self._update([201], "叶子和栖约定下周三赶海。", {
+                "open_question": "赶海是否成行",
+                "current_state": "已约定待确认天气",
+                "closure_criteria": ["成行或改期"],
+            }),
         ]
         merged = merge_thread_operations(
             ops, evidence_times=self.times, threads_by_id=self.threads,
@@ -4059,6 +4065,135 @@ class ResolvedTimelineDedupeTests(unittest.TestCase):
                 self._trans_op("resolve_thread", "网关改造已经完成。", [3], "已完成"),
                 self._update_op("关闭之后又推进的正文。", [4], "推进"),
             ])
+
+
+class StructureChangePreservationTests(unittest.TestCase):
+    """复审轮 4 回归：正文未变但结构变化时，不得降级为"只补证据"。
+
+    比较语义与数据库一致：正文哈希 + 结构规范形（递归剥离显式 null、
+    键序无关）。普通字段无模型基线，不参与变化判定。
+    """
+
+    def setUp(self):
+        self.base_content = "网关改造当前状态：正文与数据库当前版本完全相同。"
+        self.target = {
+            "id": 12, "memory_key": "topic.x",
+            "continuity_id": "21111111-1111-1111-1111-1111111111a1",
+            "thread_state": "open", "maintained_by": "rumination",
+            "content": self.base_content,
+            "content_hash": _sha256(self.base_content),
+            "continuity_data": {
+                "open_question": "改造是否完成", "current_state": "进行中",
+                "closure_criteria": ["实测通过"],
+            },
+            "evidence_message_ids": [1],
+        }
+        self.threads = _threads_by_id(self.target)
+        self.times = _staggered_evidence_times(range(1, 20))
+
+    def _snap(self):
+        return _snap(self.target)
+
+    def _update_op(self, content, evidence, current_state):
+        return {
+            "op": "update_thread", "reason": "进程有实质进展",
+            "target_memory_id": 12, **self._snap(),
+            "content": content,
+            "continuity_data": {
+                "open_question": "改造是否完成", "current_state": current_state,
+                "closure_criteria": ["实测通过"],
+            },
+            "evidence_message_ids": list(evidence),
+        }
+
+    def _parse(self, ops):
+        return parse_rumination_output(
+            json.dumps({"operations": ops}, ensure_ascii=False),
+            evidence_times=self.times,
+            threads_by_id=self.threads,
+        )
+
+    def _merge(self, parsed):
+        return merge_thread_operations(
+            parsed, evidence_times=self.times, threads_by_id=self.threads,
+        )
+
+    def test_multi_op_merge_keeps_structure_change_on_same_body(self):
+        parsed = self._parse([
+            self._update_op(self.base_content, [3], "进行中"),
+            self._update_op(self.base_content, [4], "实测通过，改造完成"),
+        ])
+        merged = self._merge(parsed)
+        tops = [item for item in merged if item.get("target_memory_id") == 12]
+        self.assertEqual(len(tops), 1)
+        self.assertEqual(tops[0]["op"], "update_thread")
+        self.assertEqual(tops[0]["content"], self.base_content)
+        self.assertEqual(
+            tops[0]["continuity_data"]["current_state"], "实测通过，改造完成",
+        )
+        self.assertEqual(tops[0]["evidence_message_ids"], [3, 4])
+
+    def test_single_update_keeps_structure_change_on_same_body(self):
+        parsed = self._parse([
+            self._update_op(self.base_content, [3], "实测通过，改造完成"),
+        ])
+        self.assertEqual(parsed[0]["op"], "update_thread")
+        self.assertEqual(
+            parsed[0]["continuity_data"]["current_state"], "实测通过，改造完成",
+        )
+
+    def test_truly_unchanged_expression_still_downgrades_to_evidence_only(self):
+        # merge 阶段对"正文与结构都与当前版本一致"的多条进展仍降级为
+        # 只补证据。（完全相同的重复操作在 parse 去重阶段就合并为单条，
+        # 由提交侧 evidence_merged_unchanged 分支处理，见 pg 集成测试。）
+        merged = self._merge([
+            self._update_op(self.base_content, [3], "进行中"),
+            self._update_op(self.base_content, [4], "进行中"),
+        ])
+        tops = [item for item in merged if item.get("target_memory_id") == 12]
+        self.assertEqual(len(tops), 1)
+        self.assertEqual(tops[0]["op"], "evidence_only")
+        self.assertNotIn("continuity_data", tops[0])
+        self.assertNotIn("content", tops[0])
+
+    def test_canonical_equivalence_ignores_key_order_and_explicit_nulls(self):
+        # 键序不同、显式 null 等价于"未提供"：规范形一致时仍只补证据。
+        reordered = self._update_op(self.base_content, [4], "进行中")
+        reordered["continuity_data"] = {
+            "closure_criteria": ["实测通过"],
+            "current_state": "进行中",
+            "open_question": "改造是否完成",
+            "next_expected": None,
+        }
+        merged = self._merge([
+            self._update_op(self.base_content, [3], "进行中"),
+            reordered,
+        ])
+        tops = [item for item in merged if item.get("target_memory_id") == 12]
+        self.assertEqual(tops[0]["op"], "evidence_only")
+
+    def test_parse_dedupes_identical_updates_before_merge(self):
+        # 完全相同的重复 update 在 parse 阶段合并为单条（证据并集），
+        # 交由提交侧按同哈希分支裁决。
+        parsed = self._parse([
+            self._update_op(self.base_content, [3], "进行中"),
+            self._update_op(self.base_content, [4], "进行中"),
+        ])
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["op"], "update_thread")
+        self.assertEqual(parsed[0]["evidence_message_ids"], [3, 4])
+        self.assertEqual(
+            parsed[0]["continuity_data"]["current_state"], "进行中",
+        )
+
+    def test_invalid_structure_still_degrades_before_merge(self):
+        op = self._update_op(self.base_content, [3], "进行中")
+        op["continuity_data"] = {
+            "open_question": "改造是否完成", "current_state": "进行中",
+            "closure_criteria": ["实测通过"], "unexpected_field": "多余字段",
+        }
+        parsed = self._parse([op])
+        self.assertEqual([item["op"] for item in parsed], ["ignore"])
 
 
 if __name__ == "__main__":

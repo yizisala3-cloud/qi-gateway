@@ -739,5 +739,137 @@ class MergedEvidenceLimitContractTests(unittest.TestCase):
         )
 
 
+class StructureUpdateContractTests(unittest.TestCase):
+    """20260914010000: same-body structural changes update in place.
+
+    memories.content_hash is unique, so a same-hash version row can never
+    exist. "Evidence only" now requires the canonical structure (via
+    jsonb_strip_nulls, matching the gateway) to be unchanged as well; a real
+    structure or state change is validated and applied to the current active
+    row, which also un-breaks pause/resume/resolve on an unchanged body.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = (
+            ROOT / "supabase/migrations/20260914010000_rumination_structure_update.sql"
+        ).read_text(encoding="utf-8")
+        cls.executable = re.sub(r"--[^\n]*", "", cls.sql)
+        cls.previous = re.sub(
+            r"--[^\n]*", "",
+            (
+                ROOT / "supabase/migrations/20260913010000_rumination_merged_evidence_limit.sql"
+            ).read_text(encoding="utf-8"),
+        )
+        parts = cls.executable.split(
+            "create or replace function public.commit_rumination_batch", 1
+        )
+        assert len(parts) == 2, "commit_rumination_batch must be rebuilt exactly once"
+        cls.commit = parts[1]
+
+    def test_rebuilds_only_commit_rumination_batch_without_ddl(self):
+        self.assertIn(
+            "drop function if exists public.commit_rumination_batch(bigint, jsonb)",
+            self.executable,
+        )
+        self.assertEqual(self.executable.count("create or replace function"), 1)
+        ddl = re.findall(
+            r"(alter\s+table|drop\s+table|create\s+table|"
+            r"create\s+or\s+replace\s+trigger)"
+            r"[\s\S]{0,120}?(chat_messages|memories|memory_requests|"
+            r"memory_rumination_cursors|memory_path_handoffs)",
+            self.executable,
+            re.IGNORECASE,
+        )
+        self.assertEqual(ddl, [])
+        self.assertNotIn("memory_relations", self.executable)
+
+    def test_same_hash_branch_validates_structure_and_updates_in_place(self):
+        # "只补证据"以结构规范形未变为条件；结构变化先过校验再原地更新。
+        self.assertIn("jsonb_strip_nulls(coalesce(v_continuity_data, '{}'::jsonb))", self.commit)
+        self.assertIn("jsonb_strip_nulls(coalesce(v_target.continuity_data, '{}'::jsonb))", self.commit)
+        self.assertIn("'structure_updated_in_place'", self.commit)
+        self.assertIn(
+            "if not public.validate_continuity_data('thread', v_thread_state, v_continuity_data) then",
+            self.commit,
+        )
+        self.assertIn("set continuity_data = v_continuity_data,", self.commit)
+        self.assertIn("thread_state = v_thread_state,", self.commit)
+        # 旧的同哈希提前返回（仅凭正文）不复存在。
+        self.assertNotIn(
+            "if v_content_hash = v_target.content_hash and v_op_type = 'update_thread' then",
+            self.commit,
+        )
+        # 未变的表达仍走 evidence_merged_unchanged。
+        self.assertIn("'evidence_merged_unchanged'", self.commit)
+
+    def test_body_differs_from_0913_only_in_same_hash_branch(self):
+        def body(text):
+            return text.split(
+                "create or replace function public.commit_rumination_batch", 1
+            )[1].split("$function$;", 1)[0]
+
+        old_lines = body(self.previous).splitlines()
+        new_lines = body(self.executable).splitlines()
+        removed = [line for line in old_lines if line not in new_lines]
+        added = [line for line in new_lines if line not in old_lines]
+        # 被移除的只有旧的同哈希提前返回块（old_block 共 18 行，其中 12 行
+        # 在新块中逐字保留：evidence 合并 SQL、evidence_only 计数、预览）。
+        self.assertEqual(
+            removed[0],
+            "            if v_content_hash = v_target.content_hash "
+            "and v_op_type = 'update_thread' then",
+        )
+        self.assertTrue(
+            all(
+                "v_content_hash = v_target.content_hash and v_op_type" in line
+                or "Unchanged body" in line
+                or line in (
+                    "                update public.memories",
+                    "                    where id = v_target.id;",
+                    "                v_counts := jsonb_set(v_counts, '{evidence_only}',",
+                    "                v_preview := v_preview || jsonb_build_object(",
+                    "                continue;",
+                    "                end if;",
+                    "            end if;",
+                )
+                or line.strip().startswith((
+                    "set evidence_message_ids",
+                    "evidence_start_time",
+                    "evidence_end_time",
+                    "select coalesce",
+                    "from unnest",
+                    "),",
+                    "((v_counts->>'evidence_only')",
+                    "'op', 'update_thread',",
+                    "'memory_id', v_target.id,",
+                    "'reason', v_reason",
+                ))
+                for line in removed
+            ),
+            removed,
+        )
+        # 新增行只包含三分支实现的关键构造。
+        self.assertTrue(any("jsonb_strip_nulls" in line for line in added))
+        self.assertTrue(any("structure_updated_in_place" in line for line in added))
+        self.assertTrue(any("set continuity_data = v_continuity_data," in line for line in added))
+        # 证据上限（0913 的唯一改动）原样保留。
+        self.assertIn("v_evidence_count not between 1 and 960", "\n".join(new_lines))
+
+    def test_security_definer_fixed_search_path_and_service_role(self):
+        self.assertIn("security definer", self.commit)
+        self.assertIn("set search_path to 'public', 'extensions'", self.commit)
+        self.assertRegex(
+            self.executable,
+            r"revoke\s+all\s+on\s+function\s+public\.commit_rumination_batch\(bigint,\s*jsonb\)"
+            r"[\s\S]{0,200}?from\s+public,\s*anon,\s*authenticated",
+        )
+        self.assertRegex(
+            self.executable,
+            r"grant\s+execute\s+on\s+function\s+public\.commit_rumination_batch\(bigint,\s*jsonb\)"
+            r"[\s\S]{0,200}?to\s+service_role",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -992,6 +992,9 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
         current_content = self._query_one(
             "select content from public.memories where id = %s", (watch_id,),
         )
+        current_continuity = self._query_one(
+            "select continuity_data from public.memories where id = %s", (watch_id,),
+        )
         run_id = self._claim(521, 522)
         result = self._commit(run_id, [{
             "op": "update_thread",
@@ -999,16 +1002,15 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "target_memory_id": watch_id,
             **self._thread_snapshot(watch_id),
             "content": current_content,
-            "continuity_data": {
-                "open_question": "夜间观察是否成行",
-                "current_state": "约定观察猎户座，等待晴夜",
-                "closure_criteria": ["观察完成或取消"],
-            },
+            "continuity_data": current_continuity,
             "evidence_message_ids": [521],
             "content_hash": _sha256(current_content),
             "embedding": "[0.7,0.7,0.7]",
         }])
-        self.assertEqual(result["op_counts"]["evidence_only"], 1)
+        self.assertEqual(
+            result["op_counts"]["evidence_only"], 1,
+            f"op_counts={result['op_counts']} preview={result['preview']}",
+        )
         self.assertEqual(result["op_counts"]["updated_versions"], 0)
         self.assertEqual(self._query_one(
             "select count(*) from public.memories where supersedes_memory_id = %s",
@@ -1389,6 +1391,140 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
         self.assertEqual(row[2], "pending")
         for memory_id in (first, second):
             self.assertTrue(self._active_memory("id = %s", (memory_id,)))
+
+    # -- same-body structure updates (20260914010000) -----------------------
+    #
+    # memories.content_hash is unique, so a same-body structural change must
+    # update the current active row in place; "evidence only" now requires
+    # the canonical structure to be unchanged too, and a same-body pause
+    # flips the state in place instead of violating the unique constraint.
+
+    STRUCTURE_CONTENT = "结构更新契约线程的当前正文。"
+
+    def _seed_structure_thread(self, key, uuid_text, content):
+        self.conn.execute(
+            "insert into public.memory_continuity_objects (continuity_id, assistant_id) "
+            "values (%s::uuid, 'a-rumination') on conflict (continuity_id) do nothing",
+            (uuid_text,),
+        )
+        self.conn.execute(
+            "insert into public.memories ("
+            "content, title, tags, importance, embedding, source, verified, is_active, "
+            "assistant_id, confidence, content_hash, memory_key, "
+            "continuity_id, continuity_schema_version, continuity_data, "
+            "continuity_type, thread_state, evidence_message_ids, "
+            "evidence_start_time, evidence_end_time, evidence_time_precision, "
+            "producer_path, maintained_by"
+            ") values ("
+            "%s, '结构更新契约', '{thread}', 6, '[0.6,0.6,0.6]', 'rumination', "
+            "'verified', true, 'a-rumination', 0.9, %s, %s, "
+            "%s::uuid, 1, "
+            "'{\"open_question\": \"结构更新是否生效\", \"current_state\": \"初始状态\", "
+            "\"closure_criteria\": [\"完成\"]}'::jsonb, "
+            "'thread', 'open', '{501,502}', "
+            "'2026-09-01 10:00+08', '2026-09-01 10:01+08', 'minute', "
+            "'rumination', 'rumination'"
+            ") on conflict (content_hash) do nothing",
+            (content, _sha256(content), key, uuid_text),
+        )
+        found = self._active_memory("memory_key = %s", (key,))
+        assert found is not None, f"thread fixture not seeded: {key}"
+        return found
+
+    def _structure_update_op(self, structure_id, snapshot, current_state, *,
+                             op="update_thread", content=None):
+        content = content or self.STRUCTURE_CONTENT
+        continuity = {
+            "open_question": "结构更新是否生效", "current_state": current_state,
+            "closure_criteria": ["完成"],
+        }
+        return {
+            "op": op, "reason": "结构更新" if op == "update_thread" else "暂停",
+            "target_memory_id": structure_id, **snapshot,
+            "thread_state": "open" if op == "update_thread" else "paused",
+            "content": content,
+            "continuity_data": continuity,
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "importance": 6, "confidence": 0.9,
+            "embedding": "[0.6,0.6,0.6]",
+        }
+
+    def test_same_body_structure_change_updates_in_place(self):
+        self._set_cursor(initialized=True, value=520)
+        content = "结构更新契约线程 A 的当前正文。"
+        structure_id = self._seed_structure_thread(
+            "topic.structure.update", "21111111-1111-1111-1111-1111111111fc", content,
+        )
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [self._structure_update_op(
+            structure_id, self._thread_snapshot(structure_id), "结构已更新",
+            content=content,
+        )])
+        self.assertEqual(result["op_counts"]["updated_versions"], 1)
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "structure_updated_in_place",
+        )
+        rows = self._query(
+            "select is_active, thread_state, continuity_data->>'current_state', "
+            "evidence_message_ids from public.memories "
+            "where memory_key = 'topic.structure.update'"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0][0])
+        self.assertEqual(rows[0][1], "open")
+        self.assertEqual(rows[0][2], "结构已更新")
+        self.assertTrue(set(rows[0][3]) >= {501, 502, 521})
+        self.assertEqual(self._cursor(), 522)
+
+    def test_same_body_unchanged_structure_merges_evidence_only(self):
+        self._set_cursor(initialized=True, value=520)
+        content = "结构更新契约线程 B 的当前正文。"
+        structure_id = self._seed_structure_thread(
+            "topic.structure.same", "21111111-1111-1111-1111-1111111111fd", content,
+        )
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [self._structure_update_op(
+            structure_id, self._thread_snapshot(structure_id), "初始状态",
+            content=content,
+        )])
+        self.assertEqual(result["op_counts"]["evidence_only"], 1)
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "evidence_merged_unchanged",
+        )
+        rows = self._query(
+            "select continuity_data->>'current_state', "
+            "evidence_message_ids @> '{501,502,521}' "
+            "from public.memories where memory_key = 'topic.structure.same'"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "初始状态")
+        self.assertTrue(rows[0][1])
+
+    def test_same_body_pause_updates_state_in_place(self):
+        # 修复前：同正文 pause 会插入同哈希新版本行并违反唯一约束。
+        self._set_cursor(initialized=True, value=520)
+        content = "结构更新契约线程 C 的当前正文。"
+        structure_id = self._seed_structure_thread(
+            "topic.structure.pause", "21111111-1111-1111-1111-1111111111fe", content,
+        )
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [self._structure_update_op(
+            structure_id, self._thread_snapshot(structure_id), "暂停",
+            op="pause_thread", content=content,
+        )])
+        self.assertEqual(result["op_counts"]["updated_versions"], 1)
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "structure_updated_in_place",
+        )
+        rows = self._query(
+            "select is_active, thread_state from public.memories "
+            "where memory_key = 'topic.structure.pause'"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0][0])
+        self.assertEqual(rows[0][1], "paused")
+        self.assertEqual(self._cursor(), 522)
 
     # -- fast-path gating ---------------------------------------------------
 
@@ -1980,7 +2116,8 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
         ), 0)
         self.assertEqual(self._cursor(), 520)
 
-        # 重试携带最新快照可以正常推进。
+        # 重试携带最新快照可以正常推进。重试的结构与当前版本不同，按新
+        # 语义走原地结构更新（不再降级为只补证据）。
         result = self._commit(run_id, [{
             "op": "update_thread",
             "reason": "使用最新快照重试",
@@ -1996,7 +2133,10 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "content_hash": _sha256(changed),
             "embedding": "[0.72,0.72,0.72]",
         }])
-        self.assertEqual(result["op_counts"]["evidence_only"], 1)
+        self.assertEqual(result["op_counts"]["updated_versions"], 1)
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "structure_updated_in_place",
+        )
         self.assertEqual(self._cursor(), 522)
 
     # -- absorption handoff ---------------------------------------------------

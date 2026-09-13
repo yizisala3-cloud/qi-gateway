@@ -1641,6 +1641,30 @@ def _op_evidence_time(op: dict[str, Any], evidence_times: dict[int, str | None])
     return max(valid)
 
 
+def _strip_null_values(value: Any) -> Any:
+    """递归剥离对象里的显式 null 字段；数组元素原样保留。"""
+    if isinstance(value, dict):
+        return {
+            key: _strip_null_values(item)
+            for key, item in value.items()
+            if item is not None
+        }
+    if isinstance(value, list):
+        return list(value)
+    return value
+
+
+def _canonical_continuity(value: Any) -> str:
+    """continuity_data 规范形：剥离显式 null 后按键序序列化。
+
+    与 SQL jsonb_strip_nulls 一致：键序无关、null 字段视为未提供、数组
+    元素原样保留。用于"正文未变时结构是否真的变了"的判定。
+    """
+    if not isinstance(value, dict):
+        return ""
+    return json.dumps(_strip_null_values(value), sort_keys=True, ensure_ascii=False)
+
+
 def _merged_thread_op(
     target_id: int,
     entries: list[tuple[int, dict[str, Any]]],
@@ -1748,12 +1772,16 @@ def _merged_thread_op(
         merged["content_hash"] = hashlib.sha256(
             merged["content"].casefold().encode("utf-8"),
         ).hexdigest()
-    # 状态未变且最终正文与当前版本相同：不重写正文，只合并证据。
+    # 状态未变、正文未变且结构规范形未变：不重写，只合并证据。结构有
+    # 变化时保留完整操作，由提交侧在 content_hash 唯一约束下原地更新
+    # 当前版本（普通字段无模型基线，不参与变化判定）。
     if (
         merged_kind == "update_thread"
         and merged.get("content")
         and str(target.get("content") or "")
         and merged["content"].casefold() == str(target["content"]).casefold()
+        and _canonical_continuity(merged.get("continuity_data"))
+            == _canonical_continuity(target.get("continuity_data"))
     ):
         merged_kind = "evidence_only"
         merged["op"] = merged_kind
