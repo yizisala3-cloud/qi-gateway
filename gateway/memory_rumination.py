@@ -54,6 +54,10 @@ log = logging.getLogger("gateway.memory_rumination")
 CST = timezone(timedelta(hours=8))
 
 FIRST_RUN_MAX_MESSAGES = 120
+# 正文长度硬性契约：解析器与提交 RPC 的显式校验保持一致（固定值，非配置）。
+CONTENT_MIN_LENGTH = 5
+CONTENT_MAX_LENGTH = 3000
+
 RUMINATION_BATCH_MAX = 120
 RUMINATION_BATCH_MIN = 60
 MAX_EVIDENCE_IDS = 8
@@ -891,7 +895,7 @@ def parse_rumination_output(
     # 同批去重在时间线与结构全部解析之后进行（_dedupe_effective_ops）；
     # 主循环只做与位置无关的校验，状态转换的合法性由
     # _resolve_thread_timelines 按真实证据时间重放裁决。
-    for raw in raw_ops:
+    for op_index, raw in enumerate(raw_ops):
         if not isinstance(raw, dict):
             raise RuminationPipelineError("model_schema_error", "operation must be an object")
         op_type = str(raw.get("op") or "").strip().casefold()
@@ -987,16 +991,35 @@ def parse_rumination_output(
             validated.append(op)
             continue
 
-        content = re.sub(r"\s+", " ", str(raw.get("content") or "")).strip()
+        raw_content = raw.get("content")
+        if raw_content is not None and not isinstance(raw_content, str):
+            # 非字符串正文显式报类型错误，不允许 str() 强转后蒙混过关。
+            raise RuminationPipelineError(
+                "model_schema_error",
+                f"op #{op_index} ({op_type}) content content_type_invalid: "
+                f"raw_type={type(raw_content).__name__} (expected str)",
+            )
+        content = (
+            re.sub(r"\s+", " ", raw_content).strip()
+            if isinstance(raw_content, str) else ""
+        )
         requires_content = op_type in {
             "create_memory", "create_tracked_thread", "update_thread",
             "pause_thread", "resume_thread", "resolve_thread", "create_request",
         }
         if requires_content or (op_type == "adopt_thread" and content):
-            if len(content) < 5 or len(content) > 600:
+            if len(content) < CONTENT_MIN_LENGTH or len(content) > CONTENT_MAX_LENGTH:
+                category = (
+                    "content_too_short"
+                    if len(content) < CONTENT_MIN_LENGTH
+                    else "content_too_long"
+                )
                 raise RuminationPipelineError(
                     "model_schema_error",
-                    f"op {op_type} content must be 5-600 characters",
+                    f"op #{op_index} ({op_type}) content {category}: "
+                    f"raw_type={type(raw_content).__name__}, "
+                    f"normalized_length={len(content)}, "
+                    f"allowed={CONTENT_MIN_LENGTH}-{CONTENT_MAX_LENGTH}",
                 )
         title = _clean_text_field(raw.get("title"), 100) or None
         op_content_hash = (

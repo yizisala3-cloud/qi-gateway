@@ -1854,6 +1854,122 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
                 self.assertEqual((row[0], row[1]), ("open", True))
                 self.assertEqual(self._cursor(), 522)
 
+    # -- content length contract 5-3000 (real chain, 20260918010000) --------
+
+    def test_content_length_contract_real_chain_and_review(self):
+        from gateway.memory_rumination import (
+            enrich_rumination_ops,
+            merge_thread_operations,
+            parse_rumination_output,
+        )
+
+        evidence_times = {
+            521: "2026-09-06T09:00+08:00",
+            522: "2026-09-06T09:01+08:00",
+        }
+
+        def build(content):
+            return json.dumps({"operations": [{
+                "op": "create_request", "reason": "正文长度契约验证",
+                "continuity_type": "profile",
+                "content": content,
+                "continuity_data": {
+                    "facet": "契约", "statement": "长度边界验证",
+                    "scope": "全局", "stability": "stable",
+                    "basis": "explicit_self_report",
+                },
+                "evidence_message_ids": [521, 522],
+            }]}, ensure_ascii=False)
+
+        def chain(model_output, run_id):
+            with (
+                patch(
+                    "gateway.memory_rumination._get_embedding_sync",
+                    return_value=[0.2, 0.2, 0.2],
+                ),
+                patch("gateway.memory_rumination._update_heartbeat"),
+            ):
+                ops = parse_rumination_output(
+                    model_output,
+                    evidence_times=evidence_times,
+                    threads_by_id={},
+                )
+                ops = merge_thread_operations(
+                    ops, evidence_times=evidence_times, threads_by_id={},
+                )
+                return enrich_rumination_ops(ops, run_id)
+
+        leftovers = self._query(
+            "select coalesce(string_agg(id || ':' || pipeline || ':' || status "
+            "|| ':' || coalesce(source_first_message_id::text,'') || '-' || "
+            "coalesce(source_last_message_id::text,''), ' | '), 'none') "
+            "from public.memory_digest_runs where status in ('claimed', 'running')"
+        )
+        print("DEBUG all active runs:", leftovers)
+        print("DEBUG run2:", self._query(
+            "select id, assistant_id, pipeline, status, trigger, claimed_at, "
+            "heartbeat_at from public.memory_digest_runs where id = 2"))
+        # 拒绝边界：解析阶段整批拒绝，不产生任何提交或部分写入。
+        for raw_content in ("x" * 4, "x" * 3001, 123):
+            label = (
+                f"length={len(raw_content)}" if isinstance(raw_content, str)
+                else f"type={type(raw_content).__name__}"
+            )
+            with self.subTest(case="reject", label=label):
+                with self.assertRaises(Exception):
+                    chain(build(raw_content), 1)
+
+        # 允许边界：全文落库、哈希与网关规范化全文一致。
+        for length in (5, 600, 601, 3000):
+            with self.subTest(case="accept", length=length):
+                self._set_cursor(initialized=True, value=520)
+                try:
+                    run_id = self._claim(521, 522)
+                except AssertionError:
+                    print("DEBUG runs at failed claim:", self._query(
+                        "select id || ':' || pipeline || ':' || status "
+                        "|| ':hb=' || coalesce(heartbeat_at::text, 'null') "
+                        "from public.memory_digest_runs order by id"))
+                    raise
+                content = f"长度契约 {length}：" + "x" * length
+                prefix = f"长度契约 {length}："
+                content = prefix + "x" * (length - len(prefix))
+                ops = chain(build(content), run_id)
+                result = self._commit(run_id, ops)
+                self.assertEqual(result["op_counts"]["created_requests"], 1)
+                request_id = result["preview"][0]["request_id"]
+                row = self._query_row(
+                    "select length(content), content_hash from public.memory_requests "
+                    "where id = %s",
+                    (request_id,),
+                )
+                self.assertEqual(row[0], len(content))
+                self.assertEqual(row[1], _sha256(content))
+
+        # >600 的申请审核通过后仍完整保存（审核与落库路径不再截断）。
+        prefix = "长度契约 审核："
+        content = prefix + "x" * (601 - len(prefix))
+        self._set_cursor(initialized=True, value=520)
+        run_id = self._claim(521, 522)
+        ops = chain(build(content), run_id)
+        result = self._commit(run_id, ops)
+        request_id = result["preview"][0]["request_id"]
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "select public.review_memory_request_v5(%s, %s)",
+                (request_id, "approve"),
+            )
+            cur.fetchall()
+        row = self._query_row(
+            "select length(m.content), m.content_hash "
+            "from public.memories m "
+            "join public.memory_requests r on r.memory_id = m.id "
+            "where r.id = %s",
+            (request_id,),
+        )
+        self.assertEqual(row[0], len(content))
+        self.assertEqual(row[1], _sha256(content))
+
     # -- fast-path gating ---------------------------------------------------
 
     def _thread_candidate_item(self, content, content_hash, thread_state="open"):

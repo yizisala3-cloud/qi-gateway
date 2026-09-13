@@ -3873,6 +3873,93 @@ class TimelineConsistencyTests(unittest.TestCase):
             self.assertNotIn("_raw_thread_state", op)
 
 
+class ContentContractTests(unittest.TestCase):
+    """正文长度契约 5–3000：诊断含序号/类型/原始值类型/规范化长度/分类。"""
+
+    def setUp(self):
+        self.threads = _threads_by_id(_thread(memory_id=12, state="open"))
+        self.times = _staggered_evidence_times(range(1, 20))
+
+    def _parse(self, raw_content):
+        op = {
+            "op": "create_request", "reason": "长度契约测试",
+            "continuity_type": "profile",
+            "content": raw_content,
+            "continuity_data": {
+                "facet": "契约", "statement": "长度边界验证",
+                "scope": "全局", "stability": "stable",
+                "basis": "explicit_self_report",
+            },
+            "evidence_message_ids": [3],
+        }
+        return parse_rumination_output(
+            json.dumps({"operations": [op]}, ensure_ascii=False),
+            evidence_times=self.times,
+            threads_by_id=self.threads,
+        )
+
+    def test_below_minimum_rejected_with_full_diagnostics(self):
+        with self.assertRaises(RuminationPipelineError) as raised:
+            self._parse("abcd")
+        message = str(raised.exception)
+        self.assertIn("op #0 (create_request)", message)
+        self.assertIn("content_too_short", message)
+        self.assertIn("raw_type=str", message)
+        self.assertIn("normalized_length=4", message)
+        self.assertIn("allowed=5-3000", message)
+        self.assertNotIn("abcd", message)
+
+    def test_minimum_and_maximum_boundaries_pass(self):
+        for length in (5, 600, 601, 3000):
+            with self.subTest(length=length):
+                parsed = self._parse("x" * length)
+                self.assertEqual(len(parsed[0]["content"]), length)
+
+    def test_above_maximum_rejected_with_category(self):
+        with self.assertRaises(RuminationPipelineError) as raised:
+            self._parse("x" * 3001)
+        self.assertIn("content_too_long", str(raised.exception))
+        self.assertIn("normalized_length=3001", str(raised.exception))
+
+    def test_non_string_content_rejected_as_type_error(self):
+        for raw, type_name in ((123, "int"), (["正文"], "list"), (1.5, "float")):
+            with self.subTest(raw_type=type_name):
+                with self.assertRaises(RuminationPipelineError) as raised:
+                    self._parse(raw)
+                message = str(raised.exception)
+                self.assertIn("content_type_invalid", message)
+                self.assertIn(f"raw_type={type_name}", message)
+
+    def test_missing_and_null_content_count_as_too_short(self):
+        op = self._threadless_op_without_content()
+        with self.assertRaises(RuminationPipelineError) as raised:
+            parse_rumination_output(
+                json.dumps({"operations": [op]}, ensure_ascii=False),
+                evidence_times=self.times,
+                threads_by_id=self.threads,
+            )
+        message = str(raised.exception)
+        self.assertIn("content_too_short", message)
+        self.assertIn("normalized_length=0", message)
+
+    def _threadless_op_without_content(self):
+        return {
+            "op": "create_request", "reason": "缺正文",
+            "continuity_type": "profile",
+            "continuity_data": {
+                "facet": "契约", "statement": "缺正文验证",
+                "scope": "全局", "stability": "stable",
+                "basis": "explicit_self_report",
+            },
+            "evidence_message_ids": [3],
+        }
+
+    def test_whitespace_normalization_measured_after_collapse(self):
+        with self.assertRaises(RuminationPipelineError) as raised:
+            self._parse("  a 	 b  ")
+        self.assertIn("normalized_length=3", str(raised.exception))
+
+
 class CreateTrackedThreadStateTests(unittest.TestCase):
     """create_tracked_thread 必须把规范化后的 thread_state='open' 写入 op。
 
