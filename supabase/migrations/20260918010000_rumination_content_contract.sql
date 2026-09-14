@@ -1407,4 +1407,30 @@ begin
 end;
 $contract$;
 
+-- CREATE OR REPLACE 不保留被替换函数的自定义 ACL：五个重建后的函数必须
+-- 显式补授（签名取自生产 pg_get_function_identity_arguments 实测值），
+-- 否则 service_role 无法调用审核链与管理入口。
+revoke all on function public.create_admin_memory_v1(text, text, text, text, text[], integer, text, text, text, text, text[], extensions.vector, text, text, jsonb, bigint[]) from public, anon, authenticated;
+grant execute on function public.create_admin_memory_v1(text, text, text, text, text[], integer, text, text, text, text, text[], extensions.vector, text, text, jsonb, bigint[]) to service_role;
+
+revoke all on function public.edit_admin_memory_v1(integer, jsonb, text, extensions.vector, text) from public, anon, authenticated;
+grant execute on function public.edit_admin_memory_v1(integer, jsonb, text, extensions.vector, text) to service_role;
+
+revoke all on function public.change_memory_type_v1(integer, text, text, text, text[], integer, text, text, text, text, text[], extensions.vector, text, text, jsonb, bigint[]) from public, anon, authenticated;
+grant execute on function public.change_memory_type_v1(integer, text, text, text, text[], integer, text, text, text, text, text[], extensions.vector, text, text, jsonb, bigint[]) to service_role;
+
+revoke all on function public.review_memory_request_v2(
+    bigint, text, text, text, text[], integer, text, text, text, text, text
+) from public, anon, authenticated;
+grant execute on function public.review_memory_request_v2(
+    bigint, text, text, text, text[], integer, text, text, text, text, text
+) to service_role;
+
+revoke all on function public.review_memory_request_v3(
+    bigint, text, text, text, text[], integer, text, text, text, text, text, integer
+) from public, anon, authenticated;
+grant execute on function public.review_memory_request_v3(
+    bigint, text, text, text, text[], integer, text, text, text, text, text, integer
+) to service_role;
+
 commit;
