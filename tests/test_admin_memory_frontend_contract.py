@@ -166,3 +166,28 @@ class AssetVersionContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LongContentContractTests(unittest.TestCase):
+    """长正文路径：审核、合并与编辑入口支持 3000 字符。
+
+    通用短字段输入（_memory_form.js 的默认分支）保持 600，不属于长正文
+    路径；标题、备注、召回场景等其他字段限制不变。
+    """
+
+    def setUp(self):
+        self.browser = BROWSER.read_text(encoding="utf-8")
+        self.form = FORM.read_text(encoding="utf-8")
+
+    def test_review_and_merge_inputs_support_3000(self):
+        self.assertIn('id="rv-content" rows="7" maxlength="3000"', self.browser)
+        self.assertIn('id="merge-content" rows="8" maxlength="3000"', self.browser)
+        self.assertEqual(self.browser.count('maxlength="600"'), 0)
+
+    def test_edit_form_supports_3000(self):
+        self.assertIn('id="mf-content" rows="6" maxlength="3000"', self.form)
+        self.assertIn("5 到 3000 个字符", self.form)
+        self.assertIn("/3000", self.form)
+        self.assertIn("正文长度必须在 5 到 3000 个字符之间", self.form)
+        # 仅通用短字段输入保留 600。
+        self.assertEqual(self.form.count('maxlength="600"'), 1)

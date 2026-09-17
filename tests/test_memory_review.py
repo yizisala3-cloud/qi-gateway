@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import sys
 import types
@@ -92,6 +93,25 @@ class ValidationTests(unittest.TestCase):
         self.assertIsNone(review["update_mode"])
         self.assertIsNone(review["memory_key"])
         self.assertIsNone(review["related_memory_id"])
+
+    def test_content_length_contract_allows_up_to_3000(self):
+        for length in (601, 3000):
+            with self.subTest(length=length):
+                content = "x" * length
+                review = validate_review(12, {
+                    "action": "approve",
+                    "content": content,
+                })
+                self.assertEqual(len(review["content"]), length)
+                self.assertEqual(
+                    review["content_hash"],
+                    hashlib.sha256(content.casefold().encode("utf-8")).hexdigest(),
+                )
+
+    def test_content_over_3000_rejected_at_gateway_entry(self):
+        with self.assertRaises(MemoryRequestError) as raised:
+            validate_review(12, {"action": "approve", "content": "x" * 3001})
+        self.assertIn("must not exceed 3000", str(raised.exception))
 
     def test_replace_review_requires_a_stable_key(self):
         review = validate_review(12, {

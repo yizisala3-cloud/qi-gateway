@@ -54,6 +54,10 @@ log = logging.getLogger("gateway.memory_rumination")
 CST = timezone(timedelta(hours=8))
 
 FIRST_RUN_MAX_MESSAGES = 120
+# 正文长度硬性契约：解析器与提交 RPC 的显式校验保持一致（固定值，非配置）。
+CONTENT_MIN_LENGTH = 5
+CONTENT_MAX_LENGTH = 3000
+
 RUMINATION_BATCH_MAX = 120
 RUMINATION_BATCH_MIN = 60
 MAX_EVIDENCE_IDS = 8
@@ -241,7 +245,8 @@ RUMINATION_SYSTEM_PROMPT = """你是“反刍连续感”提取器，负责在�
 5. 正文忠于事实：AI 参与的经历可以写成共同经历；AI 未参与时不得写成“我们共同完成”。
 6. 每项操作的 evidence_message_ids 必须是本批 <chat_log> 中真实存在、且直接支持该操作的消息 id（1-8 条）；引用输入列表之外的 id 会被整批拒绝。
 7. 目标 thread 操作的 target_memory_id 必须来自 <unfinished_threads>，并且必须逐字回显该 thread 的快照字段：target_memory_key（无 key 的 fast_path thread 回显 null）、target_continuity_id、target_content_hash、target_thread_state。快照缺失、写错或与输入不一致时整批被拒绝；回显快照用于确保你提交时的判断仍基于读取时的状态。
-8. content 是完整、独立可理解的正文（5-600 字符），不写“今天/昨天”等相对时间；绝对时间放 memory_time，无法可靠确定时填 null 且 time_precision=unknown。
+8. content 是完整、独立可理解的正文（5-3000 字符），不写“今天/昨天”等相对时间；绝对时间放 memory_time，无法可靠确定时填 null 且 time_precision=unknown。
+9. 每条操作的 content 建议控制在 25–2000 字符，优先简洁、完整、独立可理解。内容简单时可以更短，不要为了凑长度扩写；确有必要时可超过建议长度，但必须符合 5–3000 字符的硬性范围。长度要求针对每条正文，不是整个 JSON 输出。
 9. recall_scene 是以后触发召回的场景描述，不是正文复制；无法确定填 null。recall_tags 来自原文真实依据，没有就留空数组。
 10. 不输出 API Key、Token、密码、service_role 等秘密。
 11. 已有实质相同的 pending 反刍申请时不要再提交；rejected/duplicate/conflict 的申请只有在出现拒绝之后的新原文证据时才能重新提交。
@@ -891,7 +896,7 @@ def parse_rumination_output(
     # 同批去重在时间线与结构全部解析之后进行（_dedupe_effective_ops）；
     # 主循环只做与位置无关的校验，状态转换的合法性由
     # _resolve_thread_timelines 按真实证据时间重放裁决。
-    for raw in raw_ops:
+    for op_index, raw in enumerate(raw_ops):
         if not isinstance(raw, dict):
             raise RuminationPipelineError("model_schema_error", "operation must be an object")
         op_type = str(raw.get("op") or "").strip().casefold()
@@ -987,16 +992,35 @@ def parse_rumination_output(
             validated.append(op)
             continue
 
-        content = re.sub(r"\s+", " ", str(raw.get("content") or "")).strip()
+        raw_content = raw.get("content")
+        if raw_content is not None and not isinstance(raw_content, str):
+            # 非字符串正文显式报类型错误，不允许 str() 强转后蒙混过关。
+            raise RuminationPipelineError(
+                "model_schema_error",
+                f"op #{op_index} ({op_type}) content content_type_invalid: "
+                f"raw_type={type(raw_content).__name__} (expected str)",
+            )
+        content = (
+            re.sub(r"\s+", " ", raw_content).strip()
+            if isinstance(raw_content, str) else ""
+        )
         requires_content = op_type in {
             "create_memory", "create_tracked_thread", "update_thread",
             "pause_thread", "resume_thread", "resolve_thread", "create_request",
         }
         if requires_content or (op_type == "adopt_thread" and content):
-            if len(content) < 5 or len(content) > 600:
+            if len(content) < CONTENT_MIN_LENGTH or len(content) > CONTENT_MAX_LENGTH:
+                category = (
+                    "content_too_short"
+                    if len(content) < CONTENT_MIN_LENGTH
+                    else "content_too_long"
+                )
                 raise RuminationPipelineError(
                     "model_schema_error",
-                    f"op {op_type} content must be 5-600 characters",
+                    f"op #{op_index} ({op_type}) content {category}: "
+                    f"raw_type={type(raw_content).__name__}, "
+                    f"normalized_length={len(content)}, "
+                    f"allowed={CONTENT_MIN_LENGTH}-{CONTENT_MAX_LENGTH}",
                 )
         title = _clean_text_field(raw.get("title"), 100) or None
         op_content_hash = (

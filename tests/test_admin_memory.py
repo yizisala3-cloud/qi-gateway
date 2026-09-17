@@ -214,7 +214,10 @@ class CreateAdminMemoryTests(ServiceTestCase):
 
     def test_content_boundaries(self):
         self.client.outcomes["create_admin_memory_v1"] = CREATE_OK
-        for text, ok in (("短", False), ("刚好五个字", True), ("字" * 600, True), ("字" * 601, False)):
+        for text, ok in (
+            ("短", False), ("刚好五个字", True), ("字" * 600, True),
+            ("字" * 601, True), ("字" * 3000, True), ("字" * 3001, False),
+        ):
             with self.subTest(length=len(text), ok=ok):
                 if ok:
                     admin_memory.create_admin_memory({
@@ -636,3 +639,12 @@ class UndoAndRestoreTests(ServiceTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AdminContentContractTests(unittest.TestCase):
+    """管理表单保存入口与长正文契约一致（3000）。"""
+
+    def test_max_content_length_supports_3000(self):
+        from gateway.admin_memory import MAX_CONTENT_LENGTH
+
+        self.assertEqual(MAX_CONTENT_LENGTH, 3000)
