@@ -964,13 +964,16 @@ class TakeoverAndBaselineContractTests(unittest.TestCase):
 
 
 class ContinuityMergeAndAbsorbGuardContractTests(unittest.TestCase):
-    """20260919010000: continuity merge + thread absorb guard.
+    """20260919010000: continuity merge + thread absorb guard + evidence-only key guard.
 
     F3 merges continuity_data when the gateway attaches the read-time
     baseline (projected fields from the model output, non-projected fields
     preserved from the server row; baseline-missing callers keep the legacy
     whole replacement). F7 makes ANY thread an invalid absorption target
-    across the commit RPC re-checks and the approval re-verification.
+    across the commit RPC re-checks and the approval re-verification. The
+    review follow-up gives the evidence_only branch the same key guard as
+    the update paths: an op key fills only a KEYLESS target and is
+    format- and conflict-checked.
     """
 
     @classmethod
@@ -1046,6 +1049,28 @@ class ContinuityMergeAndAbsorbGuardContractTests(unittest.TestCase):
             "public.validate_continuity_data('thread', v_target.thread_state, "
             "v_continuity_data) then",
             self.commit,
+        )
+
+    def test_evidence_only_key_guard_matches_update_paths(self):
+        # 复审跟进：evidence_only 分支与 update 路径同规则——op key 只回填
+        # keyless 目标（keyed 目标保持原 key），且格式与唯一冲突校验齐备；
+        # 无条件覆盖的旧写法不复存在。
+        evidence_branch = self.commit.split(
+            "if v_op_type = 'evidence_only' then", 1
+        )[1].split("if v_op_type in ('update_thread'", 1)[0]
+        self.assertIn(
+            "case when v_target.memory_key is null\n"
+            "                     then nullif(lower(trim(coalesce(v_op->>'memory_key', ''))), '') end,",
+            evidence_branch,
+        )
+        self.assertIn(
+            "raise exception 'memory_rumination_memory_key_conflict';",
+            evidence_branch,
+        )
+        self.assertNotIn(
+            "nullif(lower(trim(coalesce(v_op->>'memory_key', ''))), ''),\n"
+            "                v_target.memory_key",
+            evidence_branch,
         )
 
     def test_thread_is_never_an_absorb_target(self):

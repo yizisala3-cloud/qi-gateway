@@ -4090,6 +4090,110 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
                 # 审核侧（review v5）对 thread 吸收目标的拒绝由
                 # test_thread_absorb_target_rejected_on_approve 覆盖。
 
+    def test_evidence_only_key_conflict_rejects_batch(self):
+        # 复审跟进守卫：op 携带的 key 与任一活跃记忆冲突时，evidence_only
+        # 对 keyless fast_path 目标的回填整批拒绝（修复前是裸 23505 唯一
+        # 约束错误），游标不推进、目标行的 key 未被改写。
+        self._set_cursor(initialized=True, value=520)
+        self._seed_structure_thread(
+            "topic.evidence.clash", "21111111-1111-1111-1111-1111111112c1",
+            "key 冲突守卫的占位活跃线索正文。",
+        )
+        content = "快速路径线程 J：evidence_only 冲突守卫。"
+        fp_id = self._seed_fast_path_thread(
+            "topic.evidence.clash.fp", "21111111-1111-1111-1111-1111111112c2",
+            content, None,
+        )
+        run_id = self._claim(521, 522)
+        with self.assertRaises(Exception) as raised:
+            self._commit(run_id, [{
+                "op": "evidence_only", "reason": "冲突回填",
+                "target_memory_id": fp_id,
+                **self._thread_snapshot(fp_id),
+                "memory_key": "topic.evidence.clash",
+                "evidence_message_ids": [521],
+            }])
+        self.assertIn(
+            "memory_rumination_memory_key_conflict", str(raised.exception),
+        )
+        self.assertEqual(self._cursor(), 520)
+        row = self._query_row(
+            "select maintained_by, memory_key from public.memories where id = %s",
+            (fp_id,),
+        )
+        self.assertEqual(row[0], "fast_path")
+        self.assertIsNone(row[1])
+
+    def test_evidence_only_key_backfills_keyless_fast_path_target(self):
+        # 回归：keyless fast_path thread + 未占用的合法 key → 回填成功、
+        # maintained_by 翻转为 rumination、写 adopt_thread handoff 行
+        # （该回填路径此前没有 DB 级测试）。
+        self._set_cursor(initialized=True, value=520)
+        content = "快速路径线程 K：evidence_only 回填正文。"
+        fp_id = self._seed_fast_path_thread(
+            "topic.evidence.fill", "21111111-1111-1111-1111-1111111112c3",
+            content, None,
+        )
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [{
+            "op": "evidence_only", "reason": "补充证据并接管",
+            "target_memory_id": fp_id,
+            **self._thread_snapshot(fp_id),
+            "memory_key": "topic.evidence.filled",
+            "evidence_message_ids": [521],
+        }])
+        self.assertEqual(result["op_counts"]["evidence_only"], 1)
+        self.assertEqual(result["op_counts"]["adopted_threads"], 1)
+        row = self._query_row(
+            "select maintained_by, memory_key, "
+            "evidence_message_ids @> '{501,502,521}' from public.memories "
+            "where id = %s",
+            (fp_id,),
+        )
+        self.assertEqual(row[0], "rumination")
+        self.assertEqual(row[1], "topic.evidence.filled")
+        self.assertTrue(row[2])
+        handoff = self._query_row(
+            "select kind, memory_key from public.memory_path_handoffs "
+            "where run_id = %s",
+            (run_id,),
+        )
+        self.assertEqual(handoff[0], "adopt_thread")
+        self.assertEqual(handoff[1], "topic.evidence.filled")
+        self.assertEqual(self._cursor(), 522)
+
+    def test_evidence_only_keeps_existing_key_on_keyed_target(self):
+        # 已有 key 的反刍 thread 上 evidence_only 携带另一个合法 key：提交
+        # 成功但 memory_key 保持原值（静默忽略，与 update 路径同语义）——
+        # 稳定主题键不被静默改写。
+        self._set_cursor(initialized=True, value=520)
+        content = "反刍维护线程 L：evidence_only 不改写 key。"
+        owned_id = self._seed_structure_thread(
+            "topic.evidence.owned", "21111111-1111-1111-1111-1111111112c4", content,
+        )
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [{
+            "op": "evidence_only", "reason": "重复表达",
+            "target_memory_id": owned_id,
+            **self._thread_snapshot(owned_id),
+            "memory_key": "topic.evidence.attempted.rekey",
+            "evidence_message_ids": [521],
+        }])
+        self.assertEqual(result["op_counts"]["evidence_only"], 1)
+        self.assertEqual(result["op_counts"]["adopted_threads"], 0)
+        row = self._query_row(
+            "select maintained_by, memory_key from public.memories where id = %s",
+            (owned_id,),
+        )
+        self.assertEqual(row[0], "rumination")
+        self.assertEqual(row[1], "topic.evidence.owned")
+        # 反刍维护目标：无接管记录。
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_path_handoffs where run_id = %s",
+            (run_id,),
+        ), 0)
+        self.assertEqual(self._cursor(), 522)
+
 
 if __name__ == "__main__":
     unittest.main()

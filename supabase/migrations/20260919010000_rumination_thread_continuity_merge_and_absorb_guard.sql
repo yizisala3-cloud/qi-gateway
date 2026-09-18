@@ -39,6 +39,18 @@
 -- thread as an absorption target will be rejected with 409 on approval;
 -- reviewers should reject such requests. No data correction is performed.
 --
+-- Evidence-only key guard (review follow-up): the parser whitelist now
+-- allows evidence_only ops to carry memory_key (the DB branch already
+-- consumed it for keyless backfill), but this branch was the ONLY thread-op
+-- path without the keyless guard and the key-conflict check: an op key
+-- would silently re-key an existing rumination thread (breaking the
+-- "one process, one stable key" invariant), and a conflicting key on a
+-- keyless fast_path target would fail the batch with a raw 23505
+-- unique-index error — the same livelock shape F1 fixes at the parser,
+-- without F5's structured error code. The branch now applies exactly the
+-- update paths' takeover-completion rule: an op key fills only a KEYLESS
+-- target, and the resulting key is format- and conflict-checked.
+--
 -- Deploy order: gateway FIRST, THEN this migration. The gateway tightens its
 -- candidate list first (threads are never offered to the model), so under
 -- any order the model can never emit a thread absorption the DB would
@@ -46,11 +58,13 @@
 -- still sees thread candidates and its batch fails.
 --
 -- Forward-only follow-up to 20260918010000 (commit_rumination_batch is
--- copied verbatim from it) and 20260908010000 (review_memory_request_v5 is
--- copied verbatim from it); production may currently run either
--- 20260915010000 or 20260918010000 (byte-identical except the content-length
--- checks) — both are compatible with this rebuild. No table structure is
--- touched; the only DDL is the rebuild of these two functions.
+-- copied verbatim from it, with exactly three deltas: the F3 continuity
+-- merge, the F7 thread-absorb guard, and the evidence-only key guard) and
+-- 20260908010000 (review_memory_request_v5 is copied verbatim from it,
+-- with exactly the F7 thread-absorb rejection); production may currently
+-- run either 20260915010000 or 20260918010000 (byte-identical except the
+-- content-length checks) — both are compatible with this rebuild. No table
+-- structure is touched; the only DDL is the rebuild of these two functions.
 --
 -- security definer, fixed search_path, service_role only (unchanged).
 -- Does NOT touch chat_messages, memories table structure, memory_requests, or
@@ -743,13 +757,28 @@ begin
             -- Repeated expression: merge evidence into the current active
             -- version, never rewrite the body, never create a version. An op
             -- (or merge) carrying a key fills in a keyless fast_path takeover.
+            -- Key guard mirrors the update paths' takeover-completion block:
+            -- a keyed target is never re-keyed (the stable topic key is kept),
+            -- and a resulting key is format- and conflict-checked instead of
+            -- surfacing a raw 23505 unique-index error.
             v_memory_key := coalesce(
-                nullif(lower(trim(coalesce(v_op->>'memory_key', ''))), ''),
+                case when v_target.memory_key is null
+                     then nullif(lower(trim(coalesce(v_op->>'memory_key', ''))), '') end,
                 v_target.memory_key
             );
-            if v_memory_key is not null
-               and v_memory_key !~ '^[a-z0-9][a-z0-9._:/-]{2,119}$' then
-                raise exception 'memory_rumination_invalid_memory_key';
+            if v_memory_key is not null then
+                if v_memory_key !~ '^[a-z0-9][a-z0-9._:/-]{2,119}$' then
+                    raise exception 'memory_rumination_invalid_memory_key';
+                end if;
+                if exists (
+                    select 1 from public.memories as memory
+                    where memory.memory_key = v_memory_key
+                      and memory.is_active = true
+                      and memory.verified = 'verified'
+                      and memory.id <> v_target.id
+                ) then
+                    raise exception 'memory_rumination_memory_key_conflict';
+                end if;
             end if;
             update public.memories
             set maintained_by = 'rumination',
