@@ -380,8 +380,12 @@ class ParseValidationTests(unittest.TestCase):
                              "21111111-1111-1111-1111-1111111111a2")])
 
     def test_keyless_fast_path_target_allows_null_key_snapshot(self):
+        # null key 的快照回显本身合法（不触发 snapshot mismatch）；但 F1 后
+        # 无 key 的非 adopt 操作命中 keyless fast_path 目标会降级为 ignore，
+        # 不再放行到提交侧被 DB 整批拒绝。
         ops = self._parse([_op(target_memory_id=14, **self._snap(14))])
-        self.assertEqual(ops[0]["target_memory_key"], None)
+        self.assertEqual(ops[0]["op"], "ignore")
+        self.assertIn("keyless fast_path", ops[0]["reason"])
 
     def test_absorb_targets_must_be_candidates(self):
         episode_request = {
@@ -4360,6 +4364,415 @@ class StructureChangePreservationTests(unittest.TestCase):
         self.assertEqual(
             parsed[0]["continuity_baseline"], self.target["continuity_data"],
         )
+
+
+class KeylessFastPathNonAdoptDowngradeTests(unittest.TestCase):
+    """F1：keyless fast_path 目标上的非 adopt 操作降级为单操作 ignore。
+
+    DB 契约（commit_rumination_batch）规定非 adopt 的 thread 操作命中
+    keyless fast_path 目标时必须自带 memory_key，否则提交 RPC 整批拒绝、
+    游标不动，形成批次级活锁。解析器镜像该规则并降级为 ignore。
+    """
+
+    def setUp(self):
+        self.times = _staggered_evidence_times(range(1, 60))
+        self.keyless_open = _thread(
+            memory_id=21, state="open", maintained_by="fast_path", key=None,
+        )
+        self.keyless_paused = _thread(
+            memory_id=22, state="paused", maintained_by="fast_path", key=None,
+        )
+        self.rumination_open = _thread(
+            memory_id=23, state="open", key="topic.rumination.open",
+        )
+        self.rumination_paused = _thread(
+            memory_id=24, state="paused", key="topic.rumination.paused",
+        )
+
+    _RESOLVE_DATA = {
+        "open_question": "要解决什么",
+        "current_state": "已满足关闭条件",
+        "closure_summary": "进程已完成",
+        "closure_reason": "关闭条件满足",
+        "closed_at": "2026-09-06",
+    }
+    _SIMPLE_DATA = {"open_question": "要解决什么", "current_state": "有实质进展"}
+
+    def _cases(self, targets):
+        open_target, paused_target = targets
+        return [
+            ("evidence_only", open_target, None),
+            ("update_thread", open_target, dict(self._SIMPLE_DATA)),
+            ("pause_thread", open_target, dict(self._SIMPLE_DATA)),
+            ("resume_thread", paused_target, dict(self._SIMPLE_DATA)),
+            ("resolve_thread", open_target, dict(self._RESOLVE_DATA)),
+        ]
+
+    def _parse(self, ops, threads):
+        return parse_rumination_output(
+            json.dumps({"operations": ops}, ensure_ascii=False),
+            evidence_times=self.times,
+            threads_by_id=_threads_by_id(*threads),
+        )
+
+    @staticmethod
+    def _thread_op(op_type, target, data, memory_key=None):
+        op = {
+            "op": op_type, "reason": "状态推进",
+            "target_memory_id": target["id"],
+            "target_memory_key": target["memory_key"],
+            "target_continuity_id": target["continuity_id"],
+            "target_content_hash": target["content_hash"],
+            "target_thread_state": target["thread_state"],
+            "evidence_message_ids": [3],
+        }
+        if op_type != "evidence_only":
+            op["content"] = "进程当前状态已有新的实质进展。"
+            op["continuity_data"] = data
+        if memory_key:
+            op["memory_key"] = memory_key
+        return op
+
+    def test_keyless_fast_path_non_adopt_without_key_downgrades_to_ignore(self):
+        targets = (self.keyless_open, self.keyless_paused)
+        for op_type, target, data in self._cases(targets):
+            with self.subTest(op=op_type):
+                parsed = self._parse(
+                    [self._thread_op(op_type, target, data)], [target],
+                )
+                self.assertEqual(len(parsed), 1)
+                self.assertEqual(parsed[0]["op"], "ignore")
+                self.assertIn("keyless fast_path", parsed[0]["reason"])
+                self.assertIn("memory_key", parsed[0]["reason"])
+                self.assertEqual(parsed[0]["evidence_message_ids"], [3])
+
+    def test_keyless_fast_path_non_adopt_with_valid_key_passes(self):
+        targets = (self.keyless_open, self.keyless_paused)
+        for op_type, target, data in self._cases(targets):
+            with self.subTest(op=op_type):
+                parsed = self._parse(
+                    [self._thread_op(op_type, target, data, memory_key="topic.valid.key")],
+                    [target],
+                )
+                self.assertEqual(len(parsed), 1)
+                self.assertEqual(parsed[0]["op"], op_type)
+                self.assertEqual(parsed[0]["memory_key"], "topic.valid.key")
+
+    def test_rumination_maintained_targets_are_unaffected(self):
+        targets = (self.rumination_open, self.rumination_paused)
+        for op_type, target, data in self._cases(targets):
+            with self.subTest(op=op_type):
+                parsed = self._parse(
+                    [self._thread_op(op_type, target, data)], [target],
+                )
+                self.assertEqual(len(parsed), 1)
+                self.assertEqual(parsed[0]["op"], op_type)
+                self.assertNotIn("memory_key", parsed[0])
+
+
+class ThreadStateEchoToleranceTests(unittest.TestCase):
+    """F2：pause/resume/resolve 回显 thread_state 不再整批拒绝。
+
+    DB 对这三类操作按操作类型取固定状态、忽略 op 携带的 thread_state；
+    解析器放行该字段但要求与操作类型一致。
+    """
+
+    _EXPECTED = {
+        "pause_thread": "paused",
+        "resume_thread": "open",
+        "resolve_thread": "resolved",
+    }
+    _WRONG = {
+        "pause_thread": "open",
+        "resume_thread": "resolved",
+        "resolve_thread": "paused",
+    }
+    _SIMPLE_DATA = {"open_question": "要解决什么", "current_state": "有实质进展"}
+    _RESOLVE_DATA = {
+        "open_question": "要解决什么",
+        "current_state": "已满足关闭条件",
+        "closure_summary": "进程已完成",
+        "closure_reason": "关闭条件满足",
+        "closed_at": "2026-09-06",
+    }
+
+    def setUp(self):
+        self.threads = _threads_by_id(
+            _thread(memory_id=12, state="open"),
+            _thread(memory_id=13, state="paused", key="topic.paused"),
+        )
+        self.times = _staggered_evidence_times(range(1, 60))
+
+    def _cases(self):
+        return [
+            ("pause_thread", 12, dict(self._SIMPLE_DATA)),
+            ("resume_thread", 13, dict(self._SIMPLE_DATA)),
+            ("resolve_thread", 12, dict(self._RESOLVE_DATA)),
+        ]
+
+    def _parse(self, ops):
+        return parse_rumination_output(
+            json.dumps({"operations": ops}, ensure_ascii=False),
+            evidence_times=self.times,
+            threads_by_id=self.threads,
+        )
+
+    def _op(self, op_type, memory_id, data, thread_state=None):
+        target = self.threads[memory_id]
+        op = {
+            "op": op_type, "reason": "状态推进",
+            "target_memory_id": memory_id,
+            "target_memory_key": target["memory_key"],
+            "target_continuity_id": target["continuity_id"],
+            "target_content_hash": target["content_hash"],
+            "target_thread_state": target["thread_state"],
+            "content": "进程状态推进到新的阶段。",
+            "continuity_data": data,
+            "evidence_message_ids": [3],
+        }
+        if thread_state is not None:
+            op["thread_state"] = thread_state
+        return op
+
+    def test_consistent_thread_state_accepted_with_kind_fixed_value(self):
+        for op_type, memory_id, data in self._cases():
+            with self.subTest(op=op_type):
+                parsed = self._parse([
+                    self._op(op_type, memory_id, data,
+                             thread_state=self._EXPECTED[op_type]),
+                ])
+                self.assertEqual(parsed[0]["op"], op_type)
+                self.assertEqual(parsed[0]["thread_state"], self._EXPECTED[op_type])
+
+    def test_missing_thread_state_passes(self):
+        for op_type, memory_id, data in self._cases():
+            with self.subTest(op=op_type):
+                parsed = self._parse([self._op(op_type, memory_id, data)])
+                self.assertEqual(parsed[0]["op"], op_type)
+                self.assertEqual(parsed[0]["thread_state"], self._EXPECTED[op_type])
+
+    def test_inconsistent_thread_state_rejected(self):
+        for op_type, memory_id, data in self._cases():
+            with self.subTest(op=op_type):
+                with self.assertRaisesRegex(
+                    RuminationPipelineError, "requires thread_state",
+                ):
+                    self._parse([
+                        self._op(op_type, memory_id, data,
+                                 thread_state=self._WRONG[op_type]),
+                    ])
+
+    def test_update_thread_state_mismatch_still_rejected(self):
+        # update_thread 的现有行为不变：thread_state 只能回显当前位置状态。
+        with self.assertRaisesRegex(RuminationPipelineError, "cannot change thread_state"):
+            self._parse([self._op("update_thread", 12, dict(self._SIMPLE_DATA),
+                                  thread_state="paused")])
+
+
+class DbErrorCodeExtractionTests(unittest.TestCase):
+    """F5：Postgrest/APIError 折叠的 DB 错误码还原为结构化 error_code。"""
+
+    def setUp(self):
+        from gateway.memory_rumination import _extract_db_error_code
+        self._extract = _extract_db_error_code
+
+    def test_extracts_from_apireerror_repr(self):
+        exc = Exception(
+            "APIError({'message': 'memory_rumination_invalid_memory_key', "
+            "'code': 'P0001', 'details': None, 'hint': None})"
+        )
+        self.assertEqual(self._extract(exc), "memory_rumination_invalid_memory_key")
+
+    def test_extracts_from_double_quote_json_form(self):
+        exc = Exception(
+            '{"message": "memory_rumination_invalid_memory_key", "code": "P0001"}'
+        )
+        self.assertEqual(self._extract(exc), "memory_rumination_invalid_memory_key")
+
+    def test_extracts_other_memory_prefixes(self):
+        for message, expected in (
+            ("memory_digest_claim_failed", "memory_digest_claim_failed"),
+            ("memory_request_stale_update", "memory_request_stale_update"),
+        ):
+            with self.subTest(message=message):
+                self.assertEqual(
+                    self._extract(Exception({'message': expected})), expected,
+                )
+
+    def test_unrelated_errors_return_none(self):
+        self.assertIsNone(self._extract(Exception("connection refused")))
+        self.assertIsNone(self._extract(Exception("{'message': 'other_error'}")))
+        self.assertIsNone(self._extract(Exception("")))
+
+    def test_commit_rpc_rejection_surfaces_structured_code(self):
+        api_error = Exception(
+            "APIError({'message': 'memory_rumination_invalid_memory_key', "
+            "'code': 'P0001', 'details': None, 'hint': None})"
+        )
+        with (
+            patch("gateway.memory_rumination._rpc_object", side_effect=[
+                {"status": "claimed", "run_id": 71}, api_error,
+            ]),
+            patch("gateway.memory_rumination._fetch_batch_rows", return_value=[]),
+            patch("gateway.memory_rumination._normalize_batch_messages", return_value=[
+                {"id": 101, "conversation_id": "c1", "role": "user",
+                 "content": "消息", "source_time": "2026-09-01T10:00+08:00"},
+            ]),
+            patch("gateway.memory_rumination._load_unfinished_threads", return_value=[]),
+            patch("gateway.memory_rumination._load_own_requests", return_value=[]),
+            patch("gateway.memory_rumination._call_rumination_model",
+                  return_value='{"operations":[]}'),
+            patch("gateway.memory_rumination._set_run_model_name"),
+            patch("gateway.memory_rumination._update_heartbeat"),
+            patch("gateway.memory_rumination._mark_failed") as mark_failed,
+        ):
+            with self.assertRaises(RuminationPipelineError) as raised:
+                run_rumination_batch("assistant-1", "rumination_manual", (101, 160, 60), first_batch=False)
+        self.assertEqual(raised.exception.code, "memory_rumination_invalid_memory_key")
+        self.assertEqual(raised.exception.status_code, 500)
+        mark_failed.assert_called_once_with(
+            71, "memory_rumination_invalid_memory_key",
+            "commit/claim RPC rejected: memory_rumination_invalid_memory_key",
+        )
+
+    def test_claim_rpc_rejection_surfaces_structured_code(self):
+        api_error = Exception(
+            "APIError({'message': 'memory_rumination_invalid_trigger', "
+            "'code': 'P0001', 'details': None, 'hint': None})"
+        )
+        with (
+            patch("gateway.memory_rumination._rpc_object", side_effect=[api_error]),
+            patch("gateway.memory_rumination._mark_failed") as mark_failed,
+        ):
+            with self.assertRaises(RuminationPipelineError) as raised:
+                run_rumination_batch("assistant-1", "rumination_manual", (101, 160, 60), first_batch=False)
+        self.assertEqual(raised.exception.code, "memory_rumination_invalid_trigger")
+        self.assertIn(
+            "commit/claim RPC rejected: memory_rumination_invalid_trigger",
+            str(raised.exception),
+        )
+        mark_failed.assert_not_called()
+
+
+class ClaimInvalidScheduledExecutionTests(unittest.TestCase):
+    """F6：claim 状态 invalid_scheduled_execution 有专属错误码（409）。"""
+
+    def test_invalid_scheduled_execution_maps_to_dedicated_code(self):
+        with (
+            patch("gateway.memory_rumination._rpc_object", return_value={
+                "status": "invalid_scheduled_execution",
+            }),
+            patch("gateway.memory_rumination._mark_failed") as mark_failed,
+        ):
+            with self.assertRaises(RuminationPipelineError) as raised:
+                run_rumination_batch("assistant-1", "rumination_manual", (101, 160, 60), first_batch=False)
+        self.assertEqual(raised.exception.code, "invalid_scheduled_execution")
+        self.assertEqual(raised.exception.status_code, 409)
+        mark_failed.assert_not_called()
+
+
+class AbsorbCandidateThreadExclusionTests(unittest.TestCase):
+    """F7：候选列表一律排除 thread（不再有闭合状态例外）。"""
+
+    def test_threads_never_listed_as_absorbable(self):
+        from gateway.memory_rumination import _load_absorbable_candidates
+
+        rows = [
+            {"id": 101, "continuity_type": "thread", "producer_path": "fast_path",
+             "is_active": True, "verified": "verified", "title": "进行中的线索",
+             "evidence_message_ids": [101], "memory_key": None,
+             "thread_state": "open"},
+            {"id": 102, "continuity_type": "thread", "producer_path": "fast_path",
+             "is_active": True, "verified": "verified", "title": "已解决线索",
+             "evidence_message_ids": [101], "memory_key": "topic.done",
+             "thread_state": "resolved"},
+            {"id": 103, "continuity_type": "moment", "producer_path": "fast_path",
+             "is_active": True, "verified": "verified", "title": "普通时刻",
+             "evidence_message_ids": [101], "memory_key": None,
+             "thread_state": None},
+        ]
+        fake = _FakeClient({"memories": rows})
+        with patch("gateway.memory_rumination.get_client", return_value=fake):
+            candidates = _load_absorbable_candidates("assistant-1", [{"id": 101}])
+        self.assertEqual([candidate["memory_id"] for candidate in candidates], [103])
+
+
+class TargetSnapshotKeyNormalizationTests(unittest.TestCase):
+    """F8-1：target_memory_key 回显统一归一化为 casefold 形式。
+
+    DB 用 btrim 后精确比较（不 lower）：模型大写回显若原样透传会被 DB 拒绝。
+    """
+
+    def test_uppercase_echo_is_normalized_to_lowercase(self):
+        threads = _threads_by_id(_thread(memory_id=12, state="open", key="topic.x"))
+        parsed = parse_rumination_output(
+            json.dumps({"operations": [_op(target_memory_key="TOPIC.X")]},
+                       ensure_ascii=False),
+            evidence_times=_staggered_evidence_times(range(1, 60)),
+            threads_by_id=threads,
+        )
+        self.assertEqual(parsed[0]["target_memory_key"], "topic.x")
+
+
+class RuminationStatusThresholdTests(unittest.TestCase):
+    """F8-3：threshold_met 与首跑分支同口径（未初始化只要有积压即可执行）。"""
+
+    def _status(self, *, initialized, backlog):
+        cursor = {
+            "assistant_id": "assistant-1",
+            "initialized": initialized,
+            "last_processed_message_id": 100,
+            "last_scheduled_date": None,
+            "last_success_at": None,
+        }
+        with (
+            patch("gateway.memory_rumination.resolve_rumination_assistant_id",
+                  return_value="assistant-1"),
+            patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
+            patch("gateway.memory_rumination._backlog_count", return_value=backlog),
+            patch("gateway.memory_rumination._model_config", return_value=("u", "k", "m")),
+            patch("gateway.memory_rumination._rumination_analysis_configured",
+                  return_value=True),
+            patch("gateway.memory_rumination.list_rumination_runs", return_value=[]),
+        ):
+            return get_rumination_status()
+
+    def test_uninitialized_cursor_with_any_backlog_meets_threshold(self):
+        self.assertFalse(self._status(initialized=False, backlog=0)["threshold_met"])
+        self.assertTrue(self._status(initialized=False, backlog=1)["threshold_met"])
+
+    def test_initialized_cursor_always_meets_threshold(self):
+        self.assertTrue(self._status(initialized=True, backlog=0)["threshold_met"])
+
+
+class DigestSkipReasonTests(unittest.TestCase):
+    """F8-4：digest 汇总的 reason 取首个 skipped 结果携带的原因（claim 状态）。"""
+
+    def test_skip_reason_reflects_claim_status(self):
+        cursor = {
+            "assistant_id": "assistant-1", "initialized": True,
+            "last_processed_message_id": 100, "last_scheduled_date": None,
+            "last_success_at": None,
+        }
+        with (
+            patch("gateway.memory_rumination._rumination_analysis_configured",
+                  return_value=True),
+            patch("gateway.memory_rumination.resolve_rumination_assistant_id",
+                  return_value="assistant-1"),
+            patch("gateway.memory_rumination.get_rumination_cursor", return_value=cursor),
+            patch("gateway.memory_rumination._mark_stale_rumination_runs"),
+            patch(
+                "gateway.memory_rumination._fetch_message_ids",
+                side_effect=[list(range(101, 221)), list(range(221, 341))],
+            ),
+            patch("gateway.memory_rumination._rpc_object",
+                  return_value={"status": "batch_stale"}),
+            patch("gateway.memory_rumination._call_rumination_model") as model,
+        ):
+            result = run_rumination_digest("rumination_manual")
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "batch_stale")
+        model.assert_not_called()
 
 
 if __name__ == "__main__":

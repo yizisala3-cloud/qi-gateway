@@ -124,6 +124,9 @@ _OP_FIELDS: dict[str, frozenset[str]] = {
         "op", "reason", "evidence_message_ids", "target_memory_id",
         "target_memory_key", "target_continuity_id", "target_content_hash",
         "target_thread_state",
+        # DB 侧 evidence_only 路径支持用 op 携带的 key 回填 keyless
+        # fast_path 接管（与 merge 并集同语义），白名单必须放行。
+        "memory_key",
     }),
     "update_thread": frozenset({
         "op", "reason", "evidence_message_ids", "target_memory_id",
@@ -136,21 +139,21 @@ _OP_FIELDS: dict[str, frozenset[str]] = {
         "op", "reason", "evidence_message_ids", "target_memory_id",
         "target_memory_key", "target_continuity_id", "target_content_hash",
         "target_thread_state",
-        "content", "title", "continuity_data", "memory_key", "memory_time",
+        "content", "title", "thread_state", "continuity_data", "memory_key", "memory_time",
         "time_precision",
     }),
     "resume_thread": frozenset({
         "op", "reason", "evidence_message_ids", "target_memory_id",
         "target_memory_key", "target_continuity_id", "target_content_hash",
         "target_thread_state",
-        "content", "title", "continuity_data", "memory_key", "memory_time",
+        "content", "title", "thread_state", "continuity_data", "memory_key", "memory_time",
         "time_precision",
     }),
     "resolve_thread": frozenset({
         "op", "reason", "evidence_message_ids", "target_memory_id",
         "target_memory_key", "target_continuity_id", "target_content_hash",
         "target_thread_state",
-        "content", "title", "continuity_data", "memory_key", "memory_time",
+        "content", "title", "thread_state", "continuity_data", "memory_key", "memory_time",
         "time_precision",
     }),
     "create_request": frozenset({
@@ -247,12 +250,12 @@ RUMINATION_SYSTEM_PROMPT = """你是“反刍连续感”提取器，负责在�
 7. 目标 thread 操作的 target_memory_id 必须来自 <unfinished_threads>，并且必须逐字回显该 thread 的快照字段：target_memory_key（无 key 的 fast_path thread 回显 null）、target_continuity_id、target_content_hash、target_thread_state。快照缺失、写错或与输入不一致时整批被拒绝；回显快照用于确保你提交时的判断仍基于读取时的状态。
 8. content 是完整、独立可理解的正文（5-3000 字符），不写“今天/昨天”等相对时间；绝对时间放 memory_time，无法可靠确定时填 null 且 time_precision=unknown。
 9. 每条操作的 content 建议控制在 25–2000 字符，优先简洁、完整、独立可理解。内容简单时可以更短，不要为了凑长度扩写；确有必要时可超过建议长度，但必须符合 5–3000 字符的硬性范围。长度要求针对每条正文，不是整个 JSON 输出。
-9. recall_scene 是以后触发召回的场景描述，不是正文复制；无法确定填 null。recall_tags 来自原文真实依据，没有就留空数组。
-10. 不输出 API Key、Token、密码、service_role 等秘密。
-11. 已有实质相同的 pending 反刍申请时不要再提交；rejected/duplicate/conflict 的申请只有在出现拒绝之后的新原文证据时才能重新提交。
-12. 没有新证据的长期进程不要重写；不确定时选择 ignore 或 evidence_only。
-13. 同一条 thread 在本批出现多个连续进展时（例如上午完成、下午部署、晚上验收），必须把它们合并为一个操作：content 写最终完整当前状态，evidence_message_ids 取各进展消息的并集，按证据时间得到的最终状态决定操作类型；不要为同一 thread 输出多个版本操作。
-14. create_request 与 create_memory（moment/inside_joke）可以带可选的 absorbed_fast_path_memory_ids：仅当该操作明确吸收或覆盖某条快速路径正式记忆时才列出其 memory_id（最多 8 条）。只能引用 <absorbable_fast_path_memories> 中列出的候选 ID——该列表为空时禁止输出任何吸收 ID；候选之外的任何 ID（包括碰巧真实存在的记忆）都会整批拒绝。候选只提供最小元数据（id、类型、标题、证据 ID），不含完整正文；吸收判断以你本批原文证据为准。不得因为 evidence_message_ids 相同就吸收所有候选——相同原文可以合法支撑不同分类和不同语义。不能确定目标时省略该字段。thread 的生命周期请使用专门的 thread 操作，不要通过吸收来处置 thread。
+10. recall_scene 是以后触发召回的场景描述，不是正文复制；无法确定填 null。recall_tags 来自原文真实依据，没有就留空数组。
+11. 不输出 API Key、Token、密码、service_role 等秘密。
+12. 已有实质相同的 pending 反刍申请时不要再提交；rejected/duplicate/conflict 的申请只有在出现拒绝之后的新原文证据时才能重新提交。
+13. 没有新证据的长期进程不要重写；不确定时选择 ignore 或 evidence_only。
+14. 同一条 thread 在本批出现多个连续进展时（例如上午完成、下午部署、晚上验收），必须把它们合并为一个操作：content 写最终完整当前状态，evidence_message_ids 取各进展消息的并集，按证据时间得到的最终状态决定操作类型；不要为同一 thread 输出多个版本操作。
+15. create_request 与 create_memory（moment/inside_joke）可以带可选的 absorbed_fast_path_memory_ids：仅当该操作明确吸收或覆盖某条快速路径正式记忆时才列出其 memory_id（最多 8 条）。只能引用 <absorbable_fast_path_memories> 中列出的候选 ID——该列表为空时禁止输出任何吸收 ID；候选之外的任何 ID（包括碰巧真实存在的记忆）都会整批拒绝。候选只提供最小元数据（id、类型、标题、证据 ID），不含完整正文；吸收判断以你本批原文证据为准。不得因为 evidence_message_ids 相同就吸收所有候选——相同原文可以合法支撑不同分类和不同语义。不能确定目标时省略该字段。thread 的生命周期请使用专门的 thread 操作，不要通过吸收来处置 thread。
 
 ## 字段规则
 - memory_type 是已经退役的旧字段，绝对禁止输出。
@@ -268,6 +271,14 @@ RUMINATION_SYSTEM_PROMPT = """你是“反刍连续感”提取器，负责在�
 - 如果 unfinished_threads 中的 fast_path thread 的 memory_key 为 null，
   而你无法根据聊天内容确定稳定的 ASCII memory_key，
   不要输出 adopt_thread。请选择 ignore。
+- 对 <unfinished_threads> 中 maintained_by=fast_path 且 memory_key 为 null 的
+  thread：除 adopt_thread 外的任何 thread 操作（evidence_only / update_thread /
+  pause_thread / resume_thread / resolve_thread）都必须在操作中提供稳定的
+  memory_key，系统会同时完成接管并回填该 key；无法确定稳定 memory_key 时，
+  对该 thread 只能输出 ignore，不得输出其它任何操作。
+- pause_thread / resume_thread / resolve_thread 的 thread_state 由系统按操作
+  类型自动设定，不需要输出；如果你输出了，必须与操作类型一致
+  （paused / open / resolved），不一致整批拒绝。
 
 ## continuity_data 结构
 continuity_data 必须是内联 JSON 对象，不能是字符串、不能是转义后的 JSON 文本、不能是 null。
@@ -363,6 +374,20 @@ def _rpc_object(name: str, params: dict[str, Any]) -> dict[str, Any]:
             "database_response_error", f"{name} returned an invalid response", 500,
         )
     return data
+
+
+# PostgREST/APIError 把 PL/pgSQL raise 的错误码折叠进 repr（如
+# "APIError({'message': 'memory_rumination_invalid_memory_key', ...})"）。
+# 这里把它还原成结构化错误码，run 记录不再只看到 pipeline_error。
+_DB_ERROR_CODE_PATTERN = re.compile(
+    r"['\"]?message['\"]?\s*[:=]\s*['\"](memory_(?:rumination|digest|request)_[a-z0-9_]+)['\"]"
+)
+
+
+def _extract_db_error_code(exc: BaseException) -> str | None:
+    """Pull a known memory_* raise code out of a PostgREST/APIError repr."""
+    match = _DB_ERROR_CODE_PATTERN.search(str(exc))
+    return match.group(1) if match else None
 
 
 def get_rumination_cursor(assistant_id: str) -> dict[str, Any]:
@@ -510,8 +535,8 @@ def _load_absorbable_candidates(
     候选只暴露吸收判断所需的最小元数据（memory_id、continuity_type、title、
     evidence_message_ids、memory_key、thread_state）：五类正式记忆的完整正文
     仍不进入模型输入，标题（≤100 字符的短标签）仅用于把候选与本批原文对齐。
-    候选围绕本批证据交集生成，绝不把全部正式记忆列给模型；closed thread 不
-    是合法吸收目标，直接排除。
+    候选围绕本批证据交集生成，绝不把全部正式记忆列给模型；thread 一律不是
+    吸收目标（其生命周期只走专门的 thread 操作），无论其闭合状态如何都排除。
     """
     evidence_ids = sorted({int(row["id"]) for row in batch_rows})
     if not evidence_ids:
@@ -535,10 +560,7 @@ def _load_absorbable_candidates(
     )
     candidates = []
     for row in response.data or []:
-        if (
-            row.get("continuity_type") == "thread"
-            and row.get("thread_state") in ("resolved", "dissolved", "abandoned")
-        ):
+        if row.get("continuity_type") == "thread":
             continue
         candidates.append({
             "memory_id": int(row["id"]),
@@ -987,6 +1009,23 @@ def parse_rumination_output(
             # of a fast-path takeover; it never re-keys a rumination thread.
             if raw.get("memory_key"):
                 op["memory_key"] = _normalize_memory_key(raw.get("memory_key"), op_type=op_type)
+            # DB 契约镜像（20260915010000/20260918010000 commit_rumination_batch）：
+            # 非 adopt 操作命中 keyless fast_path 目标时必须自带稳定 memory_key，
+            # 否则提交 RPC 会整批拒绝。这里降级为单操作 ignore，与 adopt 的
+            # keyless 跳过保持同一形态，避免批次级活锁。
+            if (
+                op_type != "adopt_thread"
+                and target.get("maintained_by") == "fast_path"
+                and target.get("memory_key") is None
+                and not op.get("memory_key")
+            ):
+                validated.append({
+                    "op": "ignore",
+                    "reason": "无法对 keyless fast_path thread 执行该操作：需先提供稳定 "
+                              "memory_key 完成接管（或使用 adopt_thread）；本批跳过该操作",
+                    "evidence_message_ids": list(op["evidence_message_ids"]),
+                })
+                continue
 
         if op_type == "ignore":
             validated.append(op)
@@ -1188,6 +1227,15 @@ def parse_rumination_output(
                 "resume_thread": "open",
                 "resolve_thread": "resolved",
             }[op_type]
+            # DB 对这三类操作按类型取固定状态、忽略 op 携带的 thread_state
+            # （20260918010000:762-768 kind-fixed）；模型若回显了该字段，
+            # 必须与操作类型一致，否则是明显的语义错误，整批拒绝。
+            raw_op_state = str(raw.get("thread_state") or "").strip().casefold()
+            if raw_op_state and raw_op_state != expected_state:
+                raise RuminationPipelineError(
+                    "model_schema_error",
+                    f"{op_type} requires thread_state='{expected_state}'",
+                )
             op["thread_state"] = expected_state
             continuity_data = _try_validate_continuity_data(
                 "thread", expected_state, raw.get("continuity_data"),
@@ -1591,7 +1639,9 @@ def _validated_target_snapshot(
             f"target_thread_state snapshot mismatch for memory {target.get('id')}",
         )
     return {
-        "target_memory_key": snapshot_key if snapshot_key else None,
+        # DB 用 btrim 后精确比较（不 lower）：回显统一归一化为比较用的
+        # casefold 形式，避免模型大写回显原样透传后被 DB 拒绝。
+        "target_memory_key": str(snapshot_key).strip().casefold() if snapshot_key else None,
         "target_continuity_id": snapshot_id,
         "target_content_hash": snapshot_hash,
         "target_thread_state": snapshot_state,
@@ -2048,15 +2098,25 @@ def run_rumination_batch(
     if trigger not in RUMINATION_TRIGGERS:
         raise ValueError("unsupported rumination trigger")
 
-    claim = _rpc_object("claim_rumination_batch", {
-        "p_assistant_id": assistant_id,
-        "p_trigger": trigger,
-        "p_first_message_id": first_id,
-        "p_last_message_id": last_id,
-        "p_message_count": count,
-        "p_first_batch": bool(first_batch),
-        "p_scheduled_execution_id": scheduled_execution_id,
-    })
+    try:
+        claim = _rpc_object("claim_rumination_batch", {
+            "p_assistant_id": assistant_id,
+            "p_trigger": trigger,
+            "p_first_message_id": first_id,
+            "p_last_message_id": last_id,
+            "p_message_count": count,
+            "p_first_batch": bool(first_batch),
+            "p_scheduled_execution_id": scheduled_execution_id,
+        })
+    except Exception as exc:
+        # claim 阶段的 DB 拒绝（memory_rumination_invalid_trigger /
+        # memory_rumination_invalid_batch）同样还原为结构化错误码。
+        db_code = _extract_db_error_code(exc)
+        if db_code:
+            raise RuminationPipelineError(
+                db_code, f"commit/claim RPC rejected: {db_code}", 500,
+            ) from exc
+        raise
     if claim.get("status") == "already_running":
         raise RuminationPipelineError(
             "already_running", "Another rumination batch is already running", 409,
@@ -2066,6 +2126,11 @@ def run_rumination_batch(
         "already_scheduled_today",
     }:
         return {"status": "skipped", "reason": claim.get("status"), "cursor": claim.get("cursor")}
+    if claim.get("status") == "invalid_scheduled_execution":
+        raise RuminationPipelineError(
+            "invalid_scheduled_execution",
+            "Scheduled execution identity is invalid or no longer running", 409,
+        )
     if claim.get("status") != "claimed":
         raise RuminationPipelineError(
             "commit_failed", "Failed to claim a rumination batch", 500,
@@ -2146,6 +2211,16 @@ def run_rumination_batch(
             run_id, assistant_id, trigger, first_id, last_id, count,
             stage, type(exc).__name__,
         )
+        db_code = _extract_db_error_code(exc)
+        if db_code:
+            # DB 侧拒绝（如 memory_rumination_invalid_memory_key）以结构化
+            # 错误码落库，不再折叠成 pipeline_error: APIError {...}。
+            _mark_failed(run_id, db_code, f"commit/claim RPC rejected: {db_code}")
+            wrapped = RuminationPipelineError(
+                db_code, f"commit/claim RPC rejected: {db_code}", 500,
+            )
+            wrapped.scheduled_execution_id = scheduled_execution_id
+            raise wrapped from exc
         _mark_failed(run_id, "pipeline_error", f"{type(exc).__name__}: {str(exc)[:1200]}")
         wrapped = RuminationPipelineError(
             "pipeline_error", "Rumination pipeline failed", 500,
@@ -2330,6 +2405,10 @@ def run_rumination_digest(trigger: str = "rumination_manual") -> dict[str, Any]:
     skipped_only = results and all(
         item.get("status") == "skipped" for item in results
     )
+    skip_reason = next(
+        (item.get("reason") for item in results if item.get("status") == "skipped"),
+        None,
+    )
     cursor_after = next(
         (
             item["cursor_after"]
@@ -2342,7 +2421,7 @@ def run_rumination_digest(trigger: str = "rumination_manual") -> dict[str, Any]:
         "status": (
             "failed" if failed else ("skipped" if skipped_only else "succeeded")
         ),
-        "reason": "already_scheduled_today" if skipped_only else None,
+        "reason": skip_reason if skipped_only else None,
         "trigger": trigger,
         "assistant_id": assistant_id,
         "batch_count": len(results),
@@ -2442,7 +2521,9 @@ def get_rumination_status() -> dict[str, Any]:
     initialized = bool(cursor.get("initialized"))
     backlog = _backlog_count(assistant_id, cursor_id)
     _, _, model = _model_config()
-    threshold_met = bool(initialized) or backlog >= RUMINATION_BATCH_MIN
+    # 与首跑分支同口径：未初始化游标的首跑没有 60 条门槛，只要有消息即可
+    # 执行；已初始化时按日常批次门槛判定。
+    threshold_met = bool(initialized) or backlog >= 1
     return {
         "assistant_id": assistant_id,
         "configured": _rumination_analysis_configured(),

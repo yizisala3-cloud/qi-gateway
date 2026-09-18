@@ -3347,8 +3347,12 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
                 )
                 self._assert_absorb_rejected(request_id, fast_id)
 
-    def test_snapshot_rejects_thread_state_change(self):
-        # thread_state 变化必须作用在 thread 目标上：seed 一个 fast_path thread。
+    def test_thread_absorb_target_rejected_on_approve(self):
+        # 20260919010000 起 thread 一律不是吸收目标：create_request 在提交侧
+        # 已拒绝，这里用 SQL 模拟迁移前创建的在途申请（吸收目标指向 open
+        # thread，创建时快照齐备）。结构复核先于快照比对：通过审核一律被
+        # memory_rumination_absorb_target_invalid 拒绝，申请保持 pending，
+        # 审核人应拒绝该申请（可接受，不做数据订正）。
         digest = hashlib.md5(b"thread-state-change").hexdigest()
         uuid = f"21111111-1111-1111-1111-1111111116{digest[:2]}"
         content = "快速路径线索：约定一起补完旅行手账的后续。".replace("的后续", "")
@@ -3378,19 +3382,28 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             "content_hash = %s", (_sha256(content),),
         )
         self.assertIsNotNone(fast_id)
+        moment_id = self._fast_path_moment(
+            "快速路径片段：thread 吸收守护用例的占位目标。",
+            "21111111-1111-1111-1111-1111111160a1",
+        )
         request_id = self._seed_absorb_request(
-            fast_id, content="反刍吸收快速路径线索的episode经历（thread_state 用例）。",
+            moment_id, content="反刍吸收快速路径线索的episode经历（thread_state 用例）。",
         )
         self.conn.execute(
-            "update public.memories set thread_state = 'paused' where id = %s",
-            (fast_id,),
+            "update public.memory_requests set "
+            "absorbed_fast_path_memory_ids = array[%s::bigint], "
+            "absorbed_fast_path_memory_snapshots = ("
+            "  select jsonb_build_array(public.build_absorb_target_snapshot(m)) "
+            "  from public.memories m where m.id = %s) "
+            "where id = %s",
+            (fast_id, fast_id, request_id),
         )
         with self.assertRaises(Exception) as raised:
             self._approve_absorb_request(
                 request_id, "反刍吸收快速路径线索的episode经历（thread_state 用例通过稿）。"
             )
         self.assertIn(
-            "memory_rumination_absorb_target_changed", str(raised.exception),
+            "memory_rumination_absorb_target_invalid", str(raised.exception),
         )
         self._assert_absorb_rejected(request_id, fast_id)
 
@@ -3824,6 +3837,362 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             (["猎户座"], 50),
         )
         self.assertIn(open_id, [row[0] for row in rows])
+
+    # -- continuity merge + thread absorb guard (20260919010000) ------------
+
+    def _seed_hidden_field_thread(self, key, uuid_text, content):
+        """Thread whose continuity_data carries non-projected fields
+        (opened_at + retrieval hints) the model input never exposes."""
+        self.conn.execute(
+            "insert into public.memory_continuity_objects (continuity_id, assistant_id) "
+            "values (%s::uuid, 'a-rumination') on conflict (continuity_id) do nothing",
+            (uuid_text,),
+        )
+        self.conn.execute(
+            "insert into public.memories ("
+            "content, title, tags, importance, embedding, source, verified, is_active, "
+            "assistant_id, confidence, content_hash, memory_key, "
+            "continuity_id, continuity_schema_version, continuity_data, "
+            "continuity_type, thread_state, evidence_message_ids, "
+            "evidence_start_time, evidence_end_time, evidence_time_precision, "
+            "producer_path, maintained_by"
+            ") values ("
+            "%s, '可见字段合并契约', '{thread}', 6, '[0.6,0.6,0.6]', 'rumination', "
+            "'verified', true, 'a-rumination', 0.9, %s, %s, "
+            "%s::uuid, 1, "
+            "'{\"open_question\": \"结构更新是否生效\", \"current_state\": \"初始状态\", "
+            "\"closure_criteria\": [\"完成\"], \"opened_at\": \"2026-09-01\", "
+            "\"abstract_retrieval_hints\": [\"赶海回顾\"]}'::jsonb, "
+            "'thread', 'open', '{501,502}', "
+            "'2026-09-01 10:00+08', '2026-09-01 10:01+08', 'minute', "
+            "'rumination', 'rumination'"
+            ") on conflict (content_hash) do nothing",
+            (content, _sha256(content), key, uuid_text),
+        )
+        found = self._active_memory("memory_key = %s", (key,))
+        assert found is not None, f"thread fixture not seeded: {key}"
+        return found
+
+    def _hidden_field_baseline(self, memory_id):
+        return self._query_one(
+            "select continuity_data from public.memories where id = %s", (memory_id,),
+        )
+
+    def test_continuity_merge_preserves_invisible_fields_on_versioned_update(self):
+        self._set_cursor(initialized=True, value=520)
+        content = "可见字段合并契约线程 A 的更新正文。"
+        merged_id = self._seed_hidden_field_thread(
+            "topic.merge.versioned", "21111111-1111-1111-1111-1111111112b1", content,
+        )
+        baseline = self._hidden_field_baseline(merged_id)
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [{
+            "op": "update_thread", "reason": "可见字段更新",
+            "target_memory_id": merged_id,
+            **self._thread_snapshot(merged_id),
+            "thread_state": "open",
+            "content": content,
+            "continuity_data": {
+                "open_question": "结构更新是否生效", "current_state": "已更新状态",
+                "closure_criteria": ["完成"],
+            },
+            "continuity_baseline": baseline,
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "importance": 6, "confidence": 0.9,
+            "embedding": "[0.6,0.6,0.6]",
+        }])
+        self.assertEqual(result["op_counts"]["updated_versions"], 1)
+        row = self._query_row(
+            "select continuity_data->>'current_state', continuity_data->>'opened_at', "
+            "continuity_data->'abstract_retrieval_hints' from public.memories "
+            "where memory_key = 'topic.merge.versioned' and is_active",
+        )
+        self.assertEqual(row[0], "已更新状态")
+        self.assertEqual(row[1], "2026-09-01")
+        self.assertEqual(row[2], ["赶海回顾"])
+        self.assertEqual(self._cursor(), 522)
+
+    def test_continuity_merge_preserves_invisible_fields_on_in_place_update(self):
+        self._set_cursor(initialized=True, value=520)
+        content = "可见字段合并契约线程 B 的当前正文。"
+        merged_id = self._seed_hidden_field_thread(
+            "topic.merge.inplace", "21111111-1111-1111-1111-1111111112b2", content,
+        )
+        baseline = self._hidden_field_baseline(merged_id)
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [{
+            "op": "update_thread", "reason": "原地结构更新",
+            "target_memory_id": merged_id,
+            **self._thread_snapshot(merged_id),
+            "thread_state": "open",
+            "content": content,
+            "continuity_data": {
+                "open_question": "结构更新是否生效", "current_state": "原地结构更新",
+                "closure_criteria": ["完成"],
+            },
+            "continuity_baseline": baseline,
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "importance": 6, "confidence": 0.9,
+            "embedding": "[0.6,0.6,0.6]",
+        }])
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "structure_updated_in_place",
+        )
+        row = self._query_row(
+            "select continuity_data->>'current_state', continuity_data->>'opened_at', "
+            "continuity_data->'abstract_retrieval_hints' from public.memories "
+            "where id = %s",
+            (merged_id,),
+        )
+        self.assertEqual(row[0], "原地结构更新")
+        self.assertEqual(row[1], "2026-09-01")
+        self.assertEqual(row[2], ["赶海回顾"])
+
+    def test_unchanged_visible_fields_with_baseline_degrade_to_evidence_merge(self):
+        # 修复前：模型无法回显的不可见字段（opened_at/hints）差异会把同正文
+        # 未变的表达顶成 structure_updated_in_place；合并后正确降级。
+        self._set_cursor(initialized=True, value=520)
+        content = "可见字段合并契约线程 C 的当前正文。"
+        merged_id = self._seed_hidden_field_thread(
+            "topic.merge.unchanged", "21111111-1111-1111-1111-1111111112b3", content,
+        )
+        baseline = self._hidden_field_baseline(merged_id)
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [{
+            "op": "update_thread", "reason": "重复表达",
+            "target_memory_id": merged_id,
+            **self._thread_snapshot(merged_id),
+            "thread_state": "open",
+            "content": content,
+            "continuity_data": {
+                "open_question": "结构更新是否生效", "current_state": "初始状态",
+                "closure_criteria": ["完成"],
+            },
+            "continuity_baseline": baseline,
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "importance": 6, "confidence": 0.9,
+            "embedding": "[0.6,0.6,0.6]",
+        }])
+        self.assertEqual(result["op_counts"]["evidence_only"], 1)
+        self.assertEqual(
+            result["preview"][0]["commit_status"], "evidence_merged_unchanged",
+        )
+        # 不可见字段仍在。
+        self.assertEqual(self._query_one(
+            "select continuity_data->>'opened_at' from public.memories where id = %s",
+            (merged_id,),
+        ), "2026-09-01")
+
+    def test_baseline_missing_direct_call_replaces_continuity_wholesale(self):
+        # 兼容守护：不携带 continuity_baseline 的直接调用保持旧行为（整包
+        # 替换，不可见字段不保留）。
+        self._set_cursor(initialized=True, value=520)
+        content = "可见字段合并契约线程 D 的更新正文。"
+        merged_id = self._seed_hidden_field_thread(
+            "topic.merge.nobaseline", "21111111-1111-1111-1111-1111111112b4", content,
+        )
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [{
+            "op": "update_thread", "reason": "无基线直调",
+            "target_memory_id": merged_id,
+            **self._thread_snapshot(merged_id),
+            "thread_state": "open",
+            "content": content,
+            "continuity_data": {
+                "open_question": "结构更新是否生效", "current_state": "已更新状态",
+                "closure_criteria": ["完成"],
+            },
+            "evidence_message_ids": [521],
+            "content_hash": _sha256(content),
+            "importance": 6, "confidence": 0.9,
+            "embedding": "[0.6,0.6,0.6]",
+        }])
+        self.assertEqual(result["op_counts"]["updated_versions"], 1)
+        row = self._query_row(
+            "select continuity_data->>'current_state', continuity_data->>'opened_at' "
+            "from public.memories where memory_key = 'topic.merge.nobaseline' "
+            "and is_active",
+        )
+        self.assertEqual(row[0], "已更新状态")
+        self.assertIsNone(row[1])
+
+    def test_keyless_fast_path_non_adopt_without_key_still_rejected_at_commit(self):
+        # 回归守护：绕过解析器直接 commit 无 key 的非 adopt 操作，DB 的
+        # memory_rumination_invalid_memory_key 仍是最后防线，整批回滚。
+        self._set_cursor(initialized=True, value=520)
+        content = "快速路径线程 G：无 key 非 adopt 拒绝正文。"
+        fp_id = self._seed_fast_path_thread(
+            "topic.fp.guard", "21111111-1111-1111-1111-1111111112a7", content, None,
+        )
+        run_id = self._claim(521, 522)
+        with self.assertRaises(Exception) as raised:
+            self._commit(run_id, [self._fast_path_update_op(
+                fp_id, "结构已更新", content=content,
+            )])
+        self.assertIn("memory_rumination_invalid_memory_key", str(raised.exception))
+        self.assertEqual(self._cursor(), 520)
+        row = self._query_row(
+            "select maintained_by, memory_key from public.memories where id = %s",
+            (fp_id,),
+        )
+        self.assertEqual(row[0], "fast_path")
+        self.assertIsNone(row[1])
+
+    def test_open_thread_absorb_target_rejected_at_commit(self):
+        # F7：open fast_path thread 不是合法吸收目标（create_memory 与
+        # create_request 一致拒绝）。
+        thread_id = self._seed_fast_path_thread(
+            "topic.fp.absorb", "21111111-1111-1111-1111-1111111112a8",
+            "快速路径线程 H：开放线索不可吸收。", None,
+        )
+        moment_content = "带开放 thread 吸收目标的操作原文。"
+        for op_type, extra in (
+            ("create_memory", {
+                "continuity_type": "moment",
+                "continuity_data": {
+                    "scene": "聊天窗口", "event": "直接记忆", "moment_state": "standalone",
+                },
+            }),
+            ("create_request", {
+                "continuity_type": "episode",
+                "continuity_data": EPISODE_DATA,
+            }),
+        ):
+            with self.subTest(op=op_type):
+                self._set_cursor(initialized=True, value=520)
+                run_id = self._claim(521, 522)
+                with self.assertRaises(Exception) as raised:
+                    self._commit(run_id, [{
+                        "op": op_type, "reason": "吸收守护验证",
+                        "content": moment_content,
+                        "evidence_message_ids": [521],
+                        "content_hash": _sha256(moment_content),
+                        "embedding": "[0.2,0.2,0.2]",
+                        "importance": 5, "confidence": 0.8,
+                        "absorbed_fast_path_memory_ids": [thread_id],
+                        **extra,
+                    }])
+                self.assertIn(
+                    "memory_rumination_absorb_target_invalid", str(raised.exception),
+                )
+                self.assertEqual(self._cursor(), 520)
+                # 目标 thread 仍活跃，事务完整回滚。
+                self.assertTrue(self._active_memory("id = %s", (thread_id,)))
+                # 失败提交的 run 仍持有 30 分钟租约：显式关闭后下一个
+                # subtest 才能重新 claim。
+                self.conn.execute(
+                    "update public.memory_digest_runs set status = 'failed', "
+                    "error_code = 'test_cleanup' where id = %s", (run_id,),
+                )
+                # 审核侧（review v5）对 thread 吸收目标的拒绝由
+                # test_thread_absorb_target_rejected_on_approve 覆盖。
+
+    def test_evidence_only_key_conflict_rejects_batch(self):
+        # 复审跟进守卫：op 携带的 key 与任一活跃记忆冲突时，evidence_only
+        # 对 keyless fast_path 目标的回填整批拒绝（修复前是裸 23505 唯一
+        # 约束错误），游标不推进、目标行的 key 未被改写。
+        self._set_cursor(initialized=True, value=520)
+        self._seed_structure_thread(
+            "topic.evidence.clash", "21111111-1111-1111-1111-1111111112c1",
+            "key 冲突守卫的占位活跃线索正文。",
+        )
+        content = "快速路径线程 J：evidence_only 冲突守卫。"
+        fp_id = self._seed_fast_path_thread(
+            "topic.evidence.clash.fp", "21111111-1111-1111-1111-1111111112c2",
+            content, None,
+        )
+        run_id = self._claim(521, 522)
+        with self.assertRaises(Exception) as raised:
+            self._commit(run_id, [{
+                "op": "evidence_only", "reason": "冲突回填",
+                "target_memory_id": fp_id,
+                **self._thread_snapshot(fp_id),
+                "memory_key": "topic.evidence.clash",
+                "evidence_message_ids": [521],
+            }])
+        self.assertIn(
+            "memory_rumination_memory_key_conflict", str(raised.exception),
+        )
+        self.assertEqual(self._cursor(), 520)
+        row = self._query_row(
+            "select maintained_by, memory_key from public.memories where id = %s",
+            (fp_id,),
+        )
+        self.assertEqual(row[0], "fast_path")
+        self.assertIsNone(row[1])
+
+    def test_evidence_only_key_backfills_keyless_fast_path_target(self):
+        # 回归：keyless fast_path thread + 未占用的合法 key → 回填成功、
+        # maintained_by 翻转为 rumination、写 adopt_thread handoff 行
+        # （该回填路径此前没有 DB 级测试）。
+        self._set_cursor(initialized=True, value=520)
+        content = "快速路径线程 K：evidence_only 回填正文。"
+        fp_id = self._seed_fast_path_thread(
+            "topic.evidence.fill", "21111111-1111-1111-1111-1111111112c3",
+            content, None,
+        )
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [{
+            "op": "evidence_only", "reason": "补充证据并接管",
+            "target_memory_id": fp_id,
+            **self._thread_snapshot(fp_id),
+            "memory_key": "topic.evidence.filled",
+            "evidence_message_ids": [521],
+        }])
+        self.assertEqual(result["op_counts"]["evidence_only"], 1)
+        self.assertEqual(result["op_counts"]["adopted_threads"], 1)
+        row = self._query_row(
+            "select maintained_by, memory_key, "
+            "evidence_message_ids @> '{501,502,521}' from public.memories "
+            "where id = %s",
+            (fp_id,),
+        )
+        self.assertEqual(row[0], "rumination")
+        self.assertEqual(row[1], "topic.evidence.filled")
+        self.assertTrue(row[2])
+        handoff = self._query_row(
+            "select kind, memory_key from public.memory_path_handoffs "
+            "where run_id = %s",
+            (run_id,),
+        )
+        self.assertEqual(handoff[0], "adopt_thread")
+        self.assertEqual(handoff[1], "topic.evidence.filled")
+        self.assertEqual(self._cursor(), 522)
+
+    def test_evidence_only_keeps_existing_key_on_keyed_target(self):
+        # 已有 key 的反刍 thread 上 evidence_only 携带另一个合法 key：提交
+        # 成功但 memory_key 保持原值（静默忽略，与 update 路径同语义）——
+        # 稳定主题键不被静默改写。
+        self._set_cursor(initialized=True, value=520)
+        content = "反刍维护线程 L：evidence_only 不改写 key。"
+        owned_id = self._seed_structure_thread(
+            "topic.evidence.owned", "21111111-1111-1111-1111-1111111112c4", content,
+        )
+        run_id = self._claim(521, 522)
+        result = self._commit(run_id, [{
+            "op": "evidence_only", "reason": "重复表达",
+            "target_memory_id": owned_id,
+            **self._thread_snapshot(owned_id),
+            "memory_key": "topic.evidence.attempted.rekey",
+            "evidence_message_ids": [521],
+        }])
+        self.assertEqual(result["op_counts"]["evidence_only"], 1)
+        self.assertEqual(result["op_counts"]["adopted_threads"], 0)
+        row = self._query_row(
+            "select maintained_by, memory_key from public.memories where id = %s",
+            (owned_id,),
+        )
+        self.assertEqual(row[0], "rumination")
+        self.assertEqual(row[1], "topic.evidence.owned")
+        # 反刍维护目标：无接管记录。
+        self.assertEqual(self._query_one(
+            "select count(*) from public.memory_path_handoffs where run_id = %s",
+            (run_id,),
+        ), 0)
+        self.assertEqual(self._cursor(), 522)
 
 
 if __name__ == "__main__":

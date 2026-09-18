@@ -963,5 +963,158 @@ class TakeoverAndBaselineContractTests(unittest.TestCase):
         )
 
 
+class ContinuityMergeAndAbsorbGuardContractTests(unittest.TestCase):
+    """20260919010000: continuity merge + thread absorb guard + evidence-only key guard.
+
+    F3 merges continuity_data when the gateway attaches the read-time
+    baseline (projected fields from the model output, non-projected fields
+    preserved from the server row; baseline-missing callers keep the legacy
+    whole replacement). F7 makes ANY thread an invalid absorption target
+    across the commit RPC re-checks and the approval re-verification. The
+    review follow-up gives the evidence_only branch the same key guard as
+    the update paths: an op key fills only a KEYLESS target and is
+    format- and conflict-checked.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = (
+            ROOT / "supabase/migrations/"
+            "20260919010000_rumination_thread_continuity_merge_and_absorb_guard.sql"
+        ).read_text(encoding="utf-8")
+        cls.executable = re.sub(r"--[^\n]*", "", cls.sql)
+        cls.commit = cls.executable.split(
+            "create or replace function public.commit_rumination_batch", 1
+        )[1].split("$function$;", 1)[0]
+        cls.v5 = cls.executable.split(
+            "create or replace function public.review_memory_request_v5", 1
+        )[1]
+
+    def test_rebuilds_exactly_the_two_functions_without_ddl(self):
+        self.assertEqual(self.executable.count("create or replace function"), 2)
+        self.assertIn(
+            "drop function if exists public.commit_rumination_batch(bigint, jsonb)",
+            self.executable,
+        )
+        self.assertIn(
+            "drop function if exists public.review_memory_request_v5(",
+            self.executable,
+        )
+        ddl = re.findall(
+            r"(alter\s+table|drop\s+table|create\s+table|"
+            r"create\s+or\s+replace\s+trigger)"
+            r"[\s\S]{0,120}?(chat_messages|memories|memory_requests|"
+            r"memory_rumination_cursors|memory_path_handoffs)",
+            self.executable,
+            re.IGNORECASE,
+        )
+        self.assertEqual(ddl, [])
+        self.assertNotIn("memory_relations", self.executable)
+        self.assertRegex(self.executable, r"\bbegin\s*;")
+        self.assertRegex(self.executable, r"\bcommit\s*;")
+
+    def test_continuity_merge_applies_only_with_baseline(self):
+        self.assertIn("v_continuity_data_merged jsonb;", self.commit)
+        # 合并计算出现在共享生命周期块与 adopt_thread 版本化路径两处。
+        self.assertEqual(self.commit.count("v_continuity_data_merged :="), 2)
+        self.assertEqual(
+            self.commit.count("case when v_op ? 'continuity_baseline' then"), 2,
+        )
+        # 投影外字段以服务端当前行为准；baseline 缺失时整包替换（兼容守护）。
+        self.assertIn(
+            "'open_question', 'current_state', 'next_expected', 'closure_criteria'",
+            self.commit,
+        )
+        self.assertIn("else v_continuity_data\n", self.commit)
+        # 同正文判定改用合并值与 target 比较。
+        self.assertIn(
+            "jsonb_strip_nulls(coalesce(v_continuity_data_merged, '{}'::jsonb))",
+            self.commit,
+        )
+        # 两条写入路径（原地更新 + 版本化插入）写合并值。
+        self.assertIn("set continuity_data = v_continuity_data_merged,", self.commit)
+        self.assertEqual(
+            self.commit.count("v_target.continuity_id, 1, v_continuity_data_merged,"),
+            2,
+        )
+        # 结构校验仍针对模型原始 continuity_data（契约不变）。
+        self.assertEqual(
+            self.commit.count(
+                "public.validate_continuity_data('thread', v_thread_state, "
+                "v_continuity_data) then"
+            ),
+            2,
+        )
+        self.assertIn(
+            "public.validate_continuity_data('thread', v_target.thread_state, "
+            "v_continuity_data) then",
+            self.commit,
+        )
+
+    def test_evidence_only_key_guard_matches_update_paths(self):
+        # 复审跟进：evidence_only 分支与 update 路径同规则——op key 只回填
+        # keyless 目标（keyed 目标保持原 key），且格式与唯一冲突校验齐备；
+        # 无条件覆盖的旧写法不复存在。
+        evidence_branch = self.commit.split(
+            "if v_op_type = 'evidence_only' then", 1
+        )[1].split("if v_op_type in ('update_thread'", 1)[0]
+        self.assertIn(
+            "case when v_target.memory_key is null\n"
+            "                     then nullif(lower(trim(coalesce(v_op->>'memory_key', ''))), '') end,",
+            evidence_branch,
+        )
+        self.assertIn(
+            "raise exception 'memory_rumination_memory_key_conflict';",
+            evidence_branch,
+        )
+        self.assertNotIn(
+            "nullif(lower(trim(coalesce(v_op->>'memory_key', ''))), ''),\n"
+            "                v_target.memory_key",
+            evidence_branch,
+        )
+
+    def test_thread_is_never_an_absorb_target(self):
+        # commit 的 create_memory 与 create_request 两处复核 + v5 复核。
+        self.assertEqual(
+            self.commit.count(
+                "v_absorbed.continuity_type is not distinct from 'thread'"
+            ),
+            2,
+        )
+        self.assertIn(
+            "v_absorbed.continuity_type is not distinct from 'thread'", self.v5,
+        )
+        # 旧的“仅拒闭合 thread”例外在两个函数中都不复存在。
+        self.assertNotIn("v_absorbed.continuity_type = 'thread'", self.commit)
+        self.assertNotIn("v_absorbed.continuity_type = 'thread'", self.v5)
+        self.assertNotIn("'resolved', 'dissolved', 'abandoned'", self.commit)
+        self.assertNotIn("'resolved', 'dissolved', 'abandoned'", self.v5)
+
+    def test_security_model_unchanged(self):
+        self.assertIn("security definer", self.commit)
+        self.assertIn("set search_path to 'public', 'extensions'", self.commit)
+        for function_name in ("commit_rumination_batch", "review_memory_request_v5"):
+            with self.subTest(rpc=function_name):
+                self.assertRegex(
+                    self.executable,
+                    rf"revoke\s+all\s+on\s+function\s+public\.{function_name}"
+                    rf"[\s\S]{{0,400}}?from\s+public,\s*anon,\s*authenticated",
+                )
+                self.assertRegex(
+                    self.executable,
+                    rf"grant\s+execute\s+on\s+function\s+public\.{function_name}"
+                    rf"[\s\S]{{0,400}}?to\s+service_role",
+                )
+
+    def test_chat_messages_and_relations_untouched(self):
+        forbidden = re.findall(
+            r"(insert\s+into|update|delete\s+from|alter\s+table)[\s\S]{0,120}?chat_messages",
+            self.executable,
+            re.IGNORECASE,
+        )
+        self.assertEqual(forbidden, [])
+        self.assertNotIn("memory_relations", self.executable)
+
+
 if __name__ == "__main__":
     unittest.main()

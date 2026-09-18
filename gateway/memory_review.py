@@ -483,6 +483,15 @@ def review_memory_request(
                 "拟交接的快速路径记忆已发生变化或不再可用，本次审核未通过，请重新确认后重试",
                 409,
             ) from exc
+        if "memory_rumination_absorb_target_changed" in message:
+            # 快照复核失败：目标与申请创建时留存的快照不一致（可能已被编辑
+            # 或归档）。前端 admin/js/lib/absorb_display.js 按该码给出警告 UI。
+            raise MemoryRequestError(
+                "rumination_absorb_target_changed",
+                "拟交接的快速路径记忆与申请创建时的快照不一致（可能已被编辑或归档），"
+                "本次审核未通过，请刷新后重新确认",
+                409,
+            ) from exc
         if "memory_rumination_absorb_result_invalid" in message:
             raise MemoryRequestError(
                 "rumination_result_invalid",

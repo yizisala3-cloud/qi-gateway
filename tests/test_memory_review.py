@@ -475,6 +475,18 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "stale_update")
         self.assertEqual(raised.exception.status_code, 409)
 
+    def test_maps_absorb_target_changed_to_conflict(self):
+        client = _Client(error=RuntimeError("memory_rumination_absorb_target_changed"))
+        with (
+            patch(f"{MODULE}._server_writes_allowed", return_value=True),
+            patch(f"{MODULE}.get_client", return_value=client),
+        ):
+            with self.assertRaises(MemoryRequestError) as raised:
+                review_memory_request(8, {"action": "reject"})
+
+        self.assertEqual(raised.exception.code, "rumination_absorb_target_changed")
+        self.assertEqual(raised.exception.status_code, 409)
+
 
 class ReviewRecallEditTests(unittest.TestCase):
     """审核表单编辑召回字段：最终值解析、向量生成与成对校验。"""
