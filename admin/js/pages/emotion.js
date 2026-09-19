@@ -1,6 +1,6 @@
 // pages/emotion.js - 情感：Eventide 身体状态展示区（接口尚未接入）
-import { icon } from '../ui.js?v=20260919-digest-tabs2';
-import { empty } from '../ui.js?v=20260919-digest-tabs2';
+import { icon } from '../ui.js?v=20260920-planning1';
+import { empty } from '../ui.js?v=20260920-planning1';
 
 export default {
   async mount(root) {

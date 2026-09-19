@@ -31,6 +31,8 @@ from .memory_digest_api import memory_digest_routes
 from .memory_request_api import memory_request_routes
 from .memory_review_api import memory_review_routes
 from .memory_mcp import memory_mcp, memory_mcp_http_app
+from .planning import run_maintenance as run_planning_maintenance
+from .planning_api import planning_api_routes
 from .todo_api import todo_routes
 from .model_routing import select_upstream_model
 from .request_context import (
@@ -54,6 +56,7 @@ http_client: httpx.AsyncClient | None = None
 
 _background_tasks: set[asyncio.Task] = set()
 _daily_running = False
+_planning_running = False
 _last_digest_run: dict | None = None
 _last_heat_decay_date = ""
 
@@ -223,6 +226,34 @@ async def daily_task_loop():
             await asyncio.sleep(300)
 
 
+async def planning_loop():
+    """规划管理后台循环（约 1 分钟粒度）。
+
+    职责：0 点（含错过的）按规则游标补生成出现实例、间歇待办到期生成、
+    限时超时打标、15 分钟等待自动重算、废弃/此次废弃满 72 小时清理。
+    失败只记日志，绝不影响记忆任务循环。
+    """
+    global _planning_running
+    _planning_running = True
+    log.info("规划管理调度器启动（1min 间隔）")
+    while _planning_running:
+        try:
+            await asyncio.sleep(60)
+            loop = asyncio.get_event_loop()
+            try:
+                result = await loop.run_in_executor(bg_executor, run_planning_maintenance)
+                if isinstance(result, dict) and result.get("status") == "skipped_busy":
+                    continue
+                log.debug("规划维护完成: %s", result)
+            except Exception:
+                log.exception("规划维护循环异常")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log.exception("规划管理调度器异常: %s", e)
+            await asyncio.sleep(30)
+
+
 async def chat_completions(request: Request):
     if not verify_token(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -333,6 +364,7 @@ async def status(request: Request):
         "rls_ready": supabase_status["elevated_active"],
         "bg_tasks": len(_background_tasks),
         "daily_running": _daily_running,
+        "planning_running": _planning_running,
         "last_digest_run": _last_digest_run,
         "rumination_configured": _rumination_configured(),
         "last_heat_decay_date": _last_heat_decay_date,
@@ -364,13 +396,16 @@ async def lifespan(app):
     )
     log.info(f"网关启动 Phase 4.5 Memory Digest | upstream={cfg.UPSTREAM_BASE_URL}")
     daily_task = track_task(daily_task_loop())
+    planning_task = track_task(planning_loop())
     try:
         async with memory_mcp.session_manager.run():
             yield
     finally:
-        global _daily_running
+        global _daily_running, _planning_running
         _daily_running = False
+        _planning_running = False
         daily_task.cancel()
+        planning_task.cancel()
         await http_client.aclose()
         bg_executor.shutdown(wait=False)
         log.info("网关关闭")
@@ -388,6 +423,7 @@ _routes.extend(memory_digest_routes)
 _routes.extend(memory_request_routes)
 _routes.extend(memory_review_routes)
 _routes.extend(todo_routes)
+_routes.extend(planning_api_routes)
 
 
 class NoCacheStaticFiles(StaticFiles):

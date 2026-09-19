@@ -1,6 +1,6 @@
 // pages/config.js - 配置：真实状态展示，未接入功能仅占位
-import { gw, esc } from '../api.js?v=20260919-digest-tabs2';
-import { loading, errorBlock, tag, delegate, icon } from '../ui.js?v=20260919-digest-tabs2';
+import { gw, esc } from '../api.js?v=20260920-planning1';
+import { loading, errorBlock, tag, delegate, icon } from '../ui.js?v=20260920-planning1';
 
 function boolTag(value, yes = '已配置', no = '未配置') {
   return value ? tag(yes, 'green') : tag(no, 'red');

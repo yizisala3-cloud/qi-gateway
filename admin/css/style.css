@@ -1259,3 +1259,99 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   .retro-time-pop { width: min(258px, calc(100vw - 16px)); }
   .retro-time-grid button { padding: 7px 0; }
 }
+
+/* ---------- 规划管理（一期） ---------- */
+.plan-region { margin-bottom: 18px; }
+.plan-region .card { padding: 16px 18px; }
+.plan-region-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.plan-region-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: 0.04em;
+}
+.plan-region-title .ico { color: var(--gold-strong); }
+.plan-region-sub { font-size: 12px; color: var(--ink-muted); }
+
+.plan-group-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 14px 0 8px;
+  font-size: 12.5px;
+  letter-spacing: 0.14em;
+  color: var(--ink-muted);
+}
+.plan-group-title::after { content: ""; flex: 1; border-top: 1px dashed var(--gold-faint); }
+.plan-group-title .plan-count { font-size: 11.5px; letter-spacing: 0; color: var(--ink-faint); }
+
+.plan-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  background: var(--paper-card);
+  border: 1px solid var(--gold-faint);
+  border-radius: var(--radius);
+  padding: 11px 14px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s, opacity 0.15s;
+}
+.plan-item:hover { border-color: var(--gold-line); box-shadow: var(--shadow-lift); }
+.plan-item.selected { border-color: var(--gold-strong); box-shadow: 0 0 0 1px var(--gold-line), var(--shadow-lift); }
+.plan-item.is-idle { background: transparent; }
+.plan-item.is-closed { opacity: 0.72; }
+.plan-item-main { flex: 1; min-width: 0; }
+.plan-item-title { font-size: 14px; font-weight: 600; color: var(--ink); word-break: break-word; }
+.plan-item-meta { margin-top: 3px; font-size: 12px; color: var(--ink-muted); display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.plan-item-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex-shrink: 0; }
+
+.plan-handle {
+  cursor: grab;
+  color: var(--ink-faint);
+  display: inline-flex;
+  padding: 4px 2px;
+  touch-action: none;
+}
+.plan-handle .ico { width: 15px; height: 15px; }
+.plan-list.reordering .plan-item { cursor: grabbing; }
+.plan-list.reordering .plan-item.is-dragging {
+  opacity: 0.85;
+  border-style: dashed;
+  border-color: var(--gold-strong);
+  box-shadow: var(--shadow-lift);
+}
+.plan-list.reordering .plan-item:not(.is-dragging) { transition: transform 0.12s ease, border-color 0.15s; }
+
+.plan-goal-empty, .plan-summary-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 22px 12px;
+  color: var(--ink-muted);
+  text-align: center;
+}
+.plan-summary-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+
+.plan-alarm-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  border: 1px solid var(--gold-line);
+  border-radius: var(--radius);
+  background: var(--gold-soft);
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
