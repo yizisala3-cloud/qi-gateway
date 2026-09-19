@@ -419,8 +419,18 @@ _routes.extend(memory_request_routes)
 _routes.extend(memory_review_routes)
 _routes.extend(todo_routes)
 
+
+class NoCacheStaticFiles(StaticFiles):
+    # Same no-cache stance as the SSE route: every /admin load revalidates, so a
+    # forgotten ?v= bump costs one hard refresh instead of a stale page forever.
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 if os.path.isdir(_admin_dir):
-    _routes.append(Mount("/admin", app=StaticFiles(directory=_admin_dir, html=True), name="admin"))
+    _routes.append(Mount("/admin", app=NoCacheStaticFiles(directory=_admin_dir, html=True), name="admin"))
     log.info(f"Admin panel mounted at /admin (dir={_admin_dir})")
 
 # The SDK owns the exact /mcp Streamable HTTP route. This catch-all mount is
