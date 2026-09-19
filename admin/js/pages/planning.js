@@ -1,9 +1,9 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
-import { gw } from '../api.js?v=20260920-planning1';
+import { gw } from '../api.js?v=20260920-planning-mobile1';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, fmtDate, esc,
   createDetailPanel,
-} from '../ui.js?v=20260920-planning1';
+} from '../ui.js?v=20260920-planning-mobile1';
 
 const TASK_TYPE_LABELS = {
   daily: '每日', interval: '间歇', weekly: '每周', monthly: '每月', once: '单次', idle: '闲时',
