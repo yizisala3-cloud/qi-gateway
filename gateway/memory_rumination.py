@@ -2521,9 +2521,11 @@ def get_rumination_status() -> dict[str, Any]:
     initialized = bool(cursor.get("initialized"))
     backlog = _backlog_count(assistant_id, cursor_id)
     _, _, model = _model_config()
-    # 与首跑分支同口径：未初始化游标的首跑没有 60 条门槛，只要有消息即可
-    # 执行；已初始化时按日常批次门槛判定。
-    threshold_met = bool(initialized) or backlog >= 1
+    # 语义是"下一次运行会真正处理积压而不是跳过"：首跑没有 60 条门槛，
+    # 积压 ≥1 即可执行；日常批必须达到批次下限，否则应显示等待积压。
+    threshold_met = backlog >= (
+        1 if not initialized else RUMINATION_BATCH_MIN
+    )
     return {
         "assistant_id": assistant_id,
         "configured": _rumination_analysis_configured(),

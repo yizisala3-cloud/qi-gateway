@@ -4715,7 +4715,11 @@ class TargetSnapshotKeyNormalizationTests(unittest.TestCase):
 
 
 class RuminationStatusThresholdTests(unittest.TestCase):
-    """F8-3：threshold_met 与首跑分支同口径（未初始化只要有积压即可执行）。"""
+    """threshold_met 语义：下一次运行会真正处理积压而不是跳过。
+
+    首跑（未初始化）没有 60 条门槛，积压 ≥1 即可执行；日常批必须达到
+    批次下限（60），否则概览应显示"等待积压"而不是"可执行"。
+    """
 
     def _status(self, *, initialized, backlog):
         cursor = {
@@ -4741,8 +4745,12 @@ class RuminationStatusThresholdTests(unittest.TestCase):
         self.assertFalse(self._status(initialized=False, backlog=0)["threshold_met"])
         self.assertTrue(self._status(initialized=False, backlog=1)["threshold_met"])
 
-    def test_initialized_cursor_always_meets_threshold(self):
-        self.assertTrue(self._status(initialized=True, backlog=0)["threshold_met"])
+    def test_initialized_cursor_requires_batch_min(self):
+        # 已初始化游标按日常批规则判定：不足 60 显示"等待积压"，
+        # 与 run 的 waiting_for_batch_threshold 跳过行为一致。
+        self.assertFalse(self._status(initialized=True, backlog=0)["threshold_met"])
+        self.assertFalse(self._status(initialized=True, backlog=59)["threshold_met"])
+        self.assertTrue(self._status(initialized=True, backlog=60)["threshold_met"])
 
 
 class DigestSkipReasonTests(unittest.TestCase):
