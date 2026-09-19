@@ -1,5 +1,5 @@
 // ui.js - shared retro UI components: icons, tags, modal, toast, detail panel
-export const ASSET_VERSION = '20260919-digest-tabs2';
+export const ASSET_VERSION = '20260920-bookpage1';
 
 /* ---------- SVG icons (stroke, no emoji) ---------- */
 const ICON_PATHS = {
