@@ -1,9 +1,18 @@
 // pages/digest.js - 记忆总结：连续感总结 + 反刍连续感
-import { gw, esc } from '../api.js?v=20260919-digest-tabs1';
-import { loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, fmtDate } from '../ui.js?v=20260919-digest-tabs1';
+import { gw, esc, query } from '../api.js?v=20260919-digest-status1';
+import { loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, fmtDate } from '../ui.js?v=20260919-digest-status1';
 
 const TIME_PRECISION_LABELS = {
   minute: '精确到分钟', day: '精确到日期', approximate: '大概时间', unknown: '时间未知',
+};
+// memory_requests.status 的展示文案；运行详情里的申请状态以数据库实际值为准。
+const REQUEST_STATUS_LABELS = {
+  approved: { label: '已转正', tone: 'green' },
+  pending: { label: '待审核', tone: 'amber' },
+  rejected: { label: '已拒绝', tone: 'red' },
+  merged: { label: '已合并', tone: 'gold' },
+  duplicate: { label: '重复', tone: 'muted' },
+  conflict: { label: '冲突待处理', tone: 'red' },
 };
 const COMMIT_STATUS_LABELS = {
   inserted_pending: '已进入记忆申请',
@@ -51,10 +60,10 @@ function commitTag(memory) {
 
 function candidateCards(candidates) {
   if (!candidates?.length) return '<p class="muted">本批聊天没有提取到连续感候选。</p>';
-  return candidates.map((candidate) => {
+  return candidates.map((candidate, index) => {
     const evidence = (candidate.evidence_message_ids || []).map((id) => `#${esc(id)}`).join('、') || '-';
     return `
-      <div class="mem-card" style="cursor:default">
+      <div class="mem-card" style="cursor:default" data-candidate="${index}">
         <div class="mem-title">${esc(candidate.title || '(无标题)')}</div>
         <div class="mem-snippet">${esc(candidate.content || '')}</div>
         <div class="mt8">
@@ -417,7 +426,7 @@ export default {
         <div class="card-head">
           <div>
             <div class="card-title">${icon('scroll')}连续感总结 ${statusTag(data.status)}</div>
-            <div class="card-sub">候选只写入 pending 审核队列，审核通过后才会成为正式记忆；自动阈值 ${esc(data.auto_threshold ?? 80)} 条，手动与自动冷却彼此独立。</div>
+            <div class="card-sub">写入的申请按类型分流：moment、thread、inside_joke 校验通过后自动转正，其余类型进入审核队列；自动阈值 ${esc(data.auto_threshold ?? 80)} 条，手动与自动冷却彼此独立。</div>
           </div>
         </div>
         ${paused ? `<div class="banner banner-danger">本批未生成候选，连续感自动总结已暂停。请重试或确认跳过本批。</div>` : ''}
@@ -442,7 +451,7 @@ export default {
             <div class="mem-title">#${esc(run.id)} · ${esc(run.trigger)} ${statusTag(run.status)}</div>
             <div class="card-meta">
               来源 ${esc(run.source_first_message_id ?? '-')} → ${esc(run.source_last_message_id ?? '-')}
-              · ${esc(run.message_count ?? 0)} 条消息 · 写入 ${esc(run.inserted_count ?? 0)} 条 pending
+              · ${esc(run.message_count ?? 0)} 条消息 · 写入 ${esc(run.inserted_count ?? 0)} 条记忆申请（去向见运行详情）
               · ${esc(fmtDate(run.started_at))}
             </div>
             ${run.error_code ? `<div class="card-meta" style="color:var(--red)">${esc(run.error_code)}: ${esc(run.error_message || '')}</div>` : ''}
@@ -508,7 +517,7 @@ export default {
       if (result.paused_empty) {
         toast('本批未生成候选，连续感自动总结已暂停。请重试或确认跳过本批。', 'err');
       } else {
-        toast(`已写入 ${result.inserted_count || 0} 条 pending 记忆申请`);
+        toast(`已写入 ${result.inserted_count || 0} 条记忆申请（去向见运行详情）`);
       }
     } catch (error) {
       toast(`连续感总结失败：${error.message}`, 'err');
@@ -553,7 +562,7 @@ export default {
         <div class="kv"><span class="k">状态</span><span class="v">${esc(result.status || '-')}</span></div>
         <div class="kv"><span class="k">来源范围</span><span class="v">${esc(result.source_first_message_id ?? '-')} → ${esc(result.source_last_message_id ?? '-')}</span></div>
         <div class="kv"><span class="k">Cursor</span><span class="v">${esc(result.cursor_before ?? '-')} → ${esc(result.cursor_after ?? '-')}</span></div>
-        <div class="kv"><span class="k">写入 pending</span><span class="v">${esc(result.inserted_count ?? 0)}</span></div>
+        <div class="kv"><span class="k">写入记忆申请</span><span class="v">${esc(result.inserted_count ?? 0)}（去向见运行列表的运行详情）</span></div>
         ${result.paused_empty ? '<div class="banner banner-danger mt16">本批没有生成候选，cursor 未推进。</div>' : ''}
         <div class="mt16">${candidateCards(candidates)}</div>`,
       footer: '<button class="btn btn-secondary" data-close>关闭</button>',
@@ -585,20 +594,72 @@ export default {
   openRun(id) {
     const run = (this.data?.recent_runs || []).find((item) => String(item.id) === String(id));
     if (!run) { toast('运行记录不在当前列表中', 'err'); return; }
+    const candidates = Array.isArray(run.preview_memories) ? run.preview_memories : [];
     const { root, close } = modal({
       title: `连续感运行 #${esc(run.id)} · ${esc(run.trigger)}`,
       body: `
         <div class="kv"><span class="k">状态</span><span class="v">${statusTag(run.status)}</span></div>
         <div class="kv"><span class="k">来源范围</span><span class="v">${esc(run.source_first_message_id ?? '-')} → ${esc(run.source_last_message_id ?? '-')}</span></div>
         <div class="kv"><span class="k">消息数量</span><span class="v">${esc(run.message_count ?? 0)}</span></div>
-        <div class="kv"><span class="k">写入 pending</span><span class="v">${esc(run.inserted_count ?? 0)}</span></div>
+        <div class="kv"><span class="k">写入记忆申请</span><span class="v">${esc(run.inserted_count ?? 0)}</span></div>
+        <div class="kv"><span class="k">申请去向</span><span class="v" id="run-request-note"><span class="muted">正在读取申请状态…</span></span></div>
         <div class="kv"><span class="k">开始时间</span><span class="v">${esc(fmtDate(run.started_at))}</span></div>
         ${run.error_code ? `<div class="banner banner-danger mt16">${esc(run.error_code)}: ${esc(run.error_message || '')}</div>` : ''}
-        ${run.preview_memories?.length ? `<div class="section-title">候选记忆详情</div>${candidateCards(run.preview_memories)}` : ''}`,
+        ${candidates.length ? `<div class="section-title">候选记忆详情</div>${candidateCards(candidates)}` : ''}`,
       footer: '<button class="btn btn-secondary" data-close>关闭</button>',
       wide: true,
       draggable: true,
     });
     root.querySelector('[data-close]').onclick = close;
+    this.hydrateRunRequestStatus(root, run, candidates);
+  },
+
+  /* 运行详情弹窗的申请去向：数据 API 按 digest_run_id 反查 memory_requests，
+   * 弹窗先按候选快照渲染，申请状态异步补齐。标签一律来自数据库实际状态，
+   * 不使用候选快照推断出的去向。 */
+  async hydrateRunRequestStatus(root, run, candidates) {
+    const note = root.querySelector('#run-request-note');
+    let requests = [];
+    try {
+      requests = await query('memory_requests', {
+        select: 'id,status,memory_key,content,evidence_message_ids',
+        eq: { digest_run_id: Number(run.id) },
+        limit: 50,
+      });
+    } catch (error) {
+      if (note) note.innerHTML = `<span class="muted">申请状态读取失败：${esc(error.message)}</span>`;
+      return;
+    }
+    if (note && root.isConnected) {
+      const tally = {};
+      for (const request of requests) {
+        tally[request.status || 'unknown'] = (tally[request.status || 'unknown'] || 0) + 1;
+      }
+      const parts = Object.entries(tally).map(([status, n]) => {
+        const meta = REQUEST_STATUS_LABELS[status] || { label: status, tone: 'muted' };
+        return tag(`${esc(meta.label)} ${n}`, meta.tone);
+      });
+      note.innerHTML = parts.length ? parts.join(' ') : '<span class="muted">没有查到本批写入的申请</span>';
+    }
+    if (!candidates.length) return;
+    // 每条候选与申请对号入座：优先正文与主题键精确匹配，再退回证据消息集。
+    // 候选没有 commit_status，申请被去重跳过时对应卡片不会有匹配项。
+    const unmatched = [...requests];
+    for (const [index, candidate] of candidates.entries()) {
+      const evidence = (candidate.evidence_message_ids || []).join(',');
+      let pos = unmatched.findIndex((request) =>
+        (candidate.content && request.content === candidate.content)
+        || (candidate.memory_key && request.memory_key === candidate.memory_key));
+      if (pos < 0 && evidence) {
+        pos = unmatched.findIndex((request) => (request.evidence_message_ids || []).join(',') === evidence);
+      }
+      if (pos < 0) continue;
+      const [request] = unmatched.splice(pos, 1);
+      const row = root.querySelector(`[data-candidate="${index}"] .tag-row`);
+      if (!row) continue;
+      const meta = REQUEST_STATUS_LABELS[request.status] || { label: request.status || '未知', tone: 'muted' };
+      row.insertAdjacentHTML('afterbegin',
+        `${tag(esc(meta.label), meta.tone)} ${tag(`申请 #${esc(request.id)}`, 'slate')} `);
+    }
   },
 };
