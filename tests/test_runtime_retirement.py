@@ -86,7 +86,7 @@ if importlib.util.find_spec("starlette") is None:
         "starlette.staticfiles": staticfiles,
     })
 
-from gateway import context, db, main
+from gateway import app_settings, context, db, main
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -283,6 +283,81 @@ class RuntimeRetirementTests(unittest.TestCase):
             ("limit", 1),
             ("execute", None),
         ])
+
+
+class EventideInjectionGateTests(unittest.TestCase):
+    """身体状态注入开关：关闭 = 彻底暂停，fail-open 保持现状。"""
+
+    def setUp(self):
+        # TTL 缓存是模块级的：每个用例前后都清空，避免用例间串味。
+        app_settings.reset_settings_cache()
+        self.addCleanup(app_settings.reset_settings_cache)
+
+    def test_disabled_build_eventide_context_returns_empty_without_db_or_bridge(self):
+        with (
+            patch.object(app_settings, "is_eventide_injection_enabled", return_value=False),
+            patch.object(context.db, "load_eventide_state") as load_state,
+            patch.object(context.db, "save_eventide_state") as save_state,
+            patch.object(context.eventide_bridge, "create_initial_state") as create_state,
+            patch.object(context.eventide_bridge, "advance_and_render") as advance,
+        ):
+            self.assertEqual(context.build_eventide_context(), "")
+
+        load_state.assert_not_called()
+        save_state.assert_not_called()
+        create_state.assert_not_called()
+        advance.assert_not_called()
+
+    def test_disabled_build_context_skips_eventide_submission(self):
+        with (
+            patch.object(app_settings, "is_eventide_injection_enabled", return_value=False),
+            patch("gateway.context.build_eventide_context") as build_eventide,
+            patch("gateway.context.load_persona", return_value="PERSONA"),
+            patch("gateway.context.build_recent_chat_context", return_value="RECENT"),
+            patch("gateway.context.search_memories", new=AsyncMock(return_value=[])),
+        ):
+            rendered = context.build_context("hello")
+
+        build_eventide.assert_not_called()
+        self.assertIn("PERSONA", rendered)
+        self.assertIn("RECENT", rendered)
+
+    def test_enabled_build_context_keeps_eventide(self):
+        with (
+            patch.object(app_settings, "is_eventide_injection_enabled", return_value=True),
+            patch("gateway.context.load_persona", return_value="PERSONA"),
+            patch("gateway.context.build_eventide_context", return_value="EVENTIDE"),
+            patch("gateway.context.build_recent_chat_context", return_value="RECENT"),
+            patch("gateway.context.search_memories", new=AsyncMock(return_value=[])),
+        ):
+            rendered = context.build_context("hello")
+
+        self.assertIn("EVENTIDE", rendered)
+
+    def test_settings_cache_hits_db_once_per_ttl_window(self):
+        with (
+            patch.object(app_settings.db, "load_app_setting", return_value=False) as load,
+            patch.object(app_settings.db, "save_app_setting") as save,
+        ):
+            self.assertFalse(app_settings.is_eventide_injection_enabled())
+            self.assertFalse(app_settings.is_eventide_injection_enabled())
+
+        load.assert_called_once_with(app_settings.EVENTIDE_INJECT_KEY)
+        save.assert_not_called()
+
+    def test_settings_fail_open_on_query_failure(self):
+        with patch.object(
+            app_settings.db, "load_app_setting", return_value=db.APP_SETTING_QUERY_FAILED
+        ):
+            self.assertTrue(app_settings.is_eventide_injection_enabled())
+
+    def test_settings_fail_open_on_missing_row(self):
+        with patch.object(app_settings.db, "load_app_setting", return_value=None):
+            self.assertTrue(app_settings.is_eventide_injection_enabled())
+
+    def test_settings_accepts_string_false(self):
+        with patch.object(app_settings.db, "load_app_setting", return_value="false"):
+            self.assertFalse(app_settings.is_eventide_injection_enabled())
 
 
 if __name__ == "__main__":

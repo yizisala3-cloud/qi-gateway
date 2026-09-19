@@ -78,7 +78,12 @@ body {
   font-size: 14px;
   line-height: 1.65;
   color: var(--ink);
-  background: var(--green-deep);
+  /* 全局深绿纸纹：原侧栏底纹铺满整页，主区变成绿底上的漂浮书页。
+     不用 background-attachment: fixed——iOS Safari 对 fixed 背景渲染
+     不可靠；且布局是 100vh 内滚，body 本身不滚动，fixed 没有收益。 */
+  background:
+    linear-gradient(var(--green-veil), var(--green-veil)),
+    url("/admin/assets/dark-green-paper.png") center / cover no-repeat, var(--green-deep);
   -webkit-font-smoothing: antialiased;
 }
 a { color: inherit; text-decoration: none; }
@@ -287,8 +292,29 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
   display: none;
 }
 
-/* ---------- 主内容（象牙纸张） ---------- */
-.main { flex: 1; min-width: 0; height: 100vh; }
+/* ---------- 主内容（绿底上的漂浮书页） ---------- */
+.main {
+  flex: 1;
+  min-width: 0;
+  height: 100vh;
+  /* 手机端地址栏收展会改变可视高度，dvh 让书页始终贴合可视区 */
+  height: 100dvh;
+  position: relative;
+  padding: 18px 22px 22px;
+}
+/* 书页左上/右上角外侧的小角饰：复用侧栏顶部角花，右上镜像 */
+.main::before, .main::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  width: 72px;
+  height: 24px;
+  background: url("/admin/assets/ornaments/top-border-ornament.png") center / contain no-repeat;
+  opacity: 0.5;
+  pointer-events: none;
+}
+.main::before { left: 10px; }
+.main::after { right: 10px; transform: scaleX(-1); }
 .content {
   height: 100%;
   overflow-y: auto;
@@ -296,6 +322,12 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
   background:
     linear-gradient(var(--paper-veil), var(--paper-veil)),
     url("/admin/assets/ivory-paper.png") center / 620px auto repeat, var(--paper);
+  border-radius: 16px;
+  border: 1px solid var(--gold-line);
+  /* 第二圈细金线：outline 跟随圆角，且不会被自身 overflow 裁剪 */
+  outline: 1px solid var(--gold-faint);
+  outline-offset: 5px;
+  box-shadow: 0 12px 32px rgba(8, 14, 9, 0.38), 0 3px 10px rgba(8, 14, 9, 0.28);
 }
 
 .page-head {
@@ -1036,12 +1068,27 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   }
   .sidebar-backdrop.show { opacity: 1; pointer-events: auto; }
   .icon-btn.menu-btn { display: inline-flex; }
-  .content { padding: 18px 16px 70px; }
+  /* 抽屉态侧栏同样用 dvh，避免地址栏遮住底部状态栏 */
+  .sidebar { height: 100vh; height: 100dvh; }
+  .main { padding: 10px; }
+  .main::before, .main::after { display: none; }
+  .content { border-radius: 12px; padding: 18px 16px 70px; }
   .page-title { font-size: 23px; }
   .tabs { width: 100%; overflow-x: auto; }
   .grid-2, .grid-4 { grid-template-columns: repeat(2, 1fr); }
   .card { padding: 14px 15px; }
   .modal-mask { padding: 12px; }
+}
+
+/* 手机竖屏（≤560px）：卡片网格改单列，内容区收紧换回可读宽度 */
+@media (max-width: 560px) {
+  .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+  .content { padding: 16px 14px 56px; }
+  .card { padding: 13px 14px; }
+  .page-title { font-size: 21px; }
+  .page-head-rule { margin: 14px 0 16px; }
+  .page-head-actions { gap: 8px; }
+  .stat .value { font-size: 21px; }
 }
 
 /* =========================================================
@@ -1258,4 +1305,98 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
 @media (max-width: 768px) {
   .retro-time-pop { width: min(258px, calc(100vw - 16px)); }
   .retro-time-grid button { padding: 7px 0; }
+}
+
+/* =========================================================
+   拨杆开关 · 金色描边轨道 + 选中态墨绿底
+   用于配置页功能开关；状态由 aria-checked 驱动
+   ========================================================= */
+
+.toggle-switch {
+  position: relative;
+  width: 46px;
+  height: 24px;
+  padding: 0;
+  border-radius: 999px;
+  background: var(--paper-card);
+  border: 1px solid var(--gold-line);
+  box-shadow: inset 0 1px 3px rgba(70, 58, 30, 0.14);
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
+}
+.toggle-switch .toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--paper-solid);
+  border: 1px solid var(--gold);
+  box-shadow: 0 1px 2px rgba(70, 58, 30, 0.28);
+  transition: left 0.2s ease;
+}
+.toggle-switch:hover:not(:disabled) { border-color: var(--gold-strong); }
+.toggle-switch[aria-checked="true"] {
+  background: linear-gradient(180deg, var(--green-mid), var(--green-ink));
+  border-color: var(--green-deep);
+  box-shadow: inset 0 1px 3px rgba(20, 32, 24, 0.35);
+}
+.toggle-switch[aria-checked="true"] .toggle-knob { left: 24px; }
+.toggle-switch:disabled { opacity: 0.45; cursor: not-allowed; }
+.toggle-switch:focus-visible {
+  outline: 1.5px solid rgba(154, 130, 72, 0.65);
+  outline-offset: 2px;
+}
+
+/* =========================================================
+   情感页 · Eventide 身体状态
+   轨道 = 金色细底 + 墨绿渐变填充；等级 tag 复用全局 tag()
+   ========================================================= */
+
+.body-summary { margin-bottom: 16px; }
+.body-summary .stat .value { letter-spacing: 0.06em; }
+.body-stat-sub { margin-top: 2px; font-size: 12px; color: var(--ink-soft); min-height: 1.2em; }
+
+.body-fields { display: flex; flex-direction: column; }
+.body-field { padding: 10px 0 9px; border-top: 1px dashed var(--gold-faint); }
+.body-field:first-child { border-top: none; }
+.body-field-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.body-field-name {
+  width: 52px;
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+}
+.body-field-track {
+  flex: 1;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--gold-faint);
+  overflow: hidden;
+}
+.body-field-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--green-mid), var(--green-ink));
+  transition: width 0.5s ease;
+}
+.body-field-value {
+  min-width: 30px;
+  text-align: right;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+.body-field-desc { margin-top: 3px; font-size: 12px; color: var(--ink-muted); }
+.body-updated { margin: 12px 0 0; }
+
+@media (max-width: 768px) {
+  .body-field-name { width: 44px; }
 }

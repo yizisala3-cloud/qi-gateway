@@ -109,3 +109,53 @@ def get_body_payload(state_data: dict[str, Any]) -> dict[str, Any] | None:
     except Exception as e:
         log.error(f"Eventide payload 失败: {e}")
         return None
+
+
+def _iso(value: Any) -> str | None:
+    """BodyState 里的 datetime/字符串统一转 ISO 文本；空值给 None。"""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value) if value else None
+
+
+def get_body_overview(state_data: dict[str, Any]) -> dict[str, Any] | None:
+    """读取结构化身体状态总览（admin 只读展示用，不推进、不落库）。
+
+    在 payload 七项数值之外补充周期/事件标签与状态内部时间戳：标签从
+    runtime.config 的注册表按 key 解析，解析不出时回退 key；任何一层
+    失败都降级为 None/缺省，绝不伪造数值。
+    """
+    runtime = get_runtime()
+    if not runtime or not state_data:
+        return None
+
+    try:
+        state = runtime.load_state(state_data)
+    except Exception as e:
+        log.error(f"Eventide overview 状态加载失败: {e}")
+        return None
+
+    try:
+        fields = runtime.payload(state) or {}
+    except Exception as e:
+        log.error(f"Eventide overview payload 失败: {e}")
+        fields = {}
+
+    config = getattr(runtime, "config", None)
+    cycles = getattr(config, "cycles", None) or {}
+    events = getattr(config, "events", None) or {}
+
+    cycle_key = getattr(state, "cycle_key", None)
+    event_key = getattr(state, "active_event_key", None)
+    cycle_def = cycles.get(cycle_key)
+    event_def = events.get(event_key) if event_key else None
+
+    return {
+        "fields": fields,
+        "cycle_label": getattr(cycle_def, "label", None) or cycle_key,
+        "cycle_expires_at": _iso(getattr(state, "cycle_expires_at", None)),
+        "event_label": getattr(event_def, "label", None) if event_def else None,
+        "event_description": getattr(event_def, "description", None),
+        "event_expires_at": _iso(getattr(state, "active_event_expires_at", None)),
+        "last_tick_at": _iso(getattr(state, "last_tick_at", None)),
+    }
