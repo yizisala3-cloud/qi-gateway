@@ -17,7 +17,6 @@ from gateway.todos import (
     cancel_todo,
     complete_todo,
     create_todo,
-    get_proactive_todo_context,
     list_todos,
     snooze_todo,
     validate_create_todo,
@@ -261,83 +260,6 @@ class PersistenceTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "database_permissions_unavailable")
         get_client.assert_not_called()
-
-
-class ProactiveContextTests(unittest.TestCase):
-    def test_reads_single_owner_todos_without_identity_configuration(self):
-        rows = [
-            _row(content="今天九点的任务"),
-            _row(
-                id="22222222-2222-4222-8222-222222222222",
-                user_name="不需要配置的名字",
-                ai_name="不需要配置的角色",
-                content="没有排期的任务",
-                scheduled_start=None,
-            ),
-            _row(
-                id="33333333-3333-4333-8333-333333333333",
-                content="明天的任务",
-                scheduled_start="2026-08-03T09:00:00+08:00",
-            ),
-        ]
-        client = _Client(rows)
-        with (
-            patch(f"{MODULE}._server_access_allowed", return_value=True),
-            patch(f"{MODULE}.get_client", return_value=client),
-        ):
-            context = get_proactive_todo_context(
-                now=datetime(2026, 8, 2, 4, 0, tzinfo=timezone.utc),
-            )
-
-        self.assertIn("今天九点的任务", context)
-        self.assertIn("没有排期的任务", context)
-        self.assertNotIn("明天的任务", context)
-        filter_fields = {
-            field
-            for query_filters in client.executed_filters
-            for field, _value in query_filters
-        }
-        self.assertNotIn("user_name", filter_fields)
-        self.assertNotIn("ai_name", filter_fields)
-
-    def test_atomic_claim_uses_three_hour_cooldown_without_count_limit(self):
-        client = _Client(rpc_rows=[{
-            "todo_id": TODO_ID,
-            "content": "三小时后才能再次进入上下文",
-            "scheduled_start": "2026-08-02T09:00:00+08:00",
-        }])
-        with (
-            patch(f"{MODULE}._server_access_allowed", return_value=True),
-            patch(f"{MODULE}.get_client", return_value=client),
-        ):
-            context = get_proactive_todo_context(
-                now=datetime(2026, 8, 2, 4, 0, tzinfo=timezone.utc),
-            )
-
-        self.assertIn("三小时后才能再次进入上下文", context)
-        self.assertEqual(client.table_names, [])
-        rpc_name, payload = client.rpc_calls[0]
-        self.assertEqual(rpc_name, "claim_proactive_todos")
-        self.assertEqual(payload["p_cooldown_minutes"], 180)
-        self.assertNotIn("p_daily_limit", payload)
-        self.assertNotIn("p_reminder_count", payload)
-
-    def test_empty_successful_claim_does_not_fall_back_or_repeat_todos(self):
-        client = _Client([_row()], rpc_rows=[])
-        with (
-            patch(f"{MODULE}._server_access_allowed", return_value=True),
-            patch(f"{MODULE}.get_client", return_value=client),
-        ):
-            context = get_proactive_todo_context(
-                now=datetime(2026, 8, 2, 4, 0, tzinfo=timezone.utc),
-            )
-
-        self.assertEqual(context, "")
-        self.assertEqual(client.table_names, [])
-
-    def test_database_failure_does_not_block_proactive_reply(self):
-        with patch(f"{MODULE}._client", side_effect=RuntimeError("offline")):
-            self.assertEqual(get_proactive_todo_context(), "")
 
 
 if __name__ == "__main__":

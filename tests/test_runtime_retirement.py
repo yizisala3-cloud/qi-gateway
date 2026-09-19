@@ -209,35 +209,15 @@ class RuntimeRetirementTests(unittest.TestCase):
         body = asyncio.run(collect())
         self.assertIn("literal <<delay:5>>", body)
 
-    def test_client_proactive_prompt_is_preserved_and_not_forced(self):
-        original_system = {
-            "role": "system",
-            "content": "## 主动消息触发（定时触发）\n没必要发送时回复 [PASS]。",
-        }
-        messages = [
-            original_system,
-            {"role": "user", "content": "last real message"},
-            {"role": "assistant", "content": "already answered"},
-            {"role": "user", "content": "请根据以上上下文决定是否发消息"},
-        ]
-        client = _NonStreamingClient("[PASS]")
-        request = _Request({"messages": messages, "stream": False})
-
-        with (
-            patch.object(main, "verify_token", return_value=True),
-            patch.object(main, "get_proactive_todo_context", return_value=""),
-            patch.object(main, "http_client", client),
-        ):
-            response = asyncio.run(main.chat_completions(request))
-
-        self.assertIs(client.last_body["messages"][0], original_system)
-        self.assertEqual(original_system["content"], "## 主动消息触发（定时触发）\n没必要发送时回复 [PASS]。")
-        annotation = client.last_body["messages"][1]["content"]
-        self.assertIn("客户端控制信号", annotation)
-        self.assertIn("遵循客户端原始 system prompt", annotation)
-        self.assertNotIn("请直接输出", annotation)
-        self.assertNotIn("必须回复", annotation)
-        self.assertEqual(json.loads(response.body)["choices"][0]["message"]["content"], "[PASS]")
+    def test_client_proactive_layer_is_retired(self):
+        # 主动消息兼容层已删除：所有请求一律走普通聊天路径。
+        source = (ROOT / "gateway" / "main.py").read_text(encoding="utf-8")
+        self.assertNotIn("is_orangechat_proactive_request", source)
+        self.assertNotIn("annotate_proactive_control_signal", source)
+        self.assertNotIn("get_proactive_todo_context", source)
+        todos_source = (ROOT / "gateway" / "todos.py").read_text(encoding="utf-8")
+        self.assertNotIn("get_proactive_todo_context", todos_source)
+        self.assertFalse((ROOT / "orangechat_plugins").exists())
 
     def test_old_proactive_route_and_background_loops_are_absent(self):
         paths = {route.path for route in main._routes if hasattr(route, "path")}

@@ -3,7 +3,6 @@
 设计取舍（有意为之并有测试固化）：
 - user 与 assistant 成对保存：只有上游成功产出有效 assistant 文本时才写；
   上游失败时不保留用户输入，避免出现没有回复的孤儿 user 行。
-- 主动请求的合成控制信号不保存为 user；主动产生的 assistant 回复保存。
 - 历史消息绝不重复落库，每次请求最多一条 user + 一条 assistant。
 - assistant_id 来自网关现有协议（MEMORY_ASSISTANT_ID 或自动发现）；
   取不到时明确跳过并记日志，不伪造身份。
@@ -156,7 +155,6 @@ class GatewayTestCase(unittest.TestCase):
         patches = [
             mock.patch.object(gateway_main.cfg, "GATEWAY_TOKEN", ""),
             mock.patch("gateway.main.build_context", lambda *a, **k: ""),
-            mock.patch("gateway.main.get_proactive_todo_context", lambda: ""),
             mock.patch("gateway.main.resolve_assistant_id", lambda: "assistant-1"),
             mock.patch("gateway.db.save_chat_message", self.recorder),
         ]
@@ -366,52 +364,6 @@ class StreamPersistenceTests(GatewayTestCase):
 
         rows = asyncio.run(scenario())
         self.assertEqual(rows, [])
-
-
-class ProactivePersistenceTests(GatewayTestCase):
-    def proactive_messages(self):
-        return [
-            {
-                "role": "system",
-                "content": "原始人设\n\n## 主动消息触发（定时触发）\n规则",
-            },
-            {"role": "user", "content": "最后一条真人消息"},
-            {"role": "assistant", "content": "已回复过的内容"},
-            {
-                "role": "user",
-                "content": "请根据以上上下文决定是否发消息。没什么好说的就回复 [PASS] 即可。",
-            },
-        ]
-
-    def test_proactive_control_signal_not_saved_but_reply_saved(self):
-        self.run_non_stream(
-            self.proactive_messages(), FakePostClient(200, upstream_completion("[PASS]")),
-        )
-
-        self.assertEqual(
-            [(row["role"], row["content"]) for row in self.recorder.rows],
-            [("assistant", "[PASS]")],
-        )
-
-    def test_proactive_stream_reply_saved_without_control_signal(self):
-        self.run_stream(
-            self.proactive_messages(), FakeStreamClient(FakeStreamResponse(200, SSE_LINES)),
-        )
-
-        self.assertEqual(
-            [(row["role"], row["content"]) for row in self.recorder.rows],
-            [("assistant", "你好，我在")],
-        )
-
-    def test_proactive_history_not_repeated(self):
-        self.run_non_stream(
-            self.proactive_messages(), FakePostClient(200, upstream_completion("[PASS]")),
-        )
-
-        saved_contents = [row["content"] for row in self.recorder.rows]
-        self.assertNotIn("最后一条真人消息", saved_contents)
-        self.assertNotIn("已回复过的内容", saved_contents)
-        self.assertEqual(len(self.recorder.rows), 1)
 
 
 class SaveChatMessageTests(unittest.TestCase):

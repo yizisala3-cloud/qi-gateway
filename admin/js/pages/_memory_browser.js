@@ -30,7 +30,8 @@ const SOURCE_LABELS = {
   manual: '用户手工写入',
   ai_tool_request: 'AI 工具申请',
   daily_digest: '自动总结',
-  orangechat_plugin: 'OrangeChat 插件',
+  // 历史 DB 值：旧客户端兼容插件已退役，申请仍在，显示映射保留。
+  orangechat_plugin: '旧客户端插件',
   mcp_memory: 'MCP 记忆写入',
 };
 export function sourceLabel(value) {
