@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .persona import load_persona
 from .memory_search import search_memories, format_memories_for_injection
+from . import app_settings
 from . import db
 from . import eventide_bridge
 
@@ -24,6 +25,10 @@ _executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="ctx")
 
 def build_eventide_context() -> str:
     """[2] Eventide 身体状态卡。"""
+    # 注入开关关闭 = 彻底暂停：不 load、不 save、不 tick、不创建初始状态，
+    # 数值冻结在关闭那一刻。early return 同时是防御层与直测入口。
+    if not app_settings.is_eventide_injection_enabled():
+        return ""
     try:
         state_data = db.load_eventide_state()
 
@@ -93,11 +98,16 @@ def build_context(user_message: str = "", history_turns=None) -> str:
     """
     futures = {
         "persona": _executor.submit(load_persona),
-        "eventide": _executor.submit(build_eventide_context),
         "recent_chat": _executor.submit(build_recent_chat_context, 10),
     }
+    results: dict[str, str] = {}
 
-    results = {}
+    # 开关关闭时干脆不提交 eventide 任务：连 db 读取都不会发生。
+    if app_settings.is_eventide_injection_enabled():
+        futures["eventide"] = _executor.submit(build_eventide_context)
+    else:
+        results["eventide"] = ""
+
     for name, future in futures.items():
         try:
             results[name] = future.result(timeout=8.0) or ""

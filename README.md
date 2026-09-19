@@ -71,8 +71,21 @@
 | `/v1/todos/{id}/snooze` | POST | 延后待办（待办插件 Token） |
 | `/v1/todos/{id}/cancel` | POST | 软隐藏取消待办（待办插件 Token） |
 | `/admin/api/memory-requests/{id}/review` | POST | Dashboard 通过或拒绝记忆申请（网关 Token） |
+| `/admin/api/eventide/settings` | GET / PUT | Dashboard 读取/切换身体状态注入开关（网关 Token） |
+| `/admin/api/eventide/body` | GET | Dashboard 读取 Eventide 身体状态（只读，网关 Token） |
 | `/health` | GET | 健康检查（无需鉴权） |
 | `/status` | GET | 网关状态（需鉴权） |
+
+## 身体状态注入开关
+
+网关级应用设置存储在 Supabase `app_settings` 表（`key` / `value` jsonb / `updated_at`，由迁移 `20260920010000_create_app_settings.sql` 创建，并幂等种子 `eventide.inject_enabled=true`）。Dashboard 在配置页提供开关（`PUT /admin/api/eventide/settings`），情感页只读展示当前身体状态（`GET /admin/api/eventide/body`，只读接口不会推进状态或创建初始状态）。
+
+开关语义：
+
+- 开启（默认）：每次聊天构建上下文时按 60 秒进程内缓存读取开关，推进 Eventide 状态并注入身体状态卡；首次聊天自动创建初始状态。
+- 关闭 = 彻底暂停：不再注入、不再推进状态、不创建初始状态，数值冻结在关闭那一刻；已存在的状态行原样保留。
+- 重新开启：不回填关闭期间的时间，由 Eventide 原生机制按时间分段追赶（每段 ≤6 小时、最多 48 段），网关不写任何追赶逻辑。
+- fail-open：开关读取异常或行缺失时一律按开启处理（保持注入现状），查询失败只记 warning；写库失败时 Dashboard 开关会报错并回滚 UI。
 
 ## MCP 记忆工具
 

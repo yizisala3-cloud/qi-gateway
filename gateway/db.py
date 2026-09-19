@@ -172,6 +172,53 @@ def save_chat_message(
         return False
 
 
+# ── 应用设置 ──────────────────────────────────────────────────────
+
+# load_app_setting 的三态返回里的「查询失败」哨兵：与 None（行不存在）
+# 区分开，让调用方对查询异常走 fail-open 并记 warning，行缺失静默按
+# 默认值处理。本模块其余 safe_query 函数无此需求，仍统一返回 None。
+APP_SETTING_QUERY_FAILED = object()
+
+
+def load_app_setting(key: str) -> Any:
+    """读取 app_settings 单值。
+
+    返回值三态：命中返回 value；行不存在返回 None；查询失败（含
+    Supabase 客户端不可用）返回 APP_SETTING_QUERY_FAILED 哨兵，绝不抛出。
+    """
+    client = get_client()
+    if not client:
+        return APP_SETTING_QUERY_FAILED
+    try:
+        resp = (
+            client.table("app_settings")
+            .select("value")
+            .eq("key", key)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        log.warning(f"app_settings 读取失败: {key} | {e}")
+        return APP_SETTING_QUERY_FAILED
+    if resp.data:
+        return resp.data[0].get("value")
+    return None
+
+
+@safe_query
+def save_app_setting(key: str, value: Any) -> bool:
+    """保存 app_settings 单值（upsert）。"""
+    client = get_client()
+    if not client:
+        return False
+    client.table("app_settings").upsert({
+        "key": key,
+        "value": value,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).execute()
+    return True
+
+
 # ── Eventide 状态 ─────────────────────────────────────────────────
 @safe_query
 def load_eventide_state() -> dict[str, Any] | None:
