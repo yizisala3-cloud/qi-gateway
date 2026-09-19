@@ -1,4 +1,3 @@
-import json
 import re
 import unittest
 from pathlib import Path
@@ -14,8 +13,6 @@ SUPERSESSION_MIGRATION = ROOT / "supabase" / "migrations" / "20260802070000_memo
 SIMILARITY_REVIEW_MIGRATION = ROOT / "supabase" / "migrations" / "20260802080000_memory_similarity_review.sql"
 IDEMPOTENT_SIMILARITY_REVIEW_MIGRATION = ROOT / "supabase" / "migrations" / "20260802081000_idempotent_memory_similarity_review.sql"
 AUTO_DIGEST_REQUEST_MIGRATION = ROOT / "supabase" / "migrations" / "20260804020000_auto_digest_memory_requests.sql"
-MANIFEST = ROOT / "orangechat_plugins" / "memory-request" / "manifest.json"
-MAIN_JS = ROOT / "orangechat_plugins" / "memory-request" / "main.js"
 REVIEW_PAGE = ROOT / "admin" / "js" / "pages" / "_memory_browser.js"
 MEMORY_FORM = ROOT / "admin" / "js" / "pages" / "_memory_form.js"
 ROUTES_JS = ROOT / "admin" / "js" / "routes.js"
@@ -265,51 +262,16 @@ class AutomaticDigestMemoryRequestMigrationContractTests(unittest.TestCase):
         self.assertNotIn("delete from", self.sql)
 
 
-class OrangeChatPluginContractTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-        cls.main_js = MAIN_JS.read_text(encoding="utf-8")
-        cls.tools = {tool["name"]: tool for tool in cls.manifest["tools"]}
+class RetiredPluginLayerContractTests(unittest.TestCase):
+    """旧 OrangeChat 兼容插件源码已移除；端点与历史数据值保留。"""
 
-    def test_manifest_tool_matches_export(self):
-        expected = {"request_memory", "review_memory_requests"}
-        self.assertEqual(set(self.tools), expected)
-        for name in expected:
-            self.assertIn(f"exports.{name} = {name}", self.main_js)
+    def test_plugin_sources_are_removed_from_the_repo(self):
+        self.assertFalse((ROOT / "orangechat_plugins").exists())
 
-    def test_plugin_uses_http_gateway_without_supabase_credentials(self):
-        config_names = {item["name"] for item in self.manifest["config"]}
-        self.assertEqual(config_names, {"gateway_url", "plugin_token", "assistant_id"})
-        self.assertIn("/v1/memory-requests", self.main_js)
-        self.assertIn("/v1/memory-requests/reviewable", self.main_js)
-        self.assertIn("fetch(", self.main_js)
-        self.assertNotIn("supabase", self.main_js.casefold())
-        self.assertNotIn("websocket", self.main_js.casefold())
-
-    def test_tool_description_preserves_split_review_policy(self):
-        description = self.tools["request_memory"]["description"]
-        for value in ("episode", "profile", "interaction_rule"):
-            self.assertIn(value, description)
-        self.assertIn("叶子审核", description)
-
-    def test_tool_supports_explicit_mutable_fact_replacement(self):
-        parameters = {
-            item["name"]: item
-            for item in self.tools["request_memory"]["parameters"]
-        }
-        self.assertIn("update_mode", parameters)
-        self.assertIn("memory_key", parameters)
-        self.assertIn("update_mode: mode", self.main_js)
-        self.assertIn("payload.memory_key", self.main_js)
-        self.assertIn("replace", self.tools["request_memory"]["description"])
-
-    def test_v3_plugin_has_no_todo_or_relation_proposal_payload(self):
-        self.assertEqual(self.manifest["version"], "3.1.0")
-        self.assertNotIn("todo", self.main_js.casefold())
-        self.assertNotIn("proposed_relations", self.main_js)
-        self.assertIn("USER_REVIEW_TYPES = ['episode', 'profile', 'interaction_rule']", self.main_js)
-        self.assertIn("assistant_id: cfg.assistantId", self.main_js)
+    def test_history_data_values_are_unchanged_in_migrations(self):
+        # memory_requests.source 的历史取值保留，旧插件申请仍可读。
+        sql = MIGRATION.read_text(encoding="utf-8")
+        self.assertIn("'orangechat_plugin'", sql)
 
 
 class MemoryReviewDashboardContractTests(unittest.TestCase):

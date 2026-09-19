@@ -2,74 +2,38 @@ import unittest
 
 from gateway.request_context import (
     GATEWAY_CONTEXT_HEADING,
-    PROACTIVE_CONTROL_HEADING,
     TODO_FEEDBACK_HEADING,
     append_gateway_context,
     build_todo_feedback_guidance,
     extract_last_user_text,
     extract_recent_turns,
-    is_orangechat_proactive_request,
-    annotate_proactive_control_signal,
 )
 
 
-class ProactiveDetectionTests(unittest.TestCase):
-    def test_detects_timer_proactive_request(self):
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "原始人设\n\n## 主动消息触发（定时触发）\n"
-                    "绝对不要复述上一轮的对话内容。"
-                ),
-            },
-            {"role": "user", "content": "昨天的最后一条真人消息"},
-            {"role": "assistant", "content": "昨天已经回复过的内容"},
-            {
-                "role": "user",
-                "content": "请根据以上上下文决定是否发消息。没什么好说的就回复 [PASS] 即可，不要强行找话题。",
-            },
-        ]
-
-        self.assertTrue(is_orangechat_proactive_request(messages))
-
-    def test_detects_device_event_proactive_request_with_text_parts(self):
-        messages = [
-            {
-                "role": "system",
-                "content": "## ⚠️ 当前触发原因：用户手机动向（设备事件触发）",
-            },
-            {
-                "role": "user",
-                "content": [{
-                    "type": "text",
-                    "text": "请根据以上用户动向决定是否发消息。没什么好说的就回复 [PASS]。",
-                }],
-            },
-        ]
-
-        self.assertTrue(is_orangechat_proactive_request(messages))
-
-    def test_requires_both_system_and_synthetic_user_markers(self):
-        only_system = [
-            {"role": "system", "content": "## 主动消息触发（定时触发）"},
-            {"role": "user", "content": "我们聊聊主动消息吧"},
-        ]
-        only_user = [
-            {"role": "system", "content": "普通人设"},
-            {"role": "user", "content": "请根据以上上下文决定是否发消息。"},
-        ]
-
-        self.assertFalse(is_orangechat_proactive_request(only_system))
-        self.assertFalse(is_orangechat_proactive_request(only_user))
-
-    def test_last_user_text_is_the_synthetic_trigger_not_history(self):
+class LastUserTextTests(unittest.TestCase):
+    def test_last_user_text_returns_the_latest_user_message(self):
         messages = [
             {"role": "user", "content": "真人消息"},
             {"role": "assistant", "content": "已经回复"},
-            {"role": "user", "content": "主动触发指令"},
+            {"role": "user", "content": "最新的用户消息"},
         ]
-        self.assertEqual(extract_last_user_text(messages), "主动触发指令")
+        self.assertEqual(extract_last_user_text(messages), "最新的用户消息")
+
+    def test_last_user_text_supports_multimodal_text_parts(self):
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "看看这张图"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,xxx"}},
+                ],
+            },
+        ]
+        self.assertEqual(extract_last_user_text(messages), "看看这张图")
+
+    def test_last_user_text_without_user_returns_empty(self):
+        self.assertEqual(extract_last_user_text([{"role": "assistant", "content": "hi"}]), "")
+        self.assertEqual(extract_last_user_text(None), "")
 
 
 class ContextInjectionTests(unittest.TestCase):
@@ -108,37 +72,6 @@ class ContextInjectionTests(unittest.TestCase):
         result = append_gateway_context(messages, "")
         self.assertEqual(result, messages)
         self.assertIsNot(result, messages)
-
-    def test_proactive_annotation_explains_control_signal_without_overriding_client_policy(self):
-        original_system = {
-            "role": "system",
-            "content": "原始人设和主动消息规则：没什么好说的就回复 [PASS]。",
-        }
-        history = [
-            {"role": "user", "content": "最后一条真实消息"},
-            {"role": "assistant", "content": "已经回复过"},
-            {"role": "user", "content": "请根据以上上下文决定是否发消息。"},
-        ]
-        messages = [original_system, *history]
-
-        result = annotate_proactive_control_signal(messages)
-
-        self.assertEqual(messages, [original_system, *history])
-        self.assertEqual(
-            original_system["content"],
-            "原始人设和主动消息规则：没什么好说的就回复 [PASS]。",
-        )
-        self.assertIs(result[0], original_system)
-        self.assertEqual(result[1]["role"], "system")
-        self.assertIn(PROACTIVE_CONTROL_HEADING, result[1]["content"])
-        self.assertIn("不是用户本人发言", result[1]["content"])
-        self.assertIn("不要重复回答", result[1]["content"])
-        self.assertIn("遵循客户端原始 system prompt", result[1]["content"])
-        self.assertNotIn("请直接输出", result[1]["content"])
-        self.assertNotIn("必须回复", result[1]["content"])
-        self.assertNotIn("NO_REPLY", result[1]["content"])
-        self.assertNotIn("SKIP", result[1]["content"])
-        self.assertEqual(result[2:], history)
 
 
 class TodoFeedbackGuidanceTests(unittest.TestCase):

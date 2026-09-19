@@ -1,6 +1,6 @@
 """网关入口 - Starlette ASGI 应用。
 
-保留聊天代理、客户端主动请求上下文、Eventide、待办和记忆任务。
+保留聊天代理、Eventide、待办和记忆任务。
 """
 import asyncio
 import json
@@ -32,16 +32,13 @@ from .memory_request_api import memory_request_routes
 from .memory_review_api import memory_review_routes
 from .memory_mcp import memory_mcp, memory_mcp_http_app
 from .todo_api import todo_routes
-from .todos import get_proactive_todo_context
 from .model_routing import select_upstream_model
 from .request_context import (
     append_gateway_context,
     build_todo_feedback_guidance,
     extract_last_user_text,
     extract_recent_turns,
-    is_orangechat_proactive_request,
     message_text,
-    annotate_proactive_control_signal,
 )
 from . import db
 
@@ -77,11 +74,11 @@ def verify_token(request: Request) -> bool:
 
 
 # ── 聊天原文保存（旁路） ──────────────────────────────────────────
-# 仅保存本次请求新产生的消息：普通请求取最后一条真实 user 消息与上游回复；
-# 主动请求的合成控制信号一律不作为 user 保存。历史消息不在这里重复落库，
-# 由客户端的常规请求流程维护。user 记录与 assistant 记录成对保存——只有
-# 上游成功产出有效 assistant 文本时才写两条；上游失败时不保留用户输入，
-# 这是有意的取舍，保证 chat_messages 里不出现没有回复的孤儿 user 行。
+# 仅保存本次请求新产生的消息：普通请求取最后一条真实 user 消息与上游回复。
+# 历史消息不在这里重复落库，由客户端的常规请求流程维护。user 记录与
+# assistant 记录成对保存——只有上游成功产出有效 assistant 文本时才写两条；
+# 上游失败时不保留用户输入，这是有意的取舍，保证 chat_messages 里不出现
+# 没有回复的孤儿 user 行。
 
 def extract_assistant_reply_text(status_code: int, payload: bytes) -> str:
     """从 OpenAI-compatible 响应中提取 assistant 文本；结构异常返回空串。"""
@@ -236,44 +233,17 @@ async def chat_completions(request: Request):
 
     loop = asyncio.get_event_loop()
     messages = body.get("messages", [])
-    proactive_request = is_orangechat_proactive_request(messages)
-    if proactive_request:
-        # OrangeChat already supplies its complete persona, history, proactive
-        # rules and synthetic trigger. Keep the original prompt untouched, add
-        # only a neutral control-signal annotation, and do not count the trigger
-        # as a new message from the human user.
-        user_text = ""
-        proactive_request_messages = annotate_proactive_control_signal(messages)
-        try:
-            todo_context = await asyncio.wait_for(
-                loop.run_in_executor(bg_executor, get_proactive_todo_context),
-                timeout=3.0,
-            )
-        except asyncio.TimeoutError:
-            # The reminder is optional; a slow database must not delay or
-            # suppress the proactive chat request itself.
-            todo_context = ""
-            log.warning("主动消息待办读取超时，已跳过")
-        if todo_context:
-            proactive_request_messages = append_gateway_context(
-                proactive_request_messages,
-                todo_context,
-            )
-        body["messages"] = proactive_request_messages
-        log.info("OrangeChat proactive request detected; preserving client system prompt")
-    else:
-        user_text = extract_last_user_text(messages)
-        history_turns = extract_recent_turns(messages)
+    user_text = extract_last_user_text(messages)
+    history_turns = extract_recent_turns(messages)
 
-    if not proactive_request:
-        full_context = await loop.run_in_executor(
-            bg_executor, build_context, user_text, history_turns
-        )
-        todo_feedback = build_todo_feedback_guidance(user_text)
-        if todo_feedback:
-            full_context = full_context + "\n\n" + todo_feedback if full_context else todo_feedback
-        if full_context and "messages" in body:
-            body["messages"] = append_gateway_context(body["messages"], full_context)
+    full_context = await loop.run_in_executor(
+        bg_executor, build_context, user_text, history_turns
+    )
+    todo_feedback = build_todo_feedback_guidance(user_text)
+    if todo_feedback:
+        full_context = full_context + "\n\n" + todo_feedback if full_context else todo_feedback
+    if full_context and "messages" in body:
+        body["messages"] = append_gateway_context(body["messages"], full_context)
 
     upstream_url = f"{cfg.UPSTREAM_BASE_URL.rstrip('/')}/chat/completions"
     headers = {

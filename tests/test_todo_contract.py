@@ -1,11 +1,8 @@
-import json
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MANIFEST = ROOT / "orangechat_plugins" / "todo" / "manifest.json"
-MAIN_JS = ROOT / "orangechat_plugins" / "todo" / "main.js"
 TODO_PY = ROOT / "gateway" / "todos.py"
 API_PY = ROOT / "gateway" / "todo_api.py"
 GATEWAY_MAIN = ROOT / "gateway" / "main.py"
@@ -13,48 +10,6 @@ REMINDER_MIGRATION = (
     ROOT / "supabase" / "migrations"
     / "20260804010000_atomic_proactive_todo_claim.sql"
 )
-
-
-class TodoPluginContractTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-        cls.main_js = MAIN_JS.read_text(encoding="utf-8")
-
-    def test_manifest_tools_match_exports(self):
-        expected = {
-            "create_todo",
-            "list_today_todos",
-            "complete_todo",
-            "snooze_todo",
-            "cancel_todo",
-        }
-        self.assertEqual({tool["name"] for tool in self.manifest["tools"]}, expected)
-        for name in expected:
-            self.assertIn(f"exports.{name} = {name}", self.main_js)
-
-    def test_plugin_uses_http_gateway_and_no_database_credentials(self):
-        config_names = {item["name"] for item in self.manifest["config"]}
-        self.assertEqual(config_names, {
-            "gateway_url",
-            "plugin_token",
-            "user_name",
-            "ai_name",
-            "timezone_offset_minutes",
-        })
-        self.assertIn("fetch(", self.main_js)
-        self.assertIn("/v1/todos/query", self.main_js)
-        self.assertNotIn("supabase", self.main_js.casefold())
-        self.assertNotIn("websocket", self.main_js.casefold())
-
-    def test_cancel_is_soft_and_role_scope_is_mandatory(self):
-        cancel_description = next(
-            tool["description"] for tool in self.manifest["tools"]
-            if tool["name"] == "cancel_todo"
-        )
-        self.assertIn("软隐藏", cancel_description)
-        self.assertIn("user_name", self.main_js)
-        self.assertIn("ai_name", self.main_js)
 
 
 class TodoGatewayContractTests(unittest.TestCase):
@@ -80,17 +35,20 @@ class TodoGatewayContractTests(unittest.TestCase):
         self.assertNotIn(".delete(", code)
         self.assertIn('"is_hidden": true', code)
 
-    def test_proactive_todos_are_appended_without_identity_environment_variables(self):
+    def test_todo_feedback_guidance_remains_in_chat_path(self):
+        main = GATEWAY_MAIN.read_text(encoding="utf-8")
+        self.assertIn("build_todo_feedback_guidance", main)
+        self.assertIn("append_gateway_context", main)
+
+    def test_retired_proactive_todo_layer_is_absent(self):
         main = GATEWAY_MAIN.read_text(encoding="utf-8")
         todos = TODO_PY.read_text(encoding="utf-8")
-        self.assertIn("get_proactive_todo_context", main)
-        self.assertIn("append_gateway_context", main)
-        self.assertIn("asyncio.wait_for", main)
-        self.assertIn("build_todo_feedback_guidance", main)
+        self.assertNotIn("get_proactive_todo_context", todos + main)
+        self.assertNotIn("claim_proactive_todos", todos + main)
         self.assertNotIn("PROACTIVE_TODO_USER_NAME", todos + main)
         self.assertNotIn("PROACTIVE_TODO_AI_NAME", todos + main)
 
-    def test_proactive_claim_is_atomic_and_only_has_a_three_hour_cooldown(self):
+    def test_proactive_claim_migration_keeps_atomic_three_hour_cooldown(self):
         sql = REMINDER_MIGRATION.read_text(encoding="utf-8").casefold()
         self.assertIn("create table if not exists public.todo_reminder_state", sql)
         self.assertIn("create or replace function public.claim_proactive_todos", sql)
