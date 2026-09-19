@@ -23,7 +23,6 @@ INDEX_HTML = ROOT / "admin" / "index.html"
 APP_JS = ROOT / "admin" / "js" / "app.js"
 ADMIN_API = ROOT / "gateway" / "admin_api.py"
 MEMORY_EXTRACT = ROOT / "gateway" / "memory_extract.py"
-ASSET_VERSION = "20260903-retrotime1"
 
 
 class MemoryRequestMigrationContractTests(unittest.TestCase):
@@ -393,10 +392,16 @@ class MemoryReviewDashboardContractTests(unittest.TestCase):
         self.assertIn("仍然通过", self.page)
 
     def test_static_asset_version_refreshed_for_plain_reload(self):
+        # Version string is parsed from index.html so this test guards chain
+        # consistency (plain-reload URL ↔ app.js ASSET_VERSION) across bumps.
         index_html = INDEX_HTML.read_text(encoding="utf-8")
         app_js = APP_JS.read_text(encoding="utf-8")
-        self.assertIn(f"/admin/js/app.js?v={ASSET_VERSION}", index_html)
-        self.assertIn(f"const ASSET_VERSION = '{ASSET_VERSION}'", app_js)
+        match = re.search(r"/admin/js/app\.js\?v=([\w-]+)", index_html)
+        self.assertIsNotNone(match, "index.html must load app.js with an explicit ?v= version")
+        version = match.group(1)
+        self.assertIn(f"/admin/js/app.js?v={version}", index_html)
+        self.assertIn(f"style.css?v={version}", index_html)
+        self.assertIn(f"const ASSET_VERSION = '{version}'", app_js)
 
     def test_dashboard_select_fields_covered_by_admin_whitelist(self):
         allowed = _TABLES["memory_requests"]["read"]

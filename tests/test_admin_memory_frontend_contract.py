@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BROWSER = ROOT / "admin" / "js" / "pages" / "_memory_browser.js"
 FORM = ROOT / "admin" / "js" / "pages" / "_memory_form.js"
 INDEX_HTML = ROOT / "admin" / "index.html"
-ASSET_VERSION = "20260903-retrotime1"
+APP_JS = ROOT / "admin" / "js" / "app.js"
 
 EMOJI_PATTERN = re.compile(
     "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F600-\U0001F64F]"
@@ -159,9 +159,15 @@ class MemoryBrowserContractTests(unittest.TestCase):
 
 class AssetVersionContractTests(unittest.TestCase):
     def test_index_html_loads_current_assets(self):
+        # The version string is parsed out of index.html itself: this test pins
+        # chain consistency (html ↔ css ↔ app.js ASSET_VERSION), not one value.
         html = INDEX_HTML.read_text(encoding="utf-8")
-        self.assertIn(f"style.css?v={ASSET_VERSION}", html)
-        self.assertIn(f"app.js?v={ASSET_VERSION}", html)
+        app_js = APP_JS.read_text(encoding="utf-8")
+        match = re.search(r"app\.js\?v=([\w-]+)", html)
+        self.assertIsNotNone(match, "index.html must load app.js with an explicit ?v= version")
+        version = match.group(1)
+        self.assertIn(f"style.css?v={version}", html)
+        self.assertIn(f"const ASSET_VERSION = '{version}'", app_js)
 
 
 if __name__ == "__main__":

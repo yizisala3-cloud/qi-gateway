@@ -590,8 +590,13 @@ class RuntimeRetirementTests(unittest.TestCase):
         app_js = (ROOT / "admin" / "js" / "app.js").read_text(encoding="utf-8")
         self.assertNotIn("20260830-retro1", index_html)
         self.assertNotIn("20260830-retro1", app_js)
-        self.assertIn("20260903-retrotime1", index_html)
-        self.assertIn("20260903-retrotime1", app_js)
+        # Current version is parsed from index.html: guard chain consistency
+        # (html ↔ css ↔ app.js ASSET_VERSION) instead of pinning one value.
+        match = re.search(r"app\.js\?v=([\w-]+)", index_html)
+        self.assertIsNotNone(match, "index.html must load app.js with an explicit ?v= version")
+        version = match.group(1)
+        self.assertIn(f"style.css?v={version}", index_html)
+        self.assertIn(f"const ASSET_VERSION = '{version}'", app_js)
 
 
 class ContinuitySchemaStillValidTests(unittest.TestCase):
