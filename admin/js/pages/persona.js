@@ -1,7 +1,7 @@
 // pages/persona.js - 人设与规则：人设 / 用户资料 / 互动规则
-import { query, update, insert, esc } from '../api.js?v=20260920-planning-mobile1';
-import { loading, empty, tag, toast, modal, confirm, delegate, icon } from '../ui.js?v=20260920-planning-mobile1';
-import { createMemoryBrowser } from './_memory_browser.js?v=20260920-planning-mobile1';
+import { query, update, insert, esc } from '../api.js?v=20260920-blankfix1';
+import { loading, empty, tag, toast, modal, confirm, delegate, icon } from '../ui.js?v=20260920-blankfix1';
+import { createMemoryBrowser } from './_memory_browser.js?v=20260920-blankfix1';
 
 const VIEW_TABS = [
   { key: 'persona', label: '人设' },

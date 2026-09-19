@@ -1,6 +1,6 @@
 // pages/logs.js - 日志：真实空状态，接口尚未接入
-import { icon } from '../ui.js?v=20260920-planning-mobile1';
-import { empty } from '../ui.js?v=20260920-planning-mobile1';
+import { icon } from '../ui.js?v=20260920-blankfix1';
+import { empty } from '../ui.js?v=20260920-blankfix1';
 
 export default {
   async mount(root) {
