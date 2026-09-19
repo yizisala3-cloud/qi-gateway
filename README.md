@@ -4,21 +4,20 @@
 
 ## 当前状态
 
-记忆系统、连续感总结、Eventide、待办读写闭环、橘瓣工具和客户端主动唤醒时的待办上下文注入已实现。旧积温、网关标签定时器和旧主动消息库存投递链已经退役。
+记忆系统、连续感总结、Eventide、待办读写闭环和 MCP 记忆工具已实现。旧积温、网关标签定时器、旧主动消息库存投递链和 OrangeChat 客户端兼容插件层已经退役；`/v1/memory-requests*`、`/v1/todos*` 端点与对应 Token 继续保留。
 
-橘瓣原生主动消息请求会由网关保留原始 system prompt 和完整历史，不再被当作真人新消息处理，也不会注入普通聊天上下文。网关仅追加一条独立的内部触发说明，明确程序生成的最后一条 `user` 消息不是真人发言，禁止重复回答和虚构用户信息；是否发送以及如何拒绝仍遵循客户端原始提示词。普通聊天的网关上下文同样使用独立的补充 system 消息，原 system prompt 内容始终保持不变。
+普通聊天的网关上下文使用独立的补充 system 消息追加，原 system prompt 内容始终保持不变。
 
 ## 架构
 
 ```
-橘瓣 → qi-gateway(/v1/chat/completions) → 上游 LLM → qi-gateway → 橘瓣
+手机客户端 → qi-gateway(/v1/chat/completions) → 上游 LLM → qi-gateway → 手机客户端
 ```
 
 当前保留能力：
 - Eventide 身体状态卡注入
 - 记忆检索、连续感总结和审核
-- 待办工具及客户端主动请求中的待办上下文
-- 客户端原生主动请求识别；发送或拒绝协议由客户端原始 system prompt 决定
+- 待办工具（`/v1/todos*` 端点保持不变）
 
 ## 部署
 
@@ -26,17 +25,17 @@
 
 | 变量 | 说明 |
 |------|------|
-| `GATEWAY_TOKEN` | 网关鉴权 token（橘瓣填的 API Key） |
+| `GATEWAY_TOKEN` | 网关鉴权 token（手机客户端填的 API Key） |
 | `UPSTREAM_BASE_URL` | 聊天上游地址，默认 `https://api.deepseek.com/v1` |
 | `UPSTREAM_API_KEY` | DeepSeek API Key，只通过部署环境变量配置 |
 | `UPSTREAM_MODEL` | 默认 `deepseek-v4-pro`；配置后统一覆盖客户端传入的模型名 |
 | `SUPABASE_URL` | Supabase 项目地址 |
 | `SUPABASE_SECRET_KEY` / `SUPABASE_SERVICE_ROLE_KEY` | 仅服务端使用的 Supabase 写入密钥 |
 | `SUPABASE_KEY` | 兼容用 publishable/anon key，不用于主动记忆写入 |
-| `MEMORY_PLUGIN_TOKEN` | 橘瓣记忆申请插件的独立鉴权 Token |
+| `MEMORY_PLUGIN_TOKEN` | 记忆申请插件的独立鉴权 Token（插件源码已移除，端点保留） |
 | `MCP_MEMORY_TOKEN` | `/mcp` 远程记忆工具的独立 Bearer Token |
 | `MEMORY_REQUEST_RATE_LIMIT` | 每个 assistant 每分钟最多提交的记忆申请数，默认 6 |
-| `TODO_PLUGIN_TOKEN` | 橘瓣待办插件的独立鉴权 Token |
+| `TODO_PLUGIN_TOKEN` | 待办插件的独立鉴权 Token（插件源码已移除，端点保留） |
 | `TODO_REQUEST_RATE_LIMIT` | 单实例每分钟最多处理的待办插件请求数，默认 60 |
 | `RUMINATION_BASE_URL` / `RUMINATION_API_KEY` / `RUMINATION_MODEL` | 反刍连续感路径的独立提取模型；留空回退复用 `CONTINUITY_*` |
 | `RUMINATION_MAX_TOKENS` | 反刍文本提取最大输出 token 数，默认 8192 |
@@ -49,7 +48,7 @@
 2. 配置环境变量
 3. 部署后访问 `/health` 确认运行
 
-### 橘瓣连接
+### 手机客户端连接
 
 - 提供商格式：OpenAI
 - API Base URL：`https://你的域名/v1`
@@ -62,9 +61,9 @@
 |------|------|------|
 | `/v1/chat/completions` | POST | 核心聊天接口，OpenAI 兼容 |
 | `/v1/models` | GET | 模型列表 |
-| `/v1/memory-requests` | POST | 橘瓣插件提交 pending 记忆申请（插件专用 Token） |
+| `/v1/memory-requests` | POST | 手机客户端插件提交 pending 记忆申请（插件专用 Token） |
 | `/v1/memory-requests/reviewable` | POST | 列出当前 assistant 下 AI 可审核的低权重申请 |
-| `/v1/memory-requests/{id}/review` | POST | 橘瓣 AI 审核低权重申请；服务端再次限制分类 |
+| `/v1/memory-requests/{id}/review` | POST | 手机客户端 AI 审核低权重申请；服务端再次限制分类 |
 | `/mcp` | Streamable HTTP | 标准 MCP 记忆工具（独立 MCP Token） |
 | `/v1/todos` | POST | 创建当前用户与角色范围内的待办（待办插件 Token） |
 | `/v1/todos/query` | POST | 查询今日、逾期或全部开放待办（待办插件 Token） |
@@ -75,25 +74,23 @@
 | `/health` | GET | 健康检查（无需鉴权） |
 | `/status` | GET | 网关状态（需鉴权） |
 
-## MCP 记忆工具与橘瓣兼容插件
+## MCP 记忆工具
 
 推荐客户端通过官方 Python MCP SDK 提供的 Streamable HTTP 端点连接：URL 填 `https://你的域名/mcp`，自定义请求头填 `Authorization: Bearer <MCP_MEMORY_TOKEN>`。协议协商、初始化、ping、`tools/list`、`tools/call`、请求 ID、Content-Type/Accept 和标准工具错误由 SDK 处理。服务使用无持久会话模式，只暴露 `request_memory` 与 `review_memory_requests`。
 
-兼容插件源码位于 `orangechat_plugins/memory-request/`，版本 3.1.0，保留原插件 ID，但只包含同名的两个记忆工具和三个配置，不再包含待办。插件继续使用独立的 `MEMORY_PLUGIN_TOKEN`；Supabase 服务端密钥始终留在网关环境变量中。
+旧版 OrangeChat 兼容插件源码已从仓库移除（原 `orangechat_plugins/` 目录）；`/v1/memory-requests*` 端点与 `MEMORY_PLUGIN_TOKEN` 鉴权保持不变，MCP 是当前推荐的客户端接入方式。
 
-`moment/thread/inside_joke` 经完整校验、去重和版本处理后，在单个数据库事务中直接成为正式记忆；`episode/profile/interaction_rule` 强制进入 pending，由用户审核。客户端请求头不能改变这个分类边界。MCP 申请保留 `memory_requests.source=mcp_memory`，旧插件申请保留 `orangechat_plugin`，正式记忆按既有规则使用 `ai_tool_request`（自动总结审核结果保留 `daily_digest`）。
+`moment/thread/inside_joke` 经完整校验、去重和版本处理后，在单个数据库事务中直接成为正式记忆；`episode/profile/interaction_rule` 强制进入 pending，由用户审核。客户端请求头不能改变这个分类边界。MCP 申请保留 `memory_requests.source=mcp_memory`，历史插件申请保留 `orangechat_plugin`（历史数据值），正式记忆按既有规则使用 `ai_tool_request`（自动总结审核结果保留 `daily_digest`）。
 
 进度、状态、位置等可变事实可以使用 `update_mode=replace` 和稳定的 ASCII `memory_key`。审核通过后，新版本会原子启用，旧版本仅软失效，并通过 `supersedes_memory_id` / `superseded_by_memory_id` 保留双向替代关系；过期申请不得反向覆盖较新的已审核版本。普通相似内容默认仍是独立候选，不会仅凭相似度自动覆盖。
 
 普通相似内容由 Dashboard 人工选择现有记忆后处理：`duplicate` 只把申请关联到已有记忆，不写入新内容；`conflict` 将申请保留在冲突待处理队列且不参与召回；`merge` 要求用户编辑最终合并内容，再原子创建新版本并软失效旧版本。每次操作都会写入私有的追加式审核事件，保留目标、结果、操作者和备注。
 
-## 橘瓣待办插件
+## 待办接口
 
-待办能力不再并入记忆兼容插件；需要时使用 `orangechat_plugins/todo/` 的独立版本。插件只通过普通 HTTP 调用网关，不使用 WebSocket，也不持有 Supabase 密钥。网关对每次读写同时约束 `user_name` 与 `ai_name`；取消操作只会设置 `is_hidden=true`，不会永久删除记录。
+待办能力通过 `/v1/todos*` 端点提供（需 `TODO_PLUGIN_TOKEN`）；旧待办插件源码已从仓库移除（原 `orangechat_plugins/todo/` 目录）。客户端只通过普通 HTTP 调用网关，不持有 Supabase 密钥。网关对每次读写同时约束 `user_name` 与 `ai_name`；取消操作只会设置 `is_hidden=true`，不会永久删除记录。
 
-“今日待办”包含今天已排期、已逾期和未排期的开放事项，并排除已完成、已取消、空心占位和开始/结束标记。时间参数必须是带时区的 ISO 8601 字符串。橘瓣原生主动消息触发时，网关会读取这些开放待办并作为独立辅助 system 消息追加，原始 system prompt 保持不变；查询失败时直接跳过，不会阻断主动回复。当前部署仅供一个用户与一个 AI 使用，因此主动提醒读取不增加身份环境变量，插件的写入和修改接口仍保留原有身份约束。
-
-应用 `20260804010000_atomic_proactive_todo_claim.sql` 后，同一条待办至少间隔三小时才会再次进入客户端主动请求上下文。该机制只记录最近一次进入上下文的时间，不设置每日提醒次数或累计次数上限；数据库使用原子 claim 避免并发请求重复选中同一待办。若某个部署环境尚未应用迁移，代码会安全退回原有直接读取逻辑，不阻断客户端主动请求。
+“今日待办”包含今天已排期、已逾期和未排期的开放事项，并排除已完成、已取消、空心占位和开始/结束标记。时间参数必须是带时区的 ISO 8601 字符串。写入和修改接口同时约束 `user_name` 与 `ai_name`。
 
 正常聊天中，用户明确表达“完成了”“稍后再做”或“取消提醒”等已有待办状态变化时，网关会追加一段独立的待办反馈说明，引导模型先用 `list_today_todos` 定位原记录，再调用完成、延期或取消工具；不会用 `create_todo` 复制出新待办。指代不清或无法可靠确定新时间时应先询问用户。普通聊天不会因此自动注入整张待办表，原始 system prompt 仍保持不变。
 
@@ -101,7 +98,9 @@
 
 ## 记忆检索
 
-自动总结会先把橘瓣消息内的显示时间戳解析并统一为 Asia/Shanghai 时间，再从正文移除重复时间行。模型只输出最多 8 条结构化候选，并必须引用本批真实消息 ID；无有效证据的候选会被丢弃。总结预览区分证据时间、记忆实际发生时间及时间精度。应用 `20260804020000_auto_digest_memory_requests.sql` 后，执行总结会把候选原子写入记忆申请队列，只有审核通过后才成为可召回的正式记忆；分类、证据、时间、向量和总结批次来源会随审核结果保留。
+自动总结会先把手机客户端消息内的显示时间戳解析并统一为 Asia/Shanghai 时间，再从正文移除重复时间行。模型只输出最多 12 条结构化候选，并必须引用本批真实消息 ID；无有效证据的候选会被丢弃。总结预览区分证据时间、记忆实际发生时间及时间精度。应用 `20260804020000_auto_digest_memory_requests.sql` 后，执行总结会把候选原子写入记忆申请队列，只有审核通过后才成为可召回的正式记忆；分类、证据、时间、向量和总结批次来源会随审核结果保留。`inserted_count` 是本批写入的申请总数（含提交事务内自动转正的部分）；每条申请的真实状态可在 admin 运行详情中查看。
+
+连续感总结成功提交后只设置 1 小时的自动冷却（`auto_cooldown_until`）；旧版"手动触发成功后再冷却 10 秒"的机制已在 `20260917010000_memory_continuity_stale_batch_guard.sql` 重建提交 RPC 时移除。
 
 该 migration 还会在原子提交时检查已有记忆工具申请、正式记忆和开放待办。同一来源、同一稳定主题键且处于同一时间窗口，或内容已完全存在时直接跳过；已创建的待办不会被再写成目标记忆。仅靠相似度无法确定时不会自动覆盖，而是保留 `pending` 并在审核页标注“疑似重复”。同一主题的更晚状态更新仍会进入替代审核，不会被相似度误删。
 
