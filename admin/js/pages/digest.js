@@ -1,6 +1,6 @@
 // pages/digest.js - 记忆总结：连续感总结 + 反刍连续感
-import { gw, esc } from '../api.js?v=20260905-rumination1';
-import { loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, fmtDate } from '../ui.js?v=20260905-rumination1';
+import { gw, esc } from '../api.js?v=20260919-digest-tabs1';
+import { loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, fmtDate } from '../ui.js?v=20260919-digest-tabs1';
 
 const TIME_PRECISION_LABELS = {
   minute: '精确到分钟', day: '精确到日期', approximate: '大概时间', unknown: '时间未知',
@@ -87,43 +87,59 @@ export default {
   ruminationBusy: false,
   data: null,
   rumination: null,
+  view: 'continuity',
 
   async mount(root) {
     this.root = root;
     root.innerHTML = `
       <div class="page-with-detail">
         <div class="page-main">
-          <div id="digest-warning"></div>
-          <div class="toolbar">
-            <label class="inline">批次消息数（1-100）<input id="digest-limit" type="number" min="1" max="100" value="60" style="width:90px"></label>
+          <div class="toolbar" style="margin-bottom:14px">
+            <div class="tabs" role="tablist">
+              <button class="tab active" data-act="view" data-view="continuity">${icon('scroll')}连续感总结</button>
+              <button class="tab" data-act="view" data-view="rumination">${icon('feather')}反刍总结</button>
+            </div>
             <span class="grow"></span>
             <button class="btn btn-secondary" data-act="refresh">${icon('refresh')}刷新</button>
-            <button class="btn btn-secondary" data-act="skip" disabled style="display:none">${icon('x')}跳过暂停批次</button>
-            <button class="btn btn-secondary" data-act="preview" disabled>${icon('search')}连续感预览</button>
-            <button class="btn btn-primary" data-act="execute" disabled>${icon('check')}执行连续感总结</button>
           </div>
-          <div id="continuity-status">${loading()}</div>
-          <div class="section-title">最近连续感运行</div>
-          <div id="continuity-runs">${loading()}</div>
-          <div class="section-title">反刍连续感</div>
-          <div id="rumination-warning"></div>
-          <div class="toolbar">
-            <span class="muted text-sm">独立游标 · 每日一次 · 批次 60～120 条</span>
-            <span class="grow"></span>
-            <button class="btn btn-primary" data-act="rumination-execute" disabled>${icon('check')}执行反刍总结</button>
+          <div id="view-continuity">
+            <div id="digest-warning"></div>
+            <div class="toolbar">
+              <label class="inline">批次消息数（1-100）<input id="digest-limit" type="number" min="1" max="100" value="60" style="width:90px"></label>
+              <span class="grow"></span>
+              <button class="btn btn-secondary" data-act="skip" disabled style="display:none">${icon('x')}跳过暂停批次</button>
+              <button class="btn btn-secondary" data-act="preview" disabled>${icon('search')}连续感预览</button>
+              <button class="btn btn-primary" data-act="execute" disabled>${icon('check')}执行连续感总结</button>
+            </div>
+            <div id="continuity-status">${loading()}</div>
+            <div class="section-title">最近连续感运行</div>
+            <div id="continuity-runs">${loading()}</div>
           </div>
-          <div id="rumination-status">${loading()}</div>
-          <div class="section-title">最近反刍运行</div>
-          <div id="rumination-runs">${loading()}</div>
+          <div id="view-rumination" hidden>
+            <div id="rumination-warning"></div>
+            <div class="toolbar">
+              <span class="muted text-sm">独立游标 · 每日一次 · 批次 60～120 条</span>
+              <span class="grow"></span>
+              <button class="btn btn-primary" data-act="rumination-execute" disabled>${icon('check')}执行反刍总结</button>
+            </div>
+            <div id="rumination-status">${loading()}</div>
+            <div class="section-title">最近反刍运行</div>
+            <div id="rumination-runs">${loading()}</div>
+          </div>
         </div>
         <aside class="side-panel" aria-label="状态概览">
-          <div class="panel-title">${icon('scroll')}连续感概览</div>
-          <div id="continuity-overview">${loading()}</div>
-          <div class="panel-title mt16">${icon('scroll')}反刍概览</div>
-          <div id="rumination-overview">${loading()}</div>
+          <div id="overview-continuity">
+            <div class="panel-title">${icon('scroll')}连续感概览</div>
+            <div id="continuity-overview">${loading()}</div>
+          </div>
+          <div id="overview-rumination" hidden>
+            <div class="panel-title">${icon('scroll')}反刍概览</div>
+            <div id="rumination-overview">${loading()}</div>
+          </div>
         </aside>
       </div>`;
     delegate(root, {
+      view: (el) => this.switchView(el.dataset.view),
       refresh: () => this.load(),
       preview: () => this.runPreview(),
       execute: () => this.runExecute(),
@@ -133,6 +149,18 @@ export default {
       'rumination-detail': (el) => this.openRuminationRun(el.dataset.id),
     });
     await this.load();
+  },
+
+  switchView(view) {
+    if (view !== 'continuity' && view !== 'rumination') return;
+    this.view = view;
+    this.root.querySelectorAll('.tab[data-view]').forEach((el) => {
+      el.classList.toggle('active', el.dataset.view === view);
+    });
+    this.root.querySelector('#view-continuity').hidden = view !== 'continuity';
+    this.root.querySelector('#view-rumination').hidden = view !== 'rumination';
+    this.root.querySelector('#overview-continuity').hidden = view !== 'continuity';
+    this.root.querySelector('#overview-rumination').hidden = view !== 'rumination';
   },
 
   syncControls() {
