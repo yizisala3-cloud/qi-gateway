@@ -78,11 +78,12 @@ body {
   font-size: 14px;
   line-height: 1.65;
   color: var(--ink);
-  /* 全局深绿纸纹：原侧栏底纹铺满整页，主区变成绿底上的漂浮书页 */
+  /* 全局深绿纸纹：原侧栏底纹铺满整页，主区变成绿底上的漂浮书页。
+     不用 background-attachment: fixed——iOS Safari 对 fixed 背景渲染
+     不可靠；且布局是 100vh 内滚，body 本身不滚动，fixed 没有收益。 */
   background:
     linear-gradient(var(--green-veil), var(--green-veil)),
     url("/admin/assets/dark-green-paper.png") center / cover no-repeat, var(--green-deep);
-  background-attachment: fixed;
   -webkit-font-smoothing: antialiased;
 }
 a { color: inherit; text-decoration: none; }
@@ -296,6 +297,8 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
   flex: 1;
   min-width: 0;
   height: 100vh;
+  /* 手机端地址栏收展会改变可视高度，dvh 让书页始终贴合可视区 */
+  height: 100dvh;
   position: relative;
   padding: 18px 22px 22px;
 }
@@ -1065,6 +1068,8 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   }
   .sidebar-backdrop.show { opacity: 1; pointer-events: auto; }
   .icon-btn.menu-btn { display: inline-flex; }
+  /* 抽屉态侧栏同样用 dvh，避免地址栏遮住底部状态栏 */
+  .sidebar { height: 100vh; height: 100dvh; }
   .main { padding: 10px; }
   .main::before, .main::after { display: none; }
   .content { border-radius: 12px; padding: 18px 16px 70px; }
@@ -1073,6 +1078,17 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   .grid-2, .grid-4 { grid-template-columns: repeat(2, 1fr); }
   .card { padding: 14px 15px; }
   .modal-mask { padding: 12px; }
+}
+
+/* 手机竖屏（≤560px）：卡片网格改单列，内容区收紧换回可读宽度 */
+@media (max-width: 560px) {
+  .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+  .content { padding: 16px 14px 56px; }
+  .card { padding: 13px 14px; }
+  .page-title { font-size: 21px; }
+  .page-head-rule { margin: 14px 0 16px; }
+  .page-head-actions { gap: 8px; }
+  .stat .value { font-size: 21px; }
 }
 
 /* =========================================================
