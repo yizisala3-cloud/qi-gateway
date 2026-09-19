@@ -1,13 +1,13 @@
 // pages/_memory_browser.js - shared library/requests browser with detail panel
-import { gw, query, update, count, esc } from '../api.js?v=20260903-retrotime1';
+import { gw, query, update, count, esc } from '../api.js?v=20260919-digest-tabs2';
 import {
   loading, empty, errorBlock, banner, tag, heatTag, impTag, pagerHtml,
   toast, modal, confirm, delegate, icon, fmtDate, createDetailPanel,
-} from '../ui.js?v=20260903-retrotime1';
-import { openMemoryForm } from './_memory_form.js?v=20260903-retrotime1';
-import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20260909-absorb1';
+} from '../ui.js?v=20260919-digest-tabs2';
+import { openMemoryForm } from './_memory_form.js?v=20260919-digest-tabs2';
+import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20260919-digest-tabs2';
 
-export const ASSET_VERSION = '20260903-retrotime1';
+export const ASSET_VERSION = '20260919-digest-tabs2';
 
 const PAGE_SIZE = 20;
 const REQ_FETCH_LIMIT = 100;
