@@ -27,6 +27,7 @@ from .memory_rumination import _rumination_analysis_configured as _rumination_co
 from .memory_rumination import run_rumination_digest_if_due
 from .admin_api import admin_api_routes
 from .admin_memory_api import admin_memory_routes
+from .context_admin_api import context_admin_routes
 from .eventide_admin_api import eventide_admin_routes
 from .memory_digest_api import memory_digest_routes
 from .memory_request_api import memory_request_routes
@@ -420,6 +421,7 @@ _routes = [
 ]
 _routes.extend(admin_api_routes)
 _routes.extend(admin_memory_routes)
+_routes.extend(context_admin_routes)
 _routes.extend(eventide_admin_routes)
 _routes.extend(memory_digest_routes)
 _routes.extend(memory_request_routes)

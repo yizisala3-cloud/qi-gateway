@@ -1,14 +1,16 @@
 """上下文拼装：并发获取所有注入源，按固定顺序拼装。
 
 注入结构（静态 → 动态）：
+[0] 当前时间戳（可关）
 [1] 人设 persona（静态）
-[2] Eventide 身体状态卡
+[2] Eventide 身体状态卡（可关）
 [3] 长期记忆搜索结果
-[4] 短期上下文 chat_messages 最近10条
+[4] 短期上下文 chat_messages 最近 N 条（可关，N 可配）
 """
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 
 from .persona import load_persona
 from .memory_search import search_memories, format_memories_for_injection
@@ -19,6 +21,11 @@ from . import eventide_bridge
 log = logging.getLogger("gateway.context")
 
 _executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="ctx")
+
+# 时间戳展示时区：与 db.py / eventide_admin_api.py 的挂钟约定一致（Asia/Shanghai）。
+_CST = timezone(timedelta(hours=8))
+# Python weekday() 周一=0；标签按周一到周日排。
+_WEEKDAY_LABELS = ("一", "二", "三", "四", "五", "六", "日")
 
 # ── 数据源构建函数 ────────────────────────────────
 
@@ -53,8 +60,23 @@ def build_eventide_context() -> str:
         return ""
 
 
+def build_timestamp_context() -> str:
+    """[0] 当前时间块。每轮请求实时生成，让模型对齐"现在"，
+    取代此前用户在客户端提示词里手动维护的时间。"""
+    if not app_settings.is_timestamp_injection_enabled():
+        return ""
+    now = datetime.now(_CST)
+    weekday = _WEEKDAY_LABELS[now.weekday()]
+    return f"[当前时间] {now.strftime('%Y-%m-%d %H:%M')} 星期{weekday}"
+
+
 def build_recent_chat_context(limit: int = 10) -> str:
-    """[4] 从 chat_messages 拉最近 N 条对话作为短期上下文。"""
+    """[4] 从 chat_messages 拉最近 N 条对话作为短期上下文。
+
+    N 条只看数据库里最近的 N 行（user/assistant 各算一行），与客户端
+    本次请求携带多少条历史完全无关，也不做去重：这样无论客户端怎么
+    裁剪 history，模型看到的近期背景都是稳定的。
+    """
     try:
         client = db.get_client()
         if not client:
@@ -98,9 +120,22 @@ def build_context(user_message: str = "", history_turns=None) -> str:
     """
     futures = {
         "persona": _executor.submit(load_persona),
-        "recent_chat": _executor.submit(build_recent_chat_context, 10),
     }
     results: dict[str, str] = {}
+
+    # 时间戳是纯内存计算，不值得占用 executor 线程。
+    results["timestamp"] = build_timestamp_context()
+
+    # 开关与条数都在运行 build_context 的线程里读一次：落到内层 executor
+    # 任务里再读会绕开 fail-open 缓存的预期时序，也让"读几次库"变得
+    # 不可推理。近期对话开关关闭时干脆不提交任务：连 db 读取都不会发生。
+    if app_settings.is_recent_chat_injection_enabled():
+        futures["recent_chat"] = _executor.submit(
+            build_recent_chat_context,
+            app_settings.get_recent_chat_injection_limit(),
+        )
+    else:
+        results["recent_chat"] = ""
 
     # 开关关闭时干脆不提交 eventide 任务：连 db 读取都不会发生。
     if app_settings.is_eventide_injection_enabled():
@@ -128,8 +163,11 @@ def build_context(user_message: str = "", history_turns=None) -> str:
         except Exception as e:
             log.warning(f"记忆搜索失败: {e}")
 
-    # 按固定顺序拼装
+    # 按固定顺序拼装：时间 → 人设 → 身体 → 记忆 → 近期对话。
     parts = []
+
+    if results["timestamp"]:
+        parts.append(results["timestamp"])
 
     if results["persona"]:
         parts.append(results["persona"])
