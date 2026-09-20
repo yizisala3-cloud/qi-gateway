@@ -73,6 +73,7 @@
 | `/admin/api/memory-requests/{id}/review` | POST | Dashboard 通过或拒绝记忆申请（网关 Token） |
 | `/admin/api/eventide/settings` | GET / PUT | Dashboard 读取/切换身体状态注入开关（网关 Token） |
 | `/admin/api/eventide/body` | GET | Dashboard 读取 Eventide 身体状态（只读，网关 Token） |
+| `/admin/api/context/settings` | GET / PUT | Dashboard 读取/设置上下文注入（近期对话开关与条数、时间戳开关）（网关 Token） |
 | `/health` | GET | 健康检查（无需鉴权） |
 | `/status` | GET | 网关状态（需鉴权） |
 
@@ -86,6 +87,15 @@
 - 关闭 = 彻底暂停：不再注入、不再推进状态、不创建初始状态，数值冻结在关闭那一刻；已存在的状态行原样保留。
 - 重新开启：不回填关闭期间的时间，由 Eventide 原生机制按时间分段追赶（每段 ≤6 小时、最多 48 段），网关不写任何追赶逻辑。
 - fail-open：开关读取异常或行缺失时一律按开启处理（保持注入现状），查询失败只记 warning；写库失败时 Dashboard 开关会报错并回滚 UI。
+
+## 上下文注入设置
+
+配置页“上下文注入”卡片对应 `/admin/api/context/settings`（网关 Token，GET 读取、PUT 可选更新任意键），设置同样存储在 `app_settings`（由迁移 `20260921010000_seed_context_injection_settings.sql` 幂等种子）。保存成功即清空 60 秒 TTL 缓存，下一次聊天请求立即生效，无需重启。
+
+- 流式上下文（近期对话注入）：每轮聊天稳定注入数据库 `chat_messages` 最近 N 条（user/assistant 各算一行），与客户端本次请求发送多少条历史无关、也不去重；N 范围 1–100，默认 10。关闭后网关不查库、不注入 `[最近对话]` 块，persona / Eventide / 记忆检索不受影响。
+- 时间戳注入：每轮请求实时生成 `[当前时间] YYYY-MM-DD HH:MM 星期X`（北京时间 UTC+8），默认开启，用于取代客户端提示词里手动维护的时间。
+- 两个开关 fail-open：读取异常或行缺失按开启处理；注入条数非法时回退默认 10 并夹取到 1–100。
+- `chat_messages` 对网关始终只读，相关迁移不触碰该表。
 
 ## MCP 记忆工具
 
