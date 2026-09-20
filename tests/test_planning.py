@@ -1017,5 +1017,47 @@ class CleanupAndMaintenanceTests(_Base):
         self.run_with(run)
 
 
+class ScheduleLabelTests(_Base):
+    """BUG-12：排列状态标签展示串用「落后」，避开与「延后」完成状态撞名。"""
+
+    def _serialize(self, occ_row, task_id):
+        task = next(row for row in self.client.rows["planning_task"] if row["id"] == task_id)
+        return planning.serialize_occurrence(occ_row, task, self.NOW)
+
+    def test_deferred_and_overdue_pending_label_as_behind(self):
+        def run(client):
+            self._seed_tasks(client, [{"id": 1}])
+            self._seed(client, [
+                {"task_id": 1, "id": 1, "status": "deferred",
+                 "est_start": planning._iso(_cst(2026, 9, 20, 9, 0))},
+                {"task_id": 1, "id": 2, "status": "pending",
+                 "est_start": planning._iso(_cst(2026, 9, 20, 9, 0))},
+                {"task_id": 1, "id": 3, "status": "pending",
+                 "est_start": planning._iso(_cst(2026, 9, 20, 15, 0))},
+            ])
+            rows = client.rows["planning_occurrence"]
+            self.assertEqual(self._serialize(rows[0], 1)["schedule_label"], "落后")
+            self.assertEqual(self._serialize(rows[1], 1)["schedule_label"], "落后")
+            # 未来时间 + 未延后 → 正常
+            self.assertEqual(self._serialize(rows[2], 1)["schedule_label"], "正常")
+            # 完成状态展示名同步（前端 STATUS_META 一致）
+            self.assertNotIn("延后", planning.schedule_label(
+                rows[0],
+                next(row for row in client.rows["planning_task"] if row["id"] == 1),
+                self.NOW,
+            ))
+        self.run_with(run)
+
+    def test_timeout_label_unchanged(self):
+        def run(client):
+            self._seed_tasks(client, [{"id": 1}])
+            self._seed(client, [{"task_id": 1, "status": "timeout"}])
+            self.assertEqual(
+                self._serialize(client.rows["planning_occurrence"][0], 1)["schedule_label"],
+                "超时",
+            )
+        self.run_with(run)
+
+
 if __name__ == "__main__":
     unittest.main()

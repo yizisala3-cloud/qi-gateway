@@ -409,14 +409,14 @@ def _deadline_for(task: dict[str, Any], occ: dict[str, Any]) -> str | None:
 
 
 def schedule_label(occ: dict[str, Any], task: dict[str, Any], now: datetime) -> str:
-    """排列状态标签：超时 / 延后 / 前进 / 正常（仅展示）。"""
+    """排列状态标签：超时 / 落后 / 前进 / 正常（仅展示；「落后」避开与「延后」状态撞名）。"""
     if occ["status"] == "timeout":
         return "超时"
     if occ["status"] == "deferred":
-        return "延后"
+        return "落后"
     est_start = _parse_dt(occ["est_start"], "est_start") if occ.get("est_start") else None
     if est_start and est_start < now and occ["status"] == "pending":
-        return "延后"
+        return "落后"
     nominal = occ.get("nominal_start")
     if est_start and nominal and est_start < _parse_dt(nominal, "nominal_start") - timedelta(seconds=60):
         return "前进"

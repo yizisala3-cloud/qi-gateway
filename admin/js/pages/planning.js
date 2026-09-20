@@ -1,9 +1,12 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
-import { gw } from '../api.js?v=20260920-blankfix1';
+// 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
+// 数据按需加载：今日看板 30 秒轮询，全部待办首次切到该页签时才拉取。
+import { gw } from '../api.js?v=20260920-planning2';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, fmtDate, esc,
   createDetailPanel,
-} from '../ui.js?v=20260920-blankfix1';
+} from '../ui.js?v=20260920-planning2';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20260920-planning2';
 
 const TASK_TYPE_LABELS = {
   daily: '每日', interval: '间歇', weekly: '每周', monthly: '每月', once: '单次', idle: '闲时',
@@ -11,8 +14,9 @@ const TASK_TYPE_LABELS = {
 const TASK_TYPES = Object.keys(TASK_TYPE_LABELS);
 const WEEKDAY_NAMES = ['一', '二', '三', '四', '五', '六', '日'];
 const STATUS_META = {
-  pending: { label: '待处理', tone: 'muted' },
-  in_progress: { label: '进行中', tone: 'amber' },
+  // BUG-12：pending/in_progress 显示名与今日分区名（待处理/进度中）撞车，改为「未开始/执行中」
+  pending: { label: '未开始', tone: 'muted' },
+  in_progress: { label: '执行中', tone: 'amber' },
   completed: { label: '已完成', tone: 'green' },
   partial: { label: '部分完成', tone: 'gold' },
   deferred: { label: '已延后', tone: 'slate' },
@@ -77,6 +81,11 @@ function typeSummaryTag(task) {
   return tag(esc(taskTypeSummary(task)), 'slate');
 }
 
+// BUG-13：三分区空态改为一行式小空态（小图标 + 纯文字，高度受限）
+function miniEmpty(msg) {
+  return `<div class="plan-empty-mini">${icon('feather')}<span>${esc(msg)}</span></div>`;
+}
+
 export default {
   board: null,
   tasks: [],
@@ -85,6 +94,9 @@ export default {
   detail: null,
   selected: null,
   reorderMode: false,
+  activeTab: 'today',
+  activeSection: 'progress',
+  loadedTabs: null,
   pollTimer: null,
   alarmAudio: null,
   timerAudio: null,
@@ -94,6 +106,9 @@ export default {
 
   async mount(root) {
     this.root = root;
+    this.activeTab = 'today';
+    this.activeSection = 'progress';
+    this.loadedTabs = new Set();
     root.innerHTML = `
       <div class="page-with-detail" id="planning-layout">
         <div class="page-main">
@@ -113,24 +128,33 @@ export default {
               <button class="btn btn-danger-line btn-sm" data-act="cancel-reorder">${icon('x')}撤销</button>
             </div>
           </div>
-          <div id="planning-alarm-banner"></div>
 
-          <div class="plan-region" id="planning-today">
+          <div class="tabs" id="planning-tabs" style="margin-bottom:14px">
+            <button class="tab active" data-act="plan-tab" data-tab="today">${icon('calendar')}当前待办</button>
+            <button class="tab" data-act="plan-tab" data-tab="all">${icon('inbox')}全部待办</button>
+            <button class="tab" data-act="plan-tab" data-tab="goals">${icon('star')}长期目标</button>
+            <button class="tab" data-act="plan-tab" data-tab="summary">${icon('journal')}每日总结</button>
+          </div>
+
+          <div class="plan-region" id="planning-today" data-panel="today">
             <div class="card">
               <div class="plan-region-head">
                 <div class="plan-region-title">${icon('calendar')}当前待办</div>
                 <span class="plan-region-sub">只显示今天的待办；已完成的记录可改状态、补时间</span>
               </div>
-              <div class="plan-group-title">进度中 <span class="plan-count" id="planning-progress-count"></span></div>
+              <div id="planning-alarm-banner"></div>
+              <div class="subtabs">
+                <button class="subtab active" data-act="plan-subtab" data-section="progress">进度中 <span class="plan-count" id="planning-progress-count"></span></button>
+                <button class="subtab" data-act="plan-subtab" data-section="attention">待处理 <span class="plan-count" id="planning-attention-count"></span></button>
+                <button class="subtab" data-act="plan-subtab" data-section="done">已完成 <span class="plan-count" id="planning-done-count"></span></button>
+              </div>
               <div class="plan-list" id="planning-progress">${loading()}</div>
-              <div class="plan-group-title">待处理 <span class="plan-count" id="planning-attention-count"></span></div>
-              <div class="plan-list" id="planning-attention"></div>
-              <div class="plan-group-title">已完成 <span class="plan-count" id="planning-done-count"></span></div>
-              <div class="plan-list" id="planning-done"></div>
+              <div class="plan-list" id="planning-attention" hidden></div>
+              <div class="plan-list" id="planning-done" hidden></div>
             </div>
           </div>
 
-          <div class="plan-region" id="planning-all">
+          <div class="plan-region" id="planning-all" data-panel="all" hidden>
             <div class="card">
               <div class="plan-region-head">
                 <div class="plan-region-title">${icon('inbox')}全部待办</div>
@@ -149,7 +173,9 @@ export default {
                     ${Object.entries(STATUS_META).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join('')}
                   </select>
                 </label>
-                <label class="inline">日期 <input type="date" id="planning-filter-date" style="width:auto"></label>
+                <label class="inline">日期
+                  <span class="retro-time retro-time-inline" data-retro-for="planning-filter-date" data-retro-mode="date"></span>
+                </label>
                 <button class="btn btn-quiet btn-sm" data-act="clear-filters">清除筛选</button>
               </div>
               <div class="plan-group-title">任务定义 <span class="plan-count" id="planning-tasks-count"></span></div>
@@ -159,7 +185,7 @@ export default {
             </div>
           </div>
 
-          <div class="plan-region" id="planning-goals">
+          <div class="plan-region" id="planning-goals" data-panel="goals" hidden>
             <div class="card">
               <div class="plan-region-head">
                 <div class="plan-region-title">${icon('star')}长期目标</div>
@@ -172,7 +198,7 @@ export default {
             </div>
           </div>
 
-          <div class="plan-region" id="planning-summary">
+          <div class="plan-region" id="planning-summary" data-panel="summary" hidden>
             <div class="card">
               <div class="plan-region-head">
                 <div class="plan-region-title">${icon('journal')}每日总结</div>
@@ -195,16 +221,19 @@ export default {
     this.progressList = root.querySelector('#planning-progress');
     root.addEventListener('click', (e) => this.handleItemClick(e));
     this.bindDetailActions();
+    this.initRetroFields(root);
 
     delegate(root, {
       'new-task': () => this.openTaskForm(null),
       recompute: () => this.runRecompute(),
-      refresh: () => this.loadAll(),
+      refresh: () => this.refreshAll(),
       'enter-reorder': () => this.enterReorder(),
       'confirm-reorder': () => this.confirmReorder(),
       'cancel-reorder': () => this.cancelReorder(),
       'clear-filters': () => this.clearFilters(),
       stop: () => this.stopRinging(),
+      'plan-tab': (el) => this.switchTab(el.dataset.tab),
+      'plan-subtab': (el) => this.switchSection(el.dataset.section),
     });
     root.querySelector('#planning-filter-type').addEventListener('change', (e) => {
       this.filters.task_type = e.target.value;
@@ -214,7 +243,8 @@ export default {
       this.filters.status = e.target.value;
       this.loadOccurrences();
     });
-    root.querySelector('#planning-filter-date').addEventListener('change', (e) => {
+    // 复古日期选择器（BUG-14）：值变化走隐藏 input 的 input 事件
+    root.querySelector('#planning-filter-date').addEventListener('input', (e) => {
       this.filters.for_date = e.target.value;
       this.loadOccurrences();
     });
@@ -223,12 +253,60 @@ export default {
     // 首次用户手势时静音解锁音频，规避浏览器 autoplay 策略拦截首次响铃（BUG-9）
     this.audioUnlockHandler = () => this.unlockAudio();
     window.addEventListener('pointerdown', this.audioUnlockHandler, { once: true });
-    await this.loadAll();
+    this.loadedTabs.add('today');
+    await this.loadToday();
     this.pollTimer = setInterval(() => {
       if (this.reorderMode) return;  // 排列中不重绘，避免打断拖拽
       this.loadToday({ silent: true });
     }, POLL_MS);
     window.addEventListener('beforeunload', this.onUnload = () => this.stopRinging());
+  },
+
+  /* ---------- 页签切换（BUG-16） ---------- */
+
+  switchTab(tab) {
+    if (!tab || tab === this.activeTab || !this.root) return;
+    if (this.reorderMode) {
+      // 排列模式只在「当前待办」页签内有效，切走即退出并还原列表
+      this.exitReorder();
+      this.loadToday();
+    }
+    this.activeTab = tab;
+    this.root.querySelectorAll('#planning-tabs .tab').forEach((el) => {
+      el.classList.toggle('active', el.dataset.tab === tab);
+    });
+    this.root.querySelectorAll('.plan-region[data-panel]').forEach((panel) => {
+      panel.hidden = panel.dataset.panel !== tab;
+    });
+    if (tab === 'all' && !this.loadedTabs.has('all')) {
+      this.loadedTabs.add('all');
+      this.loadTasks();
+      this.loadOccurrences();
+    }
+    // 长期目标 / 每日总结为占位页签，无数据需要加载
+  },
+
+  switchSection(section) {
+    if (!section || section === this.activeSection || !this.root) return;
+    this.activeSection = section;
+    this.root.querySelectorAll('#planning-today .subtab').forEach((el) => {
+      el.classList.toggle('active', el.dataset.section === section);
+    });
+    for (const key of ['progress', 'attention', 'done']) {
+      const el = this.root.querySelector(`#planning-${key}`);
+      if (el) el.hidden = key !== section;
+    }
+  },
+
+  /** 把 .retro-time 宿主初始化为复古选择器（mode：datetime/date/time）。 */
+  initRetroFields(scope) {
+    scope.querySelectorAll('.retro-time[data-retro-for]').forEach((host) => {
+      createRetroTimeField(host, {
+        id: host.dataset.retroFor,
+        value: host.dataset.retroValue || '',
+        mode: host.dataset.retroMode || 'datetime',
+      });
+    });
   },
 
   unmount() {
@@ -238,6 +316,7 @@ export default {
     window.removeEventListener('beforeunload', this.onUnload);
     window.removeEventListener('pointerdown', this.audioUnlockHandler);
     this.detail = null;
+    this.loadedTabs = null;
     this.root = null;
   },
 
@@ -255,6 +334,12 @@ export default {
   },
 
   /* ---------- 数据加载 ---------- */
+
+  async refreshAll() {
+    // 刷新是显式动作：连同「全部待办」一起重拉（其面板可能尚未激活过）
+    this.loadedTabs?.add('all');
+    await this.loadAll();
+  },
 
   async loadAll() {
     await Promise.all([this.loadToday(), this.loadTasks(), this.loadOccurrences()]);
@@ -355,13 +440,13 @@ export default {
         draggable: inReorder,
         idle: occ.task_type === 'idle',
       })).join('')
-      : empty('今天还没有待办', '新建一个待办，或等待 0 点刷新');
+      : miniEmpty('今天还没有待办，新建一个或等 0 点刷新');
     attention.innerHTML = board.attention.length
       ? board.attention.map((occ) => this.itemHtml(occ)).join('')
-      : empty('没有需要处理的异常待办');
+      : miniEmpty('没有需要处理的异常待办');
     done.innerHTML = board.done.length
       ? board.done.map((occ) => this.itemHtml(occ, { closed: true })).join('')
-      : empty('今天还没有关闭的记录');
+      : miniEmpty('今天还没有关闭的记录');
 
     this.root.querySelector('#planning-progress-count').textContent = `${board.progress.length}`;
     this.root.querySelector('#planning-attention-count').textContent = `${board.attention.length}`;
@@ -477,14 +562,44 @@ export default {
         <div class="kv"><span class="k">预估耗时</span><span class="v">${occ.estimated_minutes ? occ.estimated_minutes + 'm' : '-'}</span></div>
         ${occ.is_limited ? `<div class="kv"><span class="k">限时截止</span><span class="v">${fmtClock(occ.deadline_at)}</span></div>` : ''}
         ${occ.partial_note ? `<div class="kv kv-block"><span class="k">部分完成说明</span><span class="v">${esc(occ.partial_note)}</span></div>` : ''}
-        <div class="kv"><span class="k">提醒</span><span class="v">${[
-          occ.alarm_start ? '开始闹钟' : '',
-          occ.alarm_end ? '结束闹钟' : '',
-          occ.timer_minutes ? `计时器 ${occ.timer_minutes}m` : '',
-        ].filter(Boolean).join('、') || '无'}</span></div>
-        <div class="kv"><span class="k">排列标签</span><span class="v">${esc(occ.schedule_label)}</span></div>`,
+        <div class="kv kv-block"><span class="k">提醒</span><span class="v">
+          <div class="tag-row" data-alarm-controls data-task-id="${occ.task_id}">
+            <label class="inline"><input type="checkbox" data-alarm-start ${occ.alarm_start ? 'checked' : ''}> 开始闹钟</label>
+            <label class="inline"><input type="checkbox" data-alarm-end ${occ.alarm_end ? 'checked' : ''}> 结束闹钟</label>
+            <input type="text" data-timer-input placeholder="计时器，如 1h30m" value="${esc(occ.timer_minutes ?? '')}" style="width:130px">
+            <button class="btn btn-secondary btn-sm" data-act="occ-save-alarm" data-id="${occ.id}">${icon('check')}保存提醒</button>
+          </div>
+          <p class="muted text-sm" style="margin:4px 0 0">改动保存到所属待办；计时器支持 1h30m 简写，留空保存即清除。</p>
+        </span></div>
+        <div class="kv"><span class="k">当前状态</span><span class="v">${esc(occ.schedule_label)}</span></div>`,
       actions,
     });
+  },
+
+  /** BUG-11：详情栏「保存提醒」→ PATCH 所属任务定义的闹钟/计时器字段。 */
+  async saveOccurrenceAlarm(occId) {
+    const host = this.detail?.body?.querySelector('[data-alarm-controls]');
+    if (!host) return;
+    const taskId = Number(host.dataset.taskId);
+    const timer = host.querySelector('[data-timer-input]').value.trim();
+    try {
+      await gw(`/admin/api/planning/tasks/${taskId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          alarm_start: host.querySelector('[data-alarm-start]').checked,
+          alarm_end: host.querySelector('[data-alarm-end]').checked,
+          timer_minutes: timer || null,
+        }),
+      });
+      toast('提醒已保存');
+      await this.loadToday();
+      await this.loadOccurrences();
+      const fresh = this.findOccurrence(occId) || this.occurrences.find((o) => o.id === occId);
+      if (fresh) this.showOccurrenceDetail(fresh);
+    } catch (error) {
+      toast(`保存提醒失败：${error.message}`, 'err');
+    }
   },
 
   occurrenceActions(occ) {
@@ -560,8 +675,8 @@ export default {
           task.alarm_end ? '结束闹钟' : '',
           task.timer_minutes ? `计时器 ${task.timer_minutes}m` : '',
         ].filter(Boolean).join('、') || '无'}</span></div>
-        ${task.next_due ? `<div class="kv"><span class="k">下次到期</span><span class="v">${fmtDue(task.next_due)}</span></div>` : ''}
-        <div class="kv"><span class="k">生成游标</span><span class="v">${esc(task.cursor_date || '-')}</span></div>`,
+        ${task.next_due ? `<div class="kv muted text-sm"><span class="k">下次到期</span><span class="v">${fmtDue(task.next_due)}</span></div>` : ''}
+        <div class="kv muted text-sm"><span class="k">生成游标</span><span class="v">${esc(task.cursor_date || '-')}</span></div>`,
       actions: parts.join(''),
     });
   },
@@ -576,11 +691,17 @@ export default {
 
   enterReorder() {
     if (this.reorderMode) return;
+    if (this.activeTab !== 'today') {
+      // BUG-16：排列模式只在「当前待办」页签内可用
+      toast('调整顺序只在「当前待办」页签可用');
+      return;
+    }
     const items = this.board?.progress || [];
     if (items.length < 2) {
       toast('至少两个待办才能调整顺序');
       return;
     }
+    if (this.activeSection !== 'progress') this.switchSection('progress');  // 可拖拽列表在「进度中」
     this.reorderMode = true;
     this.root.querySelector('#planning-reorder-bar').style.display = '';
     this.root.querySelector('#planning-reorder-btn').disabled = true;
@@ -701,6 +822,7 @@ export default {
       else if (act === 'partial') return this.askPartial(id);
       else if (act === 'defer') return this.askNewTime(id, 'deferred', '延后到什么时间？');
       else if (act === 'reschedule') return this.askNewTime(id, 'pending', '重新安排到什么时间？');
+      else if (act === 'save-alarm') return this.saveOccurrenceAlarm(id);
       else if (act === 'discard-this') {
         if (!(await confirm('确认「此次废弃」？只废弃这一次出现，不影响后续刷新。', { danger: false }))) return;
         await post('/status', { status: 'discarded_this' });
@@ -953,7 +1075,9 @@ export default {
     this.filters = { task_type: '', status: '', for_date: '' };
     this.root.querySelector('#planning-filter-type').value = '';
     this.root.querySelector('#planning-filter-status').value = '';
-    this.root.querySelector('#planning-filter-date').value = '';
+    const dateInput = this.root.querySelector('#planning-filter-date');
+    if (dateInput._applyRetroValue) dateInput._applyRetroValue('', true);  // 静默清空，避免触发 input 再拉一次
+    else dateInput.value = '';
     this.loadOccurrences();
   },
 
@@ -987,19 +1111,19 @@ export default {
         </div>
         <div data-type-block="once" style="display:none">
           <div class="field"><label>目标日期</label>
-            <input type="date" id="pf-target-date" value="${esc(value('target_date'))}"></div>
+            <div class="retro-time" data-retro-for="pf-target-date" data-retro-mode="date" data-retro-value="${esc(value('target_date'))}"></div></div>
         </div>
         <div class="field"><label>预估耗时（分钟，或 1h30m 简写）</label>
           <input type="text" id="pf-estimated" value="${esc(value('estimated_minutes', ''))}"></div>
         <div class="field"><label>显式开始时间（可选，填写后不参与自动移动）</label>
-          <input type="time" id="pf-start-tod" value="${esc(value('est_start_tod'))}"></div>
+          <div class="retro-time" data-retro-for="pf-start-tod" data-retro-mode="time" data-retro-value="${esc(value('est_start_tod'))}"></div></div>
         <div class="field"><label>显式结束时间（可选）</label>
-          <input type="time" id="pf-end-tod" value="${esc(value('est_end_tod'))}"></div>
+          <div class="retro-time" data-retro-for="pf-end-tod" data-retro-mode="time" data-retro-value="${esc(value('est_end_tod'))}"></div></div>
         <div class="field"><label class="inline"><input type="checkbox" id="pf-fixed" ${value('is_fixed') ? 'checked' : ''}> 固定待办（不因重算移动）</label></div>
         <div class="field"><label>限时截止（可选，当日时刻）</label>
-          <input type="time" id="pf-deadline" value="${esc(value('deadline_tod'))}"></div>
+          <div class="retro-time" data-retro-for="pf-deadline" data-retro-mode="time" data-retro-value="${esc(value('deadline_tod'))}"></div></div>
         <div class="field"><label>限时范围结束（可选，需先填截止）</label>
-          <input type="time" id="pf-deadline-end" value="${esc(value('deadline_end_tod'))}"></div>
+          <div class="retro-time" data-retro-for="pf-deadline-end" data-retro-mode="time" data-retro-value="${esc(value('deadline_end_tod'))}"></div></div>
         <div class="field"><label class="inline"><input type="checkbox" id="pf-hollow" ${value('is_hollow') ? 'checked' : ''}> 中空待办（开始/结束两个条目，中间可插入其他待办）</label></div>
         <div id="pf-hollow-block" style="display:none">
           <div class="field"><label>开始阶段内容</label><input type="text" id="pf-hollow-start" value="${esc(value('hollow_start_content'))}"></div>
@@ -1023,6 +1147,7 @@ export default {
     });
 
     const typeSelect = root.querySelector('#pf-type');
+    this.initRetroFields(root);  // BUG-14：表单内日期/时刻统一为复古选择器（值契约不变）
     const syncBlocks = () => {
       const type = typeSelect.value;
       root.querySelectorAll('[data-type-block]').forEach((block) => {
