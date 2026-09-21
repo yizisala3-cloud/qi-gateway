@@ -29,6 +29,7 @@
 | `UPSTREAM_BASE_URL` | 聊天上游地址，默认 `https://api.deepseek.com/v1` |
 | `UPSTREAM_API_KEY` | DeepSeek API Key，只通过部署环境变量配置 |
 | `UPSTREAM_MODEL` | 默认 `deepseek-v4-pro`；配置后统一覆盖客户端传入的模型名 |
+| `GEMINI_BROWSER_TOOL_COMPAT_ENABLED` | Gemini 浏览器代理工具历史兼容，默认 `false`；仅对最终模型名以 `gemini-` 开头的请求生效 |
 | `SUPABASE_URL` | Supabase 项目地址 |
 | `SUPABASE_SECRET_KEY` / `SUPABASE_SERVICE_ROLE_KEY` | 仅服务端使用的 Supabase 写入密钥 |
 | `SUPABASE_KEY` | 兼容用 publishable/anon key，不用于主动记忆写入 |
@@ -54,6 +55,12 @@
 - API Base URL：`https://你的域名/v1`
 - API Key：填 `GATEWAY_TOKEN` 的值
 - 模型名：填 `UPSTREAM_MODEL` 的值
+
+### Gemini 浏览器代理工具历史兼容
+
+部分 OpenAI 兼容的 Gemini 浏览器代理要求 `role=tool` 消息同时携带函数名，但手机客户端的标准工具历史通常只提供 `tool_call_id`。仅在确认上游存在此兼容问题时，设置 `GEMINI_BROWSER_TOOL_COMPAT_ENABLED=true`；网关会在最终选中的模型名以 `gemini-` 开头时，从前置 `assistant.tool_calls` 按 `tool_call_id` 补充或纠正 `tool.name`。
+
+该兼容层默认关闭，不根据 `UPSTREAM_BASE_URL` 猜测供应商，不改变消息顺序、`tool_call_id`、`content`、`tool_calls`、参数或工具定义。无法匹配的工具结果保持原样，不会伪造 `unknown_function`。非 Gemini 模型和关闭开关时继续沿用原转发行为。
 
 ## 端点
 

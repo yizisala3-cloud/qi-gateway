@@ -37,6 +37,7 @@ from .planning import run_maintenance as run_planning_maintenance
 from .planning_api import planning_api_routes
 from .todo_api import todo_routes
 from .model_routing import select_upstream_model
+from .upstream_compat import normalize_gemini_browser_tool_history
 from .request_context import (
     append_gateway_context,
     build_todo_feedback_guidance,
@@ -290,6 +291,12 @@ async def chat_completions(request: Request):
     )
     if selected_model:
         body["model"] = selected_model
+    if "messages" in body:
+        body["messages"] = normalize_gemini_browser_tool_history(
+            body["messages"],
+            enabled=cfg.GEMINI_BROWSER_TOOL_COMPAT_ENABLED,
+            selected_model=selected_model,
+        )
     is_stream = body.get("stream", False)
 
     if not is_stream:

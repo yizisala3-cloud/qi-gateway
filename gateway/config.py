@@ -26,6 +26,10 @@ class Config:
     UPSTREAM_BASE_URL: str = os.getenv("UPSTREAM_BASE_URL", DEFAULT_UPSTREAM_BASE_URL)
     UPSTREAM_API_KEY: str = os.getenv("UPSTREAM_API_KEY", "")
     UPSTREAM_MODEL: str = os.getenv("UPSTREAM_MODEL", DEFAULT_UPSTREAM_MODEL)
+    GEMINI_BROWSER_TOOL_COMPAT_ENABLED: bool = (
+        os.getenv("GEMINI_BROWSER_TOOL_COMPAT_ENABLED", "false").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
     # Preferred backend-only key. Modern sb_secret_* keys and legacy service_role
     # keys bypass RLS and must never be exposed to the browser or source control.
