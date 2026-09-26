@@ -9,6 +9,7 @@
 复古选择器（lib/retro_time.js）、详情栏术语去工程味。
 """
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -276,73 +277,6 @@ class PlanningPageContractTests(unittest.TestCase):
         self.assertIn('<div class="kv muted text-sm"><span class="k">生成游标</span>', self.page)
         self.assertIn('<div class="kv muted text-sm"><span class="k">下次到期</span>', self.page)
 
-
-
-class PlanningNavigationContractTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.routes = ROUTES.read_text(encoding="utf-8")
-        cls.ui = UI.read_text(encoding="utf-8")
-        cls.page = PLANNING.read_text(encoding="utf-8")
-
-    def test_planning_is_first_nav_item(self):
-        first_item = re.search(r"items:\s*\[\s*\{([^}]*)\}", self.routes).group(1)
-        self.assertIn("key: 'planning'", first_item)
-        self.assertIn("规划管理", first_item)
-
-    def test_legacy_six_pages_are_unchanged(self):
-        for key in LEGACY_NAV_KEYS:
-            with self.subTest(key=key):
-                self.assertIn(f"key: '{key}'", self.routes)
-
-    def test_planning_icon_is_inline_svg(self):
-        self.assertIn("calendar:", self.ui)
-
-    def test_asset_version_chain_is_consistent(self):
-        version = re.search(r"ASSET_VERSION = '([^']+)'", self.ui).group(1)
-        version_refs = re.findall(r"\?v=([0-9a-z-]+)", self.routes + self.page)
-        # routes.js 不带版本串；planning.js 的 import 版本必须与 ui.js 一致
-        self.assertTrue(version_refs, "planning.js should pin import versions")
-        for ref in version_refs:
-            self.assertEqual(ref, version)
-        index_html = (ROOT / "admin" / "index.html").read_text(encoding="utf-8")
-        self.assertIn(f"?v={version}", index_html)
-        app_js = (ROOT / "admin" / "js" / "app.js").read_text(encoding="utf-8")
-        self.assertIn(f"'{version}'", app_js)
-
-    def test_js_syntax_is_parseable(self):
-        quickjs = _try_import_quickjs()
-        if quickjs is None:
-            self.skipTest("quickjs is not installed")
-        import re as _re
-        for path in (PLANNING, RETRO_TIME):
-            src = path.read_text(encoding="utf-8")
-            src = _re.sub(r"import\s[^;]*?;", "", src, flags=_re.S)
-            src = src.replace("export default {", "const __page__ = {")
-            src = _re.sub(r"\bexport\s+(?=(async\s+)?(function|const|let|class|var)\b)", "", src)
-            check = quickjs.Context().eval(
-                "(function(src){ try { new globalThis.Function(src)(); return 'ok'; }"
-                " catch (e) { return e.name + ': ' + e.message; } })"
-            )
-            with self.subTest(file=path.name):
-                self.assertEqual(check(src), "ok")
-
-
-class PlanningAudioAssetTests(unittest.TestCase):
-    def test_audio_files_and_credits_exist(self):
-        audio_dir = ROOT / "admin" / "assets" / "audio"
-        self.assertTrue((audio_dir / "alarm-clock.mp3").is_file())
-        self.assertTrue((audio_dir / "timer-done.ogg").is_file())
-        credits = CREDITS.read_text(encoding="utf-8")
-        self.assertIn("CC0", credits)
-        self.assertIn("Calm Piano 1", credits)
-        self.assertIn("Slow Piano Intermission", credits)
-        self.assertIn("opengameart.org", credits)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
     def test_split_dialog_daily_path_contract(self):
         # 日常路径收尾：拆分弹窗默认 1 项、添加/移除、上限 10、防双击、
         # 提交 1 项合法；文案不再出现「至少填写两部分」。
@@ -351,7 +285,7 @@ if __name__ == "__main__":
             "data-add-part",
             "data-remove-part",
             "rows.length >= 10 ? 'none' : ''",  # 达到 10 个隐藏添加按钮
-            "rows.length <= 1",                 # 至少保留 1 项，不允许删到 0
+            "').length <= 1) return;",          # 至少保留 1 项，不允许删到 0
             "请至少填写一个待办内容",
             "if (submit.disabled) return;",     # 防双击：请求期间禁用提交
             "submit.disabled = true;",
@@ -405,8 +339,9 @@ if __name__ == "__main__":
             "PAUSABLE_TYPES = ['daily', 'interval', 'weekly', 'monthly']",
             "PAUSABLE_TYPES.includes(task.task_type)",
             "task.refresh_enabled === false",
-            "data-act=\"task-pause-refresh\"",
-            "data-act=\"task-resume-refresh\"",
+            # 暂停/恢复入口由 paused 状态驱动同一模板（act 名保持 task-*-refresh）
+            "'task-resume-refresh' : 'task-pause-refresh'",
+            "act === 'pause-refresh' || act === 'resume-refresh'",
             "恢复刷新", "暂停刷新",
             "刷新已暂停",  # 徽标：详情栏一眼可见当前暂停状态
             # 确认弹窗：指定标题/正文/按钮文案，非危险样式
@@ -431,3 +366,430 @@ if __name__ == "__main__":
         self.assertIn("if (task.is_active && PAUSABLE_TYPES.includes(task.task_type)) {", self.page)
         # 暂停/恢复走任务级 PATCH，不出现「此次不执行/完成」语义混淆文案
         self.assertNotIn("暂停即此次不执行", self.page)
+
+
+class PlanningNavigationContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.routes = ROUTES.read_text(encoding="utf-8")
+        cls.ui = UI.read_text(encoding="utf-8")
+        cls.page = PLANNING.read_text(encoding="utf-8")
+
+    def test_planning_is_first_nav_item(self):
+        first_item = re.search(r"items:\s*\[\s*\{([^}]*)\}", self.routes).group(1)
+        self.assertIn("key: 'planning'", first_item)
+        self.assertIn("规划管理", first_item)
+
+    def test_legacy_six_pages_are_unchanged(self):
+        for key in LEGACY_NAV_KEYS:
+            with self.subTest(key=key):
+                self.assertIn(f"key: '{key}'", self.routes)
+
+    def test_planning_icon_is_inline_svg(self):
+        self.assertIn("calendar:", self.ui)
+
+    def test_asset_version_chain_is_consistent(self):
+        version = re.search(r"ASSET_VERSION = '([^']+)'", self.ui).group(1)
+        version_refs = re.findall(r"\?v=([0-9a-z-]+)", self.routes + self.page)
+        # routes.js 不带版本串；planning.js 的 import 版本必须与 ui.js 一致
+        self.assertTrue(version_refs, "planning.js should pin import versions")
+        for ref in version_refs:
+            self.assertEqual(ref, version)
+        index_html = (ROOT / "admin" / "index.html").read_text(encoding="utf-8")
+        self.assertIn(f"?v={version}", index_html)
+        app_js = (ROOT / "admin" / "js" / "app.js").read_text(encoding="utf-8")
+        self.assertIn(f"'{version}'", app_js)
+
+    def test_js_syntax_is_parseable(self):
+        quickjs = _try_import_quickjs()
+        if quickjs is None:
+            self.skipTest("quickjs is not installed")
+        import re as _re
+        for path in (PLANNING, RETRO_TIME):
+            src = path.read_text(encoding="utf-8")
+            src = _re.sub(r"import\s[^;]*?;", "", src, flags=_re.S)
+            src = src.replace("export default {", "const __page__ = {")
+            src = _re.sub(r"\bexport\s+(?=(async\s+)?(function|const|let|class|var)\b)", "", src)
+            check = quickjs.Context().eval(
+                "(function(src){ try { new globalThis.Function(src)(); return 'ok'; }"
+                " catch (e) { return e.name + ': ' + e.message; } })"
+            )
+            with self.subTest(file=path.name):
+                self.assertEqual(check(src), "ok")
+
+    def test_task_form_submit_has_double_submit_lock(self):
+        # 新建/编辑表单防重复提交：提交锁在 handler 入口同步建立（先于任何
+        # 异步请求），创建（POST）与编辑（PATCH）走同一把锁；不能只依赖按钮
+        # disabled（按钮聚焦后按 Enter/空格仍触发 click）。两阶段语义：
+        # 提交/API 阶段失败 → 解锁可重试；服务器保存成功 → committed 终态，
+        # 此后 toast/close/loadAll 后处理失败不得解锁、不得误报「保存失败」。
+        match = re.search(
+            r"const submitBtn = root\.querySelector\('\[data-ok\]'\);\s*"
+            r"let submitting = false;\s*"
+            r"let committed = false;\s*"
+            r"submitBtn\.onclick = async \(\) => \{(.*?)\n    \};",
+            self.page, re.S)
+        self.assertIsNotNone(match, "task form submit handler must hold a submitting lock")
+        block = match.group(1)
+        for marker in (
+            "if (committed || submitting) return;",  # 终态优先：committed 后永不再次提交
+            "submitting = true;",
+            "submitBtn.disabled = true;",    # 提交中立即禁用按钮
+            # 创建与编辑都在锁保护的同一 handler 内
+            "await gw('/admin/api/planning/tasks', {",
+            "await gw(`/admin/api/planning/tasks/${task.id}`, {",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, block)
+        # 锁检查先于任何请求发起
+        self.assertLess(block.index("if (committed || submitting) return;"), block.index("await gw("))
+
+        # 提交/API 阶段失败：先解锁恢复按钮再提示（提示自身异常不得卡死
+        # 提交资格），且 return 不得落到 committed 置位
+        catch_seg = block[block.index("} catch (error) {"):block.index("committed = true;")]
+        for marker in ("submitting = false;", "submitBtn.disabled = false;", "return;"):
+            with self.subTest(catch_marker=marker):
+                self.assertIn(marker, catch_seg)
+        self.assertLess(catch_seg.index("submitting = false;"), catch_seg.index("toast(`保存失败"))
+        self.assertLess(catch_seg.index("submitBtn.disabled = false;"), catch_seg.index("toast(`保存失败"))
+
+        # 服务器保存成功 → 终态先行，随后后处理逐项 best-effort；终态段内
+        # 不得出现任何解锁动作
+        post_seg = block[block.index("committed = true;"):]
+        for step in (
+            "try { toast(editing ? '待办已保存' : '待办已创建'); } catch {",
+            "try { close(); } catch {",
+            "try { await this.loadAll(); } catch {",
+        ):
+            with self.subTest(post_step=step):
+                self.assertIn(step, post_seg)
+        self.assertNotIn("submitBtn.disabled = false;", post_seg)
+
+    def test_task_form_submit_lock_blocks_rapid_reentry(self):
+        # 行为级验证：在 quickjs 中真实执行 planning.js 的提交 handler 与
+        # openTaskForm（仅 mock 通用 modal/esc/icon 帮助函数）。覆盖：
+        # 1) API pending 期间连点只发一次请求；2) API reject 解锁可重试
+        # （失败提示自身抛异常也不得卡死提交资格）；3) payload 构建阶段同步
+        # 异常可恢复；4) 成功后 toast 抛异常 → 后处理照常、旧表单终态；
+        # 5) 成功后 close 抛异常（modal 未移除）→ 旧表单不可再提交；
+        # 6) 成功后 loadAll 抛异常 → 不得误报「保存失败」、不得重复提交；
+        # 7) 成功关闭后重新 openTaskForm 打开全新表单，相同 payload 仍可
+        # 正常创建（防重身份是单次表单生命周期，不是内容判重）。
+        quickjs = _try_import_quickjs()
+        if quickjs is None:
+            self.skipTest("quickjs is not installed")
+        handler = re.search(r"submitBtn\.onclick = (async \(\) => \{.*?\n    \});", self.page, re.S).group(1)
+        openform = re.search(r"  openTaskForm\(task\) \{(.*?)\n  \},", self.page, re.S)
+        self.assertIsNotNone(openform, "openTaskForm not found in planning.js")
+        harness = """
+            var __result = null, __error = null;
+            (async () => {
+              let cur = null;
+              globalThis.loadAll = async () => {
+                if (cur.failLoad) throw new Error('load boom');
+                cur.loads += 1;
+              };
+              const scenario = (editing, task) => {
+                const s = { calls: [], toasts: [], closed: 0, loads: 0,
+                            inFlightDisabled: null, failToast: false,
+                            failClose: false, failLoad: false, throwSel: null };
+                cur = s;
+                const queue = [];
+                const gw = (url, opts) => new Promise((resolve, reject) => {
+                  s.calls.push({ url: url, method: opts.method, body: opts.body });
+                  s.inFlightDisabled = submitBtn.disabled;
+                  queue.push({ resolve: resolve, reject: reject });
+                });
+                const toast = (msg) => {
+                  if (s.failToast) throw new Error('toast boom');
+                  s.toasts.push(msg);
+                };
+                const close = () => {
+                  if (s.failClose) throw new Error('close boom');
+                  s.closed += 1;
+                };
+                const stub = { value: '', checked: false };
+                const root = {
+                  querySelector: (sel) => {
+                    if (s.throwSel === sel) throw new Error('dom boom');
+                    return stub;
+                  },
+                  querySelectorAll: () => [],
+                };
+                const typeSelect = { value: 'daily' };
+                const submitBtn = { disabled: false };
+                let submitting = false, committed = false;
+                // handler 源码在此拼接：闭包必须覆盖本场景的锁与终态变量
+                const onclick = __HANDLER__;
+                const lastToast = () => (s.toasts.length ? s.toasts[s.toasts.length - 1] : '');
+                return { s: s, queue: queue, submitBtn: submitBtn, click: onclick, lastToast: lastToast };
+              };
+
+              const out = {};
+
+              // A：API pending 期间快速连点 → 只发一次请求；成功 → 终态不解锁
+              {
+                const env = scenario(false, {});
+                const ps = [env.click(), env.click(), env.click()];
+                out.a_round1_calls = env.s.calls.length;
+                out.a_pending_disabled = env.submitBtn.disabled;
+                env.queue[0].resolve({});
+                await Promise.all(ps);
+                out.a_success = { disabled: env.submitBtn.disabled, closed: env.s.closed,
+                                  loads: env.s.loads, lastToast: env.lastToast() };
+                await env.click();
+                out.a_reclick_calls = env.s.calls.length;
+              }
+
+              // B：API reject → 解锁；失败提示抛异常仍解锁；随后可重试成功
+              {
+                const env = scenario(false, {});
+                const p1 = env.click();
+                env.queue[0].reject(new Error('boom'));
+                await p1;
+                out.b_fail = { disabled: env.submitBtn.disabled, lastToast: env.lastToast(),
+                               calls: env.s.calls.length };
+                env.s.failToast = true;
+                const p2 = env.click();
+                env.queue[1].reject(new Error('boom2'));
+                await p2.catch(() => {});
+                out.b_fail_toast_throws = { disabled: env.submitBtn.disabled,
+                                            calls: env.s.calls.length };
+                env.s.failToast = false;
+                const p3 = env.click();
+                env.queue[2].resolve({});
+                await p3;
+                out.b_retry = { disabled: env.submitBtn.disabled, calls: env.s.calls.length,
+                                closed: env.s.closed };
+              }
+
+              // C：payload 构建阶段同步异常 → 解锁恢复，修复后可再次提交
+              {
+                const env = scenario(false, {});
+                env.s.throwSel = '#pf-estimated';
+                await env.click();
+                out.c_build_fail = { disabled: env.submitBtn.disabled, lastToast: env.lastToast(),
+                                     calls: env.s.calls.length };
+                env.s.throwSel = null;
+                const p = env.click();
+                env.queue[0].resolve({});
+                await p;
+                out.c_recovered = { calls: env.s.calls.length, closed: env.s.closed };
+              }
+
+              // D：成功后 toast 抛异常 → close/loadAll 照常执行，旧表单终态
+              {
+                const env = scenario(false, {});
+                const p = env.click();
+                env.s.failToast = true;
+                env.queue[0].resolve({});
+                await p;
+                out.d_toast_fail = { closed: env.s.closed, loads: env.s.loads,
+                                     disabled: env.submitBtn.disabled, calls: env.s.calls.length };
+                await env.click();
+                out.d_reclick_calls = env.s.calls.length;
+              }
+
+              // E：成功后 close 抛异常（modal 未被移除）→ 旧表单不可再提交
+              {
+                const env = scenario(false, {});
+                const p = env.click();
+                env.s.failClose = true;
+                env.queue[0].resolve({});
+                await p;
+                out.e_close_fail = { closed: env.s.closed, loads: env.s.loads,
+                                     disabled: env.submitBtn.disabled, lastToast: env.lastToast() };
+                await env.click();
+                out.e_reclick_calls = env.s.calls.length;
+              }
+
+              // F：成功后 loadAll 抛异常 → 不误报「保存失败」、不重复提交
+              {
+                const env = scenario(false, {});
+                const p = env.click();
+                env.s.failLoad = true;
+                env.queue[0].resolve({});
+                await p;
+                out.f_load_fail = { closed: env.s.closed, disabled: env.submitBtn.disabled,
+                                    lastToast: env.lastToast() };
+                await env.click();
+                out.f_reclick_calls = env.s.calls.length;
+              }
+
+              // 编辑路径：pending 连点一次 PATCH；失败解锁；成功后 loadAll
+              // 抛异常不误报且终态
+              {
+                const env = scenario(true, { id: 7, time_mode: 'duration' });
+                const ps = [env.click(), env.click()];
+                out.e1_round1_calls = env.s.calls.length;
+                env.queue[0].reject(new Error('patch boom'));
+                await Promise.all(ps);
+                out.e1_fail = { disabled: env.submitBtn.disabled, lastToast: env.lastToast(),
+                                method: env.s.calls[0].method, url: env.s.calls[0].url };
+                const p = env.click();
+                env.s.failLoad = true;
+                env.queue[1].resolve({});
+                await p;
+                out.e1_success_load_fail = { disabled: env.submitBtn.disabled,
+                                             lastToast: env.lastToast() };
+                await env.click();
+                out.e1_reclick_calls = env.s.calls.length;
+              }
+
+              // G：真实 openTaskForm——成功关闭后重新打开全新表单，相同
+              // payload 仍可正常创建（无内容判重）
+              {
+                const g = { calls: [], closedForms: 0, forms: [] };
+                const queue = [];
+                const gw = (url, opts) => new Promise((resolve, reject) => {
+                  g.calls.push({ url: url, method: opts.method, body: opts.body });
+                  queue.push({ resolve: resolve, reject: reject });
+                });
+                const toast = (msg) => { g.toasts.push(msg); };
+                const makeEl = () => {
+                  const kids = {};
+                  return {
+                    value: '', checked: false, disabled: false,
+                    style: {}, dataset: {}, addEventListener: () => {},
+                    // 记忆化：openTaskForm 内部绑定的 [data-ok] 与测试取到的是同一节点
+                    querySelector: (sel) => {
+                      if (!kids[sel]) kids[sel] = makeEl();
+                      return kids[sel];
+                    },
+                    querySelectorAll: () => [],
+                    insertAdjacentHTML: () => {},
+                  };
+                };
+                const modal = () => {
+                  const root = makeEl();
+                  const close = () => { g.closedForms += 1; };
+                  g.forms.push({ root: root, close: close });
+                  return { root: root, close: close };
+                };
+                const esc = (v) => String(v == null ? '' : v);
+                const icon = () => '';
+                const TASK_TYPES = ['daily', 'weekly', 'monthly', 'interval', 'once'];
+                const TASK_TYPE_LABELS = { daily: '每日', weekly: '每周', monthly: '每月',
+                                           interval: '间歇', once: '单次' };
+                const WEEKDAY_NAMES = ['一', '二', '三', '四', '五', '六', '日'];
+                const self2 = { initRetroFields: () => {}, loadAll: async () => {} };
+                const openForm = __OPENFORM_FACTORY__(modal, esc, icon, TASK_TYPES,
+                                                     TASK_TYPE_LABELS, WEEKDAY_NAMES, gw, toast);
+                openForm.call(self2, {});
+                const btn1 = g.forms[0].root.querySelector('[data-ok]');
+                const click1 = btn1.onclick;
+                const p1 = click1();
+                queue[0].resolve({});
+                await p1;
+                out.g_form1 = { closedForms: g.closedForms, calls: g.calls.length,
+                                method: g.calls[0].method };
+                await click1();
+                out.g_form1_reclick_calls = g.calls.length;
+                openForm.call(self2, {});
+                const btn2 = g.forms[1].root.querySelector('[data-ok]');
+                const p2 = btn2.onclick();
+                queue[1].resolve({});
+                await p2;
+                out.g_form2 = { closedForms: g.closedForms, calls: g.calls.length,
+                                identicalPayload: g.calls[0].body === g.calls[1].body };
+              }
+
+              return out;
+            })().then((v) => { __result = v; }).catch((e) => { __error = String(e); });
+        """.replace("__HANDLER__", handler).replace(
+            "__OPENFORM_FACTORY__",
+            "(function (modal, esc, icon, TASK_TYPES, TASK_TYPE_LABELS, "
+            "WEEKDAY_NAMES, gw, toast) { return function (task) {"
+            + openform.group(1) + "} })")
+        ctx = quickjs.Context()
+        ctx.eval(harness)
+        for _ in range(10000):
+            if not ctx.execute_pending_job():
+                break
+        self.assertIsNone(ctx.eval("__error"), f"harness crashed: {ctx.eval('__error')}")
+        out = json.loads(ctx.eval("JSON.stringify(__result)"))
+
+        # A：连点只发一次；pending 期间按钮禁用；成功后终态（按钮保持禁用、
+        # 不再发请求、提示成功、表单关闭并刷新）
+        self.assertEqual(out["a_round1_calls"], 1, "rapid double click must send one create request")
+        self.assertTrue(out["a_pending_disabled"], "button must be disabled while request is in flight")
+        self.assertTrue(out["a_success"]["disabled"], "committed form must stay disabled (no unlock)")
+        self.assertEqual(out["a_success"]["closed"], 1)
+        self.assertEqual(out["a_success"]["loads"], 1)
+        self.assertEqual(out["a_success"]["lastToast"], "待办已创建")
+        self.assertEqual(out["a_reclick_calls"], 1, "committed form must never submit again")
+
+        # B：API reject → 解锁可重试；失败提示自身抛异常也不得卡死提交资格
+        self.assertFalse(out["b_fail"]["disabled"], "API failure must release the lock")
+        self.assertIn("保存失败", out["b_fail"]["lastToast"])
+        self.assertEqual(out["b_fail"]["calls"], 1)
+        self.assertFalse(out["b_fail_toast_throws"]["disabled"],
+                         "release must happen before the failure toast")
+        self.assertEqual(out["b_fail_toast_throws"]["calls"], 2)
+        self.assertEqual(out["b_retry"]["calls"], 3)
+        self.assertTrue(out["b_retry"]["disabled"])
+        self.assertEqual(out["b_retry"]["closed"], 1)
+
+        # C：构建阶段同步异常 → 解锁恢复，修复后可再次提交
+        self.assertEqual(out["c_build_fail"]["calls"], 0, "no request must fire when build throws")
+        self.assertFalse(out["c_build_fail"]["disabled"])
+        self.assertIn("保存失败", out["c_build_fail"]["lastToast"])
+        self.assertEqual(out["c_recovered"]["calls"], 1)
+        self.assertEqual(out["c_recovered"]["closed"], 1)
+
+        # D：成功后 toast 抛异常 → close/loadAll 照常执行，终态不再提交
+        self.assertEqual(out["d_toast_fail"]["closed"], 1, "close must still run when toast throws")
+        self.assertEqual(out["d_toast_fail"]["loads"], 1, "loadAll must still run when toast throws")
+        self.assertTrue(out["d_toast_fail"]["disabled"])
+        self.assertEqual(out["d_toast_fail"]["calls"], 1)
+        self.assertEqual(out["d_reclick_calls"], 1, "committed form must never submit again")
+
+        # E：成功后 close 抛异常 → 旧表单终态不可再提交，且不误报失败
+        self.assertEqual(out["e_close_fail"]["closed"], 0, "simulated modal removal failure")
+        self.assertEqual(out["e_close_fail"]["loads"], 1, "loadAll must still run when close throws")
+        self.assertTrue(out["e_close_fail"]["disabled"])
+        self.assertEqual(out["e_close_fail"]["lastToast"], "待办已创建")
+        self.assertEqual(out["e_reclick_calls"], 1, "stale form must never submit again")
+
+        # F：成功后 loadAll 抛异常 → 不误报「保存失败」、不重复提交
+        self.assertEqual(out["f_load_fail"]["closed"], 1)
+        self.assertEqual(out["f_load_fail"]["lastToast"], "待办已创建")
+        self.assertTrue(out["f_load_fail"]["disabled"])
+        self.assertEqual(out["f_reclick_calls"], 1, "committed form must never submit again")
+
+        # 编辑路径：连点一次 PATCH；失败解锁；成功后 loadAll 抛异常不误报
+        self.assertEqual(out["e1_round1_calls"], 1, "rapid double click must send one update request")
+        self.assertEqual(out["e1_fail"]["method"], "PATCH")
+        self.assertEqual(out["e1_fail"]["url"], "/admin/api/planning/tasks/7")
+        self.assertFalse(out["e1_fail"]["disabled"])
+        self.assertIn("保存失败", out["e1_fail"]["lastToast"])
+        self.assertEqual(out["e1_success_load_fail"]["lastToast"], "待办已保存")
+        self.assertNotIn("保存失败", out["e1_success_load_fail"]["lastToast"])
+        self.assertTrue(out["e1_success_load_fail"]["disabled"])
+        self.assertEqual(out["e1_reclick_calls"], 2, "committed edit form must never submit again")
+
+        # G：新表单是全新生命周期——相同 payload 照常创建第二个
+        self.assertEqual(out["g_form1"]["calls"], 1)
+        self.assertEqual(out["g_form1"]["method"], "POST")
+        self.assertEqual(out["g_form1"]["closedForms"], 1)
+        self.assertEqual(out["g_form1_reclick_calls"], 1, "closed form must never submit again")
+        self.assertEqual(out["g_form2"]["calls"], 2, "fresh form must allow the identical create")
+        self.assertEqual(out["g_form2"]["closedForms"], 2)
+        self.assertTrue(out["g_form2"]["identicalPayload"],
+                        "second identical create must send an identical payload")
+
+
+class PlanningAudioAssetTests(unittest.TestCase):
+    def test_audio_files_and_credits_exist(self):
+        audio_dir = ROOT / "admin" / "assets" / "audio"
+        self.assertTrue((audio_dir / "alarm-clock.mp3").is_file())
+        self.assertTrue((audio_dir / "timer-done.ogg").is_file())
+        credits = CREDITS.read_text(encoding="utf-8")
+        self.assertIn("CC0", credits)
+        self.assertIn("Calm Piano 1", credits)
+        self.assertIn("Slow Piano Intermission", credits)
+        self.assertIn("opengameart.org", credits)
+
+
+if __name__ == "__main__":
+    unittest.main()

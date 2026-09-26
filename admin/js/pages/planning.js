@@ -1369,90 +1369,114 @@ export default {
     syncBlocks();
 
     root.querySelector('[data-cancel]').onclick = close;
-    root.querySelector('[data-ok]').onclick = async () => {
-      const type = typeSelect.value;
-      const body = {
-        content: root.querySelector('#pf-content').value.trim(),
-        task_type: type,
-      };
-      const estimated = root.querySelector('#pf-estimated').value.trim();
-      if (estimated) body.estimated_minutes = estimated;
-      const startTod = root.querySelector('#pf-start-tod').value;
-      const endTod = root.querySelector('#pf-end-tod').value;
-      if (startTod) body.est_start_tod = startTod;
-      const deadline = root.querySelector('#pf-deadline').value;
-      const deadlineEnd = root.querySelector('#pf-deadline-end').value;
-      if (editing) {
-        // 清除字段必须显式发送清除值（后端已支持 null/false 清除）：
-        // 不发送字段会让保存提示成功但数据库并未清除。
-        // 显式结束时间单独清除：保留开始、清空结束 → 显式发送
-        // est_end_tod: null（后端既有契约），旧结束时间真正写库清除；
-        // 无耗时兜底时后端返回明确 400，不写半区间。
-        if (!startTod && task.time_mode === 'explicit') {
-          // 显式起止清空 → 切回仅耗时模式（后端随之清除固定身份）
-          body.time_mode = 'duration';
-        } else {
-          body.est_end_tod = endTod || null;
-        }
-        body.is_fixed = root.querySelector('#pf-fixed').checked;
-        body.deadline_tod = deadline || null;
-        body.deadline_end_tod = deadlineEnd || null;
-      } else {
-        if (endTod) body.est_end_tod = endTod;
-        if (root.querySelector('#pf-fixed').checked) body.is_fixed = true;
-        if (deadline) body.deadline_tod = deadline;
-        if (deadlineEnd) body.deadline_end_tod = deadlineEnd;
-      }
-      if (type === 'interval') {
-        body.interval_days = Number(root.querySelector('#pf-interval-days').value) || null;
-        const refreshMode = root.querySelector('input[name="pf-refresh-mode"]:checked');
-        if (refreshMode) body.refresh_mode = refreshMode.value;
-      }
-      if (type === 'weekly') {
-        body.weekdays = [...root.querySelectorAll('[data-weekday]:checked')].map((el) => Number(el.value));
-      }
-      if (type === 'monthly') {
-        body.month_days = root.querySelector('#pf-month-days').value
-          .split(/[,，\s]+/).map((v) => Number(v)).filter((v) => Number.isInteger(v) && v > 0);
-      }
-      if (type === 'once') body.target_date = root.querySelector('#pf-target-date').value || null;
-      if (root.querySelector('#pf-hollow').checked) {
-        body.is_hollow = true;
-        body.hollow_start_content = root.querySelector('#pf-hollow-start').value.trim() || body.content;
-        body.hollow_start_minutes = Number(root.querySelector('#pf-hollow-start-min').value) || null;
-        body.hollow_wait_minutes = Number(root.querySelector('#pf-hollow-wait').value) || null;
-        body.hollow_wait_note = root.querySelector('#pf-hollow-note').value.trim() || null;
-        body.hollow_end_content = root.querySelector('#pf-hollow-end').value.trim() || body.content;
-        body.hollow_end_minutes = Number(root.querySelector('#pf-hollow-end-min').value) || null;
-      }
-      // 闹钟 / 计时器显式发送状态与清除值（留空保存即清除计时器）
-      body.alarm_start = root.querySelector('#pf-alarm-start').checked;
-      body.alarm_end = root.querySelector('#pf-alarm-end').checked;
-      const timer = root.querySelector('#pf-timer').value.trim();
-      body.timer_minutes = timer || null;
-      if (editing) body.is_active = root.querySelector('#pf-active').checked;
-
+    // 防重复提交（新建与编辑同一入口）：提交锁在 handler 入口同步建立，
+    // 早于任何异步请求，不能只依赖按钮 disabled（按钮聚焦后按 Enter /
+    // 空格仍会触发 click）。两阶段语义：
+    // 提交/API 阶段失败 → 释放锁与按钮，user 可修改后重新提交；
+    // 服务器保存成功 → committed 终态：此后 toast/close/loadAll 等 UI
+    // 后处理无论成败，本表单都不再解锁、不再发出第二次保存请求，也
+    // 不得把已成功的事实误报为「保存失败」。即使弹窗因异常未被移除，
+    // 提交按钮保持禁用，重复点击也不会再发请求；关闭失败时可经取消 /
+    // 右上角关闭按钮收尾。
+    const submitBtn = root.querySelector('[data-ok]');
+    let submitting = false;
+    let committed = false;
+    submitBtn.onclick = async () => {
+      if (committed || submitting) return;
+      submitting = true;
+      submitBtn.disabled = true;
       try {
+        const type = typeSelect.value;
+        const body = {
+          content: root.querySelector('#pf-content').value.trim(),
+          task_type: type,
+        };
+        const estimated = root.querySelector('#pf-estimated').value.trim();
+        if (estimated) body.estimated_minutes = estimated;
+        const startTod = root.querySelector('#pf-start-tod').value;
+        const endTod = root.querySelector('#pf-end-tod').value;
+        if (startTod) body.est_start_tod = startTod;
+        const deadline = root.querySelector('#pf-deadline').value;
+        const deadlineEnd = root.querySelector('#pf-deadline-end').value;
+        if (editing) {
+          // 清除字段必须显式发送清除值（后端已支持 null/false 清除）：
+          // 不发送字段会让保存提示成功但数据库并未清除。
+          // 显式结束时间单独清除：保留开始、清空结束 → 显式发送
+          // est_end_tod: null（后端既有契约），旧结束时间真正写库清除；
+          // 无耗时兜底时后端返回明确 400，不写半区间。
+          if (!startTod && task.time_mode === 'explicit') {
+            // 显式起止清空 → 切回仅耗时模式（后端随之清除固定身份）
+            body.time_mode = 'duration';
+          } else {
+            body.est_end_tod = endTod || null;
+          }
+          body.is_fixed = root.querySelector('#pf-fixed').checked;
+          body.deadline_tod = deadline || null;
+          body.deadline_end_tod = deadlineEnd || null;
+        } else {
+          if (endTod) body.est_end_tod = endTod;
+          if (root.querySelector('#pf-fixed').checked) body.is_fixed = true;
+          if (deadline) body.deadline_tod = deadline;
+          if (deadlineEnd) body.deadline_end_tod = deadlineEnd;
+        }
+        if (type === 'interval') {
+          body.interval_days = Number(root.querySelector('#pf-interval-days').value) || null;
+          const refreshMode = root.querySelector('input[name="pf-refresh-mode"]:checked');
+          if (refreshMode) body.refresh_mode = refreshMode.value;
+        }
+        if (type === 'weekly') {
+          body.weekdays = [...root.querySelectorAll('[data-weekday]:checked')].map((el) => Number(el.value));
+        }
+        if (type === 'monthly') {
+          body.month_days = root.querySelector('#pf-month-days').value
+            .split(/[,，\s]+/).map((v) => Number(v)).filter((v) => Number.isInteger(v) && v > 0);
+        }
+        if (type === 'once') body.target_date = root.querySelector('#pf-target-date').value || null;
+        if (root.querySelector('#pf-hollow').checked) {
+          body.is_hollow = true;
+          body.hollow_start_content = root.querySelector('#pf-hollow-start').value.trim() || body.content;
+          body.hollow_start_minutes = Number(root.querySelector('#pf-hollow-start-min').value) || null;
+          body.hollow_wait_minutes = Number(root.querySelector('#pf-hollow-wait').value) || null;
+          body.hollow_wait_note = root.querySelector('#pf-hollow-note').value.trim() || null;
+          body.hollow_end_content = root.querySelector('#pf-hollow-end').value.trim() || body.content;
+          body.hollow_end_minutes = Number(root.querySelector('#pf-hollow-end-min').value) || null;
+        }
+        // 闹钟 / 计时器显式发送状态与清除值（留空保存即清除计时器）
+        body.alarm_start = root.querySelector('#pf-alarm-start').checked;
+        body.alarm_end = root.querySelector('#pf-alarm-end').checked;
+        const timer = root.querySelector('#pf-timer').value.trim();
+        body.timer_minutes = timer || null;
+        if (editing) body.is_active = root.querySelector('#pf-active').checked;
+
         if (editing) {
           await gw(`/admin/api/planning/tasks/${task.id}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
           });
-          toast('待办已保存');
         } else {
           await gw('/admin/api/planning/tasks', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
           });
-          toast('待办已创建');
         }
-        close();
-        await this.loadAll();
       } catch (error) {
+        // 提交/API 阶段失败：先解锁恢复按钮再提示，提示自身异常不得
+        // 卡死提交资格（user 仍可修改后重新提交）
+        submitting = false;
+        submitBtn.disabled = false;
         toast(`保存失败：${error.message}`, 'err');
+        return;
       }
+      // 服务器已保存：进入不可逆终态。此后任何 UI 后处理异常都不得
+      // 重新赋予本表单提交资格，也不得误报「保存失败」。
+      committed = true;
+      submitting = false;
+      // 后处理逐项 best-effort：一步失败只影响该步，后续步骤照常执行
+      try { toast(editing ? '待办已保存' : '待办已创建'); } catch { /* 不误报失败 */ }
+      try { close(); } catch { /* 旧表单保持终态（按钮已禁用 + committed 拦截） */ }
+      try { await this.loadAll(); } catch { /* 刷新失败不改变已保存事实 */ }
     };
   },
 
