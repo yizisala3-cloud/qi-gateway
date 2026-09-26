@@ -1,5 +1,5 @@
 // ui.js - shared retro UI components: icons, tags, modal, toast, detail panel
-export const ASSET_VERSION = '20260921-ctx1';
+export const ASSET_VERSION = '20260927-planning10';
 
 /* ---------- SVG icons (stroke, no emoji) ---------- */
 const ICON_PATHS = {
@@ -117,7 +117,8 @@ export function toast(msg, type = 'ok') {
   }
   const el = document.createElement('div');
   el.className = `toast toast-${type}`;
-  el.innerHTML = `<span class="toast-ico">${icon(type === 'err' ? 'alert' : 'check')}</span><span></span>`;
+  // warn 与 err 共用警示图标；ok（成功）用对勾
+  el.innerHTML = `<span class="toast-ico">${icon(type === 'ok' ? 'check' : 'alert')}</span><span></span>`;
   el.lastElementChild.textContent = msg;
   _toastWrap.appendChild(el);
   setTimeout(() => {

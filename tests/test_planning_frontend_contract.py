@@ -3,6 +3,10 @@
 断言 planning.js 的关键区块 id、后端端点调用、无 Emoji；侧栏第一项为
 「规划管理」且现有六页不变；铃声资产与 CREDITS.md 就位；ASSET_VERSION
 版本链一致。quickjs 可用时额外做一次真实 ES 语法解析。
+
+二轮验收修复（BUG-11~16）：四区域页签化 + 今日三分区二级页签、详情栏
+提醒控件、状态显示名去撞车、一行式小空态、原生 date/time 控件统一为
+复古选择器（lib/retro_time.js）、详情栏术语去工程味。
 """
 
 import re
@@ -11,8 +15,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PLANNING = ROOT / "admin" / "js" / "pages" / "planning.js"
+RETRO_TIME = ROOT / "admin" / "js" / "lib" / "retro_time.js"
 ROUTES = ROOT / "admin" / "js" / "routes.js"
 UI = ROOT / "admin" / "js" / "ui.js"
+STYLE = ROOT / "admin" / "css" / "style.css"
 CREDITS = ROOT / "admin" / "assets" / "audio" / "CREDITS.md"
 
 EMOJI_PATTERN = re.compile(
@@ -49,6 +55,61 @@ class PlanningPageContractTests(unittest.TestCase):
         ):
             with self.subTest(section=section_id):
                 self.assertIn(f'id="{section_id}"', self.page)
+
+    def test_top_tabs_four_items_with_region_icons(self):
+        # BUG-16：工具栏下方一条 .tabs，四个页签沿用原区域图标，同一时刻只显示激活区域
+        match = re.search(r'<div class="tabs" id="planning-tabs"[^>]*>(.*?)</div>', self.page, re.S)
+        self.assertIsNotNone(match, "planning page must render the top .tabs bar")
+        block = match.group(1)
+        for tab_key, icon_name in (
+            ("today", "calendar"), ("all", "inbox"), ("goals", "star"), ("summary", "journal"),
+        ):
+            with self.subTest(tab=tab_key):
+                self.assertIn(f'data-tab="{tab_key}"', block)
+                self.assertIn(f"icon('{icon_name}')", block)
+        self.assertEqual(block.count('class="tab'), 4)
+        # 默认激活「当前待办」
+        self.assertIn('<button class="tab active" data-act="plan-tab" data-tab="today"', block)
+
+    def test_today_subtabs_three_sections_default_progress(self):
+        # BUG-16c：「当前待办」页签内 .subtabs 二级页签，默认进度中，切换只显示对应列表
+        match = re.search(r'<div class="subtabs">(.*?)</div>', self.page, re.S)
+        self.assertIsNotNone(match, "today card must render the .subtabs bar")
+        block = match.group(1)
+        for section, label in (
+            ("progress", "进度中"), ("attention", "待处理"), ("done", "已完成"),
+        ):
+            with self.subTest(section=section):
+                self.assertIn(f'data-section="{section}"', block)
+                self.assertIn(label, block)
+        self.assertIn(
+            '<button class="subtab active" data-act="plan-subtab" data-section="progress"',
+            block,
+        )
+        # 分区列表初始只显示进度中；计数移入页签
+        self.assertIn('id="planning-attention" hidden', self.page)
+        self.assertIn('id="planning-done" hidden', self.page)
+        self.assertNotIn('id="planning-progress" hidden', self.page)
+        self.assertIn("activeSection: 'progress'", self.page)
+
+    def test_tab_panels_keep_region_ids_and_default_to_today(self):
+        # BUG-16d：区域 DOM 保留原 id，只包进页签面板；初始只显示当前待办
+        self.assertIn('id="planning-today" data-panel="today">', self.page)
+        self.assertIn('id="planning-all" data-panel="all" hidden', self.page)
+        self.assertIn('id="planning-goals" data-panel="goals" hidden', self.page)
+        self.assertIn('id="planning-summary" data-panel="summary" hidden', self.page)
+        self.assertIn("activeTab: 'today'", self.page)
+        # 重算等待横幅移入当前待办页签内（不在页签栏与全部待办之间）
+        banner_at = self.page.index('id="planning-alarm-banner"')
+        self.assertGreater(banner_at, self.page.index('id="planning-today"'))
+        self.assertLess(banner_at, self.page.index('id="planning-all"'))
+
+    def test_reorder_only_available_in_today_tab(self):
+        # BUG-16e：排列模式只在「当前待办」页签可用，其它页签点击给 toast
+        self.assertIn("this.activeTab !== 'today'", self.page)
+        self.assertIn("调整顺序只在「当前待办」页签可用", self.page)
+        # 排列中切走页签自动退出排列
+        self.assertIn("排列模式只在「当前待办」页签内有效，切走即退出并还原列表", self.page)
 
     def test_all_section_has_filters_and_two_lists(self):
         for marker in (
@@ -121,10 +182,12 @@ class PlanningPageContractTests(unittest.TestCase):
         self.assertIn("data-part-minutes", self.page)
         self.assertIn("data-part-row", self.page)
 
-    def test_partial_status_offers_complete_action(self):
-        # BUG-8：部分完成条目可直接改「已完成」
-        partial_block = self.page.split("occ.status === 'partial'")[1]
-        self.assertIn("btn('finish', '已完成'", partial_block)
+    def test_partial_status_offers_full_complete_action(self):
+        # Phase 1R：部分完成保持开放，详情提供「已全部完成」收口
+        self.assertIn("btn('finish', '已全部完成'", self.page)
+        # partial 属于开放状态分组，与后端 OPEN_STATUSES 一致
+        partial_block = self.page.split("const OPEN_STATUSES = ")[1].split(";")[0]
+        self.assertIn("'partial'", partial_block)
 
     def test_audio_unlock_on_first_pointerdown(self):
         # BUG-9：首次手势静音解锁音频；播放被拦时给出提示
@@ -143,6 +206,75 @@ class PlanningPageContractTests(unittest.TestCase):
 
     def test_no_emoji_icons(self):
         self.assertIsNone(EMOJI_PATTERN.search(self.page))
+
+    def test_detail_alarm_controls_patch_task(self):
+        # BUG-11：详情栏「提醒」行可操作（闹钟勾选 + 计时器文本框 + 保存提醒），
+        # 保存走 PATCH /admin/api/planning/tasks/{task_id}，留空传 null，成功后刷新详情与列表
+        for marker in (
+            "data-alarm-controls",
+            'data-act="occ-save-alarm"',
+            "data-alarm-start",
+            "data-alarm-end",
+            "data-timer-input",
+            "保存提醒",
+            "saveOccurrenceAlarm",
+            "`/admin/api/planning/tasks/${taskId}`",
+            "timer_minutes: timer || null",
+            "alarm_start: host.querySelector('[data-alarm-start]').checked",
+            "if (fresh) this.showOccurrenceDetail(fresh);",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.page)
+        # 走 occ- 委托入口
+        self.assertIn("else if (act === 'save-alarm') return this.saveOccurrenceAlarm(id);", self.page)
+
+    def test_status_display_labels_renamed(self):
+        # BUG-12：pending/in_progress 显示名与分区名撞车 →「未开始 / 执行中」
+        self.assertIn("pending: { label: '未开始'", self.page)
+        self.assertIn("in_progress: { label: '执行中'", self.page)
+        self.assertNotIn("pending: { label: '待处理'", self.page)
+        self.assertNotIn("in_progress: { label: '进行中'", self.page)
+
+    def test_today_empty_states_are_compact(self):
+        # BUG-13：三分区空态改为一行式小空态（小图标 + 纯文字，高度受限）
+        self.assertNotIn("empty('今天还没有待办'", self.page)
+        self.assertNotIn("empty('没有需要处理的异常待办'", self.page)
+        self.assertNotIn("empty('今天还没有关闭的记录'", self.page)
+        # 三个调用点（另有 1 处 function miniEmpty 定义不计）
+        self.assertEqual(self.page.count("miniEmpty('"), 3)
+        css = STYLE.read_text(encoding="utf-8")
+        self.assertIn(".plan-empty-mini", css)
+        self.assertIn("min-height: 34px", css)
+
+    def test_no_native_date_or_time_inputs_use_retro_picker(self):
+        # BUG-14：原生 time/date 控件统一为复古选择器（lib/retro_time.js）
+        self.assertNotIn('type="time"', self.page)
+        self.assertNotIn('type="date"', self.page)
+        self.assertIn("lib/retro_time.js", self.page)
+        self.assertIn("createRetroTimeField", self.page)
+        # 时间模式 ×5（显式开始/结束、限时截止/范围、周期设置刷新时间），
+        # 日期模式 ×2（筛选日期、单次目标日期）
+        self.assertEqual(self.page.count('data-retro-mode="time"'), 5)
+        self.assertEqual(self.page.count('data-retro-mode="date"'), 2)
+        # 隐藏 input 保留原 id 契约，提交逻辑无需改动
+        for field_id in (
+            "pf-start-tod", "pf-end-tod", "pf-deadline", "pf-deadline-end",
+            "pf-target-date", "planning-filter-date", "pf-cycle-boundary",
+        ):
+            with self.subTest(field=field_id):
+                self.assertIn(f'data-retro-for="{field_id}"', self.page)
+        # 复古选择器模块的三种模式齐备
+        lib = RETRO_TIME.read_text(encoding="utf-8")
+        for marker in ("'datetime'", "'date'", "'time'", "openRetroTimePop", "createRetroTimeField"):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, lib)
+
+    def test_detail_terms_are_plain_language(self):
+        # BUG-15：「排列标签」→「当前状态」；生成游标 / 下次到期降为 muted 小字
+        self.assertIn("<span class=\"k\">当前状态</span>", self.page)
+        self.assertNotIn("排列标签", self.page)
+        self.assertIn('<div class="kv muted text-sm"><span class="k">生成游标</span>', self.page)
+        self.assertIn('<div class="kv muted text-sm"><span class="k">下次到期</span>', self.page)
 
 
 
@@ -183,15 +315,17 @@ class PlanningNavigationContractTests(unittest.TestCase):
         if quickjs is None:
             self.skipTest("quickjs is not installed")
         import re as _re
-        src = self.page
-        src = _re.sub(r"import\s[^;]*?;", "", src, flags=_re.S)
-        src = src.replace("export default {", "const __page__ = {")
-        src = _re.sub(r"\bexport\s+(?=(async\s+)?(function|const|let|class|var)\b)", "", src)
-        check = quickjs.Context().eval(
-            "(function(src){ try { new globalThis.Function(src)(); return 'ok'; }"
-            " catch (e) { return e.name + ': ' + e.message; } })"
-        )
-        self.assertEqual(check(src), "ok")
+        for path in (PLANNING, RETRO_TIME):
+            src = path.read_text(encoding="utf-8")
+            src = _re.sub(r"import\s[^;]*?;", "", src, flags=_re.S)
+            src = src.replace("export default {", "const __page__ = {")
+            src = _re.sub(r"\bexport\s+(?=(async\s+)?(function|const|let|class|var)\b)", "", src)
+            check = quickjs.Context().eval(
+                "(function(src){ try { new globalThis.Function(src)(); return 'ok'; }"
+                " catch (e) { return e.name + ': ' + e.message; } })"
+            )
+            with self.subTest(file=path.name):
+                self.assertEqual(check(src), "ok")
 
 
 class PlanningAudioAssetTests(unittest.TestCase):
@@ -208,3 +342,92 @@ class PlanningAudioAssetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_split_dialog_daily_path_contract(self):
+        # 日常路径收尾：拆分弹窗默认 1 项、添加/移除、上限 10、防双击、
+        # 提交 1 项合法；文案不再出现「至少填写两部分」。
+        for marker in (
+            "partRow(1)",                       # 默认只渲染 1 个输入区域
+            "data-add-part",
+            "data-remove-part",
+            "rows.length >= 10 ? 'none' : ''",  # 达到 10 个隐藏添加按钮
+            "rows.length <= 1",                 # 至少保留 1 项，不允许删到 0
+            "请至少填写一个待办内容",
+            "if (submit.disabled) return;",     # 防双击：请求期间禁用提交
+            "submit.disabled = true;",
+            "submit.disabled = false;",         # 失败恢复按钮
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.page)
+        self.assertNotIn("至少填写两部分", self.page)
+
+    def test_edit_time_omits_empty_est_end(self):
+        # 编辑时间结束留空：省略 est_end（不发送 null），后端按有效耗时推导
+        body = "const body = { est_start: new Date(start).toISOString() };\n        if (end) body.est_end = new Date(end).toISOString();"
+        self.assertIn(body, self.page)
+        self.assertNotIn("est_end: end ? new Date(end).toISOString() : null", self.page)
+
+    def test_hollow_task_hides_early_complete_button(self):
+        # 中空待办提前完成必然 409：按任务形态隐藏不适用入口
+        self.assertIn("task.is_active && !task.is_hollow", self.page)
+
+    def test_reorder_toast_respects_auto_recompute_switch(self):
+        # 自动重算关闭时不得提示「等待自动重算」（需求 16.3）
+        self.assertIn("this.board?.recompute?.enabled === false", self.page)
+        self.assertIn("自动重算已关闭", self.page)
+
+    def test_task_form_sends_explicit_clear_values(self):
+        # 清除字段：编辑模式显式发送 null/false 清除值，不再「不发送=没清除」；
+        # 显式结束时间单独清除同样显式发送（est_end_tod: null 为后端既有契约）
+        for marker in (
+            "body.is_fixed = root.querySelector('#pf-fixed').checked;",
+            "body.deadline_tod = deadline || null;",
+            "body.deadline_end_tod = deadlineEnd || null;",
+            "body.alarm_start = root.querySelector('#pf-alarm-start').checked;",
+            "body.alarm_end = root.querySelector('#pf-alarm-end').checked;",
+            "body.timer_minutes = timer || null;",
+            "body.time_mode = 'duration';",
+            "body.est_end_tod = endTod || null;",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.page)
+
+    def test_poll_does_not_overwrite_unsaved_detail_input(self):
+        # 30 秒轮询：详情栏有未保存输入时跳过重绘，不覆盖用户正在编辑的内容
+        self.assertIn("if (occ && !this.detailHasUnsavedInput()) this.showOccurrenceDetail(occ);", self.page)
+        self.assertIn("detailHasUnsavedInput()", self.page)
+
+    def test_pause_resume_refresh_entry_and_copy(self):
+        # 需求 24：任务详情栏提供「暂停刷新 / 恢复刷新」，仅周期任务（每日/
+        # 间歇/每周/每月）且任务启用时显示；暂停需确认弹窗，恢复直接操作；
+        # 两个 Toast 文案与需求一致；按钮状态由服务端 refresh_enabled 驱动。
+        for marker in (
+            "PAUSABLE_TYPES = ['daily', 'interval', 'weekly', 'monthly']",
+            "PAUSABLE_TYPES.includes(task.task_type)",
+            "task.refresh_enabled === false",
+            "data-act=\"task-pause-refresh\"",
+            "data-act=\"task-resume-refresh\"",
+            "恢复刷新", "暂停刷新",
+            "刷新已暂停",  # 徽标：详情栏一眼可见当前暂停状态
+            # 确认弹窗：指定标题/正文/按钮文案，非危险样式
+            "'暂停后不会继续生成新的周期待办，当前已经生成的待办不会受到影响。之后可以随时恢复。'",
+            "{ title: '暂停刷新', okText: '暂停刷新', cancelText: '取消', danger: false }",
+            # Toast 文案（需求指定）
+            "toast(resuming ? '已恢复刷新' : '已暂停刷新');",
+            # PATCH 只写 refresh_enabled，不借道 is_active
+            "body: JSON.stringify({ refresh_enabled: resuming })",
+            # in-flight guard：请求期间禁用按钮防连续点击重复 PATCH
+            "if (el) el.disabled = true;",
+            "if (el) el.disabled = false;",
+            # 操作成功后以服务端数据重绘详情（页面刷新后状态同样来自持久化）
+            "const fresh = this.tasks.find((t) => t.id === id);",
+            "if (fresh) this.showTaskDetail(fresh);",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.page)
+
+    def test_pause_refresh_not_offered_to_once_or_inactive(self):
+        # 单次/闲时没有周期刷新，不提供暂停入口；已废弃任务同样不显示
+        self.assertIn("if (task.is_active && PAUSABLE_TYPES.includes(task.task_type)) {", self.page)
+        # 暂停/恢复走任务级 PATCH，不出现「此次不执行/完成」语义混淆文案
+        self.assertNotIn("暂停即此次不执行", self.page)
