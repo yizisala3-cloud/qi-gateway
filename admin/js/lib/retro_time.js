@@ -5,7 +5,7 @@
 //   date：只显示月历 + 清除/今天，产出 YYYY-MM-DD
 //   time：隐藏月历，只留时/分 + 清除/确定，产出 HH:MM（tod 字符串，后端不变）
 // 样式复用 style.css 的 .retro-time-*；input 上挂 _applyRetroValue 供外部程序化清空。
-import { icon } from '../ui.js?v=20260920-planning2';
+import { icon } from '../ui.js?v=20260925-planning9';
 
 let activeRetroTimePop = null;
 

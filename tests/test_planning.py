@@ -22,7 +22,7 @@ CST = timezone(timedelta(hours=8))
 
 UNIQUE_VIOLATION = (
     'duplicate key value violates unique constraint '
-    '"planning_occurrence_schedule_slot_uq"'
+    '"planning_occurrence_round_phase_uq"'
 )
 
 
@@ -47,7 +47,7 @@ class _Query:
 
     def insert(self, data):
         self.op = "insert"
-        self.payload = dict(data)
+        self.payload = [dict(item) for item in data] if isinstance(data, list) else dict(data)
         return self
 
     def update(self, data):
@@ -118,18 +118,25 @@ class _Query:
     def execute(self):
         rows = self.client.rows.setdefault(self.table, [])
         if self.op == "insert":
-            if self.table == "planning_occurrence" and self.payload.get("source") == "schedule":
-                for existing in rows:
-                    if (
-                        existing.get("task_id") == self.payload.get("task_id")
-                        and existing.get("for_date") == self.payload.get("for_date")
-                        and existing.get("phase") == self.payload.get("phase")
-                    ):
-                        raise RuntimeError(UNIQUE_VIOLATION)
-            row = dict(self.payload)
-            row["id"] = self.client.next_id(self.table)
-            rows.append(row)
-            return SimpleNamespace(data=[dict(row)])
+            payloads = self.payload if isinstance(self.payload, list) else [self.payload]
+            if self.table == "planning_occurrence":
+                for item in payloads:
+                    if item.get("round_key") is None:
+                        continue
+                    for existing in rows:
+                        if (
+                            existing.get("task_id") == item.get("task_id")
+                            and existing.get("round_key") == item.get("round_key")
+                            and existing.get("phase") == item.get("phase")
+                        ):
+                            raise RuntimeError(UNIQUE_VIOLATION)
+            inserted = []
+            for item in payloads:
+                row = dict(item)
+                row["id"] = self.client.next_id(self.table)
+                rows.append(row)
+                inserted.append(dict(row))
+            return SimpleNamespace(data=inserted)
         if self.op == "upsert":
             key = self.payload.get("id")
             matched = [row for row in rows if row.get("id") == key]
@@ -158,13 +165,14 @@ class _Query:
 
 
 class _Client:
-    """最小 supabase 查询构造器替身：内存行 + 乐观 id + 唯一槽位约束。"""
+    """最小 supabase 查询构造器替身：内存行 + 乐观 id + 轮次唯一约束。"""
 
     def __init__(self):
         self.rows = {
             "planning_task": [],
             "planning_occurrence": [],
             "planning_recompute_state": [{"id": 1, "requested_at": None, "reason": None}],
+            "app_settings": [],
         }
         self._counters = {}
 
@@ -179,8 +187,22 @@ class _Client:
 
 
 def _setup(module_now=None):
-    """返回 (client, contextmanager)，统一 patch get_client 与时间。"""
+    """返回 (client, contextmanager)，统一 patch get_client、时间与 app_settings。"""
     client = _Client()
+
+    def fake_load_setting(key):
+        for row in client.rows["app_settings"]:
+            if row.get("key") == key:
+                return row.get("value")
+        return None
+
+    def fake_save_setting(key, value):
+        for row in client.rows["app_settings"]:
+            if row.get("key") == key:
+                row["value"] = value
+                return True
+        client.rows["app_settings"].append({"key": key, "value": value})
+        return True
 
     class _Patches:
         def __init__(self, now):
@@ -189,6 +211,8 @@ def _setup(module_now=None):
 
         def __enter__(self):
             self._tokens.append(patch(f"{MODULE}.get_client", return_value=client))
+            self._tokens.append(patch(f"{MODULE}.db.load_app_setting", fake_load_setting))
+            self._tokens.append(patch(f"{MODULE}.db.save_app_setting", fake_save_setting))
             if self._now is not None:
                 self._tokens.append(patch.object(planning, "_now", lambda: self._now))
             for token in self._tokens:
@@ -213,11 +237,16 @@ class _Base(unittest.TestCase):
         for index, row in enumerate(rows, start=1):
             occurrence = {
                 "id": index, "task_id": row["task_id"], "for_date": "2026-09-20",
+                "round_key": row.get("round_key"), "schedule_date": row.get("schedule_date", "2026-09-20"),
+                "display_cycle_date": row.get("display_cycle_date", "2026-09-20"),
+                "display_reason": row.get("display_reason", "initial"),
                 "phase": None, "est_start": None, "est_end": None,
                 "nominal_start": None, "actual_start": None, "actual_end": None,
                 "actual_minutes": None, "status": "pending", "partial_note": None,
                 "sort_order": row.get("sort_order", index * 10),
                 "is_fixed": row.get("is_fixed", False), "is_limited": False,
+                "estimated_time_source": row.get("estimated_time_source", "unassigned"),
+                "fixed_source": row.get("fixed_source"), "schedule_managed": True,
                 "closed_at": None, "source": "schedule",
                 "created_at": planning._iso(self.NOW), "updated_at": planning._iso(self.NOW),
             }
@@ -225,11 +254,17 @@ class _Base(unittest.TestCase):
             client.rows["planning_occurrence"].append(occurrence)
 
     def _seed_tasks(self, client, rows):
+        default_mode = {
+            "daily": "daily", "interval": "after_completion", "weekly": "fixed_weekday",
+            "monthly": "fixed_monthday", "once": "none", "idle": "none",
+        }
         for row in rows:
             client.rows["planning_task"].append({
                 "id": row["id"], "content": row.get("content", "任务"),
                 "task_type": row.get("task_type", "daily"), "interval_days": None,
                 "weekdays": None, "month_days": None, "target_date": None,
+                "refresh_mode": row.get("refresh_mode", default_mode[row.get("task_type", "daily")]),
+                "refresh_enabled": True,
                 "time_mode": row.get("time_mode", "duration"),
                 "estimated_minutes": row.get("estimated_minutes", 30),
                 "est_start_tod": row.get("est_start_tod"),
@@ -346,67 +381,55 @@ class TaskValidationTests(_Base):
 class GenerationTests(_Base):
     def test_daily_generates_once_and_is_idempotent(self):
         def run(client):
-            # 创建即生成（BUG-4）：当天实例立刻存在
+            # 创建即生成：当天实例立刻存在，身份为轮次键
             self.create_task(client)
             occurrences = client.rows["planning_occurrence"]
+            self.assertEqual([occ["round_key"] for occ in occurrences], ["cycle:2026-09-20"])
+            self.assertEqual([occ["schedule_date"] for occ in occurrences], ["2026-09-20"])
             self.assertEqual([occ["for_date"] for occ in occurrences], ["2026-09-20"])
+            self.assertEqual([occ["display_cycle_date"] for occ in occurrences], ["2026-09-20"])
             self.assertEqual(
-                next(row for row in client.rows["planning_task"])["cursor_date"],
-                "2026-09-20",
+                next(row for row in client.rows["planning_task"])["refresh_mode"], "daily",
             )
-            # 再跑一次不重复；游标被竞态拨回也会被唯一索引挡住
+            # 再跑一次不重复：轮次唯一索引挡住重放
             again = planning.generate_due(self.NOW)
             self.assertEqual(again["created"], 0)
-            stored = client.rows["planning_task"][0]
-            stored["cursor_date"] = "2026-09-19"
-            self.assertEqual(planning.generate_due(self.NOW)["created"], 0)
             self.assertEqual(len(client.rows["planning_occurrence"]), 1)
-        self.run_with(run)
-
-    def test_regression_deleted_discarded_occurrences_never_regenerate(self):
-        """72 小时清理安全前提：删除出现记录不会重新生成或漏生成。"""
-        def run(client):
-            self.create_task(client, cursor_date="2026-09-19")
-            planning.generate_due(self.NOW)
-            # 模拟清理：删除全部出现记录（含废弃记录被清理后的状态）
-            client.rows["planning_occurrence"].clear()
-            result = planning.generate_due(self.NOW)
-            self.assertEqual(result["created"], 0)
-            self.assertEqual(client.rows["planning_occurrence"], [])
-        self.run_with(run)
-
-    def test_missed_days_backfill_without_duplicates(self):
-        def run(client):
-            self.create_task(client, cursor_date="2026-09-16")
-            result = planning.generate_due(self.NOW)
-            dates = sorted(occ["for_date"] for occ in client.rows["planning_occurrence"])
-            # 当天实例已由「创建即生成」产出，这里只补漏掉的 17-19 日
-            self.assertEqual(dates, ["2026-09-17", "2026-09-18", "2026-09-19", "2026-09-20"])
-            self.assertEqual(result["created"], 3)
         self.run_with(run)
 
     def test_weekly_only_matching_weekdays(self):
         def run(client):
-            # 2026-09-14 是周一，16/18 是周三、周五
+            # 2026-09-14 是周一，16/18 是周三、周五；创建时间回拨到 9/14 早上
             self.create_task(
                 client, task_type="weekly", weekdays=[0, 2, 4],
-                cursor_date="2026-09-13", estimated_minutes=60,
+                estimated_minutes=60,
             )
+            client.rows["planning_task"][0]["created_at"] = planning._iso(_cst(2026, 9, 14, 8))
             planning.generate_due(self.NOW)
-            dates = [occ["for_date"] for occ in client.rows["planning_occurrence"]]
+            dates = [occ["schedule_date"] for occ in client.rows["planning_occurrence"]]
+            # 从创建周期起补齐错过的规则日，展示顺延到当前周期
             self.assertEqual(dates, ["2026-09-14", "2026-09-16", "2026-09-18"])
+            self.assertEqual(
+                {occ["display_cycle_date"] for occ in client.rows["planning_occurrence"]},
+                {"2026-09-20"},
+            )
+            self.assertEqual(
+                {occ["round_key"] for occ in client.rows["planning_occurrence"]},
+                {"cycle:2026-09-14", "cycle:2026-09-16", "cycle:2026-09-18"},
+            )
         self.run_with(run)
 
     def test_monthly_skips_missing_dates(self):
         def run(client):
             self.create_task(
                 client, task_type="monthly", month_days=[31],
-                cursor_date="2026-01-31", estimated_minutes=30,
+                estimated_minutes=30,
             )
+            client.rows["planning_task"][0]["created_at"] = planning._iso(_cst(2026, 1, 31, 8))
             planning.generate_due(self.NOW)
-            dates = [occ["for_date"] for occ in client.rows["planning_occurrence"]]
+            dates = [occ["schedule_date"] for occ in client.rows["planning_occurrence"]]
             # 2 月没有 31 日：跳过；3/5/7/8 月正常（当月无此日期则跳过）
-            self.assertEqual(dates, ["2026-03-31", "2026-05-31", "2026-07-31", "2026-08-31"])
+            self.assertEqual(dates, ["2026-01-31", "2026-03-31", "2026-05-31", "2026-07-31", "2026-08-31"])
         self.run_with(run)
 
     def test_once_task_with_past_target_date_generates(self):
@@ -416,44 +439,12 @@ class GenerationTests(_Base):
                 estimated_minutes=30,
             )
             planning.generate_due(self.NOW)
-            dates = [occ["for_date"] for occ in client.rows["planning_occurrence"]]
+            dates = [occ["schedule_date"] for occ in client.rows["planning_occurrence"]]
             self.assertEqual(dates, ["2026-09-18"])
-        self.run_with(run)
-
-    def test_interval_due_generates_then_completion_sets_next_due(self):
-        def run(client):
-            task = self.create_task(
-                client, task_type="interval", interval_days=3,
-                next_due=planning._iso(_cst(2026, 9, 20, 9, 0)),
-            )
-            planning.generate_due(self.NOW)
-            self.assertEqual(
-                [occ["for_date"] for occ in client.rows["planning_occurrence"]],
-                ["2026-09-20"],
-            )
-            stored = next(row for row in client.rows["planning_task"] if row["id"] == task["id"])
-            self.assertIsNone(stored["next_due"])
-            # 完成后以完成时刻 + 间隔重算
             occ = client.rows["planning_occurrence"][0]
-            planning.set_occurrence_status(occ["id"], {"status": "completed"}, self.NOW)
-            self.assertEqual(stored["next_due"], planning._iso(self.NOW + timedelta(days=3)))
-        self.run_with(run)
-
-    def test_interval_regression_deleted_records_do_not_miss_or_duplicate(self):
-        def run(client):
-            task = self.create_task(
-                client, task_type="interval", interval_days=3,
-                next_due=planning._iso(_cst(2026, 9, 20, 9, 0)),
-            )
-            planning.generate_due(self.NOW)
-            occ = client.rows["planning_occurrence"][0]
-            planning.set_occurrence_status(occ["id"], {"status": "discarded_this"}, self.NOW)
-            # 72 小时清理删除此次废弃记录
-            client.rows["planning_occurrence"].clear()
-            stored = next(row for row in client.rows["planning_task"] if row["id"] == task["id"])
-            # next_due 仍由完成时刻驱动，删除记录不会漏生成
-            self.assertEqual(stored["next_due"], planning._iso(self.NOW + timedelta(days=3)))
-            self.assertEqual(planning.generate_due(self.NOW)["created"], 0)
+            self.assertEqual(occ["round_key"], "once")
+            self.assertEqual(occ["display_cycle_date"], "2026-09-20")
+            self.assertEqual(occ["display_reason"], "carryover")
         self.run_with(run)
 
     def test_hollow_task_generates_two_linked_phases(self):
@@ -469,19 +460,30 @@ class GenerationTests(_Base):
             phases = sorted(occ["phase"] for occ in client.rows["planning_occurrence"])
             self.assertEqual(phases, ["end", "start"])
             self.assertEqual(len(client.rows["planning_occurrence"]), 2)
+            keys = {occ["round_key"] for occ in client.rows["planning_occurrence"]}
+            self.assertEqual(keys, {"cycle:2026-09-20"})
+            groups = {occ["phase_group"] for occ in client.rows["planning_occurrence"]}
+            self.assertEqual(len(groups), 1)
         self.run_with(run)
 
     def test_duplicate_slot_is_skipped_not_duplicated(self):
         def run(client):
-            self.create_task(client, cursor_date=None)
+            self.create_task(client)
             planning.generate_due(self.NOW)
-            stored = client.rows["planning_task"][0]
-            self.assertEqual(stored["cursor_date"], "2026-09-20")
-            # 模拟竞态重放：游标被拨回后再次生成，唯一索引命中并跳过
-            stored["cursor_date"] = "2026-09-19"
+            # 轮次重放：唯一索引命中并跳过，不产生第二轮
             planning.generate_due(self.NOW)
             self.assertEqual(len(client.rows["planning_occurrence"]), 1)
         self.run_with(run)
+
+    # 已退役测试（新需求删除其前提，不再重写）：
+    # * test_missed_days_backfill_without_duplicates —— 每日待办不再按游标补
+    #   生成错过的自然日，只生成当前周期（1B test_daily_outage_* 覆盖）。
+    # * test_regression_deleted_discarded_occurrences_never_regenerate ——
+    #   轮次身份由规则与轮次键决定，不再依赖「记录存在性 / 游标防重」前提。
+    # * test_interval_due_generates_then_completion_sets_next_due —— 旧单一
+    #   next_due 游标语义被刷新模式（after_completion 基准）取代。
+    # * test_interval_regression_deleted_records_do_not_miss_or_duplicate ——
+    #   同上，且新版清理绝不删除带轮次键的关闭历史。
 
 
 class RecomputeTests(_Base):
@@ -634,37 +636,67 @@ class StatusTransitionTests(_Base):
             self.assertEqual(raised.exception.status_code, 422)
         self.run_with(run)
 
-    def test_timeout_requires_new_time_to_reschedule(self):
+    def test_timeout_cannot_revive_and_reschedule_creates_new_once_task(self):
+        # HIGH #5：超时实例不得复活；「重新安排」保留原超时历史，新建单次
+        # 待办由 user 指定新的有效时间。
         def run(client):
             task, occ = self._seed_task_and_occ(client)
             client.rows["planning_occurrence"][0]["status"] = "timeout"
-            with self.assertRaises(PlanningError):
-                planning.set_occurrence_status(occ["id"], {"status": "pending"}, self.NOW)
-            new_time = _cst(2026, 9, 21, 9, 0)
-            planning.set_occurrence_status(
-                occ["id"], {"status": "pending", "est_start": planning._iso(new_time)}, self.NOW,
+            closed_at = planning._iso(self.NOW - timedelta(hours=1))
+            client.rows["planning_occurrence"][0]["closed_at"] = closed_at
+            for target in ("pending", "in_progress", "deferred", "partial"):
+                with self.assertRaises(PlanningError):
+                    planning.set_occurrence_status(
+                        occ["id"], {"status": target, "est_start": planning._iso(self.NOW)}, self.NOW,
+                    )
+            new_time = _cst(2026, 9, 20, 16, 0)
+            result = planning.reschedule_timeout_as_new(
+                occ["id"], {"est_start": planning._iso(new_time)}, self.NOW,
+                idempotency_key="op-1",
             )
-            rescheduled = client.rows["planning_occurrence"][0]
-            self.assertEqual(rescheduled["status"], "pending")
-            self.assertEqual(rescheduled["for_date"], "2026-09-21")
-            self.assertEqual(rescheduled["est_start"], planning._iso(new_time))
+            # 旧超时历史原样保留
+            old_row = client.rows["planning_occurrence"][0]
+            self.assertEqual(old_row["status"], "timeout")
+            self.assertEqual(old_row["closed_at"], closed_at)
+            # 模型 A：任务建于当前周期（请求身份在任务行上），实例立即可见，
+            # 绝对时刻为人工锚点
+            new_task = next(
+                row for row in client.rows["planning_task"] if row["id"] == result["task"]["id"]
+            )
+            self.assertEqual(new_task["task_type"], "once")
+            self.assertEqual(new_task["target_date"], "2026-09-20")
+            self.assertEqual(new_task["request_key"], "reschedule:1:op-1")
+            self.assertEqual(new_task["content"], task["content"])
+            new_occ = next(
+                row for row in client.rows["planning_occurrence"] if row["task_id"] == new_task["id"]
+            )
+            self.assertEqual(new_occ["status"], "pending")
+            self.assertEqual(new_occ["est_start"], planning._iso(new_time))
+            # 非超时实例不能走该入口
+            with self.assertRaises(PlanningError):
+                planning.reschedule_timeout_as_new(
+                    new_occ["id"],
+                    {"est_start": planning._iso(self.NOW + timedelta(hours=1))}, self.NOW,
+                    idempotency_key="op-2",
+                )
         self.run_with(run)
 
-    def test_discarded_this_only_for_repeating_tasks(self):
+    def test_discarded_this_available_for_all_task_types(self):
+        # 需求 22.4：「此次不执行」所有待办类型均提供，只关闭当前实例。
         def run(client):
             task, occ = self._seed_task_and_occ(client)
             planning.set_occurrence_status(occ["id"], {"status": "discarded_this"}, self.NOW)
             self.assertEqual(client.rows["planning_occurrence"][0]["status"], "discarded_this")
+            self.assertIsNotNone(client.rows["planning_occurrence"][0]["closed_at"])
 
             task, occ = self._seed_task_and_occ(
                 client, task_type="once", target_date="2026-09-20",
             )
-            with self.assertRaises(PlanningError) as raised:
-                planning.set_occurrence_status(occ["id"], {"status": "discarded_this"}, self.NOW)
-            self.assertEqual(raised.exception.status_code, 422)
+            planning.set_occurrence_status(occ["id"], {"status": "discarded_this"}, self.NOW)
+            self.assertEqual(occ["status"], "discarded_this")
         self.run_with(run)
 
-    def test_defer_requires_new_time_and_moves_date(self):
+    def test_defer_requires_new_time_and_moves_display(self):
         def run(client):
             task, occ = self._seed_task_and_occ(client)
             with self.assertRaises(PlanningError):
@@ -675,7 +707,11 @@ class StatusTransitionTests(_Base):
             )
             deferred = client.rows["planning_occurrence"][0]
             self.assertEqual(deferred["status"], "deferred")
-            self.assertEqual(deferred["for_date"], "2026-09-22")
+            # 轮次身份冻结：只前进展示周期并标记人工延后
+            self.assertEqual(deferred["schedule_date"], "2026-09-20")
+            self.assertEqual(deferred["for_date"], "2026-09-20")
+            self.assertEqual(deferred["display_cycle_date"], "2026-09-22")
+            self.assertEqual(deferred["display_reason"], "manual_defer")
             self.assertEqual(deferred["nominal_start"], planning._iso(new_time))
         self.run_with(run)
 
@@ -735,7 +771,10 @@ class StatusTransitionTests(_Base):
             self.assertEqual(len(result["created_task_ids"]), 2)
             new_tasks = client.rows["planning_task"][-2:]
             self.assertTrue(all(row["task_type"] == "once" for row in new_tasks))
-            self.assertEqual(client.rows["planning_occurrence"][0]["status"], "discarded")
+            # 拆分 = 本轮处理结束（2026-09-26 正式语义）：discarded_this + handled_at
+            closed = client.rows["planning_occurrence"][0]
+            self.assertEqual(closed["status"], "discarded_this")
+            self.assertIsNotNone(closed["handled_at"])
         self.run_with(run)
 
     def test_split_supports_duration_shorthand(self):
@@ -825,9 +864,11 @@ class StatusTransitionTests(_Base):
                 start_id, {"status": "deferred", "est_start": planning._iso(new_time)}, self.NOW,
             )
             stored = {row["phase"]: row for row in client.rows["planning_occurrence"]}
-            self.assertEqual(stored["start"]["for_date"], "2026-09-21")
-            # 结束阶段跟移到同一天（原实例尚未重算、无预估起止，只平移日期）
-            self.assertEqual(stored["end"]["for_date"], "2026-09-21")
+            # 轮次身份冻结：两阶段展示周期一起前进到新日期，结束阶段同日跟移
+            self.assertEqual(stored["start"]["display_cycle_date"], "2026-09-21")
+            self.assertEqual(stored["start"]["schedule_date"], "2026-09-20")
+            self.assertEqual(stored["end"]["display_cycle_date"], "2026-09-21")
+            self.assertEqual(stored["end"]["schedule_date"], "2026-09-20")
         self.run_with(run)
 
     def test_manual_est_edit_on_hollow_start_shifts_end_phase_along(self):
@@ -916,11 +957,11 @@ class CleanupAndMaintenanceTests(_Base):
             planning.generate_due(self.NOW)
             occ = client.rows["planning_occurrence"][0]
             planning.set_occurrence_status(occ["id"], {"status": "discarded_this"}, self.NOW)
-            old_discard = dict(client.rows["planning_occurrence"][0])
-            old_discard.update({
-                "id": 99, "status": "discarded",
+            # 旧版遗留行（无轮次键）才是清理对象；带轮次键的历史永久保留
+            old_discard = {
+                "id": 99, "task_id": task["id"], "status": "discarded",
                 "closed_at": planning._iso(self.NOW - timedelta(hours=73)),
-            })
+            }
             client.rows["planning_occurrence"].append(old_discard)
             # 已完成 / 部分完成记录永久保留
             done = dict(old_discard)
@@ -937,12 +978,27 @@ class CleanupAndMaintenanceTests(_Base):
             self.create_task(client, cursor_date="2026-09-19")
             planning.generate_due(self.NOW)
             planning.request_recompute("reorder", self.NOW)
-            result = planning.run_maintenance(self.NOW + timedelta(minutes=10))
+            # 默认等待 30 分钟：窗口内跳过，到期自动执行
+            result = planning.run_maintenance(self.NOW + timedelta(minutes=29))
             self.assertTrue(result["auto_recompute"].get("skipped"))
-            self.assertTrue(planning.get_recompute_state(self.NOW + timedelta(minutes=10))["pending"])
-            result = planning.run_maintenance(self.NOW + timedelta(minutes=16))
+            self.assertTrue(planning.get_recompute_state(self.NOW + timedelta(minutes=29))["pending"])
+            result = planning.run_maintenance(self.NOW + timedelta(minutes=31))
             self.assertIn("updated", result["auto_recompute"])
-            self.assertFalse(planning.get_recompute_state(self.NOW + timedelta(minutes=16))["pending"])
+            self.assertFalse(planning.get_recompute_state(self.NOW + timedelta(minutes=31))["pending"])
+        self.run_with(run)
+
+    def test_auto_recompute_disabled_keeps_order_saved_without_wait_state(self):
+        # 需求 16.3：关闭自动重算后不进入等待状态，手动重算仍可使用。
+        def run(client):
+            self.create_task(client, cursor_date="2026-09-19")
+            planning.generate_due(self.NOW)
+            client.rows["app_settings"].append(
+                {"key": planning.PLANNING_AUTO_RECOMPUTE_ENABLED_KEY, "value": False})
+            planning.save_order([occ["id"] for occ in client.rows["planning_occurrence"]], self.NOW)
+            self.assertTrue(planning.get_recompute_state(self.NOW)["pending"] is False)
+            result = planning.run_maintenance(self.NOW + timedelta(minutes=60))
+            self.assertTrue(result["auto_recompute"].get("skipped"))
+            self.assertIn("updated", planning.trigger_recompute(self.NOW))
         self.run_with(run)
 
     def test_maintenance_generation_and_timeout_sweep(self):
@@ -983,16 +1039,21 @@ class CleanupAndMaintenanceTests(_Base):
             self.assertEqual(result["timed_out"], 1)
         self.run_with(run)
 
-    def test_schedule_edit_replaces_stale_pending_occurrences(self):
+    def test_schedule_edit_keeps_generated_instance_without_rebuild(self):
+        # 新需求 28.1：规则修改只影响未来实例；已生成实例不删除、不重建。
+        # （退役 test_schedule_edit_replaces_stale_pending_occurrences：
+        #   “未固定 pending 实例删除后按新规则重建”已被新口径废除。）
         def run(client):
             task = self.create_task(client, cursor_date="2026-09-19")
             planning.generate_due(self.NOW)
             old_id = client.rows["planning_occurrence"][0]["id"]
             planning.update_task(task["id"], {"estimated_minutes": 60}, self.NOW)
-            # 未固定的 pending 实例被删除后即时按新规则重建（BUG-4）
             rows = client.rows["planning_occurrence"]
             self.assertEqual(len(rows), 1)
-            self.assertNotEqual(rows[0]["id"], old_id)
+            self.assertEqual(rows[0]["id"], old_id)
+            self.assertEqual(rows[0]["status"], "pending")
+            # 规则时间编辑不覆盖实例的预估时间（实例级数据冻结）
+            self.assertEqual(rows[0]["estimated_time_source"], "automatic")
             # 再次生成不重复
             planning.generate_due(self.NOW + timedelta(minutes=1))
             self.assertEqual(len(client.rows["planning_occurrence"]), 1)

@@ -881,6 +881,12 @@ html[data-theme="night"] .tab.active { color: #f0ebd5; }
   background: linear-gradient(180deg, #a54a35, #8f3f2d);
   border-color: #7e3526;
 }
+/* warn：业务提示（如 30 分钟防重复窗口命中）——操作已收敛但未新增记录，
+   用金调纸色系与成功（墨绿）/错误（印章红）区分，同属既有色板 */
+.toast-warn {
+  background: linear-gradient(180deg, #6f5d33, #5a4b29);
+  border-color: #9a8248;
+}
 .toast-out { opacity: 0; transform: translateX(12px); transition: opacity 0.25s, transform 0.25s; }
 
 /* ---------- 加载 / 空 / 错误 ---------- */

@@ -79,6 +79,12 @@ async def today(request: Request) -> JSONResponse:
     return await _dispatch(request, planning.today_board)
 
 
+async def cycle_settings(request: Request) -> JSONResponse:
+    if request.method == "GET":
+        return await _dispatch(request, planning.get_cycle_settings)
+    return await _dispatch_json(request, planning.set_cycle_settings)
+
+
 async def tasks_collection(request: Request) -> JSONResponse:
     if request.method == "GET":
         include_inactive = _parse_bool(request.query_params.get("include_inactive"), True)
@@ -102,7 +108,13 @@ async def task_item(request: Request) -> JSONResponse:
 
 
 async def task_complete_early(request: Request) -> JSONResponse:
-    return await _dispatch(request, planning.complete_task_early, request.path_params["task_id"])
+    if not _authorized(request):
+        return _error("unauthorized", 401, "unauthorized")
+    key = request.headers.get("Idempotency-Key")
+    if not key:
+        return _error("Idempotency-Key is required", 400, "invalid_payload")
+    return await _dispatch(request, planning.complete_task_early, request.path_params["task_id"],
+                           idempotency_key=key)
 
 
 async def occurrences_collection(request: Request) -> JSONResponse:
@@ -113,6 +125,8 @@ async def occurrences_collection(request: Request) -> JSONResponse:
         task_type=params.get("task_type"),
         status=params.get("status"),
         for_date=params.get("for_date"),
+        schedule_date=params.get("schedule_date"),
+        display_cycle_date=params.get("display_cycle_date"),
         date_from=params.get("date_from"),
         date_to=params.get("date_to"),
         limit=params.get("limit"),
@@ -143,6 +157,18 @@ async def occurrence_status(request: Request) -> JSONResponse:
     )
 
 
+async def occurrence_reschedule_timeout(request: Request) -> JSONResponse:
+    if not _authorized(request):
+        return _error("unauthorized", 401, "unauthorized")
+    key = request.headers.get("Idempotency-Key")
+    if not key:
+        return _error("Idempotency-Key is required", 400, "invalid_payload")
+    return await _dispatch_json(
+        request, planning.reschedule_timeout_as_new, request.path_params["occurrence_id"],
+        idempotency_key=key, created=True,
+    )
+
+
 async def occurrence_start(request: Request) -> JSONResponse:
     return await _dispatch(request, planning.start_occurrence, request.path_params["occurrence_id"])
 
@@ -168,6 +194,7 @@ async def recompute_collection(request: Request) -> JSONResponse:
 
 
 planning_api_routes = [
+    Route("/admin/api/planning/cycle", cycle_settings, methods=["GET", "PATCH"]),
     Route("/admin/api/planning/today", today, methods=["GET"]),
     Route("/admin/api/planning/tasks", tasks_collection, methods=["GET", "POST"]),
     Route("/admin/api/planning/tasks/{task_id:int}", task_item, methods=["GET", "PATCH"]),
@@ -175,6 +202,7 @@ planning_api_routes = [
     Route("/admin/api/planning/occurrences", occurrences_collection, methods=["GET"]),
     Route("/admin/api/planning/occurrences/{occurrence_id:int}", occurrence_item, methods=["GET", "PATCH"]),
     Route("/admin/api/planning/occurrences/{occurrence_id:int}/status", occurrence_status, methods=["POST"]),
+    Route("/admin/api/planning/occurrences/{occurrence_id:int}/reschedule-timeout", occurrence_reschedule_timeout, methods=["POST"]),
     Route("/admin/api/planning/occurrences/{occurrence_id:int}/start", occurrence_start, methods=["POST"]),
     Route("/admin/api/planning/occurrences/{occurrence_id:int}/finish", occurrence_finish, methods=["POST"]),
     Route("/admin/api/planning/occurrences/{occurrence_id:int}/split", occurrence_split, methods=["POST"]),

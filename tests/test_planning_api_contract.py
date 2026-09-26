@@ -32,9 +32,26 @@ class PlanningApiContractTests(unittest.TestCase):
 
     def setUp(self):
         self.client = _Client()
+
+        def fake_load(key):
+            for row in self.client.rows["app_settings"]:
+                if row.get("key") == key:
+                    return row.get("value")
+            return None
+
+        def fake_save(key, value):
+            for row in self.client.rows["app_settings"]:
+                if row.get("key") == key:
+                    row["value"] = value
+                    return True
+            self.client.rows["app_settings"].append({"key": key, "value": value})
+            return True
+
         patches = [
             mock.patch.object(cfg, "GATEWAY_TOKEN", GATEWAY_TOKEN),
             mock.patch.object(planning, "get_client", lambda: self.client),
+            mock.patch.object(planning.db, "load_app_setting", fake_load),
+            mock.patch.object(planning.db, "save_app_setting", fake_save),
         ]
         for item in patches:
             item.start()
@@ -144,7 +161,7 @@ class PlanningApiContractTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
 
-    def test_complete_early_only_for_interval_tasks(self):
+    def test_complete_early_only_for_refreshable_tasks(self):
         with mock.patch.object(planning, "_now", lambda: NOW):
             created = self.http.post(
                 "/admin/api/planning/tasks",
@@ -153,8 +170,9 @@ class PlanningApiContractTests(unittest.TestCase):
             ).json()
             response = self.http.post(
                 f"/admin/api/planning/tasks/{created['id']}/complete-early",
-                headers=self.auth,
+                headers={**self.auth, "Idempotency-Key": "contract-early-1"},
             )
+        # 每日待办没有「提前完成」：当天轮次始终存在，直接完成即可
         self.assertEqual(response.status_code, 422)
         self.assertEqual(response.json()["error_code"], "invalid_transition")
 

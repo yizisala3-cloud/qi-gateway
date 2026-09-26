@@ -182,10 +182,12 @@ class PlanningPageContractTests(unittest.TestCase):
         self.assertIn("data-part-minutes", self.page)
         self.assertIn("data-part-row", self.page)
 
-    def test_partial_status_offers_complete_action(self):
-        # BUG-8：部分完成条目可直接改「已完成」
-        partial_block = self.page.split("occ.status === 'partial'")[1]
-        self.assertIn("btn('finish', '已完成'", partial_block)
+    def test_partial_status_offers_full_complete_action(self):
+        # Phase 1R：部分完成保持开放，详情提供「已全部完成」收口
+        self.assertIn("btn('finish', '已全部完成'", self.page)
+        # partial 属于开放状态分组，与后端 OPEN_STATUSES 一致
+        partial_block = self.page.split("const OPEN_STATUSES = ")[1].split(";")[0]
+        self.assertIn("'partial'", partial_block)
 
     def test_audio_unlock_on_first_pointerdown(self):
         # BUG-9：首次手势静音解锁音频；播放被拦时给出提示
@@ -250,13 +252,14 @@ class PlanningPageContractTests(unittest.TestCase):
         self.assertNotIn('type="date"', self.page)
         self.assertIn("lib/retro_time.js", self.page)
         self.assertIn("createRetroTimeField", self.page)
-        # 时间模式 ×4（显式开始/结束、限时截止/范围），日期模式 ×2（筛选日期、单次目标日期）
-        self.assertEqual(self.page.count('data-retro-mode="time"'), 4)
+        # 时间模式 ×5（显式开始/结束、限时截止/范围、周期设置刷新时间），
+        # 日期模式 ×2（筛选日期、单次目标日期）
+        self.assertEqual(self.page.count('data-retro-mode="time"'), 5)
         self.assertEqual(self.page.count('data-retro-mode="date"'), 2)
         # 隐藏 input 保留原 id 契约，提交逻辑无需改动
         for field_id in (
             "pf-start-tod", "pf-end-tod", "pf-deadline", "pf-deadline-end",
-            "pf-target-date", "planning-filter-date",
+            "pf-target-date", "planning-filter-date", "pf-cycle-boundary",
         ):
             with self.subTest(field=field_id):
                 self.assertIn(f'data-retro-for="{field_id}"', self.page)
@@ -339,3 +342,92 @@ class PlanningAudioAssetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_split_dialog_daily_path_contract(self):
+        # 日常路径收尾：拆分弹窗默认 1 项、添加/移除、上限 10、防双击、
+        # 提交 1 项合法；文案不再出现「至少填写两部分」。
+        for marker in (
+            "partRow(1)",                       # 默认只渲染 1 个输入区域
+            "data-add-part",
+            "data-remove-part",
+            "rows.length >= 10 ? 'none' : ''",  # 达到 10 个隐藏添加按钮
+            "rows.length <= 1",                 # 至少保留 1 项，不允许删到 0
+            "请至少填写一个待办内容",
+            "if (submit.disabled) return;",     # 防双击：请求期间禁用提交
+            "submit.disabled = true;",
+            "submit.disabled = false;",         # 失败恢复按钮
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.page)
+        self.assertNotIn("至少填写两部分", self.page)
+
+    def test_edit_time_omits_empty_est_end(self):
+        # 编辑时间结束留空：省略 est_end（不发送 null），后端按有效耗时推导
+        body = "const body = { est_start: new Date(start).toISOString() };\n        if (end) body.est_end = new Date(end).toISOString();"
+        self.assertIn(body, self.page)
+        self.assertNotIn("est_end: end ? new Date(end).toISOString() : null", self.page)
+
+    def test_hollow_task_hides_early_complete_button(self):
+        # 中空待办提前完成必然 409：按任务形态隐藏不适用入口
+        self.assertIn("task.is_active && !task.is_hollow", self.page)
+
+    def test_reorder_toast_respects_auto_recompute_switch(self):
+        # 自动重算关闭时不得提示「等待自动重算」（需求 16.3）
+        self.assertIn("this.board?.recompute?.enabled === false", self.page)
+        self.assertIn("自动重算已关闭", self.page)
+
+    def test_task_form_sends_explicit_clear_values(self):
+        # 清除字段：编辑模式显式发送 null/false 清除值，不再「不发送=没清除」；
+        # 显式结束时间单独清除同样显式发送（est_end_tod: null 为后端既有契约）
+        for marker in (
+            "body.is_fixed = root.querySelector('#pf-fixed').checked;",
+            "body.deadline_tod = deadline || null;",
+            "body.deadline_end_tod = deadlineEnd || null;",
+            "body.alarm_start = root.querySelector('#pf-alarm-start').checked;",
+            "body.alarm_end = root.querySelector('#pf-alarm-end').checked;",
+            "body.timer_minutes = timer || null;",
+            "body.time_mode = 'duration';",
+            "body.est_end_tod = endTod || null;",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.page)
+
+    def test_poll_does_not_overwrite_unsaved_detail_input(self):
+        # 30 秒轮询：详情栏有未保存输入时跳过重绘，不覆盖用户正在编辑的内容
+        self.assertIn("if (occ && !this.detailHasUnsavedInput()) this.showOccurrenceDetail(occ);", self.page)
+        self.assertIn("detailHasUnsavedInput()", self.page)
+
+    def test_pause_resume_refresh_entry_and_copy(self):
+        # 需求 24：任务详情栏提供「暂停刷新 / 恢复刷新」，仅周期任务（每日/
+        # 间歇/每周/每月）且任务启用时显示；暂停需确认弹窗，恢复直接操作；
+        # 两个 Toast 文案与需求一致；按钮状态由服务端 refresh_enabled 驱动。
+        for marker in (
+            "PAUSABLE_TYPES = ['daily', 'interval', 'weekly', 'monthly']",
+            "PAUSABLE_TYPES.includes(task.task_type)",
+            "task.refresh_enabled === false",
+            "data-act=\"task-pause-refresh\"",
+            "data-act=\"task-resume-refresh\"",
+            "恢复刷新", "暂停刷新",
+            "刷新已暂停",  # 徽标：详情栏一眼可见当前暂停状态
+            # 确认弹窗：指定标题/正文/按钮文案，非危险样式
+            "'暂停后不会继续生成新的周期待办，当前已经生成的待办不会受到影响。之后可以随时恢复。'",
+            "{ title: '暂停刷新', okText: '暂停刷新', cancelText: '取消', danger: false }",
+            # Toast 文案（需求指定）
+            "toast(resuming ? '已恢复刷新' : '已暂停刷新');",
+            # PATCH 只写 refresh_enabled，不借道 is_active
+            "body: JSON.stringify({ refresh_enabled: resuming })",
+            # in-flight guard：请求期间禁用按钮防连续点击重复 PATCH
+            "if (el) el.disabled = true;",
+            "if (el) el.disabled = false;",
+            # 操作成功后以服务端数据重绘详情（页面刷新后状态同样来自持久化）
+            "const fresh = this.tasks.find((t) => t.id === id);",
+            "if (fresh) this.showTaskDetail(fresh);",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.page)
+
+    def test_pause_refresh_not_offered_to_once_or_inactive(self):
+        # 单次/闲时没有周期刷新，不提供暂停入口；已废弃任务同样不显示
+        self.assertIn("if (task.is_active && PAUSABLE_TYPES.includes(task.task_type)) {", self.page)
+        # 暂停/恢复走任务级 PATCH，不出现「此次不执行/完成」语义混淆文案
+        self.assertNotIn("暂停即此次不执行", self.page)

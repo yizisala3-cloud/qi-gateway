@@ -1,13 +1,13 @@
 // pages/_memory_browser.js - shared library/requests browser with detail panel
-import { gw, query, update, count, esc } from '../api.js?v=20260920-planning2';
+import { gw, query, update, count, esc } from '../api.js?v=20260925-planning9';
 import {
   loading, empty, errorBlock, banner, tag, heatTag, impTag, pagerHtml,
   toast, modal, confirm, delegate, icon, fmtDate, createDetailPanel,
-} from '../ui.js?v=20260920-planning2';
-import { openMemoryForm } from './_memory_form.js?v=20260920-planning2';
-import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20260920-planning2';
+} from '../ui.js?v=20260925-planning9';
+import { openMemoryForm } from './_memory_form.js?v=20260925-planning9';
+import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20260925-planning9';
 
-export const ASSET_VERSION = '20260920-planning2';
+export const ASSET_VERSION = '20260925-planning9';
 
 const PAGE_SIZE = 20;
 const REQ_FETCH_LIMIT = 100;

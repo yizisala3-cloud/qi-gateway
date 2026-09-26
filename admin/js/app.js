@@ -1,10 +1,10 @@
 // app.js - shell: login, sidebar, routing, theme, mobile drawers
-import { NAV, ROUTE_INDEX } from './routes.js?v=20260920-planning2';
-import { loading, errorBlock, icon, esc } from './ui.js?v=20260920-planning2';
-import { gw, getToken, setToken, clearToken } from './api.js?v=20260920-planning2';
+import { NAV, ROUTE_INDEX } from './routes.js?v=20260925-planning9';
+import { loading, errorBlock, icon, esc } from './ui.js?v=20260925-planning9';
+import { gw, getToken, setToken, clearToken } from './api.js?v=20260925-planning9';
 
 const DEFAULT_ROUTE = 'memories';
-const ASSET_VERSION = '20260920-planning2';
+const ASSET_VERSION = '20260925-planning9';
 
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);
