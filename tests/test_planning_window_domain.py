@@ -244,6 +244,45 @@ def test_feasibility_rejects_nonpositive_occupancy():
         window_feasible(resolved, at(ANCHOR, 4), 0)
 
 
+def test_feasibility_accepts_exact_timedelta_occupancy():
+    # 四轮修复（Review HIGH）：有效 est 区间允许秒级事实——可行性判定接受
+    # 精确 timedelta，不得 floor/ceil/round 截断后再比较。
+    resolved = resolve_window(MORNING, ANCHOR, at(ANCHOR, 4))
+    # 剩余 60 分钟：60 分 30 秒不可行（整分钟截断会误判可行）。
+    assert window_feasible(resolved, at(ANCHOR, 4), timedelta(minutes=60, seconds=30)) is False
+    assert window_feasible(resolved, at(ANCHOR, 4), timedelta(minutes=60)) is True
+    assert window_feasible(resolved, at(ANCHOR, 4), timedelta(minutes=59, seconds=59)) is True
+    assert window_feasible(resolved, at(ANCHOR, 4), timedelta(minutes=60, seconds=1)) is False
+    with pytest.raises(ValueError):
+        window_feasible(resolved, at(ANCHOR, 4), timedelta(0))
+    with pytest.raises(ValueError):
+        window_feasible(resolved, at(ANCHOR, 4), timedelta(minutes=-1))
+    # 整数分钟入口保持既有行为（创建校验继续使用）。
+    assert window_feasible(resolved, at(ANCHOR, 4), 60) is True
+    with pytest.raises(ValueError):
+        window_feasible(resolved, at(ANCHOR, 4), 0)
+
+
+def test_feasibility_minute_input_rejects_bool_and_float():
+    # 五轮修复（Review LOW）：分钟分支严格类型门禁——bool 是 int 子类、
+    # float（含 1.0/1.5）不得被静默当成分钟数；接口只允许整数分钟或
+    # 精确 timedelta。不改变创建表单「预计耗时整数分钟」的产品规则。
+    resolved = resolve_window(MORNING, ANCHOR, at(ANCHOR, 4))
+    for bad in (True, False, 1.0, 1.5, 0.0):
+        with pytest.raises(ValueError):
+            window_feasible(resolved, at(ANCHOR, 4), bad)
+    # 正整数分钟继续通过。
+    assert window_feasible(resolved, at(ANCHOR, 4), 1) is True
+    assert window_feasible(resolved, at(ANCHOR, 4), 59) is True
+    # 秒级 / 微秒级正 timedelta 继续通过；零与负拒绝。
+    assert window_feasible(resolved, at(ANCHOR, 4), timedelta(seconds=30)) is True
+    assert window_feasible(resolved, at(ANCHOR, 4), timedelta(microseconds=1)) is True
+    with pytest.raises(ValueError):
+        window_feasible(resolved, at(ANCHOR, 4), timedelta(0))
+    with pytest.raises(ValueError):
+        window_feasible(resolved, at(ANCHOR, 4), timedelta(microseconds=-1))
+
+
 def test_reference_must_be_timezone_aware():
     naive = datetime(2026, 9, 28, 4, 0)
     with pytest.raises(ValueError):
@@ -504,6 +543,31 @@ def test_hollow_envelope_rejects_non_integer_minutes():
         with pytest.raises(ValueError):
             hollow_envelope_minutes(30, 60, bad)
     assert hollow_envelope_minutes(30, 60, 30) == 120
+
+
+def test_hollow_envelope_duration_precise_entry():
+    # 四轮修复（Review HIGH）：包络跨度的精确 timedelta 入口——预判与落位
+    # 同用真实时长，不得截断秒；等待分量沿用整数分钟契约。
+    from gateway.planning_window import hollow_envelope_duration
+
+    assert hollow_envelope_duration(
+        timedelta(minutes=30), 120, timedelta(minutes=10, seconds=30),
+    ) == timedelta(minutes=160, seconds=30)
+    assert hollow_envelope_duration(
+        timedelta(minutes=30), 120, timedelta(minutes=10),
+    ) == timedelta(minutes=160)
+    # 等号语义不变：整数分量结果与整数版函数一致。
+    assert hollow_envelope_duration(
+        timedelta(minutes=30), 60, timedelta(minutes=30),
+    ) == timedelta(minutes=hollow_envelope_minutes(30, 60, 30))
+    for bad_wait in (0, -1, 1441, 1.5, True, None):
+        with pytest.raises(ValueError):
+            hollow_envelope_duration(timedelta(minutes=30), bad_wait, timedelta(minutes=10))
+    for bad_duration in (timedelta(0), timedelta(minutes=-1), 30, None):
+        with pytest.raises(ValueError):
+            hollow_envelope_duration(bad_duration, 60, timedelta(minutes=10))
+        with pytest.raises(ValueError):
+            hollow_envelope_duration(timedelta(minutes=30), 60, bad_duration)
 
 
 # ── I. 第三轮 Review 补强：DST 前跳/回拨的候选与容量 ──────────────

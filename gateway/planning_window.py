@@ -27,6 +27,7 @@ from .planning_domain import BUSINESS_TIMEZONE, parse_refresh_boundary
 __all__ = [
     "ResolvedWindow",
     "WindowTemplate",
+    "hollow_envelope_duration",
     "hollow_envelope_minutes",
     "remaining_window_space",
     "resolve_window",
@@ -357,7 +358,7 @@ def remaining_window_space(
 
 
 def window_feasible(
-    resolved: ResolvedWindow, reference: datetime, occupancy_minutes: int,
+    resolved: ResolvedWindow, reference: datetime, occupancy_minutes: int | timedelta,
 ) -> bool:
     """占用跨度能否完整放进窗口剩余空间（§12.1 / §18.1）。
 
@@ -365,15 +366,31 @@ def window_feasible(
     :func:`hollow_envelope_minutes`）。创建校验（剩余不足直接拒绝）与
     排程冲突判断（装不下报告冲突）必须共用本判定，禁止两套算法。
 
+    占用跨度接受整数分钟或**精确 timedelta**（2026-09-28 四轮修复：有效
+    est 区间可能含秒——PostgreSQL timestamptz 与既有区间都允许秒级事实，
+    排程必须尊重真实时长，不得 floor / ceil / round 截断后再校验）。
+
     无上界约束（无窗口 / 只有最早开始）恒可行：单侧下界「起点不早于
     窗口起点」由排程放置表达（§14.2），不属于空间可行性。
     """
-    if occupancy_minutes < 1:
-        raise ValueError("occupancy must be at least one minute")
+    if isinstance(occupancy_minutes, timedelta):
+        if occupancy_minutes <= timedelta(0):
+            raise ValueError("occupancy must be a positive duration")
+        occupancy = occupancy_minutes
+    else:
+        # 五轮修复（Review LOW）：分钟分支严格类型门禁——bool 是 int 子类、
+        # float 含 1.0/1.5 都不得被静默当成分钟数（与 hollow_envelope_minutes
+        # 的 _clean_int 同源契约一致）；接口只允许整数分钟或精确 timedelta。
+        if isinstance(occupancy_minutes, bool) or not isinstance(occupancy_minutes, int):
+            raise ValueError(
+                "occupancy must be an integer number of minutes or a timedelta")
+        if occupancy_minutes < 1:
+            raise ValueError("occupancy must be at least one minute")
+        occupancy = timedelta(minutes=occupancy_minutes)
     space = remaining_window_space(resolved, reference)
     if space is None:
         return True
-    return space >= timedelta(minutes=occupancy_minutes)
+    return space >= occupancy
 
 
 def hollow_envelope_minutes(
@@ -398,3 +415,27 @@ def hollow_envelope_minutes(
         if not 1 <= value <= 1440:
             raise ValueError(f"{field} must be between 1 and 1440")
     return start_minutes + wait_minutes + end_minutes
+
+
+def hollow_envelope_duration(
+    start_duration: timedelta, wait_minutes: int, end_duration: timedelta,
+) -> timedelta:
+    """中空包络跨度的**精确时长入口**（2026-09-28 四轮修复）：与
+    :func:`hollow_envelope_minutes` 同一包络数学，但开始 / 结束接受精确
+    ``timedelta``——有效 est 区间可能含秒，排程预判必须与实际落位使用
+    完全相同的真实时长，不得截断成整数分钟。
+
+    等待分量仍是整数分钟（``planned_wait_minutes`` 与 payload / 数据库
+    整数契约同源，沿用 1..1440 规则）；开始 / 结束必须为正 timedelta。
+    总包络不设额外上限；负值 / 零时长与非法等待一律拒绝。"""
+    for value, field in (
+        (start_duration, "hollow start duration"),
+        (end_duration, "hollow end duration"),
+    ):
+        if not isinstance(value, timedelta) or value <= timedelta(0):
+            raise ValueError(f"{field} must be a positive timedelta")
+    if isinstance(wait_minutes, bool) or not isinstance(wait_minutes, int):
+        raise ValueError("hollow wait minutes must be an integer number of minutes")
+    if not 1 <= wait_minutes <= 1440:
+        raise ValueError("hollow wait minutes must be between 1 and 1440")
+    return start_duration + timedelta(minutes=wait_minutes) + end_duration

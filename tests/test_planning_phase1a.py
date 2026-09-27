@@ -941,9 +941,10 @@ class PlanningIdentityPathTests(unittest.TestCase):
                  "phase": "end", "status": "pending", "sort_order": 1,
                  "is_fixed": False, "schedule_managed": True, "fixed_source": None,
                  "estimated_time_source": "unassigned", "est_start": None, "est_end": None}
-        placed = planning.compute_schedule([start_a, end_b], {7: task},
+        result = planning.compute_schedule([start_a, end_b], {7: task},
                                            datetime(2026, 9, 24, 9, tzinfo=BEIJING))
-        self.assertEqual(placed[4][0], datetime(2026, 9, 24, 10, 10, tzinfo=BEIJING))
+        self.assertEqual(result.placed[4][0], datetime(2026, 9, 24, 10, 10, tzinfo=BEIJING))
+        self.assertEqual(result.conflicts, [])
 
     def test_deadline_reader_uses_original_cycle_not_compatibility_date(self):
         task = {"deadline_tod": "12:00"}
