@@ -5,25 +5,29 @@ Opt-in（启动一次性 pgserver 实例，成本较高）：
     QIGATEWAY_PG_PLANNING_TEST=1 python -m pytest \
         tests/test_planning_phase1r_pgserver_integration.py -v
 
-按顺序重放全部迁移（两个 20260924 规划迁移为被测对象），随后在真实
-PostgreSQL 上验证数据库层兜底的不变量：
+按顺序重放全部迁移（两个 20260924 规划迁移与 20260927 窗口模型迁移为
+被测对象），随后在真实 PostgreSQL 上验证数据库层兜底的不变量：
 
 - 关闭 / 超时实例不得改回开放生命周期（触发器拒绝）；
 - handled_at 写入后不可改写（触发器拒绝）；
 - 轮次身份不可变（触发器拒绝）；
 - display_cycle_date >= schedule_date 与 closed_at/handled_at 形状（CHECK）；
 - 轮次唯一性（部分唯一索引）；
-- 中空两阶段成对写入（约束触发器）。
+- 中空两阶段成对写入（约束触发器）；
+- 可安排时段窗口列形状（批次 2）：§18 四种组合均可落库，模板双端不等 /
+  实例双端有序 CHECK 生效（施工计划 §3.6：本地语法解析不算数）。
 
 被测迁移文件逐字节从磁盘执行；测试绝不触碰任何生产数据库。
 """
 
 import os
+import re
 import shutil
 import tempfile
 import threading
 import time
 import unittest
+from datetime import time as _time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,7 +37,82 @@ REPRO_NOW = "2026-10-20T12:00:00+08:00"
 UNDER_TEST = (
     "20260924010000_planning_phase1a_domain_identity.sql",
     "20260924020000_planning_phase1b_refresh.sql",
+    "20260927010000_planning_window_model.sql",
 )
+WINDOW_MIGRATION = MIGRATIONS_DIR / "20260927010000_planning_window_model.sql"
+
+
+def _split_top_level_statements(sql):
+    """把迁移 SQL 拆成顶层语句序列（仅服务窗口迁移重放测试的最小实现）。
+
+    逐字符扫描：跳过 ``--`` 行注释；单引号字符串（含 ``''`` 转义）与
+    ``$tag$`` 美元引用块内部的分号不拆分——``DO $$ ... $$`` 等复合块保持
+    完整；语句按文件真实顺序返回，显式 ``begin`` / ``commit`` 原样保留。
+    逐条发送时原子性只能来自迁移文件自身的事务边界，而不是 Simple Query
+    对整串语句提供的隐式事务。
+    """
+    statements = []
+    buf = []
+    i = 0
+    n = len(sql)
+    in_line_comment = False
+    in_single_quote = False
+    dollar_tag = None
+    while i < n:
+        ch = sql[i]
+        if in_line_comment:
+            if ch == "\n":
+                in_line_comment = False
+                buf.append(" ")
+            i += 1
+            continue
+        if in_single_quote:
+            buf.append(ch)
+            if ch == "'":
+                if sql.startswith("''", i):
+                    buf.append("'")
+                    i += 2
+                    continue
+                in_single_quote = False
+            i += 1
+            continue
+        if dollar_tag is not None:
+            if sql.startswith(dollar_tag, i):
+                buf.append(dollar_tag)
+                i += len(dollar_tag)
+                dollar_tag = None
+            else:
+                buf.append(ch)
+                i += 1
+            continue
+        if sql.startswith("--", i):
+            in_line_comment = True
+            i += 2
+            continue
+        if ch == "'":
+            in_single_quote = True
+            buf.append(ch)
+            i += 1
+            continue
+        match = re.match(r"\$(\w*)\$", sql[i:])
+        if match:
+            dollar_tag = match.group(0)
+            buf.append(dollar_tag)
+            i += len(dollar_tag)
+            continue
+        if ch == ";":
+            statement = "".join(buf).strip()
+            if statement:
+                statements.append(statement)
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        statements.append(tail)
+    return statements
 PG_TRGM_LINE = "create extension if not exists pg_trgm with schema extensions;"
 PG_TRGM_FILE = "20260804020000_auto_digest_memory_requests.sql"
 
@@ -169,12 +248,14 @@ insert into public.planning_occurrence (
     display_reason, status, sort_order, is_fixed, estimated_time_source,
     fixed_source, schedule_managed, is_limited, source,
     content_snapshot, display_content, time_mode_snapshot, deadline_at,
+    window_start_at, window_end_at,
     created_at, updated_at
 ) values (
     %(task_id)s, '2026-09-24', 'cycle:2026-09-24', '2026-09-24', '2026-09-24',
     'initial', 'pending', 10, false, 'unassigned',
     null, true, false, 'schedule',
     '背单词', '背单词', 'duration', null,
+    null, null,
     '2026-09-24T06:00:00+08:00', '2026-09-24T06:00:00+08:00'
 ) returning id;
 """
@@ -241,7 +322,11 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
         return row[0][0]
 
     def _fresh_occurrence(self, **overrides):
-        """插入一个合法的新版 pending 实例，返回其 id。"""
+        """插入一个合法的新版 pending 实例，返回其 id。
+
+        窗口列（批次 2）默认 NULL=无窗口；可用 window_start_at /
+        window_end_at 覆盖（aware ISO 字符串或 datetime 均可）。
+        """
         schedule_date = overrides.pop("schedule_date", "2026-09-25")
         round_key = overrides.pop("round_key", f"cycle:{schedule_date}")
         params = {
@@ -257,6 +342,8 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
             "early_period_date": overrides.pop(
                 "early_period_date",
                 str(schedule_date) if str(round_key).startswith("early:") else None),
+            "window_start_at": overrides.pop("window_start_at", None),
+            "window_end_at": overrides.pop("window_end_at", None),
         }
         params.update(overrides)
         sql = """
@@ -266,6 +353,7 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
             estimated_time_source, fixed_source, schedule_managed, is_limited,
             source, early_period_date,
             content_snapshot, display_content, time_mode_snapshot, deadline_at,
+            window_start_at, window_end_at,
             created_at, updated_at
         ) values (
             %(task_id)s, %(schedule_date)s, %(round_key)s, %(schedule_date)s,
@@ -273,6 +361,7 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
             %(handled_at)s, 20, false, 'unassigned', null, true, false,
             %(source)s, %(early_period_date)s,
             '快照', '快照', 'duration', null,
+            %(window_start_at)s, %(window_end_at)s,
             '2026-09-24T06:00:00+08:00', '2026-09-24T06:00:00+08:00'
         ) returning id;
         """
@@ -1267,6 +1356,338 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
             {"task_id": hollow_id, "task_text": str(hollow_id)},
             "hollow round requires both start and end phases",
         )
+
+    # -- 批次 2：可安排时段窗口列与形状 CHECK（施工计划 §3.6：真库验证，
+    #    本地语法解析不算数；既有 1A/1B 约束零回归由上方全部既有用例承担）
+
+    def _windowed_task(self, start_tod=None, end_tod=None):
+        """插入带模板窗口的任务定义，返回 id。"""
+        return self._query(
+            """
+            insert into public.planning_task (
+                content, task_type, time_mode, estimated_minutes, is_active,
+                refresh_mode, refresh_enabled, window_start_tod, window_end_tod,
+                created_at, updated_at
+            ) values (
+                '窗口任务', 'daily', 'duration', 30, true,
+                'daily', true, %(start_tod)s, %(end_tod)s,
+                '2026-09-27T07:00:00+08:00', '2026-09-27T07:00:00+08:00'
+            ) returning id;
+            """,
+            {"start_tod": start_tod, "end_tod": end_tod},
+        )[0][0]
+
+    def test_template_window_four_combinations_are_accepted(self):
+        # §18 四种组合均可落库：双端（含跨自然午夜 end < start 写法）/
+        # 只有最早开始 / 只有最晚完成 / 两端皆空；各端独立为空合法。
+        dual = self._windowed_task(_time(23, 0), _time(2, 0))
+        earliest_only = self._windowed_task(_time(3, 0), None)
+        latest_only = self._windowed_task(None, _time(22, 0))
+        no_window = self._windowed_task(None, None)
+        rows = {
+            row[0]: (row[1], row[2])
+            for row in self._query(
+                "select id, window_start_tod, window_end_tod from public.planning_task "
+                "where id = any(%(ids)s)",
+                {"ids": [dual, earliest_only, latest_only, no_window]},
+            )
+        }
+        assert rows[dual] == (_time(23, 0), _time(2, 0))
+        assert rows[earliest_only] == (_time(3, 0), None)
+        assert rows[latest_only] == (None, _time(22, 0))
+        assert rows[no_window] == (None, None)
+
+    def test_template_window_equal_endpoints_rejected(self):
+        # start == end 拒绝（不解释为 24h，§6.7）。
+        with self.assertRaises(psycopg.errors.CheckViolation):
+            self._windowed_task(_time(3, 0), _time(3, 0))
+
+    def test_windowed_task_generation_shape_satisfies_identity_check(self):
+        # §3.2：新窗口行（is_limited=false、deadline_at=null、
+        # estimated_time_source='unassigned'、est 成对为空、窗口成对冻结）
+        # 天然满足 1A 身份 CHECK——模板窗口 + 实例冻结窗口成对落库零冲突。
+        task_id = self._windowed_task(_time(18, 0), _time(22, 0))
+        occ = self._fresh_occurrence(
+            task_id=task_id, round_key="cycle:2026-10-22", schedule_date="2026-10-22",
+            window_start_at="2026-10-22T18:00:00+08:00",
+            window_end_at="2026-10-22T22:00:00+08:00",
+        )
+        row = self._query(
+            "select window_start_at, window_end_at, is_limited, deadline_at, "
+            "estimated_time_source, est_start, est_end "
+            "from public.planning_occurrence where id = %(id)s",
+            {"id": occ},
+        )[0]
+        assert row[0].isoformat() == "2026-10-22T18:00:00+08:00"
+        assert row[1].isoformat() == "2026-10-22T22:00:00+08:00"
+        assert row[2] is False and row[3] is None
+        assert row[4] == "unassigned" and row[5] is None and row[6] is None
+
+    def test_occurrence_window_four_combinations_are_accepted(self):
+        # 实例窗口同四组合：单侧冻结后只有一端；NULL = 无该端约束。
+        dual = self._fresh_occurrence(
+            round_key="cycle:2026-10-23", schedule_date="2026-10-23",
+            window_start_at="2026-10-23T23:00:00+08:00",
+            window_end_at="2026-10-24T02:00:00+08:00",
+        )
+        earliest_only = self._fresh_occurrence(
+            round_key="cycle:2026-10-24", schedule_date="2026-10-24",
+            window_start_at="2026-10-24T03:00:00+08:00",
+        )
+        latest_only = self._fresh_occurrence(
+            round_key="cycle:2026-10-25", schedule_date="2026-10-25",
+            window_end_at="2026-10-25T22:00:00+08:00",
+        )
+        no_window = self._fresh_occurrence(
+            round_key="cycle:2026-10-26", schedule_date="2026-10-26",
+        )
+        rows = {
+            row[0]: (row[1], row[2])
+            for row in self._query(
+                "select id, window_start_at, window_end_at "
+                "from public.planning_occurrence where id = any(%(ids)s) order by id",
+                {"ids": [dual, earliest_only, latest_only, no_window]},
+            )
+        }
+        assert rows[dual][0].isoformat() == "2026-10-23T23:00:00+08:00"
+        assert rows[dual][1].isoformat() == "2026-10-24T02:00:00+08:00"
+        assert rows[earliest_only][0].isoformat() == "2026-10-24T03:00:00+08:00"
+        assert rows[earliest_only][1] is None
+        assert rows[latest_only][0] is None
+        assert rows[latest_only][1].isoformat() == "2026-10-25T22:00:00+08:00"
+        assert rows[no_window] == (None, None)
+
+    def test_occurrence_window_order_enforced_when_both_present(self):
+        # 双端同时非空时要求 end > start（绝对瞬间）：相等与倒序均拒绝。
+        with self.assertRaises(psycopg.errors.CheckViolation):
+            self._fresh_occurrence(
+                round_key="cycle:2026-10-27", schedule_date="2026-10-27",
+                window_start_at="2026-10-27T05:00:00+08:00",
+                window_end_at="2026-10-27T05:00:00+08:00",
+            )
+        with self.assertRaises(psycopg.errors.CheckViolation):
+            self._fresh_occurrence(
+                round_key="cycle:2026-10-28", schedule_date="2026-10-28",
+                window_start_at="2026-10-28T05:00:00+08:00",
+                window_end_at="2026-10-28T04:00:00+08:00",
+            )
+
+    def test_legacy_shape_rows_keep_null_windows_and_stay_valid(self):
+        # 既有形状行为零回归：窗口列为 NULL 的 1A 行按原语义正常写入与更新。
+        occ = self._fresh_occurrence(
+            round_key="cycle:2026-10-29", schedule_date="2026-10-29")
+        row = self._query(
+            "select window_start_at, window_end_at from public.planning_occurrence "
+            "where id = %(id)s",
+            {"id": occ},
+        )[0]
+        assert row == (None, None)
+        self._query(
+            "update public.planning_occurrence set status = 'in_progress' "
+            "where id = %(id)s",
+            {"id": occ},
+        )
+        assert self._query(
+            "select status from public.planning_occurrence where id = %(id)s",
+            {"id": occ},
+        )[0][0] == "in_progress"
+
+    # -- 批次 2 复审修复轮：迁移重放行为（真实 pgserver 执行真实迁移文件，
+    #    不是 SQL 字符串搜索；复审 LOW 项）--------------------------------
+
+    def _window_migration_sql(self):
+        return WINDOW_MIGRATION.read_text(encoding="utf-8")
+
+    def _constraint_count(self, table, name):
+        return self._query(
+            "select count(*) from pg_constraint "
+            "where conname = %(name)s and conrelid = %(table)s::regclass",
+            {"name": name, "table": table},
+        )[0][0]
+
+    def _window_column_count(self):
+        return self._query(
+            "select count(*) from information_schema.columns "
+            "where table_schema = 'public' and table_name in "
+            "('planning_task', 'planning_occurrence') "
+            "and column_name like 'window%'",
+        )[0][0]
+
+    def test_window_migration_replays_cleanly_on_same_database(self):
+        # 同一临时 PostgreSQL 库连续执行真实窗口迁移两次均成功（重放安全）；
+        # 两个 CHECK 在目标表上各只有一份；迁移不写任何数据行。
+        rows_before = self._query(
+            "select count(*) from public.planning_occurrence")[0][0]
+        self._query(self._window_migration_sql())
+        self._query(self._window_migration_sql())
+        assert rows_before == self._query(
+            "select count(*) from public.planning_occurrence")[0][0]
+        assert self._constraint_count(
+            "public.planning_task", "planning_task_window_tod_shape_check") == 1
+        assert self._constraint_count(
+            "public.planning_occurrence",
+            "planning_occurrence_window_at_order_check") == 1
+
+    def test_same_named_constraint_elsewhere_does_not_fool_scope_guard(self):
+        # 重放守卫按 (conname, conrelid) 精确判定：先删除目标表上的两个
+        # CHECK，再在其他表（public 与独立 schema）放置同名约束后重放真实
+        # 迁移——目标表必须照常补回约束，不被同名 decoy 误判为已存在；
+        # decoy 自身的同名约束不受影响。
+        self._query(
+            "alter table public.planning_task "
+            "drop constraint planning_task_window_tod_shape_check")
+        self._query(
+            "alter table public.planning_occurrence "
+            "drop constraint planning_occurrence_window_at_order_check")
+        try:
+            self._query(
+                """
+                create schema replay_probe;
+                create table replay_probe.decoy (
+                    id integer primary key,
+                    constraint planning_task_window_tod_shape_check check (id > 0),
+                    constraint planning_occurrence_window_at_order_check check (id > 0)
+                );
+                create table public.planning_window_replay_decoy (
+                    id integer primary key,
+                    constraint planning_task_window_tod_shape_check check (id > 0),
+                    constraint planning_occurrence_window_at_order_check check (id > 0)
+                );
+                """
+            )
+            self._query(self._window_migration_sql())
+            assert self._constraint_count(
+                "public.planning_task", "planning_task_window_tod_shape_check") == 1
+            assert self._constraint_count(
+                "public.planning_occurrence",
+                "planning_occurrence_window_at_order_check") == 1
+            assert self._constraint_count(
+                "replay_probe.decoy", "planning_task_window_tod_shape_check") == 1
+            assert self._constraint_count(
+                "public.planning_window_replay_decoy",
+                "planning_occurrence_window_at_order_check") == 1
+        finally:
+            self._query("drop table if exists public.planning_window_replay_decoy")
+            self._query("drop schema if exists replay_probe cascade")
+
+    def _reset_window_schema(self):
+        """把库还原到窗口迁移执行前的形状（先删 CHECK 再删列）。"""
+        self._query(
+            "alter table public.planning_task "
+            "drop constraint planning_task_window_tod_shape_check")
+        self._query(
+            "alter table public.planning_occurrence "
+            "drop constraint planning_occurrence_window_at_order_check")
+        self._query(
+            "alter table public.planning_task "
+            "drop column window_start_tod, drop column window_end_tod")
+        self._query(
+            "alter table public.planning_occurrence "
+            "drop column window_start_at, drop column window_end_at")
+
+    def _run_migration_statement_by_statement(self, sql, conn):
+        """按迁移文件顶层语句逐条发送（显式 begin / commit 照原样执行）。"""
+        for statement in _split_top_level_statements(sql):
+            conn.execute(statement)
+
+    def test_interrupted_window_migration_leaves_no_half_state(self):
+        # 事务失败无半状态，且原子性必须来自迁移文件自身的显式 BEGIN/COMMIT：
+        # 逐**顶层语句**发送（而非整串 Simple Query——后者会自带隐式事务，
+        # 掩盖文件缺少显式事务边界的缺陷）。先把库还原到「迁移前」形状，
+        # 另一连接持 planning_occurrence 排他锁，逐条执行至
+        # planning_occurrence 加列语句时被 statement_timeout 取消——已执行
+        # 的前半段（planning_task 加列与约束）随文件显式 BEGIN 开启的事务
+        # 整体回滚；锁释放后逐条完整重放成功。
+        self._reset_window_schema()
+        statements = _split_top_level_statements(self._window_migration_sql())
+        # 文件自身的显式事务边界必须按真实顺序出现在执行序列里
+        assert statements[0].casefold() == "begin"
+        assert statements[-1].casefold() == "commit"
+        locker = psycopg.connect(self.server.get_uri(), autocommit=True)
+        runner = psycopg.connect(self.server.get_uri(), autocommit=True)
+        try:
+            locker.execute("begin")
+            locker.execute(
+                "lock table public.planning_occurrence in access exclusive mode")
+            runner.execute("set statement_timeout = '1s'")
+            with self.assertRaises(psycopg.errors.QueryCanceled):
+                for statement in statements:
+                    runner.execute(statement)
+            runner.execute("rollback")  # 清除服务器端被中止的事务
+            # 取消发生在 planning_occurrence 加列：前半段不得残留
+            assert self._window_column_count() == 0
+            assert self._constraint_count(
+                "public.planning_task", "planning_task_window_tod_shape_check") == 0
+            assert self._constraint_count(
+                "public.planning_occurrence",
+                "planning_occurrence_window_at_order_check") == 0
+        finally:
+            runner.close()
+            locker.execute("rollback")  # 释放排他锁
+            locker.close()
+        # 锁释放后逐条完整重放：列与约束全部落位（各恰好一份）
+        self._run_migration_statement_by_statement(
+            self._window_migration_sql(), self.conn)
+        assert self._window_column_count() == 4
+        assert self._constraint_count(
+            "public.planning_task", "planning_task_window_tod_shape_check") == 1
+        assert self._constraint_count(
+            "public.planning_occurrence",
+            "planning_occurrence_window_at_order_check") == 1
+
+    def test_interrupted_atomicity_comes_from_migration_explicit_transaction(self):
+        # 常驻变异守卫：从执行序列中剔除迁移文件自身的 BEGIN/COMMIT（内存
+        # 变异，磁盘文件不动），以同样的逐顶层语句方式在同一故障点中断
+        # ——前半段 DDL 必然残留（planning_task 2 列 + 1 CHECK，与独立
+        # 复现一致），即「0 残留」断言在变异下必然失败。若执行方式退回
+        # 整串 Simple Query（隐式事务兜底），本用例将因无残留而失败。
+        mutated_statements = [
+            statement
+            for statement in _split_top_level_statements(self._window_migration_sql())
+            if statement.casefold() not in ("begin", "commit")
+        ]
+        assert mutated_statements, "mutation must keep the executable statements"
+        assert all(
+            statement.casefold() not in ("begin", "commit")
+            for statement in mutated_statements
+        )
+        self._reset_window_schema()
+        locker = psycopg.connect(self.server.get_uri(), autocommit=True)
+        runner = psycopg.connect(self.server.get_uri(), autocommit=True)
+        try:
+            locker.execute("begin")
+            locker.execute(
+                "lock table public.planning_occurrence in access exclusive mode")
+            runner.execute("set statement_timeout = '1s'")
+            with self.assertRaises(psycopg.errors.QueryCanceled):
+                for statement in mutated_statements:
+                    runner.execute(statement)
+            # 无显式事务边界：每条语句各自隐式提交——前半段残留
+            assert self._window_column_count() == 2  # planning_task 两列已提交
+            assert self._constraint_count(
+                "public.planning_task", "planning_task_window_tod_shape_check") == 1
+            assert self._constraint_count(
+                "public.planning_occurrence",
+                "planning_occurrence_window_at_order_check") == 0
+        finally:
+            runner.close()
+            locker.execute("rollback")  # 释放排他锁
+            locker.close()
+        # 清理变异残留，逐条完整重放恢复正确迁移后的形状
+        self._query(
+            "alter table public.planning_task "
+            "drop constraint planning_task_window_tod_shape_check")
+        self._query(
+            "alter table public.planning_task "
+            "drop column window_start_tod, drop column window_end_tod")
+        self._run_migration_statement_by_statement(
+            self._window_migration_sql(), self.conn)
+        assert self._window_column_count() == 4
+        assert self._constraint_count(
+            "public.planning_task", "planning_task_window_tod_shape_check") == 1
+        assert self._constraint_count(
+            "public.planning_occurrence",
+            "planning_occurrence_window_at_order_check") == 1
 
 
 if __name__ == "__main__":
