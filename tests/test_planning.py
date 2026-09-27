@@ -262,15 +262,18 @@ class _Base(unittest.TestCase):
             client.rows["planning_task"].append({
                 "id": row["id"], "content": row.get("content", "任务"),
                 "task_type": row.get("task_type", "daily"), "interval_days": None,
-                "weekdays": None, "month_days": None, "target_date": None,
+                "weekdays": None, "month_days": None,
+                "target_date": row.get("target_date"),
                 "refresh_mode": row.get("refresh_mode", default_mode[row.get("task_type", "daily")]),
                 "refresh_enabled": True,
                 "time_mode": row.get("time_mode", "duration"),
                 "estimated_minutes": row.get("estimated_minutes", 30),
+                "window_start_tod": row.get("window_start_tod"),
+                "window_end_tod": row.get("window_end_tod"),
                 "est_start_tod": row.get("est_start_tod"),
                 "est_end_tod": row.get("est_end_tod"),
                 "is_fixed": row.get("is_fixed", False),
-                "deadline_tod": None, "deadline_end_tod": None,
+                "deadline_tod": row.get("deadline_tod"), "deadline_end_tod": None,
                 "is_hollow": row.get("is_hollow", False),
                 "hollow_start_content": row.get("hollow_start_content"),
                 "hollow_start_minutes": row.get("hollow_start_minutes"),
@@ -338,14 +341,62 @@ class TaskValidationTests(_Base):
                 )
         self.run_with(run)
 
-    def test_explicit_times_override_duration(self):
+    def test_explicit_time_mode_rejected_on_create(self):
+        # 窗口批次：显式起止停止新写入，创建拒绝并给出中文原因。
+        def run(client):
+            with self.assertRaises(PlanningError) as raised:
+                planning.create_task(
+                    {"content": "x", "task_type": "daily", "time_mode": "explicit",
+                     "estimated_minutes": 120},
+                    self.NOW,
+                )
+            self.assertIn("显式起止", str(raised.exception))
+
+        self.run_with(run)
+
+    def test_old_time_fields_rejected_on_create(self):
+        # 旧 explicit / deadline 字段从白名单移除：新行不再产生这些事实。
+        def run(client):
+            for field in ("est_start_tod", "est_end_tod", "is_fixed",
+                          "deadline_tod", "deadline_end_tod"):
+                with self.subTest(field=field):
+                    with self.assertRaises(PlanningError) as raised:
+                        planning.create_task(
+                            {"content": "x", "task_type": "daily",
+                             "estimated_minutes": 30, field: "12:00"},
+                            self.NOW,
+                        )
+                    self.assertIn("unsupported fields", str(raised.exception))
+
+        self.run_with(run)
+
+    def test_patch_rejects_window_fields_until_edit_semantics_land(self):
+        # Review HIGH 修复：窗口编辑语义（current/future 分流与完整校验）属
+        # 批次 6——PATCH 明确拒绝窗口字段（400，不静默忽略）；创建入口不受
+        # 影响，普通非窗口 PATCH 照常工作。
         def run(client):
             task = self.create_task(
-                client, time_mode="duration", estimated_minutes=120,
-                est_start_tod="20:00", est_end_tod="22:00",
+                client, cursor_date="2026-09-19",
+                window_start_tod="18:00", window_end_tod="22:00",
             )
-            self.assertEqual(task["time_mode"], "explicit")
-            self.assertEqual(task["est_start_tod"], "20:00")
+            self.assertEqual(task["window_start_tod"], "18:00")
+            for payload in (
+                {"window_start_tod": "08:00"},
+                {"window_end_tod": "20:00"},
+                {"window_start_tod": "08:00", "window_end_tod": "20:00"},
+            ):
+                with self.subTest(payload=payload):
+                    with self.assertRaises(PlanningError) as raised:
+                        planning.update_task(task["id"], payload, self.NOW)
+                    self.assertEqual(raised.exception.status_code, 400)
+                    self.assertIn("可安排时段暂不支持编辑", str(raised.exception))
+            # 普通非窗口 PATCH 不受影响；模板保持创建时原值
+            planning.update_task(task["id"], {"content": "改名"}, self.NOW)
+            stored = next(
+                row for row in client.rows["planning_task"] if row["id"] == task["id"])
+            self.assertEqual(stored["content"], "改名")
+            self.assertEqual(stored["window_start_tod"], "18:00")
+            self.assertEqual(stored["window_end_tod"], "22:00")
         self.run_with(run)
 
     def test_timer_shorthand_parsing(self):
@@ -356,16 +407,6 @@ class TaskValidationTests(_Base):
         self.assertEqual(planning.parse_duration_shorthand("1h", "t"), 60)
         with self.assertRaises(PlanningError):
             planning.parse_duration_shorthand("abc", "t")
-
-    def test_deadline_range_requires_start(self):
-        def run(client):
-            with self.assertRaises(PlanningError):
-                planning.create_task(
-                    {"content": "x", "task_type": "once", "target_date": "2026-09-25",
-                     "estimated_minutes": 30, "deadline_end_tod": "22:00"},
-                    self.NOW,
-                )
-        self.run_with(run)
 
     def test_hollow_requires_phase_fields(self):
         def run(client):
@@ -433,11 +474,13 @@ class GenerationTests(_Base):
         self.run_with(run)
 
     def test_once_task_with_past_target_date_generates(self):
+        # 产品边界（§10/§32.40）：创建入口的 once target_date 不得早于当前
+        # 业务日期；系统补生成路径不受此限——直接播种存量任务行验证补生成。
         def run(client):
-            self.create_task(
-                client, task_type="once", target_date="2026-09-18",
-                estimated_minutes=30,
-            )
+            self._seed_tasks(client, [
+                {"id": 1, "task_type": "once", "refresh_mode": "none",
+                 "target_date": "2026-09-18"},
+            ])
             planning.generate_due(self.NOW)
             dates = [occ["schedule_date"] for occ in client.rows["planning_occurrence"]]
             self.assertEqual(dates, ["2026-09-18"])
@@ -445,6 +488,20 @@ class GenerationTests(_Base):
             self.assertEqual(occ["round_key"], "once")
             self.assertEqual(occ["display_cycle_date"], "2026-09-20")
             self.assertEqual(occ["display_reason"], "carryover")
+        self.run_with(run)
+
+    def test_once_target_date_before_today_rejected_on_create(self):
+        # 产品边界（2026-09-27 user 裁决）：用户创建入口目标日期不得早于当前
+        # 业务日期，违反拒绝并说明原因（§30.3）。
+        def run(client):
+            with self.assertRaises(PlanningError) as raised:
+                planning.create_task(
+                    {"content": "x", "task_type": "once",
+                     "target_date": "2026-09-19", "estimated_minutes": 30},
+                    self.NOW,
+                )
+            self.assertIn("目标日期不能早于当前业务日期", str(raised.exception))
+            self.assertEqual(client.rows["planning_occurrence"], [])
         self.run_with(run)
 
     def test_hollow_task_generates_two_linked_phases(self):
@@ -932,10 +989,11 @@ class StatusTransitionTests(_Base):
         """BUG-5：类型筛选在 limit 之前下推，小 limit 仍能命中更早记录。"""
         def run(client):
             daily = self.create_task(client, cursor_date="2026-09-19")
-            once = self.create_task(
-                client, task_type="once", target_date="2026-09-17",
-                content="旧单次",
-            )
+            # 产品边界：过去 target_date 不能经创建入口写入；播种存量行验证筛选。
+            self._seed_tasks(client, [
+                {"id": 99, "task_type": "once", "refresh_mode": "none",
+                 "target_date": "2026-09-17", "content": "旧单次"},
+            ])
             planning.generate_due(self.NOW)
             planning.generate_due(self.NOW + timedelta(days=1))
             # 9 月 17 日的 once 记录比 9 月 20/21 日的 daily 记录更早
@@ -1003,11 +1061,12 @@ class CleanupAndMaintenanceTests(_Base):
 
     def test_maintenance_generation_and_timeout_sweep(self):
         def run(client):
-            self.create_task(
-                client, cursor_date="2026-09-19",
-                deadline_tod="12:00",
-            )
+            self.create_task(client, cursor_date="2026-09-19")
             planning.generate_due(self.NOW)
+            # 窗口批次起 deadline_tod 停止新写入：播种存量限时形状（任务行 +
+            # 实例行）验证 sweep 判定；判定源换 window_end_at 属批次 5。
+            client.rows["planning_task"][0]["deadline_tod"] = "12:00"
+            client.rows["planning_occurrence"][0]["is_limited"] = True
             # 截止 12:00 已过 → 超时打标
             result = planning.run_maintenance(self.NOW)
             self.assertEqual(result["timeouts"]["timed_out"], 1)
@@ -1022,21 +1081,6 @@ class CleanupAndMaintenanceTests(_Base):
             # 生成后立即重算：当天新实例直接拿到 14:07 起的预估起止
             self.assertEqual(occ["est_start"], planning._iso(self.NOW))
             self.assertEqual(occ["est_end"], planning._iso(self.NOW + timedelta(minutes=30)))
-        self.run_with(run)
-
-    def test_editing_deadline_syncs_limited_flag_to_open_occurrences(self):
-        def run(client):
-            task = self.create_task(client, cursor_date="2026-09-19")
-            planning.generate_due(self.NOW)
-            occ = client.rows["planning_occurrence"][0]
-            self.assertFalse(occ["is_limited"])
-            planning.update_task(
-                task["id"], {"deadline_tod": "12:00"}, self.NOW,
-            )
-            self.assertTrue(client.rows["planning_occurrence"][0]["is_limited"])
-            # 同步后超时判定立即生效
-            result = planning.sweep_timeouts(self.NOW)
-            self.assertEqual(result["timed_out"], 1)
         self.run_with(run)
 
     def test_schedule_edit_keeps_generated_instance_without_rebuild(self):

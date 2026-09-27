@@ -263,20 +263,45 @@ def test_n4_monthly_and_interval_share_period_identity_semantics():
         assert len(rows) == 2
 
 
-def test_n5_explicit_interval_wins_in_api_and_after_manual_move():
-    # N5：显式 08:00–09:00 + 30 分钟 → 有效耗时 60（API/展示与排程同源）；
-    # 人工移动开始后仍按有效区间语义推导（10:00 → 11:00）。
+def test_n5_effective_minutes_single_source_after_manual_move():
+    # N5：有效耗时单一权威语义——实例 est 区间事实优先，其次耗时快照，
+    # API/展示与排程同源（显式区间退役后，新行的区间与快照同值）；
+    # 人工移动开始后仍按区间语义推导（10:00 → 11:00）。
     with Context() as c:
-        c.create("daily", at(23), time_mode="explicit", est_start_tod="08:00",
-                 est_end_tod="09:00", estimated_minutes=30)
+        c.create("daily", at(23), estimated_minutes=30)
         occ = c.rows[0]
+        planning.recompute_today(at(23, 8))
         task_row = c.db.rows["planning_task"][0]
         serialized = planning.serialize_occurrence(occ, task_row, at(23, 8))
+        assert serialized["estimated_minutes"] == 30
+        # 人工移动开始时间：保持有效区间语义（30 分钟区间随起点平移）
+        planning.patch_occurrence(occ["id"], {"est_start": at(23, 10).isoformat()}, at(23, 9, 30))
+        assert occ["est_end"] == at(23, 10, 30).isoformat()
+        serialized = planning.serialize_occurrence(occ, task_row, at(23, 10))
+        assert serialized["estimated_minutes"] == 30
+        # 排程同源：排程耗时来源按区间事实（30 分钟）
+        assert planning._duration_of(occ, task_row) == timedelta(minutes=30)
+
+
+def test_n5_effective_interval_fact_wins_over_planned_snapshot():
+    # N5 优先级分叉保护（Review MEDIUM）：est 区间事实（60 分钟）与
+    # planned_minutes 快照（30 分钟）**故意不同**——正确规则是区间事实优先。
+    # 直接播种存量实例制造分叉（不恢复旧创建入口）。
+    with Context() as c:
+        c.create("daily", at(23), estimated_minutes=30)
+        occ = c.rows[0]
+        occ.update({
+            "time_mode_snapshot": "explicit",
+            "planned_minutes": 30,
+            "est_start": at(23, 8).isoformat(),
+            "est_end": at(23, 9).isoformat(),
+        })
+        task_row = c.db.rows["planning_task"][0]
+        # API / serialize 读取有效耗时 = 区间 60，而非快照 30
+        serialized = planning.serialize_occurrence(occ, task_row, at(23, 8))
         assert serialized["estimated_minutes"] == 60
-        # 人工移动开始时间：保持有效区间语义
+        # 人工平移开始时间：仍按区间语义推导（10:00 → 11:00，60 分钟）
         planning.patch_occurrence(occ["id"], {"est_start": at(23, 10).isoformat()}, at(23, 9, 30))
         assert occ["est_end"] == at(23, 11).isoformat()
         serialized = planning.serialize_occurrence(occ, task_row, at(23, 10))
         assert serialized["estimated_minutes"] == 60
-        # 排程同源：排程耗时来源按 60 分钟（显式区间优先于快照）
-        assert planning._duration_of(occ, task_row) == timedelta(minutes=60)

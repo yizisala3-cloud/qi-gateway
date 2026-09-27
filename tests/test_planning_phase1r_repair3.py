@@ -252,16 +252,23 @@ def test_h3_old_key_replay_reports_superseded_and_never_revives():
             at(25, 19).isoformat(), "manual")
 
 
-def test_m4_reschedule_uses_effective_duration():
-    # M4：显式 08:00–09:00（尽管存在 30 分钟快照）→ 重排 18:00 → 18:00–19:00。
+def test_m4_reschedule_uses_interval_fact_over_snapshot():
+    # M4 优先级分叉保护（Review MEDIUM）：超时重排/adopt 的有效耗时 = est
+    # 区间事实（60 分钟），而不是 planned_minutes 快照（30 分钟）——直接
+    # 播种存量实例制造分叉（不恢复旧创建入口）。
     with Context() as c:
-        c.create("daily", at(23), time_mode="explicit", est_start_tod="08:00",
-                 est_end_tod="09:00", estimated_minutes=30)
+        c.create("daily", at(23), estimated_minutes=30)
         occ = c.rows[0]
-        occ["status"] = "timeout"
+        occ.update({
+            "time_mode_snapshot": "explicit",
+            "planned_minutes": 30,
+            "est_start": at(23, 8).isoformat(),
+            "est_end": at(23, 9).isoformat(),
+            "status": "timeout",
+        })
         result = planning.reschedule_timeout_as_new(
             occ["id"], {"est_start": at(25, 18).isoformat()}, at(25, 15),
-            idempotency_key="m4",
+            idempotency_key="m4seed",
         )
         o = result["occurrence"]
         assert (datetime.fromisoformat(o["est_end"])

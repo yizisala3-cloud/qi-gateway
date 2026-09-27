@@ -277,31 +277,6 @@ def test_task_duration_edit_does_not_reinterpret_generated_instances():
         assert dur == 120
 
 
-def test_time_mode_flip_does_not_freeze_generated_auto_instances():
-    # H4：duration 自动实例生成后任务改为 explicit——旧实例仍按自身属性
-    # （所有权元组 + 耗时快照）继续自动排程；新模式只作用于未来轮次。
-    with Context() as c:
-        c.create("daily", at(23), estimated_minutes=30)
-        occ = c.rows[0]
-        planning.recompute_today(at(23, 8))
-        planning.update_task(
-            1, {"time_mode": "explicit", "est_start_tod": "20:00", "est_end_tod": "21:00"},
-            at(23, 9))
-        result = planning.recompute_today(at(23, 12))
-        assert result["updated"] == 1
-        assert datetime.fromisoformat(occ["est_start"]) == at(23, 12)
-        dur = (datetime.fromisoformat(occ["est_end"])
-               - datetime.fromisoformat(occ["est_start"])).total_seconds() / 60
-        assert dur == 30
-        # 未来新实例采用新模式（显式区间规则锚定）
-        planning._create_occurrences(c.db, next(
-            row for row in c.db.rows["planning_task"] if row["id"] == 1),
-            date(2026, 9, 24), at(24))
-        future = next(row for row in c.rows if row["schedule_date"] == "2026-09-24")
-        assert future["estimated_time_source"] == "rule"
-        assert future["fixed_source"] == "rule"
-
-
 def test_api_and_display_use_instance_duration_snapshot():
     # M3：任务耗时 30→120 后，旧实例的 API/展示耗时为实例值 30。
     with Context() as c:

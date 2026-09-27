@@ -30,6 +30,7 @@ __all__ = [
     "hollow_envelope_minutes",
     "remaining_window_space",
     "resolve_window",
+    "resolve_window_on_date",
     "validate_template_window",
     "window_crosses_boundary",
     "window_feasible",
@@ -285,6 +286,45 @@ def resolve_window(
         anchor_date + timedelta(days=max(0, initial - 1)),
         template.end_tod, reference_abs, after_end=True)
     return ResolvedWindow(end_at=end_at)
+
+
+def resolve_window_on_date(template: WindowTemplate, on_date: date) -> ResolvedWindow:
+    """严格按指定自然日期解析（2026-09-27 分离裁决，规范 §6.7/§10/§32.41）。
+
+    把 user 的自然日期与模板时刻组合成**固定绝对约束**：没有 reference、
+    没有「已结束顺延」——它不是「找候选」，而是「user 指定日期上的窗口
+    是哪个绝对区间」。user 填写的 00:00 是当天 00:00 本身，绝不是次日的
+    第一次出现。与 :func:`resolve_window`（候选解析）是两条不得混用的
+    路径：候选解析回答「从 reference 往后找第一个合法且尚未结束的窗口」
+    （未指定日期的周期任务）；本函数回答指定日期的事实（once）。
+
+    * 双侧窗口：起点 = 当日 start_tod；终点 = 当日 end_tod，end_tod <
+      start_tod（跨自然午夜写法）时终点在次日；
+    * 只有最早开始：冻结当日 start_tod（含 00:00），只有下界；
+    * 只有最晚完成：冻结当日 end_tod（含 00:00 = 当日零点，绝不滚到
+      次日——通用候选语义在该形状下会把「reference 等号取下一次」用上，
+      故本路径必须独立实现，不能用候选解析伪装），只有上界；
+    * 无窗口：空解析。
+
+    窗口已过去导致不可行的判断不属于本函数：由调用方以
+    :func:`window_feasible` 按创建时刻判定（§12.1 创建拒绝，不顺延）。
+    """
+    if template.is_empty:
+        return ResolvedWindow()
+    if template.is_bounded:
+        end_date = (
+            on_date + timedelta(days=1)
+            if template.end_tod < template.start_tod else on_date
+        )
+        return ResolvedWindow(
+            start_at=datetime.combine(on_date, template.start_tod, tzinfo=BUSINESS_TIMEZONE),
+            end_at=datetime.combine(end_date, template.end_tod, tzinfo=BUSINESS_TIMEZONE),
+        )
+    if template.start_tod is not None:
+        return ResolvedWindow(
+            start_at=datetime.combine(on_date, template.start_tod, tzinfo=BUSINESS_TIMEZONE))
+    return ResolvedWindow(
+        end_at=datetime.combine(on_date, template.end_tod, tzinfo=BUSINESS_TIMEZONE))
 
 
 def remaining_window_space(

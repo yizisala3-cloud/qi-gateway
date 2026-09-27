@@ -193,9 +193,13 @@ def test_fixed_death_round_cannot_revive():
 
 def test_sweep_timeout_records_business_death_instant_as_closed_at():
     with Context() as c:
-        c.create("daily", at(23), deadline_tod="12:00")
+        c.create("daily", at(23))
+        # 窗口批次起 deadline_tod 停止新写入：播种存量限时任务形状（任务行 +
+        # 实例行 is_limited）验证 sweep 判定；判定源换 window_end_at 属批次 5。
+        c.db.rows["planning_task"][0]["deadline_tod"] = "12:00"
         occ = c.rows[0]
         planning.generate_due(at(24, 13))
+        occ["is_limited"] = True
         planning.sweep_timeouts(at(24, 13))
         assert occ["status"] == "timeout"
         # closed_at = 限时截止（业务死亡时刻），而非 sweep 执行时刻

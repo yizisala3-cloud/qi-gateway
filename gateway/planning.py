@@ -35,6 +35,15 @@ from .planning_domain import (
     timed_round_key,
     validate_task_refresh_mode,
 )
+from .planning_window import (
+    ResolvedWindow,
+    WindowTemplate,
+    hollow_envelope_minutes,
+    resolve_window,
+    resolve_window_on_date,
+    validate_template_window,
+    window_feasible,
+)
 
 log = logging.getLogger("gateway.planning")
 
@@ -456,8 +465,11 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
     """校验并规范化任务定义字段。
 
     ``partial=False``（创建）要求类型必填字段齐全；``partial=True``（编辑）
-    只处理出现的字段。未知字段一律拒绝。预估耗时与显式起止同时填写时，
-    以起止为准（已确认决策 12）：``time_mode`` 强制为 explicit。
+    只处理出现的字段。未知字段一律拒绝。2026-09-27 窗口批次：可安排时段
+    （``window_start_tod`` / ``window_end_tod``，§6.7）取代显式起止与限时
+    截止成为新业务事实来源；旧 explicit / deadline 字段停止新写入（白名单
+    移除即拒绝），列与存量行按历史语义保留。创建与编辑白名单分离（Review
+    HIGH 修复）：窗口字段仅在创建入口接受，编辑入口在批次 6 前明确拒绝。
     """
     if not isinstance(payload, dict):
         raise PlanningError("invalid_payload", "request body must be a JSON object")
@@ -465,14 +477,19 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
     allowed = {
         "content", "task_type", "interval_days", "weekdays", "month_days",
         "target_date", "time_mode", "estimated_minutes",
-        "est_start_tod", "est_end_tod", "is_fixed",
-        "deadline_tod", "deadline_end_tod",
         "is_hollow", "hollow_start_content", "hollow_start_minutes",
         "hollow_wait_minutes", "hollow_wait_note", "hollow_end_content",
         "hollow_end_minutes",
         "alarm_start", "alarm_end", "timer_minutes", "is_active",
         "refresh_mode", "refresh_anchor_at", "refresh_enabled",
     }
+    if not partial:
+        # 创建与编辑白名单分离（2026-09-27 Review HIGH）：窗口字段仅在创建
+        # 入口接受；编辑（PATCH）在批次 6 的 current/future 语义与完整校验
+        # 落地前明确拒绝（见下方专用检查），不得静默忽略或绕过校验写入。
+        allowed |= {"window_start_tod", "window_end_tod"}
+    if partial and ("window_start_tod" in payload or "window_end_tod" in payload):
+        raise PlanningError("invalid_payload", "可安排时段暂不支持编辑", 400)
     unknown = set(payload) - allowed
     if unknown:
         raise PlanningError("invalid_payload", f"unsupported fields: {', '.join(sorted(unknown))}")
@@ -537,24 +554,29 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
         result["estimated_minutes"] = (
             parse_duration_shorthand(raw, "estimated_minutes") if raw is not None else None
         )
-    if "est_start_tod" in payload:
-        raw = payload.get("est_start_tod")
-        result["est_start_tod"] = _tod_str(raw, "est_start_tod")
-    if "est_end_tod" in payload:
-        raw = payload.get("est_end_tod")
-        result["est_end_tod"] = _tod_str(raw, "est_end_tod")
+    if "window_start_tod" in payload:
+        raw = payload.get("window_start_tod")
+        result["window_start_tod"] = _tod_str(raw, "window_start_tod")
+    if "window_end_tod" in payload:
+        raw = payload.get("window_end_tod")
+        result["window_end_tod"] = _tod_str(raw, "window_end_tod")
+    if result.get("window_start_tod") or result.get("window_end_tod"):
+        # 形状校验与批次 1 领域构造同源：start == end 无效（不解释为 24h
+        # 窗口）；单侧约束合法。boundary 跨越与可行性在创建入口校验。
+        try:
+            _task_window_template(result)
+        except ValueError as exc:
+            raise PlanningError(
+                "invalid_payload",
+                "可安排时段的开始与结束不能相同（相同时刻不代表 24 小时窗口）", 400,
+            ) from exc
 
-    # 决策 12：起止与耗时同时出现时以起止为准。
-    if result.get("est_start_tod"):
-        result["time_mode"] = "explicit"
     if not partial:
         result.setdefault("time_mode", "duration")
         for flag in ("is_fixed", "is_hollow", "alarm_start", "alarm_end"):
             result.setdefault(flag, False)
         result.setdefault("is_active", True)
 
-    if "is_fixed" in payload:
-        result["is_fixed"] = _clean_bool(payload.get("is_fixed"), "is_fixed")
     if "alarm_start" in payload:
         result["alarm_start"] = _clean_bool(payload.get("alarm_start"), "alarm_start")
     if "alarm_end" in payload:
@@ -566,13 +588,6 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
         )
     if "is_active" in payload:
         result["is_active"] = _clean_bool(payload.get("is_active"), "is_active")
-
-    if "deadline_tod" in payload:
-        raw = payload.get("deadline_tod")
-        result["deadline_tod"] = _tod_str(raw, "deadline_tod")
-    if "deadline_end_tod" in payload:
-        raw = payload.get("deadline_end_tod")
-        result["deadline_end_tod"] = _tod_str(raw, "deadline_end_tod")
 
     if "is_hollow" in payload:
         result["is_hollow"] = _clean_bool(payload.get("is_hollow"), "is_hollow")
@@ -587,23 +602,14 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
         if field in payload:
             result[field] = _clean_int(payload.get(field), field, lo=1, hi=1440)
 
-    if result.get("deadline_end_tod") and not (
-        result.get("deadline_tod")
-        or (partial and "deadline_tod" not in payload)
-    ):
-        raise PlanningError("invalid_payload", "deadline_end_tod requires deadline_tod")
-
     if not partial:
         mode = result.get("time_mode", "duration")
         if mode == "explicit":
-            if not result.get("est_start_tod"):
-                raise PlanningError("invalid_payload", "est_start_tod is required for explicit time mode")
-            if not result.get("est_end_tod") and not result.get("estimated_minutes"):
-                raise PlanningError(
-                    "invalid_payload",
-                    "explicit tasks need est_end_tod or estimated_minutes",
-                )
-        elif not result.get("estimated_minutes") and not result.get("est_start_tod"):
+            # 显式起止随窗口批次停止新写入：新任务一律为耗时（+ 可选时段）。
+            raise PlanningError(
+                "invalid_payload", "显式起止已停用：请改用预计耗时与可安排时段", 400,
+            )
+        if not result.get("estimated_minutes"):
             raise PlanningError("invalid_payload", "estimated_minutes is required for duration tasks")
         if result.get("is_hollow"):
             for field in (
@@ -615,11 +621,6 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
                 raise PlanningError("invalid_payload", "hollow_start_content is required for hollow tasks")
             if not (result.get("hollow_end_content") or result.get("content")):
                 raise PlanningError("invalid_payload", "hollow_end_content is required for hollow tasks")
-        if result.get("deadline_end_tod") and not result.get("deadline_tod"):
-            raise PlanningError("invalid_payload", "deadline_end_tod requires deadline_tod")
-    else:
-        if result.get("time_mode") == "explicit" and "est_start_tod" in result and not result.get("est_start_tod"):
-            raise PlanningError("invalid_payload", "est_start_tod cannot be empty for explicit tasks")
 
     return result
 
@@ -708,6 +709,9 @@ def serialize_occurrence(occ: dict[str, Any], task: dict[str, Any], now: datetim
         "fixed_source": occ.get("fixed_source"),
         "schedule_managed": occ.get("schedule_managed"),
         "is_limited": occ.get("is_limited", False),
+        # 生成时冻结的实例窗口（§6.7）；NULL = 无该端约束。
+        "window_start_at": occ.get("window_start_at"),
+        "window_end_at": occ.get("window_end_at"),
         "is_hollow": is_hollow,
         "deadline_at": deadline_at,
         "alarm_start": task.get("alarm_start", False),
@@ -739,6 +743,10 @@ def serialize_task(task: dict[str, Any], now: datetime) -> dict[str, Any]:
         "target_date": task.get("target_date"),
         "time_mode": task["time_mode"],
         "estimated_minutes": task.get("estimated_minutes"),
+        # 模板窗口（2026-09-27 窗口批次的新业务事实来源）；旧 explicit /
+        # deadline 字段仅为存量行兼容保留，停止新写入。
+        "window_start_tod": task.get("window_start_tod"),
+        "window_end_tod": task.get("window_end_tod"),
         "est_start_tod": task.get("est_start_tod"),
         "est_end_tod": task.get("est_end_tod"),
         "is_fixed": task.get("is_fixed", False),
@@ -765,10 +773,87 @@ def serialize_task(task: dict[str, Any], now: datetime) -> dict[str, Any]:
 
 # ── 任务 CRUD ─────────────────────────────────────────────────────
 
+def _task_window_template(task: dict[str, Any]) -> WindowTemplate | None:
+    """任务行的可安排时段模板（§6.7）；两端皆空 = 无窗口，正常自动排程。
+
+    行内值与 payload 规范化结果同为 ``HH:MM`` 字符串；数据库返回的
+    ``HH:MM:SS`` 同样可解析（秒为 0，与模板分钟精度契约一致）。
+    形状非法（start == end）由 :class:`WindowTemplate` 构造拒绝。
+    """
+    start = task.get("window_start_tod")
+    end = task.get("window_end_tod")
+    if not start and not end:
+        return None
+    return WindowTemplate(
+        start_tod=time.fromisoformat(start) if start else None,
+        end_tod=time.fromisoformat(end) if end else None,
+    )
+
+
+def _window_occupancy_minutes(task: dict[str, Any]) -> int | None:
+    """窗口可行性判断的占用跨度（§12.1 / §17.4）：
+    普通待办 = 预计耗时；中空待办 = 开始 + 等待 + 结束的整个包络。"""
+    if task.get("is_hollow"):
+        return hollow_envelope_minutes(
+            task["hollow_start_minutes"], task["hollow_wait_minutes"],
+            task["hollow_end_minutes"],
+        )
+    return task.get("estimated_minutes")
+
+
+def _validate_window_creation(row: dict[str, Any], now: datetime) -> None:
+    """创建入口的窗口与产品边界校验（§10 / §12.1 / §30.6 / §32.40 / §32.41）。
+
+    * once 目标日期不得早于当前业务日期（Asia/Shanghai 当日，自然日比较）；
+      系统补生成路径不经过本入口，不受此限；
+    * 双侧窗口禁止跨越每日刷新 boundary（端点接触合法；单侧约束不校验）；
+    * 指定日期 once 按严格自然日解析（不按生成时刻顺延），窗口在创建时
+      已经不可容纳占用跨度 → 直接拒绝（不顺延到下一候选）；only-earliest
+      保持「只有下界」语义，不凭空补截止；
+    * 未指定日期路径按当前周期候选解析后判断剩余空间（§12.1）。
+    解析与可行性判断全部调用批次 1 领域函数，与生成冻结共用同一套数学。
+    """
+    if row.get("task_type") == "once":
+        today = _cst_date(now)
+        target = _parse_date(row.get("target_date"), "target_date")
+        if target < today:
+            raise PlanningError(
+                "invalid_payload",
+                f"目标日期不能早于当前业务日期（{today.isoformat()}）", 400,
+            )
+    template = _task_window_template(row)
+    if template is None:
+        return
+    occupancy = _window_occupancy_minutes(row)
+    if not isinstance(occupancy, int) or occupancy < 1:
+        raise PlanningError("invalid_payload", "填写了可安排时段的待办必须提供有效预计耗时", 400)
+    boundary, _, _ = _load_boundary_state(now)
+    try:
+        validate_template_window(template, boundary)
+    except ValueError as exc:
+        raise PlanningError(
+            "invalid_payload",
+            f"可安排时段不能跨越每日刷新时间 {boundary.strftime('%H:%M')}，请调整时段", 400,
+        ) from exc
+    if row["task_type"] == "once":
+        # 指定日期 once：user 自然日期 + 时刻组合成固定绝对约束，不做
+        # 候选取舍（§32.41）；创建时已不可用即拒绝，绝不顺延。
+        resolved = resolve_window_on_date(
+            template, _parse_date(row["target_date"], "target_date"))
+    else:
+        resolved = resolve_window(template, _current_cycle(now).key, now)
+    if not window_feasible(resolved, now, occupancy):
+        raise PlanningError(
+            "invalid_payload",
+            f"可安排时段剩余空间不足以容纳预计耗时 {occupancy} 分钟，请调整时段或耗时", 400,
+        )
+
+
 def create_task(payload: Any, now: datetime | None = None) -> dict[str, Any]:
     now = now or _now()
     row = validate_task_payload(payload, partial=False)
     _prepare_refresh_definition(row, now)
+    _validate_window_creation(row, now)
     row["created_at"] = _iso(now)
     row["updated_at"] = _iso(now)
     row["is_fixed"] = bool(row.get("is_fixed"))
@@ -997,18 +1082,69 @@ def list_tasks(include_inactive: bool = True, now: datetime | None = None) -> li
 
 # ── 出现实例生成（只依据任务定义与规则游标） ──────────────────────
 
-def _occurrence_est(task: dict[str, Any], schedule_date: date) -> tuple[datetime | None, datetime | None]:
-    """单条目 / 中空开始阶段的预估起止。"""
-    if task.get("time_mode") != "explicit" or not task.get("est_start_tod"):
-        return None, None
-    start = _combine(schedule_date, time.fromisoformat(task["est_start_tod"]))
-    if task.get("est_end_tod"):
-        end = _combine(schedule_date, time.fromisoformat(task["est_end_tod"]))
-        if end <= start:
-            end += timedelta(days=1)
-        return start, end
-    minutes = task.get("estimated_minutes")
-    return start, (start + timedelta(minutes=minutes)) if minutes else None
+def _once_schedule_date(
+    task: dict[str, Any], configured: time, transition: BoundaryTransition | None,
+) -> date:
+    """指定日期 once 的内部规划周期归属（2026-09-27 分离裁决，§32.41）。
+
+    * 双端窗口 / 只有最早开始 → 窗口起点绝对时刻所属规划周期；
+    * 只有最晚完成 → 该唯一指定时刻所属规划周期；
+    * 无窗口 → target_date（现行规则沿用）。
+
+    boundary 只参与此内部归属换算（时间早于 boundary 自然归属前一天），
+    不得改写 target_date 或绝对窗口；结果允许早于 target_date。
+    """
+    target = _parse_date(task["target_date"], "target_date")
+    template = _task_window_template(task)
+    if template is None or template.is_empty:
+        return target
+    resolved = resolve_window_on_date(template, target)
+    instant = resolved.start_at if resolved.start_at is not None else resolved.end_at
+    return planning_cycle_at(instant, configured, transition).key
+
+
+def _resolve_generation_window(
+    task: dict[str, Any], schedule_date: date, now: datetime,
+) -> tuple[ResolvedWindow | None, datetime | None, datetime | None]:
+    """把模板窗口解析为本轮冻结的实例窗口，并给出零自由度预锚定 est。
+
+    * 解析全部调用批次 1 领域函数，不在本模块重写窗口数学，并按「是否
+      指定日期」二分（§6.7、§32.41，两类语义不得混用）：
+      **once（指定日期）**——严格自然日解析（``resolve_window_on_date``，
+      锚点 = target_date 而非本轮 schedule_date）：user 日期 + 时刻组合成
+      固定绝对约束，不按生成时刻做候选取舍、不顺延、不改写；
+      **周期任务（未指定日期）**——候选解析（``resolve_window``，锚点 =
+      本轮 schedule_date，参考时刻 = 本轮生成时刻）；
+    * 窗口在生成时一次解析并随行写入 ``window_start_at`` / ``window_end_at``
+      （§6.7 生成即冻结）；顺延、展示周期变化、模板后续修改均不改写；
+    * 零自由度（双侧窗口长恰等于占用跨度：普通 = 预计耗时；中空 = 整个
+      包络跨度）时预锚定 est 在窗口起点——沿用原 explicit 分支的 rule 固定
+      所有权写入形状（机制继承，§13.2 固定由时间约束涌现，不是独立属性）；
+      中空结束阶段经等待链在窗口终点收口（§17.4 包络）；
+    * 单侧约束 / 非零自由度 / 无窗口不预锚定，est 留待排程层派生。
+    """
+    template = _task_window_template(task)
+    if template is None:
+        return None, None, None
+    if task["task_type"] == "once":
+        resolved = resolve_window_on_date(
+            template, _parse_date(task["target_date"], "target_date"))
+    else:
+        resolved = resolve_window(template, schedule_date, now)
+    occupancy = _window_occupancy_minutes(task)
+    if (resolved.start_at is None or resolved.end_at is None
+            or not isinstance(occupancy, int) or occupancy < 1):
+        return resolved, None, None
+    # 绝对瞬间域比较（回拨日钟面差 ≠ 绝对差，见 planning_window._absolute）。
+    span = (resolved.end_at.astimezone(timezone.utc)
+            - resolved.start_at.astimezone(timezone.utc))
+    if span != timedelta(minutes=occupancy):
+        return resolved, None, None
+    est_start = resolved.start_at
+    est_end = est_start + timedelta(
+        minutes=task["hollow_start_minutes"] if task.get("is_hollow") else occupancy,
+    )
+    return resolved, est_start, est_end
 
 
 def _generation_snapshots(
@@ -1016,9 +1152,13 @@ def _generation_snapshots(
 ) -> dict[str, Any]:
     """生成时冻结的展示 / 规则快照（BF5）。
 
-    任务定义后续修改只影响未来实例：已生成实例的名称、中空阶段文案、
-    time_mode 与有效截止时刻一律取自本行快照，序列化绝不回读任务当前
-    定义。deadline_at 的唯一后续写入是需求 18.3 的开放实例同步。
+    任务定义后续修改只影响未来实例：已生成实例的名称、中空阶段文案与
+    time_mode 一律取自本行快照，序列化绝不回读任务当前定义。
+
+    窗口批次（2026-09-27）：``deadline_at`` 生成期停止写入——新行恒 NULL，
+    ``is_limited`` 恒 False（满足 1A 身份 CHECK 形状）；存量限时行按历史
+    语义走完生命周期（迁移表「停止新写入但暂时保留兼容」）。窗口事实由
+    ``_resolve_generation_window`` 随行写入并冻结。
     """
     if phase == "start":
         display = f"{task.get('hollow_start_content') or task['content']}·开始"
@@ -1026,15 +1166,11 @@ def _generation_snapshots(
         display = f"{task.get('hollow_end_content') or task['content']}·结束"
     else:
         display = task["content"]
-    deadline_at = None
-    end_tod = task.get("deadline_end_tod") or task.get("deadline_tod")
-    if task.get("deadline_tod") and end_tod:
-        deadline_at = _iso(_combine(schedule_date, time.fromisoformat(end_tod)))
     return {
         "content_snapshot": task["content"],
         "display_content": display,
         "time_mode_snapshot": task["time_mode"],
-        "deadline_at": deadline_at,
+        "deadline_at": None,
     }
 
 
@@ -1042,11 +1178,12 @@ def _occurrence_row(
     task: dict[str, Any], phase: str | None,
     est_start: datetime | None, est_end: datetime | None, now: datetime,
     identity: OccurrenceIdentity,
+    window: ResolvedWindow | None = None,
 ) -> dict[str, Any]:
+    # est 仅来自零自由度窗口预锚定（explicit 分支已退役）：预锚定即 rule
+    # 固定所有权（机制继承）；无预锚定时 est 留待排程层派生。
     source = "rule" if est_start is not None else "unassigned"
-    fixed = bool(est_start is not None and (
-        task.get("is_fixed") or task.get("time_mode") == "explicit"
-    ))
+    fixed = est_start is not None
     ownership = EstimatedTimeOwnership(
         source=source,
         fixed_source="rule" if fixed else None,
@@ -1082,7 +1219,9 @@ def _occurrence_row(
         "estimated_time_source": ownership.source,
         "fixed_source": ownership.fixed_source,
         "schedule_managed": ownership.schedule_managed,
-        "is_limited": task.get("deadline_tod") is not None,
+        "is_limited": False,  # 窗口批次：生成期停止写入 deadline 事实
+        "window_start_at": _iso(window.start_at) if window and window.start_at else None,
+        "window_end_at": _iso(window.end_at) if window and window.end_at else None,
         "source": "schedule",
         **_generation_snapshots(task, identity.schedule_date, phase),
         "created_at": _iso(now),
@@ -1119,7 +1258,7 @@ def _create_occurrences(
     display_cycle = (current_cycle if fixed_mode and due_at is not None and due_at <= now
                      else max(schedule_date, current_cycle))
     display_reason = "carryover" if display_cycle > schedule_date else "initial"
-    est_start, est_end = _occurrence_est(task, schedule_date)
+    window, est_start, est_end = _resolve_generation_window(task, schedule_date, now)
     rows: list[dict[str, Any]] = []
     if task.get("is_hollow"):
         wait = timedelta(minutes=task["hollow_wait_minutes"])
@@ -1130,13 +1269,13 @@ def _create_occurrences(
         for phase, start, end in (("start", est_start, est_end), ("end", end_start, end_end)):
             identity = OccurrenceIdentity(task["id"], round_key, schedule_date, display_cycle,
                                           display_reason, phase, group)
-            rows.append(_occurrence_row(task, phase, start, end, now, identity))
+            rows.append(_occurrence_row(task, phase, start, end, now, identity, window=window))
             if fixed_mode and due_at is not None:
                 rows[-1]["fixed_due_at"] = _iso(due_at)
     else:
         identity = OccurrenceIdentity(task["id"], round_key, schedule_date, display_cycle,
                                       display_reason)
-        rows.append(_occurrence_row(task, None, est_start, est_end, now, identity))
+        rows.append(_occurrence_row(task, None, est_start, est_end, now, identity, window=window))
         if fixed_mode and due_at is not None:
             rows[-1]["fixed_due_at"] = _iso(due_at)
     if generation_request_key:
@@ -1328,8 +1467,19 @@ def _reconcile_task_rounds(
         raise PlanningError("invalid_task", "任务刷新模式与类型不匹配", 409) from exc
     today = cycle.key
     can_generate = task.get("refresh_enabled") is not False and (mode != "daily" or daily_enabled)
+    # 窗口批次收口（2026-09-27 Review MEDIUM + 第二轮 HIGH）：time_mode=
+    # 'explicit' 属旧模型任务定义。三类关注点显式分离，不整体跳过维护：
+    # * generation（新生成）→ 对 legacy explicit **永久禁止**（不繁殖旧模型
+    #   新实例，也不静默生成畸形 unassigned 实例）；
+    # * expiration（固定型到期清理）→ 与正常路径一致受 refresh_enabled 控制
+    #   （需求 24：暂停时到期清理一并冻结）——由下方各分支既有的
+    #   can_generate 门控自然继承，legacy 不另开清理路径；
+    # * existing occurrence maintenance（存量实例维护）→ 继续保留（顺延、
+    #   到期清理按各自规则照常），任务定义等待受控处置（部署前可清理，
+    #   不自动转换，见施工计划 §10.2）。
+    legacy_definition = task.get("time_mode") == "explicit"
     if mode == "daily":
-        if can_generate:
+        if can_generate and not legacy_definition:
             task_created = _parse_dt(task["created_at"], "created_at")
             first_cycle = planning_cycle_at(task_created, configured, transition).key
             if today >= first_cycle and (today == first_cycle or cycle.start >= task_created):
@@ -1337,15 +1487,19 @@ def _reconcile_task_rounds(
                 created += _create_occurrences(client, task, today, now, due_at=due,
                                                display_cycle_date=today)
     elif mode == "none":
-        target = (_parse_date(task["target_date"], "target_date")
-                  if task["task_type"] == "once"
-                  else planning_cycle_at(
-                      _parse_dt(task["created_at"], "created_at"),
-                      configured, transition).key)
-        if can_generate and target <= today:
-            created += _create_occurrences(client, task, target, now, display_cycle_date=today)
+        if task["task_type"] == "once":
+            # 日期分离裁决（§32.41）：指定日期 once 的 schedule_date 由严格
+            # 自然日窗口反推（内部周期身份，可早于 target_date），生成门随
+            # 之提前到该内部周期；无窗口 once 沿用 schedule_date = target_date。
+            schedule = _once_schedule_date(task, configured, transition)
+        else:
+            schedule = planning_cycle_at(
+                _parse_dt(task["created_at"], "created_at"),
+                configured, transition).key
+        if can_generate and not legacy_definition and schedule <= today:
+            created += _create_occurrences(client, task, schedule, now, display_cycle_date=today)
     elif mode == "after_completion":
-        if can_generate:
+        if can_generate and not legacy_definition:
             due = _after_completion_due(client, task)
             if due is not None and due <= now:
                 due_cycle = PlanningCycle.at(due, cycle.start.timetz().replace(tzinfo=None)).key
@@ -1354,21 +1508,26 @@ def _reconcile_task_rounds(
     else:
         events = _fixed_rounds(task, cycle, now, configured, transition, absorbed)
         if can_generate:
-            through = task.get("refresh_generated_through")
-            checked = _parse_date(through, "refresh_generated_through") if through else None
-            for day, due in events:
-                if checked is not None and day <= checked:
-                    continue
-                # A fixed-interval round is born in the cycle that generates
-                # it; calendar rounds keep their own cycle date as identity.
-                schedule = today if mode == "fixed_interval" else day
-                created += _create_occurrences(client, task, schedule, now, due_at=due,
-                                               display_cycle_date=today)
-                client.table("planning_task").update({
-                    "refresh_generated_through": day.isoformat(), "updated_at": _iso(now),
-                }).eq("id", task["id"]).execute()
+            if not legacy_definition:
+                through = task.get("refresh_generated_through")
+                checked = _parse_date(through, "refresh_generated_through") if through else None
+                for day, due in events:
+                    if checked is not None and day <= checked:
+                        continue
+                    # A fixed-interval round is born in the cycle that generates
+                    # it; calendar rounds keep their own cycle date as identity.
+                    schedule = today if mode == "fixed_interval" else day
+                    created += _create_occurrences(client, task, schedule, now, due_at=due,
+                                                   display_cycle_date=today)
+                    client.table("planning_task").update({
+                        "refresh_generated_through": day.isoformat(), "updated_at": _iso(now),
+                    }).eq("id", task["id"]).execute()
+            # 到期清理只受 refresh_enabled 控制（暂停即冻结，需求 24）——
+            # legacy 门禁只禁止新生成，不影响存量轮次的到期死亡。
             timed_out += _expire_fixed_rounds(client, task, events, now)
     _carry_open_rounds(client, task, today, now)
+    if legacy_definition:
+        log.warning("planning 旧显式任务定义停止生成新轮次: task=%s", task["id"])
     return created, timed_out, events
 
 
@@ -2924,6 +3083,14 @@ def complete_task_early(
             occ["id"], {"status": "completed", "actual_end": _iso(now)}, now,
         )
     else:
+        if task.get("time_mode") == "explicit":
+            # 窗口批次收口（2026-09-27 Review MEDIUM）：额外完成记录继承
+            # 生成时快照，旧显式定义不得再产生带 explicit 快照的新行；存量
+            # 开放轮次仍可正常完成（走上方分支，不产生新行）。
+            raise PlanningError(
+                "legacy_task_definition",
+                "旧显式起止任务定义已停止产生新的完成记录，请在受控处置中重建任务", 409,
+            )
         if task["refresh_mode"] == "after_completion":
             # BF3（第七轮）30 分钟防重复窗口：最近一次已经成功成立的完成
             # 事实（服务端持久化的 last_handled_at / 最新 early 行的 handled
@@ -2978,7 +3145,8 @@ def complete_task_early(
             "estimated_time_source": "unassigned",
             "fixed_source": None,
             "schedule_managed": True,
-            "is_limited": task.get("deadline_tod") is not None,
+            # 窗口批次：deadline 事实生成期停止写入，与 _generation_snapshots 一致
+            "is_limited": False,
             "closed_at": _iso(now),
             "handled_at": _iso(now),
             "source": "early",

@@ -545,33 +545,29 @@ def test_bf5_scenario_j_rename_keeps_generated_occurrence_name():
         assert item_b["content"] == "学日语"
 
 
-def test_bf5_scenario_k_time_mode_hollow_and_deadline_frozen():
-    # K：time_mode / 中空阶段内容 / deadline 的已生成实例不被任务编辑重新
-    # 解释；开放实例的限时窗口按 18.3 同步，关闭历史保持冻结。
+def test_bf5k_seeded_legacy_snapshot_reader_compatibility():
+    # BF5-K 读取兼容保护（Review MEDIUM）：已生成历史 occurrence 不得被当前
+    # task definition 重新解释。直接播种存量实例：occ 快照 explicit + 截止
+    # 22:00；当前 task 已是 duration、旧 deadline 定义为 20:00（与历史不同）。
+    # 读取必须返回 occ 自己的 explicit 历史模式与 22:00 历史截止。
     with Context() as c:
-        c.create("daily", at(23), time_mode="explicit", est_start_tod="08:00",
-                 est_end_tod="09:00", deadline_tod="18:00")
-        planning.generate_due(at(24, 6))
-        a = next(row for row in c.rows if row["round_key"] == "cycle:2026-09-24")
-        assert a["time_mode_snapshot"] == "explicit"
-        assert a["deadline_at"] == at(24, 18).isoformat()
-        # 任务定义改为 duration + 新截止
-        planning.update_task(
-            1, {"time_mode": "duration", "estimated_minutes": 30, "deadline_tod": "20:00"},
-            at(24, 7),
-        )
-        # 开放实例：限时窗口同步（18.3），time_mode 保持生成时快照
-        row = next(row for row in c.rows if row["id"] == a["id"])
-        assert row["deadline_at"] == at(24, 20).isoformat()
-        assert row["time_mode_snapshot"] == "explicit"
-        serialized = planning.serialize_occurrence(row, c.db.rows["planning_task"][0], at(24, 8))
+        c.create("daily", at(23), estimated_minutes=30)
+        task_row = c.db.rows["planning_task"][0]
+        # 当前任务定义与历史快照**故意不同**
+        task_row["time_mode"] = "duration"
+        task_row["deadline_tod"] = "20:00"
+        occ = c.rows[0]
+        occ.update({
+            "time_mode_snapshot": "explicit",
+            "is_limited": True,
+            "deadline_at": at(24, 22).isoformat(),
+        })
+        serialized = planning.serialize_occurrence(occ, task_row, at(25, 8))
         assert serialized["time_mode"] == "explicit"
-        assert serialized["deadline_at"] == at(24, 20).isoformat()
-        # 关闭后任务再改截止：关闭历史不被重新解释
-        planning.set_occurrence_status(row["id"], {"status": "completed"}, at(24, 9))
-        planning.update_task(1, {"deadline_tod": "22:00"}, at(24, 10))
-        closed = next(row for row in c.rows if row["id"] == a["id"])
-        assert closed["deadline_at"] == at(24, 20).isoformat()
+        assert serialized["deadline_at"] == at(24, 22).isoformat()
+        # 直接读取行同样不被任务定义改写（快照原样保留）
+        assert occ["time_mode_snapshot"] == "explicit"
+        assert occ["deadline_at"] == at(24, 22).isoformat()
 
 
 def test_bf5_hollow_stage_content_frozen():

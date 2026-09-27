@@ -759,11 +759,16 @@ class PlanningIdentityPathTests(unittest.TestCase):
         self.assertIsNone(occ["est_end"])
         self.assertEqual(occ["for_date"], "2026-09-24")
 
-    def test_rule_fixed_time_cannot_be_relabelled_as_automatic(self):
-        planning.create_task({"content": "规则固定", "task_type": "daily", "time_mode": "explicit",
-                              "est_start_tod": "08:00", "est_end_tod": "09:00"}, self.now)
+    def test_zero_freedom_window_rule_fixed_cannot_be_relabelled_as_automatic(self):
+        # 零自由度窗口（窗口长恰等于占用跨度）生成期预锚定为 rule 固定
+        # （机制继承原 explicit 分支，§13.2）；实例 patch 不能释放规则固定。
+        planning.create_task({"content": "规则固定", "task_type": "daily",
+                              "estimated_minutes": 60,
+                              "window_start_tod": "08:00", "window_end_tod": "09:00"}, self.now)
         occ = self.db.rows["planning_occurrence"][0]
-        self.assertEqual((occ["estimated_time_source"], occ["fixed_source"]), ("rule", "rule"))
+        self.assertEqual((occ["estimated_time_source"], occ["fixed_source"], occ["is_fixed"]),
+                         ("rule", "rule", True))
+        self.assertEqual(occ["est_start"], datetime(2026, 9, 24, 8, tzinfo=BEIJING).isoformat())
         before = len(self.db.writes)
         with self.assertRaises(planning.PlanningError) as error:
             planning.patch_occurrence(occ["id"], {"is_fixed": False}, self.now)
@@ -771,86 +776,56 @@ class PlanningIdentityPathTests(unittest.TestCase):
         self.assertEqual(len(self.db.writes), before)
         self.assertEqual((occ["estimated_time_source"], occ["fixed_source"]), ("rule", "rule"))
 
-    def test_task_rule_time_edit_keeps_generated_instance_frozen(self):
-        # 规则修改只影响未来：已生成实例的身份与实例级数据（含预估时间）冻结，
-        # 不因任务定义变化被改写或清空。
-        planning.create_task({"content": "规则固定", "task_type": "daily", "time_mode": "explicit",
-                              "est_start_tod": "08:00", "est_end_tod": "09:00",
-                              "is_fixed": True}, self.now)
+    def test_task_rule_edit_keeps_windowed_instance_frozen(self):
+        # 规则修改只影响未来：已生成实例的身份与实例级数据（含冻结窗口与
+        # 预估时间）不因任务定义变化被改写或清空。
+        planning.create_task({"content": "规则固定", "task_type": "daily",
+                              "estimated_minutes": 60,
+                              "window_start_tod": "08:00", "window_end_tod": "09:00"}, self.now)
         task = self.db.rows["planning_task"][0]
         occ = self.db.rows["planning_occurrence"][0]
-        self.assertEqual((occ["est_start"], occ["estimated_time_source"], occ["fixed_source"]),
-                         (datetime(2026, 9, 24, 8, tzinfo=BEIJING).isoformat(), "rule", "rule"))
+        self.assertEqual(occ["est_start"], datetime(2026, 9, 24, 8, tzinfo=BEIJING).isoformat())
         with mock.patch.object(planning, "_generate_due_quietly") as generate:
-            planning.update_task(task["id"], {"time_mode": "duration", "estimated_minutes": 60}, self.now)
+            planning.update_task(task["id"], {"estimated_minutes": 90}, self.now)
         generate.assert_called_once()
         self.assertEqual((occ["est_start"], occ["estimated_time_source"], occ["fixed_source"],
                           occ["is_fixed"], occ["schedule_managed"]),
                          (datetime(2026, 9, 24, 8, tzinfo=BEIJING).isoformat(), "rule", "rule",
                           True, True))
-        self.assertIsNone(task["est_start_tod"])
-        self.assertIsNone(task["est_end_tod"])
-        self.assertFalse(task["is_fixed"])
+        self.assertEqual(occ["window_start_at"],
+                         datetime(2026, 9, 24, 8, tzinfo=BEIJING).isoformat())
+        self.assertEqual(occ["window_end_at"],
+                         datetime(2026, 9, 24, 9, tzinfo=BEIJING).isoformat())
         # 实例保留规则固定时间，不参与自动排程。
         self.assertFalse(planning._freely_schedulable(occ, task))
 
-    def test_rule_anchor_cannot_be_cleared_while_time_mode_stays_explicit(self):
-        planning.create_task({"content": "规则固定", "task_type": "daily", "time_mode": "explicit",
-                              "est_start_tod": "08:00", "est_end_tod": "09:00"}, self.now)
+    def test_task_window_template_change_writes_new_window_only_on_future_rounds(self):
+        planning.create_task({"content": "规则固定", "task_type": "daily",
+                              "estimated_minutes": 60,
+                              "window_start_tod": "08:00", "window_end_tod": "09:00"}, self.now)
         task = self.db.rows["planning_task"][0]
         occ = self.db.rows["planning_occurrence"][0]
-        before = len(self.db.writes)
-        with self.assertRaises(planning.PlanningError):
-            planning.update_task(task["id"], {"est_start_tod": None}, self.now)
-        self.assertEqual(len(self.db.writes), before)
-        self.assertEqual((occ["est_start"], occ["estimated_time_source"], occ["fixed_source"]),
-                         (datetime(2026, 9, 24, 8, tzinfo=BEIJING).isoformat(), "rule", "rule"))
-
-    def test_rule_release_requires_duration_for_scheduler_takeover(self):
-        planning.create_task({"content": "规则固定", "task_type": "daily", "time_mode": "explicit",
-                              "est_start_tod": "08:00", "est_end_tod": "09:00"}, self.now)
-        task = self.db.rows["planning_task"][0]
-        occ = self.db.rows["planning_occurrence"][0]
-        before = len(self.db.writes)
-        with self.assertRaises(planning.PlanningError):
-            planning.update_task(task["id"], {"time_mode": "duration"}, self.now)
-        self.assertEqual(len(self.db.writes), before)
-        self.assertEqual((occ["estimated_time_source"], occ["fixed_source"]), ("rule", "rule"))
-
-    def test_task_rule_time_change_writes_new_rule_time_only_on_future_rounds(self):
-        planning.create_task({"content": "规则固定", "task_type": "daily", "time_mode": "explicit",
-                              "est_start_tod": "08:00", "est_end_tod": "09:00"}, self.now)
-        task = self.db.rows["planning_task"][0]
-        occ = self.db.rows["planning_occurrence"][0]
-        with mock.patch.object(planning, "_generate_due_quietly"):
-            planning.update_task(task["id"], {"est_start_tod": "10:00", "est_end_tod": "11:00"}, self.now)
-        # 当前实例保持生成时的规则时间（已生成实例冻结）。
+        # 当前实例保持生成时的冻结窗口与预锚定（已生成实例冻结）。
         self.assertEqual((occ["est_start"], occ["est_end"]),
                          (datetime(2026, 9, 24, 8, tzinfo=BEIJING).isoformat(),
                           datetime(2026, 9, 24, 9, tzinfo=BEIJING).isoformat()))
         self.assertEqual((occ["estimated_time_source"], occ["fixed_source"], occ["is_fixed"]),
                          ("rule", "rule", True))
-        # 下一轮（尚未生成）才按新规则生成。
+        # 模板窗口修改（编辑入口接线属批次 6；此处播种任务行模拟）只影响
+        # 尚未生成的未来实例。
+        task["window_start_tod"] = "10:00"
+        task["window_end_tod"] = "11:00"
         created = planning._create_occurrences(self.db, task, date(2026, 9, 25), self.now)
         self.assertEqual(created, 1)
         future = self.db.rows["planning_occurrence"][-1]
         self.assertEqual((future["est_start"], future["est_end"]),
                          (datetime(2026, 9, 25, 10, tzinfo=BEIJING).isoformat(),
                           datetime(2026, 9, 25, 11, tzinfo=BEIJING).isoformat()))
+        self.assertEqual((future["window_start_at"], future["window_end_at"]),
+                         (datetime(2026, 9, 25, 10, tzinfo=BEIJING).isoformat(),
+                          datetime(2026, 9, 25, 11, tzinfo=BEIJING).isoformat()))
         self.assertEqual((future["estimated_time_source"], future["fixed_source"]),
                          ("rule", "rule"))
-
-    def test_task_deadline_edit_still_syncs_limited_flag_to_open_instances(self):
-        # 18.3 未废除：开放实例必须立即跟随新的限时约束。
-        planning.create_task({"content": "限时", "task_type": "daily",
-                              "estimated_minutes": 30}, self.now)
-        task = self.db.rows["planning_task"][0]
-        occ = self.db.rows["planning_occurrence"][0]
-        self.assertFalse(occ["is_limited"])
-        planning.update_task(task["id"], {"deadline_tod": "22:00"}, self.now)
-        self.assertTrue(occ["is_limited"])
-        planning.update_task(task["id"], {"deadline_tod": None}, self.now)
-        self.assertFalse(occ["is_limited"])
 
     def test_manual_time_edit_in_same_display_cycle_preserves_carryover_reason(self):
         planning.create_task({"content": "顺延", "task_type": "daily", "estimated_minutes": 30}, self.now)

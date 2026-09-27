@@ -16,6 +16,7 @@ from gateway.planning_window import (
     hollow_envelope_minutes,
     remaining_window_space,
     resolve_window,
+    resolve_window_on_date,
     validate_template_window,
     window_crosses_boundary,
     window_feasible,
@@ -626,3 +627,78 @@ def test_remaining_space_guarded_by_absolute_domain(monkeypatch):
     finally:
         monkeypatch.undo()
     assert remaining_window_space(window, cursor) == timedelta(minutes=165)
+
+
+# ── J. 严格指定自然日期解析（2026-09-27 分离裁决，once 专用路径） ──
+#
+# 指定日期解析的本质是「把 user 的自然日期 + 时刻组合成固定绝对约束」，
+# 不是「找候选」。曾评估用 reference = target 00:00 + 通用 resolve_window
+# 伪装，经四种形状核验不等价：only-latest 00:00 在候选语义下命中
+# 「reference 等号取下一次」滚到次日——故必须独立严格解析路径。
+
+def test_strict_double_sided_same_day_window():
+    resolved = resolve_window_on_date(
+        WindowTemplate(start_tod=time(3, 0), end_tod=time(5, 0)), ANCHOR)
+    assert (resolved.start_at, resolved.end_at) == (at(ANCHOR, 3), at(ANCHOR, 5))
+
+
+def test_strict_double_sided_cross_midnight_window():
+    resolved = resolve_window_on_date(
+        WindowTemplate(start_tod=time(23, 0), end_tod=time(2, 0)), ANCHOR)
+    assert (resolved.start_at, resolved.end_at) == (at(ANCHOR, 23), at(NEXT, 2))
+
+
+def test_strict_double_sided_midnight_end_lands_next_day():
+    # 22:00→00:00：终点 00:00 属跨午夜写法（00:00 < 22:00）→ 次日零点。
+    resolved = resolve_window_on_date(
+        WindowTemplate(start_tod=time(22, 0), end_tod=time(0, 0)), ANCHOR)
+    assert (resolved.start_at, resolved.end_at) == (at(ANCHOR, 22), at(NEXT, 0))
+
+
+def test_strict_only_earliest_freezes_target_day_instant():
+    resolved = resolve_window_on_date(WindowTemplate(start_tod=time(3, 0)), ANCHOR)
+    assert resolved.start_at == at(ANCHOR, 3)
+    assert resolved.end_at is None
+
+
+def test_strict_only_latest_midnight_stays_on_target_day():
+    # ★ 核心边界：only-latest 00:00 = 当日零点本身，绝不滚到次日
+    # （候选语义会给出 NEXT 00:00——严格路径存在的理由）。
+    resolved = resolve_window_on_date(WindowTemplate(end_tod=time(0, 0)), ANCHOR)
+    assert resolved.start_at is None
+    assert resolved.end_at == at(ANCHOR, 0)
+
+
+def test_strict_only_latest_freezes_target_day_instant():
+    resolved = resolve_window_on_date(WindowTemplate(end_tod=time(22, 0)), ANCHOR)
+    assert resolved.end_at == at(ANCHOR, 22)
+    assert resolved.start_at is None
+
+
+def test_strict_only_earliest_midnight_stays_on_target_day():
+    resolved = resolve_window_on_date(WindowTemplate(start_tod=time(0, 0)), ANCHOR)
+    assert resolved.start_at == at(ANCHOR, 0)
+    assert resolved.end_at is None
+
+
+def test_strict_empty_template_resolves_empty():
+    resolved = resolve_window_on_date(WindowTemplate(), ANCHOR)
+    assert resolved.start_at is None and resolved.end_at is None
+
+
+def test_strict_resolution_is_reference_free_and_deterministic():
+    # 同一模板同一日期，无论「生成时刻」为何（凌晨 / 窗口中 / 窗口后），
+    # 严格解析结果恒相同——窗口已过导致的不可行由 window_feasible 判定，
+    # 不由解析顺延。
+    template = WindowTemplate(start_tod=time(3, 0), end_tod=time(5, 0))
+    for hour in (0, 2, 4, 6, 23):
+        resolved = resolve_window_on_date(template, ANCHOR)
+        assert (resolved.start_at, resolved.end_at) == (at(ANCHOR, 3), at(ANCHOR, 5))
+
+
+def test_strict_path_differs_from_candidate_path_on_midnight_latest():
+    # 钉住两条路径的差异本身：同一 only-latest 00:00，候选语义（reference =
+    # 当日 00:00）滚到次日，严格语义冻结当日零点——证明二者不可互相伪装。
+    template = WindowTemplate(end_tod=time(0, 0))
+    assert resolve_window(template, ANCHOR, at(ANCHOR, 0)).end_at == at(NEXT, 0)
+    assert resolve_window_on_date(template, ANCHOR).end_at == at(ANCHOR, 0)
