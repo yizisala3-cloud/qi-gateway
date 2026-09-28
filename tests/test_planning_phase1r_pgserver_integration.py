@@ -248,14 +248,14 @@ insert into public.planning_occurrence (
     display_reason, status, sort_order, is_fixed, estimated_time_source,
     fixed_source, schedule_managed, is_limited, source,
     content_snapshot, display_content, time_mode_snapshot, deadline_at,
-    window_start_at, window_end_at,
+    window_start_at, window_end_at, fixed_expires_at,
     created_at, updated_at
 ) values (
     %(task_id)s, '2026-09-24', 'cycle:2026-09-24', '2026-09-24', '2026-09-24',
     'initial', 'pending', 10, false, 'unassigned',
     null, true, false, 'schedule',
     '背单词', '背单词', 'duration', null,
-    null, null,
+    null, null, null,
     '2026-09-24T06:00:00+08:00', '2026-09-24T06:00:00+08:00'
 ) returning id;
 """
@@ -326,6 +326,7 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
 
         窗口列（批次 2）默认 NULL=无窗口；可用 window_start_at /
         window_end_at 覆盖（aware ISO 字符串或 datetime 均可）。
+        fixed_expires_at（批次 5）默认 NULL=无冻结固定死亡边界。
         """
         schedule_date = overrides.pop("schedule_date", "2026-09-25")
         round_key = overrides.pop("round_key", f"cycle:{schedule_date}")
@@ -344,6 +345,7 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
                 str(schedule_date) if str(round_key).startswith("early:") else None),
             "window_start_at": overrides.pop("window_start_at", None),
             "window_end_at": overrides.pop("window_end_at", None),
+            "fixed_expires_at": overrides.pop("fixed_expires_at", None),
         }
         params.update(overrides)
         sql = """
@@ -353,7 +355,7 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
             estimated_time_source, fixed_source, schedule_managed, is_limited,
             source, early_period_date,
             content_snapshot, display_content, time_mode_snapshot, deadline_at,
-            window_start_at, window_end_at,
+            window_start_at, window_end_at, fixed_expires_at,
             created_at, updated_at
         ) values (
             %(task_id)s, %(schedule_date)s, %(round_key)s, %(schedule_date)s,
@@ -361,7 +363,7 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
             %(handled_at)s, 20, false, 'unassigned', null, true, false,
             %(source)s, %(early_period_date)s,
             '快照', '快照', 'duration', null,
-            %(window_start_at)s, %(window_end_at)s,
+            %(window_start_at)s, %(window_end_at)s, %(fixed_expires_at)s,
             '2026-09-24T06:00:00+08:00', '2026-09-24T06:00:00+08:00'
         ) returning id;
         """
@@ -1401,6 +1403,38 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
         # start == end 拒绝（不解释为 24h，§6.7）。
         with self.assertRaises(psycopg.errors.CheckViolation):
             self._windowed_task(_time(3, 0), _time(3, 0))
+
+    def test_fixed_expires_at_column_is_nullable_and_freezable(self):
+        # 批次 5 三轮裁决（20260928010000）：固定到期死亡边界实例级冻结——
+        # 列独立可空（非固定轮 / 存量行 NULL）、带值行落库后原值可读。
+        legacy = self._fresh_occurrence(
+            round_key="cycle:2026-10-27", schedule_date="2026-10-27")
+        frozen = self._fresh_occurrence(
+            round_key="cycle:2026-10-28", schedule_date="2026-10-28",
+            fixed_expires_at="2026-10-28T20:00:00+08:00",
+        )
+        rows = {
+            row[0]: row[1]
+            for row in self._query(
+                "select id, fixed_expires_at from public.planning_occurrence "
+                "where id = any(%(ids)s) order by id",
+                {"ids": [legacy, frozen]},
+            )
+        }
+        assert rows[legacy] is None
+        assert rows[frozen].isoformat() == "2026-10-28T20:00:00+08:00"
+        # 冻结值可改写为任意时刻（无 CHECK 约束边界——应用层无任何改写
+        # 路径，由测试矩阵锁定；此处仅验证列本身无静态约束）。
+        self._query(
+            "update public.planning_occurrence set fixed_expires_at = %(v)s "
+            "where id = %(id)s",
+            {"v": "2026-10-29T20:00:00+08:00", "id": frozen},
+        )
+        updated = self._query(
+            "select fixed_expires_at from public.planning_occurrence where id = %(id)s",
+            {"id": frozen},
+        )[0][0]
+        assert updated.isoformat() == "2026-10-29T20:00:00+08:00"
 
     def test_windowed_task_generation_shape_satisfies_identity_check(self):
         # §3.2：新窗口行（is_limited=false、deadline_at=null、

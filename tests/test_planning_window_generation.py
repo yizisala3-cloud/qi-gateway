@@ -378,8 +378,11 @@ def test_legacy_deadline_only_definition_still_generates_plain_rounds():
 
 
 def _seed_fixed_round_occurrence(c, task_id=9, due_day=17, due_hour=6,
-                                 status="pending", occ_id=1):
-    """播种一条带 fixed_due_at 的存量 schedule 轮次（到期清理的判定对象）。"""
+                                 status="pending", occ_id=1, expires_at=None):
+    """播种一条带 fixed_due_at 的存量 schedule 轮次（到期清理的判定对象）。
+
+    ``expires_at`` 模拟生成入口随行冻结的 fixed_expires_at（20260928010000）；
+    传 None 即存量无冻结事实的形状。"""
     c.db.rows["planning_occurrence"].append({
         "id": occ_id, "task_id": task_id,
         "round_key": f"cycle:2026-09-{due_day:02d}",
@@ -393,6 +396,7 @@ def _seed_fixed_round_occurrence(c, task_id=9, due_day=17, due_hour=6,
         "estimated_time_source": "unassigned", "fixed_source": None,
         "schedule_managed": True, "is_limited": False,
         "window_start_at": None, "window_end_at": None,
+        "fixed_expires_at": planning._iso(at(*expires_at)) if expires_at else None,
         "time_mode_snapshot": "explicit", "content_snapshot": "旧显式",
         "display_content": "旧显式", "deadline_at": None,
         "closed_at": None, "handled_at": None, "partial_at": None,
@@ -402,37 +406,41 @@ def _seed_fixed_round_occurrence(c, task_id=9, due_day=17, due_hour=6,
     })
 
 
-# 三种固定周期的暂停矩阵配置：(任务覆盖字段, 存量轮 fixed_due_at, 越过点运行日)。
+# 三种固定周期的暂停矩阵配置：(任务覆盖字段, 存量轮 fixed_due_at, 越过点运行日,
+# 生成时冻结的到期死亡边界 fixed_expires_at)。
 # 每种配置下「下一规则点」已越过：若到期清理未被暂停冻结，存量轮必被标 timeout。
 LEGACY_PAUSE_MATRIX = [
     ({"task_type": "interval", "refresh_mode": "fixed_interval", "interval_days": 3,
       "refresh_anchor_at": planning._iso(at(14, 7)), "created_at": planning._iso(at(14, 7))},
-     17, 7, 20),
-    ({"task_type": "weekly", "refresh_mode": "fixed_weekday", "weekdays": [3, 4],
-      "created_at": planning._iso(at(16, 12))},
-     17, 6, 18),
-    ({"task_type": "monthly", "refresh_mode": "fixed_monthday", "month_days": [10, 20],
-      "created_at": planning._iso(at(5, 12))},
-     10, 6, 20),
+     17, 7, 20, (20, 7)),
+    ({"task_type": "weekly", "refresh_mode": "fixed_weekday",
+      "weekdays": [3, 4], "created_at": planning._iso(at(16, 12))},
+     17, 6, 18, (18, 6)),
+    ({"task_type": "monthly", "refresh_mode": "fixed_monthday",
+      "month_days": [10, 20], "created_at": planning._iso(at(5, 12))},
+     10, 6, 20, (20, 6)),
 ]
 
 
-@pytest.mark.parametrize("task_overrides,due_day,due_hour,run_day", LEGACY_PAUSE_MATRIX)
+@pytest.mark.parametrize("task_overrides,due_day,due_hour,run_day,expires_at", LEGACY_PAUSE_MATRIX)
 @pytest.mark.parametrize("status", ["pending", "in_progress", "partial"])
 def test_paused_legacy_explicit_fixed_rounds_never_expire(
-        task_overrides, due_day, due_hour, run_day, status):
+        task_overrides, due_day, due_hour, run_day, expires_at, status):
     # 二轮 Review HIGH：9 组暂停矩阵——legacy explicit 固定型 + refresh_enabled=
     # false 时，越过下一规则点后不生成、不到期清理；pending / in_progress /
     # partial 全部保持原开放状态，不写 closed_at；展示顺延照常（维护存活）。
+    # 冻结的 fixed_expires_at 保留原值（暂停只暂停执行，不删不改冻结事实）。
     with Context() as c:
         _seed_legacy_explicit_task(c, task_id=9, refresh_enabled=False, **task_overrides)
         _seed_fixed_round_occurrence(c, task_id=9, due_day=due_day,
-                                     due_hour=due_hour, status=status)
+                                     due_hour=due_hour, status=status,
+                                     expires_at=expires_at)
         planning.generate_due(at(run_day, 7))
         assert len(c.rows) == 1  # 无新轮次繁殖
         occ = c.rows[0]
         assert occ["status"] == status
         assert occ["closed_at"] is None
+        assert occ["fixed_expires_at"] == planning._iso(at(*expires_at))
         # 暂停不冻结展示顺延：存量实例照常进入当前周期
         assert occ["display_cycle_date"] == f"2026-09-{run_day:02d}"
 
@@ -448,7 +456,8 @@ def test_paused_normal_duration_fixed_rounds_never_expire():
             task_type="interval", refresh_mode="fixed_interval", interval_days=3,
             refresh_anchor_at=planning._iso(at(14, 7)),
             created_at=planning._iso(at(14, 7)))
-        _seed_fixed_round_occurrence(c, task_id=9, due_day=17, due_hour=7, status="pending")
+        _seed_fixed_round_occurrence(c, task_id=9, due_day=17, due_hour=7, status="pending",
+                                     expires_at=(20, 7))
         planning.generate_due(at(20, 7))
         assert len(c.rows) == 1
         occ = c.rows[0]
@@ -458,12 +467,14 @@ def test_paused_normal_duration_fixed_rounds_never_expire():
 
 def test_enabled_legacy_explicit_still_expires_existing_fixed_rounds():
     # refresh_enabled=true 的 legacy explicit：generation 仍被永久禁止
-    # （无新 explicit 实例），但存量已到期的固定型开放实例照常执行到期清理。
+    # （无新 explicit 实例），但存量已到期的固定型开放实例照常执行到期清理
+    # ——closed_at 取生成时冻结的 fixed_expires_at（播种时无窗口）。
     with Context() as c:
         _seed_legacy_explicit_task(
             c, task_id=9, task_type="weekly", refresh_mode="fixed_weekday",
             weekdays=[3, 4], created_at=planning._iso(at(16, 12)))
-        _seed_fixed_round_occurrence(c, task_id=9, due_day=17, due_hour=6, status="pending")
+        _seed_fixed_round_occurrence(c, task_id=9, due_day=17, due_hour=6, status="pending",
+                                     expires_at=(18, 6))
         planning.generate_due(at(18, 7))
         assert len(c.rows) == 1  # 不繁殖新轮次
         occ = c.rows[0]
@@ -645,11 +656,16 @@ def test_single_sided_freeze_writes_only_one_endpoint():
         assert occ["window_end_at"] == iso(24, 22)
 
 
-def test_windowed_task_does_not_time_out_or_gain_deadline_via_sweep_path():
-    # 无 deadline 事实的新窗口行不被既有 sweep 误伤（sweep 换源属批次 5）。
+def test_window_end_past_marks_timeout_with_frozen_closed_at():
+    # 批次 5 换源：实例冻结窗口终点被真实时间越过 → sweep 打标 timeout，
+    # closed_at = 窗口终点（非扫描时刻）；不写处理 / 完成事实。
     with Context() as c:
         c.create("daily", at(24, 10), estimated_minutes=30,
                  window_start_tod="18:00", window_end_tod="22:00")
+        occ = c.rows[0]
         result = planning.sweep_timeouts(at(25, 7))
-        assert result["timed_out"] == 0
-        assert c.rows[0]["status"] == "pending"
+        assert result["timed_out"] == 1
+        assert occ["status"] == "timeout"
+        assert occ["closed_at"] == iso(24, 22)
+        assert occ.get("handled_at") is None
+        assert occ.get("actual_end") is None

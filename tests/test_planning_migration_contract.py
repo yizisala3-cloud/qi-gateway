@@ -203,5 +203,81 @@ class PlanningWindowMigrationContractTests(unittest.TestCase):
                 self.assertNotIn(forbidden, self.folded)
 
 
+FIXED_EXPIRATION_MIGRATION = (
+    Path(__file__).resolve().parents[1]
+    / "supabase"
+    / "migrations"
+    / "20260928010000_planning_fixed_expiration_freeze.sql"
+)
+
+
+class PlanningFixedExpirationFreezeMigrationContractTests(unittest.TestCase):
+    """固定到期死亡边界实例级冻结迁移契约（20260928010000，批次 5 三轮裁决）。
+
+    固定刷新型「到达下一规则点死亡」的死亡边界 = 轴上晚于本轮 due 的下一个
+    规则事件，由生成入口按**生成当时的规则**随行冻结（与 window /
+    planned_minutes / content 快照同一「生成即冻结」模式）。规则后续编辑只
+    影响未来未生成实例，不得追溯重解释已生成轮次的生命周期——本迁移只提供
+    冻结载体：单列纯增量、可空、无回填、无触发器 / CHECK / RPC。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = FIXED_EXPIRATION_MIGRATION.read_text(encoding="utf-8")
+        cls.folded = cls.sql.casefold()
+
+    def test_freeze_migration_is_atomic(self):
+        self.assertIn("begin;", self.folded)
+        self.assertIn("commit;", self.folded)
+
+    def test_only_planning_occurrence_is_altered(self):
+        altered = set()
+        for line in self.sql.splitlines():
+            stripped = line.strip().casefold()
+            if stripped.startswith("alter table public."):
+                altered.add(stripped.split()[2])
+        self.assertEqual(altered, {"public.planning_occurrence"})
+
+    def test_frozen_boundary_column_added_nullable(self):
+        self.assertIn(
+            "add column if not exists fixed_expires_at timestamptz", self.folded)
+
+    def test_column_is_documented(self):
+        self.assertIn("comment on column public.planning_occurrence.fixed_expires_at",
+                      self.folded)
+
+    def test_no_backfill_no_trigger_no_check_no_rpc(self):
+        # user 裁决：存量行为 NULL、不按当前规则回算（受控部署清理，不建
+        # backfill）；数据库层不建触发器 / CHECK / RPC。
+        for forbidden in (
+            "update public.planning_occurrence",
+            "create trigger", "create constraint trigger",
+            "create or replace function", "create function",
+            "security definer", "add constraint",
+            "set not null", "set default",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.folded)
+
+    def test_never_drops_or_rewrites_existing_structure(self):
+        for forbidden in (
+            "drop column", "drop constraint", "drop trigger", "drop index",
+            "drop table", "drop function",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.folded)
+
+    def test_replay_safe(self):
+        self.assertIn("add column if not exists fixed_expires_at", self.folded)
+
+    def test_migration_never_touches_legacy_tables_or_writes_rows(self):
+        for forbidden in (
+            "alter table public.todos", "alter table public.chat_messages",
+            "update public.", "delete from public.", "insert into public.",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.folded)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1063,14 +1063,21 @@ class CleanupAndMaintenanceTests(_Base):
         def run(client):
             self.create_task(client, cursor_date="2026-09-19")
             planning.generate_due(self.NOW)
-            # 窗口批次起 deadline_tod 停止新写入：播种存量限时形状（任务行 +
-            # 实例行）验证 sweep 判定；判定源换 window_end_at 属批次 5。
-            client.rows["planning_task"][0]["deadline_tod"] = "12:00"
-            client.rows["planning_occurrence"][0]["is_limited"] = True
-            # 截止 12:00 已过 → 超时打标
+            # 批次 5 换源：超时判定源是实例行冻结的 window_end_at；播种冻结
+            # 窗口事实（NOW 前两小时的窗口终点已越过）走 run_maintenance
+            # 真实维护路径验证打标。旧 deadline 判定源已退役（见窗口超时
+            # 定向测试的退役矩阵）。
+            frozen_end = planning._iso(self.NOW - timedelta(hours=2))
+            client.rows["planning_occurrence"][0]["window_end_at"] = frozen_end
             result = planning.run_maintenance(self.NOW)
             self.assertEqual(result["timeouts"]["timed_out"], 1)
-            self.assertEqual(client.rows["planning_occurrence"][0]["status"], "timeout")
+            occ = client.rows["planning_occurrence"][0]
+            self.assertEqual(occ["status"], "timeout")
+            # closed_at = 窗口终点（业务死亡时刻），不是扫描执行时刻
+            self.assertEqual(occ["closed_at"], frozen_end)
+            # 超时是异常关闭：不写完成 / 结束 / 处理事实
+            self.assertIsNone(occ.get("handled_at"))
+            self.assertIsNone(occ.get("actual_end"))
         self.run_with(run)
 
     def test_maintenance_gives_fresh_occurrences_est_times(self):

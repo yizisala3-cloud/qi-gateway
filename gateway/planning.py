@@ -65,6 +65,13 @@ CLOSED_STATUSES = ("completed", "discarded_this", "discarded")
 
 RECOMPUTE_WAIT = timedelta(minutes=30)
 DISCARD_RETENTION = timedelta(hours=72)
+# 窗口超时扫描的显式分页大小（批次 5 Review MEDIUM）：不依赖服务端默认行数
+# 上限；固定按 id 排序持续取「当前第一页到期开放行」直到取空，已处理行离开
+# 开放结果集后自然前移，不用 offset 分页（避免处理中途结果集缩小导致跳行）。
+SWEEP_PAGE_SIZE = 1000
+# 携带「到达下一规则点死亡」生命周期的刷新模式（每日轮无固定到期死亡，
+# 不参与双死亡边界裁决；批次 5 二轮 Review HIGH）。
+_FIXED_EXPIRING_MODES = ("fixed_interval", "fixed_weekday", "fixed_monthday")
 # BF3（第七轮）：after_completion 提前完成的防重复窗口——最近一次已经
 # 成功成立的完成事实（服务端持久化处理时间）之后 30 分钟内的再次提前完成，
 # 统一视为前一次操作的重复请求；窗口外为新的真实操作。
@@ -927,11 +934,26 @@ def _prepare_refresh_definition(row: dict[str, Any], now: datetime, current: dic
         raise PlanningError("invalid_payload", "固定时间必须有有效的预估开始时间", 400)
 
 
+def _should_recompute_after_generation(result: Any) -> bool:
+    """generation 之后是否应触发一次保守的幂等重算（五轮 / 六轮 Review）。
+
+    正式条件：``created > 0`` **或** ``errors 非空``——partial create（INSERT
+    成功后 cursor 等后续写失败）的 created 计数会丢失，但新行已真实持久化；
+    task-level failure 同样可能发生在 INSERT 之后。多跑一次幂等重算的代价
+    低于新 occurrence 永久漏掉自动排程。run_maintenance 与
+    _generate_due_quietly 两个调用入口共用本判断，不得各自漂移。
+    """
+    return isinstance(result, dict) and bool(
+        result.get("created") or result.get("errors"))
+
+
 def _generate_due_quietly(client, now: datetime) -> None:
     """写操作后的同步补生成：幂等，失败只记日志，不吞掉已成功的写操作。
 
-    当天有新生成实例时顺带重算一次，让用户立刻看到带起止时间的列表；
-    重算以排列顺序与固定槽为准，不会动用户已固定的内容。
+    当天有新生成实例、或 generation 报告了 task-level failure（partial
+    create 的 created 计数会丢失，见 `_should_recompute_after_generation`）
+    时，顺带重算一次，让用户立刻看到带起止时间的列表；重算以排列顺序与
+    固定槽为准，不会动用户已固定的内容。
     """
     try:
         result = generate_due(now)
@@ -940,7 +962,7 @@ def _generate_due_quietly(client, now: datetime) -> None:
             "planning 同步生成失败（等待后台循环重试）: error=%s", type(exc).__name__,
         )
         return
-    if not result.get("created"):
+    if not _should_recompute_after_generation(result):
         return
     try:
         recompute_today(now)
@@ -1190,6 +1212,7 @@ def _occurrence_row(
     est_start: datetime | None, est_end: datetime | None, now: datetime,
     identity: OccurrenceIdentity,
     window: ResolvedWindow | None = None,
+    fixed_expires_at: datetime | None = None,
 ) -> dict[str, Any]:
     # est 仅来自零自由度窗口预锚定（explicit 分支已退役）：预锚定即 rule
     # 固定所有权（机制继承）；无预锚定时 est 留待排程层派生。
@@ -1233,6 +1256,9 @@ def _occurrence_row(
         "is_limited": False,  # 窗口批次：生成期停止写入 deadline 事实
         "window_start_at": _iso(window.start_at) if window and window.start_at else None,
         "window_end_at": _iso(window.end_at) if window and window.end_at else None,
+        # 固定轮次生成时冻结的到期死亡边界（三轮 Review 裁决，20260928010000）：
+        # 仅固定轴轮由调用方传入；中空两阶段共享同值；其余恒 NULL。
+        "fixed_expires_at": _iso(fixed_expires_at) if fixed_expires_at else None,
         "source": "schedule",
         **_generation_snapshots(task, identity.schedule_date, phase),
         "created_at": _iso(now),
@@ -1244,6 +1270,7 @@ def _create_occurrences(
     client, task: dict[str, Any], schedule_date: date, now: datetime,
     *, due_at: datetime | None = None, display_cycle_date: date | None = None,
     generation_request_key: str | None = None,
+    fixed_expires_at: datetime | None = None,
 ) -> int:
     mode = task.get("refresh_mode")
     if mode is None:
@@ -1280,13 +1307,15 @@ def _create_occurrences(
         for phase, start, end in (("start", est_start, est_end), ("end", end_start, end_end)):
             identity = OccurrenceIdentity(task["id"], round_key, schedule_date, display_cycle,
                                           display_reason, phase, group)
-            rows.append(_occurrence_row(task, phase, start, end, now, identity, window=window))
+            rows.append(_occurrence_row(task, phase, start, end, now, identity, window=window,
+                                        fixed_expires_at=fixed_expires_at))
             if fixed_mode and due_at is not None:
                 rows[-1]["fixed_due_at"] = _iso(due_at)
     else:
         identity = OccurrenceIdentity(task["id"], round_key, schedule_date, display_cycle,
                                       display_reason)
-        rows.append(_occurrence_row(task, None, est_start, est_end, now, identity, window=window))
+        rows.append(_occurrence_row(task, None, est_start, est_end, now, identity, window=window,
+                                    fixed_expires_at=fixed_expires_at))
         if fixed_mode and due_at is not None:
             rows[-1]["fixed_due_at"] = _iso(due_at)
     if generation_request_key:
@@ -1366,6 +1395,37 @@ def _fixed_rounds(
     return events
 
 
+def _following_fixed_event(
+    task: dict[str, Any], day: date, due: datetime,
+    configured: time, transition: BoundaryTransition | None,
+    absorbed: frozenset[date],
+) -> datetime | None:
+    """规则序列中**晚于本轮事件**的下一个事件（生成时冻结死亡边界用）。
+
+    ``_fixed_rounds`` 只枚举到 now——本轮若位于序列末尾，其死亡边界在将来
+    尚未入列，须按同一规则向前多看一个事件。与 ``_fixed_rounds`` 共用
+    ``_should_occur`` 与周期边界映射，不复制第二套 recurrence 数学；
+    fixed_interval 轴步长恒定，下一事件即 ``due + interval``。规则集合非空
+    由任务校验保证，逐日上限仅为防御。返回 None 表示无法确定（异常定义，
+    调用方按无冻结边界落库）。
+    """
+    mode = task.get("refresh_mode")
+    if mode == "fixed_interval":
+        interval = task.get("interval_days")
+        if not isinstance(interval, int) or interval < 1:
+            return None
+        return due + timedelta(days=interval)
+    next_day = day + timedelta(days=1)
+    for _ in range(400):
+        if next_day not in absorbed and _should_occur(task, next_day):
+            boundary = cycle_start_boundary(next_day, configured, transition)
+            candidate = PlanningCycle.for_key(next_day, boundary).start
+            if candidate > due:
+                return candidate
+        next_day += timedelta(days=1)
+    return None
+
+
 def _task_open_rows(client, task_id: int) -> list[dict[str, Any]]:
     """Page open rounds so a long outage cannot hide rows behind the API limit."""
     rows: list[dict[str, Any]] = []
@@ -1403,10 +1463,41 @@ def _carry_open_rounds(client, task: dict[str, Any], cycle_key: date, now: datet
         }).eq("task_id", task["id"]).eq("round_key", round_key).execute()
 
 
-def _expire_fixed_rounds(
-    client, task: dict[str, Any], events: list[tuple[date, datetime]], now: datetime,
-) -> int:
-    """A fixed round dies at its next rule event, regardless of handling history."""
+def _fixed_death_boundary(occ: dict[str, Any]) -> datetime | None:
+    """该固定轮次生成时冻结的到期死亡边界（§8.4 的唯一 fixed 生命周期权威）。
+
+    唯一来源是实例行生成时随行冻结的 ``fixed_expires_at``（20260928010000，
+    三轮 Review 裁决）——**不得**再从 task 当前 interval/weekdays/month_days
+    重算历史：规则编辑只影响未来未生成实例，已生成轮次按生成时的轴活完
+    生命周期。返回 None 表示边界不存在或未冻结：非 schedule 轴轮（提前完成
+    的额外完成记录无 ``fixed_due_at``）、非固定型行、存量行（NULL，不按当前
+    规则回算）。「边界是否已成立」（冻结值 ≤ now）由调用方按各自语义判定
+    ——固定到期沿用「到达即死」的 ≤ 语义，窗口 sweep 沿用严格越过语义。
+    产品门控（固定型模式、refresh_enabled 暂停、request_state、is_active）
+    同样由调用方决定。供固定到期清理与窗口 sweep 两个关闭入口共用，不得
+    复制第二套裁决。
+    """
+    if occ.get("source") != "schedule" or not occ.get("fixed_due_at"):
+        return None  # early rounds are extra completions, not axis rounds
+    expires = occ.get("fixed_expires_at")
+    if not expires:
+        return None  # 存量行 / 非固定行：不按当前规则回算历史
+    return _parse_dt(expires, "fixed_expires_at")
+
+
+def _expire_fixed_rounds(client, task: dict[str, Any], now: datetime) -> int:
+    """A fixed round dies at its frozen next-rule-event boundary, regardless of
+    handling history.
+
+    双死亡边界裁决（批次 5 Review HIGH）：该轮若同时携带已成立的窗口最晚
+    完成边界（``window_end_at`` 早于本固定到期边界；固定边界沿用「到达即
+    死」的 ≤ now 语义，故更早的窗口边界必然也已按 sweep 的严格越过语义成
+    立），``closed_at`` 取两者更早者——业务死亡时刻由生成时冻结的事实决定，
+    不由两个关闭入口（固定到期 vs 窗口 sweep）的执行顺序、generation 是否
+    临时失败或 task 规则后续编辑决定；窗口边界尚未越过（未成立）时不影响
+    固定到期。窗口 sweep 侧的同一裁决见 ``sweep_timeouts``（共用
+    ``_fixed_death_boundary``）。
+    """
     open_rows = _task_open_rows(client, task["id"])
     expired = 0
     expired_rounds: set[str] = set()
@@ -1414,16 +1505,14 @@ def _expire_fixed_rounds(
         round_key = occ.get("round_key")
         if not round_key or round_key in expired_rounds:
             continue
-        if occ.get("source") != "schedule" or not occ.get("fixed_due_at"):
-            continue  # early rounds are extra completions, not axis rounds
-        due = _parse_dt(occ["fixed_due_at"], "fixed_due_at")
-        deadline = next((event_due for _, event_due in events if event_due > due), None)
-        if deadline is None and events and occ.get("schedule_date"):
-            # A rule edit may leave an older open round outside the new axis.
-            if _parse_date(occ["schedule_date"], "schedule_date") < events[-1][0]:
-                deadline = events[-1][1]
-        if deadline is None:
-            continue
+        deadline = _fixed_death_boundary(occ)
+        if deadline is None or deadline > now:
+            continue  # 边界未冻结（存量行）或尚未到达（下一规则点未到）
+        end_at = occ.get("window_end_at")
+        if end_at:
+            window_end = _parse_dt(end_at, "window_end_at")
+            if window_end < deadline:
+                deadline = window_end
         client.table("planning_occurrence").update({
             "status": "timeout", "closed_at": _iso(deadline), "updated_at": _iso(now),
         }).eq("task_id", task["id"]).eq("round_key", round_key).in_("status", list(OPEN_STATUSES)).execute()
@@ -1519,23 +1608,66 @@ def _reconcile_task_rounds(
     else:
         events = _fixed_rounds(task, cycle, now, configured, transition, absorbed)
         if can_generate:
+            # 批次 5 三轮 Review HIGH 1：固定到期清理与新轮创建**解耦**——
+            # 旧轮生命周期结束不依赖下一轮 INSERT 成功，下一轮暂时缺失时
+            # 故障解除后按既有补生成语义恢复。清理先于创建执行。
+            # 到期清理只受 refresh_enabled 控制（暂停即冻结，需求 24）——
+            # legacy 门禁只禁止新生成，不影响存量轮次的到期死亡。
+            timed_out += _expire_fixed_rounds(client, task, now)
             if not legacy_definition:
                 through = task.get("refresh_generated_through")
                 checked = _parse_date(through, "refresh_generated_through") if through else None
-                for day, due in events:
-                    if checked is not None and day <= checked:
-                        continue
-                    # A fixed-interval round is born in the cycle that generates
-                    # it; calendar rounds keep their own cycle date as identity.
-                    schedule = today if mode == "fixed_interval" else day
-                    created += _create_occurrences(client, task, schedule, now, due_at=due,
-                                                   display_cycle_date=today)
-                    client.table("planning_task").update({
-                        "refresh_generated_through": day.isoformat(), "updated_at": _iso(now),
-                    }).eq("id", task["id"]).execute()
-            # 到期清理只受 refresh_enabled 控制（暂停即冻结，需求 24）——
-            # legacy 门禁只禁止新生成，不影响存量轮次的到期死亡。
-            timed_out += _expire_fixed_rounds(client, task, events, now)
+                # 五轮 Review HIGH：进入收尾清理前**先冻结**是否已存在原始
+                # 生成异常——不得在 cleanup 自己的 except 内用 sys.exc_info()
+                # 推断（它只看得到 cleanup 异常自身，无法区分双重失败与
+                # cleanup 单独失败）。
+                generation_error: Exception | None = None
+                try:
+                    for day, due in events:
+                        if checked is not None and day <= checked:
+                            continue
+                        # 生成该轮时按**当时**规则序列冻结它自己的死亡边界：
+                        # 序列中晚于本轮 due 的下一个事件；本轮位于序列末尾时
+                        # 其边界在将来，按同一规则向前多看一个事件。一次 reconcile
+                        # 补生成多个历史轮次时每轮各取自己的下一个事件，不按
+                        # 扫描时刻推算；规则后续编辑不得改写该冻结值（§28.1）。
+                        expires = next(
+                            (event_due for _, event_due in events if event_due > due), None)
+                        if expires is None:
+                            expires = _following_fixed_event(
+                                task, day, due, configured, transition, absorbed)
+                        # A fixed-interval round is born in the cycle that generates
+                        # it; calendar rounds keep their own cycle date as identity.
+                        schedule = today if mode == "fixed_interval" else day
+                        created += _create_occurrences(client, task, schedule, now, due_at=due,
+                                                       display_cycle_date=today,
+                                                       fixed_expires_at=expires)
+                        client.table("planning_task").update({
+                            "refresh_generated_through": day.isoformat(), "updated_at": _iso(now),
+                        }).eq("id", task["id"]).execute()
+                except Exception as exc:
+                    generation_error = exc
+                    raise
+                finally:
+                    # 批次 5 三轮/四轮 Review HIGH 1 + 五轮 Review HIGH：**任何**
+                    # 已成功写入数据库的轮次（含本轮中途失败前已创建的部分）
+                    # 都必须在本轮 reconcile 退出前经过同一固定到期清理——后续
+                    # INSERT / 游标更新失败不得让已生成的过期轮次漏关（否则其
+                    # 在 closed_at 之前仍可被 completed）。清理幂等（已关闭行
+                    # 跳过），重复调用不重复计数、不重复终态写入。清理自身失败
+                    # 不得静默：
+                    # * 无原始异常 → 清理异常正常向上抛出（整体调用失败，后续
+                    #   完成 / 提前完成操作不得继续）；
+                    # * generation 已失败 → 记录清理失败完整日志，原始异常作为
+                    #   主异常继续传播（不覆盖、不吞、不伪装成功）。
+                    try:
+                        timed_out += _expire_fixed_rounds(client, task, now)
+                    except Exception:
+                        if generation_error is None:
+                            raise
+                        log.exception(
+                            "planning 固定到期清理失败（原始生成异常继续传播）: task=%s",
+                            task["id"])
     _carry_open_rounds(client, task, today, now)
     if legacy_definition:
         log.warning("planning 旧显式任务定义停止生成新轮次: task=%s", task["id"])
@@ -1543,7 +1675,15 @@ def _reconcile_task_rounds(
 
 
 def generate_due(now: datetime | None = None) -> dict[str, Any]:
-    """Generate stable rounds from their own refresh model, never legacy cursors."""
+    """Generate stable rounds from their own refresh model, never legacy cursors.
+
+    批次 5 四轮 Review HIGH 2：失败隔离在**单 task reconcile 粒度**——单个
+    task 的生成失败（含其内部已完成的到期清理）只记录该 task 的错误并继续
+    其余任务的生命周期维护，不得终止整个任务循环，也不全局吞掉异常。每个
+    失败 task 的错误经 log（完整堆栈）与返回值 ``errors`` 列表（最小形态：
+    task_id + 异常类型名）保留可观测性，不伪装成成功；``created`` /
+    ``timed_out`` 汇总只计成功完成的任务。
+    """
     now = now or _now()
     configured, transition, absorbed = _load_boundary_state(now)
     cycle = planning_cycle_at(now, configured, transition)
@@ -1553,48 +1693,104 @@ def generate_due(now: datetime | None = None) -> dict[str, Any]:
     tasks = _rows(client, "planning_task", lambda q: q.eq("is_active", True))
     created = 0
     timed_out = 0
+    errors: list[dict[str, Any]] = []
     for task in tasks:
-        task_created, task_timed_out, _ = _reconcile_task_rounds(
-            client, task, cycle, now, configured, transition, absorbed, daily_enabled,
-        )
+        try:
+            task_created, task_timed_out, _ = _reconcile_task_rounds(
+                client, task, cycle, now, configured, transition, absorbed, daily_enabled,
+            )
+        except Exception as exc:
+            log.exception("planning 单任务生成失败: task=%s", task["id"])
+            errors.append({"task_id": task["id"], "error": type(exc).__name__})
+            continue
         created += task_created
         timed_out += task_timed_out
     if created:
         log.info("planning 生成出现实例: count=%s date=%s", created, today.isoformat())
-    return {"created": created, "timed_out": timed_out, "date": today.isoformat()}
+    result = {"created": created, "timed_out": timed_out, "date": today.isoformat()}
+    if errors:
+        result["errors"] = errors
+    return result
 
 
-# ── 限时超时判定 ──────────────────────────────────────────────────
+# ── 最晚完成超时判定（窗口换源） ──────────────────────────────────
 
 def sweep_timeouts(now: datetime | None = None) -> dict[str, int]:
-    """限时待办过截止未完成自动标记「已超时」。"""
+    """开放实例越过冻结实例窗口的最晚完成自动标记「已超时」（§18.2、§22.5）。
+
+    判定源是实例行生成时冻结的 ``window_end_at``（唯一超时权威）：状态开放
+    （含执行中 in_progress 与 partial）且真实时间**越过**（严格大于，恰等
+    不超时）窗口终点仍未合法关闭即打标，``closed_at`` = 窗口终点——业务
+    死亡时刻，与固定型槽次死亡同模式，不写扫描执行时刻。超时是异常关闭：
+    不写完成 / 结束 / 处理事实，不推进任何刷新基准（§18.2）。无窗口待办
+    不因此超时；单次 / 处理后刷新型不因跨周期超时的既有规则不变（本函数
+    不读任何日期字段）。旧 deadline 判定源（``is_limited`` + 任务 tod +
+    ``schedule_date`` 现算）已随窗口批次退役，不再构成第二超时权威；存量
+    限时行仅按序列化兼容读取。
+
+    双死亡边界裁决（批次 5 Review HIGH / 三轮 Review 收口）：固定刷新型
+    「到达下一规则点死亡」（``_expire_fixed_rounds``）是另一套独立生命周期；
+    同一开放轮次同时存在已成立的固定到期边界与窗口最晚完成边界时，两个
+    关闭入口对 ``closed_at`` 的裁决一致——都取两者更早者，且边界同源：固定
+    边界唯一来自实例行生成时冻结的 ``fixed_expires_at``（共用
+    ``_fixed_death_boundary``），**绝不**从 task 当前 recurrence rule 重算
+    历史。maintenance 生成步先于本 sweep 运行且到期清理已与新轮创建解耦；
+    generation 整体失败或单任务失败时，本 sweep 对固定型轮次读同一冻结
+    边界参与 min，保证 ``closed_at`` 与调用顺序、generation 成败、scanner
+    迟到时长、规则编辑无关。门控与到期清理一致（固定型模式、refresh_enabled
+    未暂停、请求未被取代、任务启用中——inactive task 的固定边界不成立，
+    仅窗口边界生效）；暂停 / 被取代任务的固定边界不参与 min，窗口超时仍
+    独立生效。
+
+    查询与分页（批次 5 Review MEDIUM）：查询侧直接过滤 ``status ∈ 开放`` 且
+    ``window_end_at < now``（SQL 语义下同时排除 NULL——无窗口 / legacy
+    deadline / est_end 行不进入本轮查询、无法占满结果页），按 id 稳定排序、
+    显式 ``SWEEP_PAGE_SIZE`` 分页，持续取「当前第一页到期开放行」直到取空；
+    已处理行离开开放结果集后下一轮自然前移，不用 offset 分页，不存在处理
+    中途结果集缩小导致的跳行，也不依赖服务端默认行数上限。更新带开放状态
+    条件（与固定到期清理同形状）：并发下已终态的行不得被二次改写。
+    """
     now = now or _now()
     client = _require_client()
-    open_rows = _rows(
-        client, "planning_occurrence",
-        lambda q: q.eq("is_limited", True).in_("status", list(OPEN_STATUSES)),
-    )
-    if not open_rows:
-        return {"timed_out": 0}
-    tasks = _task_map(client, {row["task_id"] for row in open_rows})
+    now_iso = _iso(now)
     timed_out = 0
-    for occ in open_rows:
-        task = tasks.get(occ["task_id"])
-        if not task:
-            continue
-        end_tod = task.get("deadline_end_tod") or task.get("deadline_tod")
-        if not end_tod:
-            continue
-        if not occ.get("schedule_date"):
-            continue  # old instances await the controlled Phase 5 boundary
-        deadline = _combine(date.fromisoformat(occ["schedule_date"]), time.fromisoformat(end_tod))
-        if deadline < now:
-            # closed_at 记录业务死亡时刻（限时截止），与固定型槽次死亡一致；
-            # updated_at 才是本行最后修改时间。
-            client.table("planning_occurrence").update({
-                "status": "timeout", "closed_at": _iso(deadline), "updated_at": _iso(now),
-            }).eq("id", occ["id"]).execute()
-            timed_out += 1
+    seen: set[int] = set()
+    tasks: dict[int, dict[str, Any]] = {}
+    while True:
+        page = _rows(
+            client, "planning_occurrence",
+            lambda q: q.in_("status", list(OPEN_STATUSES))
+            .lt("window_end_at", now_iso).order("id").limit(SWEEP_PAGE_SIZE),
+        )
+        if not page or all(row["id"] in seen for row in page):
+            break  # 取空即完毕；全页停滞（更新未生效的异常情形）防死循环
+        missing = {row["task_id"] for row in page} - tasks.keys()
+        if missing:
+            tasks.update(_task_map(client, missing))
+        for occ in page:
+            end_at = occ.get("window_end_at")
+            if not end_at:
+                continue  # 防御：timestamptz 列不产生空值以下的异常行
+            closed_at = _parse_dt(end_at, "window_end_at")
+            # 双死亡边界裁决：该轮生成时冻结的固定到期边界若已成立（到达
+            # 即死的 ≤ 语义）且固定到期机制当前有效（固定型模式、未暂停
+            # 刷新、请求未被取代、任务启用中——与 _expire_fixed_rounds 的
+            # 门控一致），closed_at 取两者更早者。generation 失败时清理虽
+            # 未执行，这里读同一冻结事实防止死亡时刻漂移到较晚的窗口边界；
+            # 暂停 / 被取代 / 停用任务的固定边界不成立，不参与 min。
+            task = tasks.get(occ["task_id"])
+            if (task and task.get("refresh_mode") in _FIXED_EXPIRING_MODES
+                    and task.get("refresh_enabled") is not False
+                    and task.get("request_state") != "superseded"
+                    and task.get("is_active") is not False):
+                boundary = _fixed_death_boundary(occ)
+                if boundary is not None and boundary <= now and boundary < closed_at:
+                    closed_at = boundary
+            result = client.table("planning_occurrence").update({
+                "status": "timeout", "closed_at": _iso(closed_at), "updated_at": _iso(now),
+            }).eq("id", occ["id"]).in_("status", list(OPEN_STATUSES)).execute()
+            timed_out += len(result.data or [])
+        seen.update(row["id"] for row in page)
     if timed_out:
         log.info("planning 超时打标: count=%s", timed_out)
     return {"timed_out": timed_out}
@@ -3369,9 +3565,25 @@ def complete_task_early(
     configured, transition, absorbed = _load_boundary_state(now)
     cycle = planning_cycle_at(now, configured, transition)
     daily_enabled = get_cycle_settings(now)["daily_refresh_enabled"]
-    _, _, events = _reconcile_task_rounds(
-        client, task, cycle, now, configured, transition, absorbed, daily_enabled,
-    )
+    try:
+        _, _, events = _reconcile_task_rounds(
+            client, task, cycle, now, configured, transition, absorbed, daily_enabled,
+        )
+    except Exception:
+        # 批次 5 七轮 Review MEDIUM：本入口直接调用 reconcile、完全绕过
+        # _generate_due_quietly 的共享重算判断——partial create（occurrence
+        # INSERT 成功后 cursor 等后续写失败）会留下已持久化但未排程的开放
+        # occurrence，后续 maintenance 因 created=0 + no errors 不再触发
+        # generation recompute。保守执行一次幂等 recompute 作为**恢复动作**
+        # （不改变失败语义、不判断创建数量），然后重新抛出原异常：提前完成
+        # 流程停止、不写 completed / handled_at / 完成事实、不创建 early 行。
+        # 恢复自身失败不得覆盖原异常：记录完整日志后让原 reconcile 异常继续
+        # 传播（与 generation + cleanup 双重失败同一原则）。
+        try:
+            recompute_today(now)
+        except Exception:
+            log.exception("planning 提前完成恢复重算失败: task=%s", task_id)
+        raise
 
     open_rows = _rows(
         client, "planning_occurrence",
@@ -3694,7 +3906,10 @@ def run_maintenance(now: datetime | None = None) -> dict[str, Any]:
             results["generation"] = generate_due(now)
             # 新生成的当天实例需要立刻拿到预估起止；
             # 重算以列表顺序与固定槽为准，不会动用户已固定的内容。
-            if isinstance(results["generation"], dict) and results["generation"].get("created"):
+            # 五轮 / 六轮 Review：触发条件与 _generate_due_quietly 共用
+            # `_should_recompute_after_generation`（created > 0 或 errors
+            # 非空——partial create 的 created 计数会丢失，保守幂等重算）。
+            if _should_recompute_after_generation(results["generation"]):
                 results["generation_recompute"] = recompute_today(now)
         except Exception as exc:
             log.exception("planning 生成失败: %s", type(exc).__name__)
