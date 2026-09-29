@@ -5,7 +5,8 @@ import sys
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Keep the retirement tests runnable in the same bare-Python environment as the
 # existing unit suite. Production installs these dependencies from requirements.
@@ -140,6 +141,32 @@ class _StreamingClient:
 
 
 class RuntimeRetirementTests(unittest.TestCase):
+    def test_recent_chat_timestamps_only_selected_messages(self):
+        query = MagicMock()
+        query.select.return_value = query
+        query.order.return_value = query
+        query.limit.return_value = query
+        query.execute.return_value = SimpleNamespace(data=[
+            {"role": "assistant", "content": "刚才的回复", "created_at": "2026-09-29T04:45:00Z"},
+            {"role": "user", "content": "之前的提问", "created_at": "2026-09-29 12:42:00"},
+            {"role": "user", "content": "没有可靠时间", "created_at": "bad-time"},
+        ])
+        client = MagicMock()
+        client.table.return_value = query
+
+        with patch.object(context.db, "get_client", return_value=client):
+            rendered = context.build_recent_chat_context()
+
+        self.assertEqual(rendered, (
+            "[最近对话]\n"
+            "叶子: 没有可靠时间\n"
+            "叶子（2026-09-29 12:42 北京时间）: 之前的提问\n"
+            "栖（2026-09-29 12:45 北京时间）: 刚才的回复"
+        ))
+        client.table.assert_called_once_with("chat_messages")
+        query.select.assert_called_once_with("role, content, created_at")
+        query.limit.assert_called_once_with(10)
+
     def test_context_has_no_jiwen_or_timer_instructions(self):
         with (
             patch("gateway.context.load_persona", return_value="PERSONA"),

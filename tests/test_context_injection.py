@@ -113,8 +113,13 @@ class RecentChatContextTests(unittest.TestCase):
             ("limit", 30),
             ("execute", None),
         ])
-        # 倒序取回后翻成正序拼接，user/assistant 各算一行。
-        self.assertEqual(text, "[最近对话]\n叶子: 问题\n栖: 新回复")
+        # 倒序取回后翻成正序拼接，user/assistant 各算一行，并标注各自的时间。
+        self.assertEqual(
+            text,
+            "[最近对话]\n"
+            "叶子（2026-09-20 10:00 北京时间）: 问题\n"
+            "栖（2026-09-20 10:01 北京时间）: 新回复",
+        )
 
     def test_missing_client_returns_empty(self):
         with patch.object(context.db, "get_client", return_value=None):
