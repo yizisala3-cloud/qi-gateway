@@ -541,6 +541,79 @@ select {
 }
 select:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* ---------- 勾选框 / 单选钮 · 替换原生蓝色选中态 ---------- */
+/* 与书页体系一致：纸色底 + 金线框；勾选后墨绿填充（同日历选中日），
+   夜间主题经 CSS 变量自动翻转 */
+/* inline 标签内部用 flex 居中：基线对齐对 CJK 字体天然偏沉（框低字高），
+   一行勾选看起来是歪的；flex 垂直居中后框与字同轴 */
+label.inline {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+input[type="checkbox"],
+input[type="radio"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 15px;
+  height: 15px;
+  flex: none;
+  margin: 0;
+  vertical-align: -1.5px;
+  background: var(--paper-card);
+  border: 1px solid var(--gold-faint);
+  border-radius: 4px;
+  display: inline-grid;
+  place-content: center;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+input[type="radio"] { border-radius: 50%; }
+input[type="checkbox"]:hover,
+input[type="radio"]:hover {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 2px var(--gold-soft);
+}
+input[type="checkbox"]:focus-visible,
+input[type="radio"]:focus-visible {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px var(--gold-soft);
+  outline: none;
+}
+input[type="checkbox"]::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  background: var(--paper-solid);
+  clip-path: polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%);
+  transform: scale(0);
+  transform-origin: center;
+  transition: transform 0.12s ease-in-out;
+}
+input[type="checkbox"]:checked {
+  background: var(--green-ink);
+  border-color: var(--green-ink);
+}
+input[type="checkbox"]:checked:hover { border-color: var(--green-mid); }
+input[type="checkbox"]:checked::before { transform: scale(1); }
+input[type="radio"]::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green-ink);
+  transform: scale(0);
+  transition: transform 0.12s ease-in-out;
+}
+input[type="radio"]:checked { border-color: var(--gold-strong); }
+input[type="radio"]:checked::before { transform: scale(1); }
+input[type="checkbox"]:disabled,
+input[type="radio"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* ---------- 标签 ---------- */
 .tag {
   display: inline-flex;
@@ -1293,12 +1366,77 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   border-top: 1px solid var(--gold-faint);
 }
 .retro-time-time .rtp-colon { color: var(--gold-strong); font-weight: 700; }
-.retro-time-time select {
-  width: auto;
+
+/* 时/分下拉 · 与复古下拉同一体系（原生 select 弹层无法换肤，整体替换） */
+.rtp-unit { position: relative; }
+.rtp-select-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
   min-width: 64px;
-  padding: 5px 24px 5px 10px;
+  background: var(--paper-card);
+  border: 1px solid var(--gold-faint);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font-family: inherit;
   font-size: 13px;
+  padding: 5px 8px 5px 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
+.rtp-select-btn:hover,
+.rtp-unit.is-open .rtp-select-btn {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 2px var(--gold-soft);
+  outline: none;
+}
+.rtp-select-btn .ico {
+  width: 12px;
+  height: 12px;
+  color: var(--gold);
+  flex: none;
+  transition: transform 0.15s;
+}
+.rtp-unit.is-open .rtp-select-btn .ico { transform: rotate(180deg); }
+.rtp-select-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  min-width: 100%;
+  max-height: 145px;  /* 约 5 个选项，其余滚动 */
+  overflow-y: auto;
+  background: var(--paper-solid);
+  border: 1px solid var(--gold-line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lift);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  user-select: none;
+}
+.rtp-select-pop[hidden] { display: none; }
+.rtp-select-option {
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 12.5px;
+  color: var(--ink);
+  text-align: center;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.rtp-select-option:hover,
+.rtp-select-option:focus-visible { background: var(--gold-soft); outline: none; }
+.rtp-select-option.is-selected {
+  background: var(--green-ink);
+  color: var(--paper-solid);
+}
+.rtp-select-option.is-selected:hover,
+.rtp-select-option.is-selected:focus-visible { background: var(--green-mid); }
 
 .retro-time-foot {
   display: flex;
@@ -1313,7 +1451,84 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   .retro-time-grid button { padding: 7px 0; }
 }
 
+/* =========================================================
+   复古下拉选择器 · 纸张卡片 + 金线选项列表
+   替换原生 select 弹层，机制同复古时间选择器
+   ========================================================= */
+
+.retro-select-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  background: var(--paper-card);
+  border: 1px solid var(--gold-faint);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 13.5px;
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.retro-select-field:hover,
+.retro-select-field:focus-visible {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px var(--gold-soft);
+  outline: none;
+}
+.retro-select-field .ico {
+  width: 15px;
+  height: 15px;
+  color: var(--gold);
+  flex: none;
+  transition: transform 0.15s;
+}
+.retro-select.is-open .retro-select-field .ico { transform: rotate(180deg); }
+
+.retro-select-pop {
+  position: fixed;
+  z-index: 2100;
+  min-width: 148px;
+  max-height: min(320px, calc(100vh - 16px));
+  overflow-y: auto;
+  background: var(--paper-solid);
+  border: 1px solid var(--gold-line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lift);
+  padding: 6px;
+  color: var(--ink);
+  font-family: var(--font);
+  user-select: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.retro-select-option {
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  text-align: left;
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.retro-select-option:hover,
+.retro-select-option:focus-visible { background: var(--gold-soft); outline: none; }
+.retro-select-option.is-selected {
+  background: var(--green-ink);
+  color: var(--paper-solid);
+}
+.retro-select-option.is-selected:hover,
+.retro-select-option.is-selected:focus-visible { background: var(--green-mid); }
+
 /* ---------- 规划管理（一期） ---------- */
+/* 可安排时段：与「目标日期」同款的全宽复古时间字段（上下排布） */
+.window-fields { display: grid; gap: 12px; margin-top: 8px; }
+.window-field > label { display: block; margin-bottom: 5px; font-weight: 600; }
 .plan-region { margin-bottom: 18px; }
 .plan-region .card { padding: 16px 18px; }
 .plan-region-head {

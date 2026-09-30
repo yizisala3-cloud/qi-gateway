@@ -22,6 +22,72 @@ function pad2(n) {
   return String(n).padStart(2, '0');
 }
 
+/**
+ * 时间弹层内的时/分下拉：纸色按钮 + 金线选项列表（与复古下拉同一视觉体系）。
+ * 列表约显示 6 项，其余滚动；下方放不下自动向上弹。返回 set(value) 供程序化赋值。
+ */
+function createRtpUnit(host, values, initial, onChange) {
+  host.innerHTML = `
+    <button type="button" class="rtp-select-btn" aria-haspopup="listbox" title="${host.title}">
+      <span class="rtp-select-text"></span>
+      ${icon('chevron-down')}
+    </button>
+    <div class="rtp-select-pop" hidden></div>`;
+  const btn = host.querySelector('.rtp-select-btn');
+  const textEl = host.querySelector('.rtp-select-text');
+  const list = host.querySelector('.rtp-select-pop');
+  let current = String(initial);
+  const render = () => {
+    textEl.textContent = current;
+    list.innerHTML = values.map((v) => `
+      <button type="button" class="rtp-select-option${v === current ? ' is-selected' : ''}"
+        data-value="${v}">${v}</button>`).join('');
+  };
+  const close = () => {
+    list.hidden = true;
+    host.classList.remove('is-open');
+  };
+  const open = () => {
+    render();
+    list.hidden = false;
+    host.classList.add('is-open');
+    const selected = list.querySelector('.is-selected');
+    if (selected) selected.scrollIntoView({ block: 'nearest' });
+    // 下方放不下就向上弹
+    list.style.top = '';
+    list.style.bottom = '';
+    if (list.getBoundingClientRect().bottom > window.innerHeight - 8) {
+      list.style.top = 'auto';
+      list.style.bottom = 'calc(100% + 4px)';
+    }
+  };
+  btn.addEventListener('click', () => {
+    const wasOpen = !list.hidden;
+    document.querySelectorAll('.rtp-select-pop:not([hidden])').forEach((p) => {
+      if (p !== list) {
+        p.hidden = true;
+        p.parentElement.classList.remove('is-open');
+      }
+    });
+    wasOpen ? close() : open();
+  });
+  list.addEventListener('click', (e) => {
+    const opt = e.target.closest('.rtp-select-option');
+    if (!opt) return;
+    current = opt.dataset.value;
+    onChange(current);
+    render();
+    close();
+  });
+  render();
+  return {
+    set(v) {
+      current = String(v);
+      render();
+    },
+  };
+}
+
 const SHANGHAI_OFFSET_MS = 8 * 3600 * 1000;
 
 /** 当前时刻的 Asia/Shanghai datetime-local 表示（与系统时区无关）。 */
@@ -47,7 +113,7 @@ function fmtDisplay(mode, value) {
 }
 
 /** 在 host 内挂载复古时间字段：隐藏 input 保留原 id/value 契约，展示层为纸色按钮。 */
-export function createRetroTimeField(host, { id, value = '', mode = 'datetime' } = {}) {
+export function createRetroTimeField(host, { id, value = '', mode = 'datetime', align = 'left' } = {}) {
   host.classList.add('retro-time');
   host.innerHTML = `
     <input type="hidden" id="${id}" class="retro-time-value">
@@ -72,12 +138,12 @@ export function createRetroTimeField(host, { id, value = '', mode = 'datetime' }
       return;
     }
     closeRetroTimePop();
-    openRetroTimePop(host.querySelector('.retro-time-field'), input, apply, mode);
+    openRetroTimePop(host.querySelector('.retro-time-field'), input, apply, mode, align);
   });
   return input;
 }
 
-export function openRetroTimePop(anchor, input, apply, mode = 'datetime') {
+export function openRetroTimePop(anchor, input, apply, mode = 'datetime', align = 'left') {
   const current = String(input.value || '');
   const nowText = nowShanghaiLocalInput();
   const nowM = nowText.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
@@ -124,9 +190,9 @@ export function openRetroTimePop(anchor, input, apply, mode = 'datetime') {
     <div class="retro-time-grid"></div>` : ''}
     ${showTimeRow ? `
     <div class="retro-time-time">
-      <select class="rtp-hour" title="小时"></select>
+      <div class="rtp-unit" data-unit="hour" title="小时"></div>
       <span class="rtp-colon">:</span>
-      <select class="rtp-minute" title="分钟"></select>
+      <div class="rtp-unit" data-unit="minute" title="分钟"></div>
     </div>` : ''}
     <div class="retro-time-foot">
       <button type="button" class="btn btn-quiet btn-sm" data-act="clear">清除</button>
@@ -140,15 +206,32 @@ export function openRetroTimePop(anchor, input, apply, mode = 'datetime') {
   activeRetroTimePop = pop;
 
   const grid = pop.querySelector('.retro-time-grid');
-  const hourSel = pop.querySelector('.rtp-hour');
-  const minuteSel = pop.querySelector('.rtp-minute');
+  let hourPick = null;
+  let minutePick = null;
   if (showTimeRow) {
-    for (let h = 0; h < 24; h++) hourSel.add(new Option(pad2(h), pad2(h)));
-    for (let min = 0; min < 60; min++) minuteSel.add(new Option(pad2(min), pad2(min)));
-    hourSel.value = state.hour;
-    minuteSel.value = state.minute;
-    hourSel.addEventListener('change', () => { state.hour = hourSel.value; });
-    minuteSel.addEventListener('change', () => { state.minute = minuteSel.value; });
+    hourPick = createRtpUnit(
+      pop.querySelector('[data-unit="hour"]'),
+      Array.from({ length: 24 }, (_, h) => pad2(h)),
+      state.hour,
+      (v) => { state.hour = v; },
+    );
+    minutePick = createRtpUnit(
+      pop.querySelector('[data-unit="minute"]'),
+      Array.from({ length: 60 }, (_, m) => pad2(m)),
+      state.minute,
+      (v) => { state.minute = v; },
+    );
+    // 点击弹层内其他区域时收起打开的时/分下拉（点在单元内交给其自身开关处理）
+    pop.addEventListener('mousedown', (e) => {
+      pop.querySelectorAll('.rtp-unit').forEach((unit) => {
+        if (unit.contains(e.target)) return;
+        const list = unit.querySelector('.rtp-select-pop');
+        if (list && !list.hidden) {
+          list.hidden = true;
+          unit.classList.remove('is-open');
+        }
+      });
+    });
   }
 
   let titleEl = null;
@@ -210,8 +293,8 @@ export function openRetroTimePop(anchor, input, apply, mode = 'datetime') {
       state.year = Number(now[1]); state.month = Number(now[2]); state.day = Number(now[3]);
       state.hour = now[4]; state.minute = now[5];
       renderGrid();
-      hourSel.value = state.hour;
-      minuteSel.value = state.minute;
+      hourPick.set(state.hour);
+      minutePick.set(state.minute);
     });
   }
   pop.querySelector('[data-act="ok"]').addEventListener('click', () => {
@@ -232,10 +315,14 @@ export function openRetroTimePop(anchor, input, apply, mode = 'datetime') {
 
   // 定位：先把字段滚入视口，再放字段正下方；下方放不下翻到上方，
   // 最终双向夹紧到视口内（字段被表单滚动移出视口时也不会漂出屏幕）。
+  // align="right" 时右缘对齐字段（时钟图标一侧），宽字段下弹层贴着图标；
+  // 窄字段回退左对齐，避免弹层伸到字段左侧之外。
   anchor.scrollIntoView({ block: 'nearest' });
   const rect = anchor.getBoundingClientRect();
   const popRect = pop.getBoundingClientRect();
-  let left = rect.left;
+  let left = align === 'right'
+    ? Math.max(rect.right - popRect.width, rect.left)
+    : rect.left;
   let top = rect.bottom + 6;
   if (top + popRect.height > window.innerHeight - 8) {
     top = rect.top - popRect.height - 6;
@@ -251,9 +338,12 @@ export function openRetroTimePop(anchor, input, apply, mode = 'datetime') {
   const onKey = (e) => { if (e.key === 'Escape') closeRetroTimePop(); };
   // 视口变化后固定定位不再贴合字段，直接关闭，避免弹层漂移出屏；
   // 打开瞬间的 scrollIntoView 自身引发的滚动豁免 300ms，否则弹层刚开即关。
+  // 弹层内部列表（时/分下拉）自身的滚动不在此列——那不是视口变化。
   const openedAt = Date.now();
-  const onViewportChange = () => {
+  const onViewportChange = (e) => {
     if (Date.now() - openedAt < 300) return;
+    if (e && e.type === 'scroll' && e.target !== window && e.target !== document
+      && pop.contains(e.target)) return;
     closeRetroTimePop();
   };
   const cleanup = () => {

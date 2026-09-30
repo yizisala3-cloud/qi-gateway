@@ -7,6 +7,10 @@
 二轮验收修复（BUG-11~16）：四区域页签化 + 今日三分区二级页签、详情栏
 提醒控件、状态显示名去撞车、一行式小空态、原生 date/time 控件统一为
 复古选择器（lib/retro_time.js）、详情栏术语去工程味。
+
+2026-10-01 视觉批次：周期设置弹窗自 planning.js 抽出至 lib/cycle_settings.js
+（配置页「规划周期」卡片承载入口）；可安排时段语义提示按 user 指示删除、
+（可选）随字段标签；时/分下拉复古化（lib/retro_time.js 内 rtp-unit）。
 """
 
 import json
@@ -19,6 +23,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PLANNING = ROOT / "admin" / "js" / "pages" / "planning.js"
 RETRO_TIME = ROOT / "admin" / "js" / "lib" / "retro_time.js"
+RETRO_SELECT = ROOT / "admin" / "js" / "lib" / "retro_select.js"
+CYCLE_SETTINGS = ROOT / "admin" / "js" / "lib" / "cycle_settings.js"
+CONFIG_PAGE = ROOT / "admin" / "js" / "pages" / "config.js"
 ROUTES = ROOT / "admin" / "js" / "routes.js"
 UI = ROOT / "admin" / "js" / "ui.js"
 STYLE = ROOT / "admin" / "css" / "style.css"
@@ -258,22 +265,35 @@ class PlanningPageContractTests(unittest.TestCase):
         self.assertIn("min-height: 34px", css)
 
     def test_no_native_date_or_time_inputs_use_retro_picker(self):
-        # BUG-14 + 批次 8：原生 time/date 控件统一为复古选择器
+        # BUG-14 + 批次 8：原生 time/date 控件统一为复古选择器。
+        # 2026-10-01 起：周期设置刷新时间与 boundary 冲突调整项已随弹窗
+        # 移至 lib/cycle_settings.js（配置页承载入口），planning 仅剩
+        # 可安排时段双端（time ×2）与筛选/目标日期（date ×2）。
         self.assertNotIn('type="time"', self.page)
         self.assertNotIn('type="date"', self.page)
         self.assertIn("lib/retro_time.js", self.page)
         self.assertIn("createRetroTimeField", self.page)
-        # 时间模式 ×5（可安排时段双端、周期设置刷新时间、boundary 冲突
-        # 调整项双端动态模板），日期模式 ×2（筛选日期、单次目标日期）
-        self.assertEqual(self.page.count('data-retro-mode="time"'), 5)
+        self.assertEqual(self.page.count('data-retro-mode="time"'), 2)
         self.assertEqual(self.page.count('data-retro-mode="date"'), 2)
         for field_id in (
             "pf-window-start", "pf-window-end",
-            "pf-target-date", "planning-filter-date", "pf-cycle-boundary",
-            "pf-adj-start-${c.task_id}", "pf-adj-end-${c.task_id}",
+            "pf-target-date", "planning-filter-date",
         ):
             with self.subTest(field=field_id):
                 self.assertIn(f'data-retro-for="{field_id}', self.page)
+        # 可安排时段双端右对齐弹层（时钟图标一侧）
+        self.assertEqual(self.page.count('data-retro-align="right"'), 2)
+        # 周期设置弹窗（lib）：boundary + 冲突调整项双端
+        cycle_lib = CYCLE_SETTINGS.read_text(encoding="utf-8")
+        self.assertEqual(cycle_lib.count('data-retro-mode="time"'), 3)
+        for field_id in (
+            "pf-cycle-boundary", "pf-adj-start-${c.task_id}", "pf-adj-end-${c.task_id}",
+        ):
+            with self.subTest(cycle_field=field_id):
+                self.assertIn(f'data-retro-for="{field_id}', cycle_lib)
+        # 配置页卡片表面的周期时间字段
+        config = CONFIG_PAGE.read_text(encoding="utf-8")
+        self.assertIn('data-retro-for="cfg-cycle-boundary"', config)
         # 复古选择器模块的三种模式齐备
         lib = RETRO_TIME.read_text(encoding="utf-8")
         for marker in ("'datetime'", "'date'", "'time'", "openRetroTimePop", "createRetroTimeField"):
@@ -367,15 +387,24 @@ class PlanningPageContractTests(unittest.TestCase):
                 self.assertNotIn(legacy, form)
 
     def test_task_form_window_four_combos_and_hint(self):
-        # C2：四种窗口组合 + 语义提示（在时段内寻找连续空闲块，不是整段
-        # 占满）；两个选择器互相独立、不强制成对填写
+        # C2（2026-10-01 更新）：四种窗口组合仍可表达（payload 契约见
+        # test_task_form_sends_window_clear_values）；可安排时段双端改为
+        # 全宽复古时间字段，「（可选）」随字段标签；原整段语义提示按
+        # user 指示删除，不得回归。
         form = self._task_form_source()
         for marker in (
-            "可安排时段（可选）", "最早开始", "最晚完成",
-            "系统在时段内寻找能完整容纳耗时的连续空闲块", "两端可独立留空",
+            "可安排时段", "最早开始（可选）", "最晚完成（可选）",
+            'data-retro-for="pf-window-start"', 'data-retro-for="pf-window-end"',
+            'data-retro-align="right"',
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, form)
+        for gone in (
+            "可安排时段（可选）", "两端可独立留空",
+            "系统在时段内寻找能完整容纳耗时的连续空闲块",
+        ):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, form)
 
     def test_task_form_inline_chinese_errors(self):
         # C3：保存失败在字段附近以中文呈现（时段区 / 目标日期区），保留
@@ -416,6 +445,8 @@ class PlanningPageContractTests(unittest.TestCase):
         # 批次 9 UI #2 修复：多项冲突逐个修正时，已修正者从下一次 dry-run
         # 响应消失、重绘移除其 DOM 行——调整必须留在稳定 task_id 集合中，
         # 最终 submit 携带全部调整（不能只剩最后一个）。
+        # 2026-10-01：实现随周期设置弹窗移至 lib/cycle_settings.js。
+        lib = CYCLE_SETTINGS.read_text(encoding="utf-8")
         for marker in (
             "mergeBoundaryAdjustments(adjustmentsState, collected)",
             "rememberedAdjustment(adjustmentsState, taskId)",
@@ -424,12 +455,16 @@ class PlanningPageContractTests(unittest.TestCase):
             "(prev && prev.window_end_tod) || c.window_end_tod",
         ):
             with self.subTest(marker=marker):
-                self.assertIn(marker, self.page)
+                self.assertIn(marker, lib)
 
     def test_cycle_settings_two_phase_boundary_flow(self):
         # C12 / §5.2.2：boundary 修改先 dry-run（零写入）→ 冲突在同一弹窗
         # 内列出并就地调整（校验按新 boundary）→ 一次原子保存（携带
-        # task_adjustments）；下一周期生效提示；取消 = 不点保存即零写入
+        # task_adjustments）；下一周期生效提示；取消 = 不点保存即零写入。
+        # 2026-10-01：弹窗实现移至 lib/cycle_settings.js；配置页卡片表面
+        # 直发 boundary 修改（同样先 dry-run），命中冲突时以 initialBoundary
+        # 预填弹窗接续调整。
+        lib = CYCLE_SETTINGS.read_text(encoding="utf-8")
         for marker in (
             "dry_run: true",
             "task_adjustments: collectAdjustments()",
@@ -440,9 +475,19 @@ class PlanningPageContractTests(unittest.TestCase):
             "pf-boundary-conflicts",
             "pf-cycle-error",
             "pf-adj-start-${c.task_id}",
+            "initialBoundary",
         ):
             with self.subTest(marker=marker):
-                self.assertIn(marker, self.page)
+                self.assertIn(marker, lib)
+        config = CONFIG_PAGE.read_text(encoding="utf-8")
+        for marker in (
+            "refresh_boundary_time: boundary, dry_run: true",
+            "refresh_boundary_time: boundary }",
+            "openCycleSettings(",
+            "initialBoundary: boundary",
+        ):
+            with self.subTest(config_marker=marker):
+                self.assertIn(marker, config)
 
     def test_manual_recompute_shows_conflict_list(self):
         # C6/C7：手动重算冲突以弹窗呈现（待办 / 约束 / 原因三要素）+ 更新数量反馈
@@ -550,7 +595,7 @@ class PlanningNavigationContractTests(unittest.TestCase):
         if quickjs is None:
             self.skipTest("quickjs is not installed")
         import re as _re
-        for path in (PLANNING, RETRO_TIME):
+        for path in (PLANNING, RETRO_TIME, RETRO_SELECT, CYCLE_SETTINGS, CONFIG_PAGE):
             src = path.read_text(encoding="utf-8")
             src = _re.sub(r"import\s[^;]*?;", "", src, flags=_re.S)
             src = src.replace("export default {", "const __page__ = {")

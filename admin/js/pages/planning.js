@@ -7,9 +7,7 @@ import {
   createDetailPanel,
 } from '../ui.js?v=20260930-planning11';
 import { createRetroTimeField } from '../lib/retro_time.js?v=20260930-planning11';
-import {
-  mergeBoundaryAdjustments, rememberedAdjustment,
-} from '../lib/planning_adjustments.js?v=20260930-planning11';
+import { createRetroSelectField } from '../lib/retro_select.js?v=20260930-planning11';
 
 const TASK_TYPE_LABELS = {
   daily: '每日', interval: '间歇', weekly: '每周', monthly: '每月', once: '单次', idle: '闲时',
@@ -118,13 +116,17 @@ export default {
     root.innerHTML = `
       <div class="page-with-detail" id="planning-layout">
         <div class="page-main">
+          <div class="tabs" id="planning-tabs" style="margin-bottom:14px">
+            <button class="tab active" data-act="plan-tab" data-tab="today">${icon('calendar')}当前待办</button>
+            <button class="tab" data-act="plan-tab" data-tab="all">${icon('inbox')}全部待办</button>
+            <button class="tab" data-act="plan-tab" data-tab="goals">${icon('star')}长期目标</button>
+            <button class="tab" data-act="plan-tab" data-tab="summary">${icon('journal')}每日总结</button>
+          </div>
+
           <div class="toolbar" style="margin-bottom:14px">
             <button class="btn btn-primary" data-act="new-task">${icon('plus')}新建待办</button>
             <button class="btn btn-secondary" data-act="recompute">${icon('refresh')}重新计算时间</button>
             <button class="btn btn-secondary" data-act="enter-reorder" id="planning-reorder-btn">${icon('sort')}调整顺序</button>
-            <span class="grow"></span>
-            <button class="btn btn-secondary" data-act="cycle-settings">${icon('gear')}周期设置</button>
-            <button class="btn btn-secondary" data-act="refresh">${icon('refresh')}刷新</button>
           </div>
           <div id="planning-reorder-bar" style="display:none;margin-bottom:12px">
             <div class="plan-alarm-bar">
@@ -134,13 +136,6 @@ export default {
               <button class="btn btn-primary btn-sm" data-act="confirm-reorder">${icon('check')}确认</button>
               <button class="btn btn-danger-line btn-sm" data-act="cancel-reorder">${icon('x')}撤销</button>
             </div>
-          </div>
-
-          <div class="tabs" id="planning-tabs" style="margin-bottom:14px">
-            <button class="tab active" data-act="plan-tab" data-tab="today">${icon('calendar')}当前待办</button>
-            <button class="tab" data-act="plan-tab" data-tab="all">${icon('inbox')}全部待办</button>
-            <button class="tab" data-act="plan-tab" data-tab="goals">${icon('star')}长期目标</button>
-            <button class="tab" data-act="plan-tab" data-tab="summary">${icon('journal')}每日总结</button>
           </div>
 
           <div class="plan-region" id="planning-today" data-panel="today">
@@ -233,8 +228,6 @@ export default {
     delegate(root, {
       'new-task': () => this.openTaskForm(null),
       recompute: () => this.runRecompute(),
-      refresh: () => this.refreshAll(),
-      'cycle-settings': () => this.openCycleSettings(),
       'enter-reorder': () => this.enterReorder(),
       'confirm-reorder': () => this.confirmReorder(),
       'cancel-reorder': () => this.cancelReorder(),
@@ -307,12 +300,20 @@ export default {
   },
 
   /** 把 .retro-time 宿主初始化为复古选择器（mode：datetime/date/time）。 */
-  initRetroFields(scope) {
+  initRetroFields(scope, selectOptionsById = {}) {
     scope.querySelectorAll('.retro-time[data-retro-for]').forEach((host) => {
       createRetroTimeField(host, {
         id: host.dataset.retroFor,
         value: host.dataset.retroValue || '',
         mode: host.dataset.retroMode || 'datetime',
+        align: host.dataset.retroAlign || 'left',
+      });
+    });
+    scope.querySelectorAll('.retro-select[data-retro-select]').forEach((host) => {
+      createRetroSelectField(host, {
+        id: host.dataset.retroSelect,
+        value: host.dataset.retroValue || '',
+        options: selectOptionsById[host.dataset.retroSelect] || [],
       });
     });
   },
@@ -342,148 +343,6 @@ export default {
   },
 
   /* ---------- 数据加载 ---------- */
-
-  async refreshAll() {
-    // 刷新是显式动作：连同「全部待办」一起重拉（其面板可能尚未激活过）
-    this.loadedTabs?.add('all');
-    await this.loadAll();
-  },
-
-  async openCycleSettings() {
-    let settings;
-    try {
-      settings = await gw('/admin/api/planning/cycle');
-    } catch (error) {
-      toast(`读取周期设置失败：${error.message}`, 'err');
-      return;
-    }
-    const pending = settings.pending_boundary;
-    const { root, close } = modal({
-      title: '周期设置',
-      wide: true,
-      body: `
-        <div class="field"><label>每日刷新时间（北京时间）</label>
-          <div class="retro-time" data-retro-for="pf-cycle-boundary" data-retro-mode="time" data-retro-value="${esc(settings.refresh_boundary_time)}"></div>
-          <p class="muted text-sm">新的刷新时间从下一规划周期开始生效，当前周期保持不变。</p></div>
-        ${pending ? `<div class="field muted text-sm">当前已有等待生效的修改：新刷新时间 ${esc(settings.refresh_boundary_time)} 将于 ${esc(fmtDue(pending.effective_at))} 起生效；当前周期按原刷新时间 ${esc(pending.previous_time)} 继续走完。</div>` : ''}
-        <div id="pf-boundary-conflicts"></div>
-        <div class="field"><label class="inline"><input type="checkbox" id="pf-daily-refresh" ${settings.daily_refresh_enabled ? 'checked' : ''}> 每日待办自动刷新</label></div>
-        <div class="field"><label class="inline"><input type="checkbox" id="pf-auto-recompute" ${settings.auto_recompute_enabled ? 'checked' : ''}> 自动重算（排列/完成等变化后等待一段时间自动重排）</label></div>
-        <div class="field"><label>自动重算等待（分钟）</label>
-          <input type="number" id="pf-auto-wait" min="1" max="1440" value="${esc(settings.auto_recompute_wait_minutes)}"></div>
-        <div id="pf-cycle-error" hidden></div>`,
-      footer: `<button class="btn btn-secondary" data-cancel>取消</button>
-               <button class="btn btn-primary" data-ok>保存</button>`,
-    });
-    this.initRetroFields(root);
-    root.querySelector('[data-cancel]').onclick = close;
-    const submitBtn = root.querySelector('[data-ok]');
-    const conflictHost = root.querySelector('#pf-boundary-conflicts');
-    const errorArea = root.querySelector('#pf-cycle-error');
-    // 冲突清单就地渲染（同一流程内调整；校验一律按新 boundary 进行）
-    // 批次 9 UI 修复：dry-run 只返回仍未通过的冲突——已修正的待办不再
-    // 出现在下一次响应里，重绘会把 DOM 中它的调整行移除。调整以稳定
-    // task_id → 值 形式留在 modal 级集合中，逐项修正互不覆盖；重绘冲突
-    // 行时恢复该待办已录入的值。
-    const adjustmentsState = [];
-    const remembered = (taskId) => rememberedAdjustment(adjustmentsState, taskId);
-    const showConflictList = (conflicts, boundary) => {
-      conflictHost.innerHTML = conflicts.length ? `
-        <div class="field">
-          <label>以下待办的可安排时段跨越新刷新时间 ${esc(boundary)}，请在下方调整后再保存</label>
-          ${conflicts.map((c) => {
-            const prev = remembered(c.task_id);
-            return `
-            <div class="field" data-adjust-task="${c.task_id}">
-              <label class="inline">${esc(c.content)}：当前时段 ${esc(c.window_start_tod) || '无'} ～ ${esc(c.window_end_tod) || '无'}</label>
-              <div class="tag-row" style="align-items:center">
-                <span class="muted text-sm">最早开始</span>
-                <div class="retro-time" data-retro-for="pf-adj-start-${c.task_id}" data-retro-mode="time" data-retro-value="${esc((prev && prev.window_start_tod) || c.window_start_tod || '')}"></div>
-                <span class="muted text-sm">最晚完成</span>
-                <div class="retro-time" data-retro-for="pf-adj-end-${c.task_id}" data-retro-mode="time" data-retro-value="${esc((prev && prev.window_end_tod) || c.window_end_tod || '')}"></div>
-              </div>
-              <p class="muted text-sm">${esc(c.reason)}</p>
-            </div>`;
-          }).join('')}
-        </div>` : '';
-      if (conflicts.length) this.initRetroFields(conflictHost);
-    };
-    const collectAdjustments = () => {
-      // 只从仍在 DOM 中的冲突行收集本次填写值；与已录入集合按 task_id
-      // 合并（同 task 覆盖旧值、其余保留）——多项冲突逐个修正后，最终
-      // submit 携带全部调整，不只剩最后一个。
-      const collected = [...conflictHost.querySelectorAll('[data-adjust-task]')]
-        .map((row) => ({
-          task_id: Number(row.dataset.adjustTask),
-          window_start_tod: root.querySelector(`#pf-adj-start-${row.dataset.adjustTask}`).value || null,
-          window_end_tod: root.querySelector(`#pf-adj-end-${row.dataset.adjustTask}`).value || null,
-        }));
-      const merged = mergeBoundaryAdjustments(adjustmentsState, collected);
-      adjustmentsState.length = 0;
-      adjustmentsState.push(...merged);
-      return adjustmentsState;
-    };
-    const patch = (bodyObj) => gw('/admin/api/planning/cycle', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(bodyObj),
-    });
-    submitBtn.onclick = async () => {
-      const boundary = root.querySelector('#pf-cycle-boundary').value;
-      const daily = root.querySelector('#pf-daily-refresh').checked;
-      const autoEnabled = root.querySelector('#pf-auto-recompute').checked;
-      const autoWait = Number(root.querySelector('#pf-auto-wait').value);
-      const boundaryChanged = boundary && boundary !== settings.refresh_boundary_time;
-      errorArea.hidden = true;
-      submitBtn.disabled = true;
-      try {
-        // boundary 修改（§5.2.2 两阶段）：先 dry-run（绝对零写入）；命中冲突
-        // 则在同一弹窗内列出并等待用户调整，全部通过后一次原子保存；取消
-        // （关闭弹窗）则全部不保存。
-        let adjustments = [];
-        if (boundaryChanged) {
-          const dry = await patch({
-            refresh_boundary_time: boundary,
-            dry_run: true,
-            ...(conflictHost.querySelector('[data-adjust-task]')
-              ? { task_adjustments: collectAdjustments() } : {}),
-          });
-          if (dry.conflicts?.length) {
-            showConflictList(dry.conflicts, boundary);
-            submitBtn.disabled = false;
-            toast('存在跨越新刷新时间的待办，请调整其可安排时段后再保存', 'err');
-            return;
-          }
-          adjustments = conflictHost.querySelector('[data-adjust-task]')
-            ? collectAdjustments() : [];
-          // 最终保存：新 boundary 与关联调整一次原子生效；modal 打开期间
-          // 出现的新冲突被服务端 409 拒绝并整体不生效
-          await patch({
-            refresh_boundary_time: boundary,
-            ...(adjustments.length ? { task_adjustments: adjustments } : {}),
-          });
-        }
-        // 其余设置键保持原路径：一次只接受一个键，逐个下发实际变化
-        const changes = [];
-        if (daily !== settings.daily_refresh_enabled) changes.push({ daily_refresh_enabled: daily });
-        if (autoEnabled !== settings.auto_recompute_enabled) changes.push({ auto_recompute_enabled: autoEnabled });
-        if (Number.isInteger(autoWait) && autoWait >= 1 && autoWait <= 1440 && autoWait !== settings.auto_recompute_wait_minutes) {
-          changes.push({ auto_recompute_wait_minutes: autoWait });
-        }
-        for (const change of changes) await patch(change);
-        close();
-        toast(boundaryChanged
-          ? '已保存；新的刷新时间从下一规划周期开始生效，当前周期保持不变'
-          : '周期设置已保存');
-        await this.loadToday();
-      } catch (error) {
-        submitBtn.disabled = false;
-        errorArea.hidden = false;
-        errorArea.innerHTML = errorBlock(esc(String(error.message || '')));
-        toast(`保存失败：${error.message}`, 'err');
-      }
-    };
-  },
 
   async loadAll() {
     await Promise.all([this.loadToday(), this.loadTasks(), this.loadOccurrences()]);
@@ -1425,8 +1284,7 @@ export default {
       && (task.has_generated_occurrence
         || this.occurrences.some((o) => o.task_id === task.id));
     const value = (field, fallback = '') => (task ? (task[field] ?? fallback) : fallback);
-    const typeOptions = TASK_TYPES.map((t) =>
-      `<option value="${t}" ${value('task_type', 'daily') === t ? 'selected' : ''}>${TASK_TYPE_LABELS[t]}</option>`).join('');
+    const typeSelectOptions = TASK_TYPES.map((t) => ({ value: t, label: TASK_TYPE_LABELS[t] }));
     const weekdayChecks = WEEKDAY_NAMES.map((name, index) => `
       <label class="inline"><input type="checkbox" data-weekday value="${index}"
         ${(value('weekdays') || []).includes(index) ? 'checked' : ''}>周${name}</label>`).join('');
@@ -1436,7 +1294,8 @@ export default {
       body: `
         <div class="field"><label>内容</label>
           <input type="text" id="pf-content" value="${esc(value('content'))}" placeholder="例如：背单词"></div>
-        <div class="field"><label>类型</label><select id="pf-type">${typeOptions}</select></div>
+        <div class="field"><label>类型</label>
+          <div class="retro-select" data-retro-select="pf-type" data-retro-value="${esc(value('task_type', 'daily'))}"></div></div>
         <div data-type-block="interval" style="display:none">
           <div class="field"><label>刷新方式</label>
             <div class="tag-row">
@@ -1461,14 +1320,15 @@ export default {
         </div>
         <div class="field"><label>预估耗时（分钟，或 1h30m 简写）</label>
           <input type="text" id="pf-estimated" value="${esc(value('estimated_minutes', ''))}"></div>
-        <div class="field"><label>可安排时段（可选）</label>
-          <div class="tag-row" style="align-items:center">
-            <span class="muted text-sm">最早开始</span>
-            <div class="retro-time" data-retro-for="pf-window-start" data-retro-mode="time" data-retro-value="${esc(value('window_start_tod'))}"></div>
-            <span class="muted text-sm">最晚完成</span>
-            <div class="retro-time" data-retro-for="pf-window-end" data-retro-mode="time" data-retro-value="${esc(value('window_end_tod'))}"></div>
-          </div>
-          <p class="muted text-sm">两端可独立留空：都不填=正常自动排程；只填最早开始=不早于该时刻；只填最晚完成=必须在此之前完成（越过即超时）；都填=系统在时段内寻找能完整容纳耗时的连续空闲块（不是整段占满）。结束早于开始表示结束在次日。</p></div>
+        <div class="field"><label>可安排时段</label>
+          <div class="window-fields">
+            <div class="window-field"><label>最早开始（可选）</label>
+              <div class="retro-time" data-retro-for="pf-window-start" data-retro-mode="time" data-retro-align="right" data-retro-value="${esc(value('window_start_tod'))}"></div>
+            </div>
+            <div class="window-field"><label>最晚完成（可选）</label>
+              <div class="retro-time" data-retro-for="pf-window-end" data-retro-mode="time" data-retro-align="right" data-retro-value="${esc(value('window_end_tod'))}"></div>
+            </div>
+          </div></div>
         <div id="pf-window-error" hidden></div>
         <div class="field"><label class="inline"><input type="checkbox" id="pf-hollow" ${value('is_hollow') ? 'checked' : ''}> 中空待办（开始/结束两个条目，中间可插入其他待办）</label></div>
         <div id="pf-hollow-block" style="display:none">
@@ -1485,8 +1345,9 @@ export default {
                <button class="btn btn-primary" data-ok>${editing ? '保存' : '创建'}</button>`,
     });
 
+    this.initRetroFields(root, { 'pf-type': typeSelectOptions });  // BUG-14：表单内日期/时刻/类型统一为复古选择器（值契约不变）
+    // 复古下拉挂载后 #pf-type 才是隐藏 input，取值必须在 initRetroFields 之后
     const typeSelect = root.querySelector('#pf-type');
-    this.initRetroFields(root);  // BUG-14：表单内日期/时刻统一为复古选择器（值契约不变）
     if (onceLocked) {
       // 批次 9 UI 修复：复古选择器是 hidden input + 按钮——只 disable
       // input 拦不住按钮弹层改值；按钮与 input 一起禁用才算真正锁死。
