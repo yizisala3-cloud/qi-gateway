@@ -1,12 +1,15 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
 // 数据按需加载：今日看板 30 秒轮询，全部待办首次切到该页签时才拉取。
-import { gw } from '../api.js?v=20260927-planning10';
+import { gw } from '../api.js?v=20260930-planning11';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, fmtDate, esc,
   createDetailPanel,
-} from '../ui.js?v=20260927-planning10';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20260927-planning10';
+} from '../ui.js?v=20260930-planning11';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20260930-planning11';
+import {
+  mergeBoundaryAdjustments, rememberedAdjustment,
+} from '../lib/planning_adjustments.js?v=20260930-planning11';
 
 const TASK_TYPE_LABELS = {
   daily: '每日', interval: '间歇', weekly: '每周', monthly: '每月', once: '单次', idle: '闲时',
@@ -357,47 +360,126 @@ export default {
     const pending = settings.pending_boundary;
     const { root, close } = modal({
       title: '周期设置',
+      wide: true,
       body: `
         <div class="field"><label>每日刷新时间（北京时间）</label>
-          <div class="retro-time" data-retro-for="pf-cycle-boundary" data-retro-mode="time" data-retro-value="${esc(settings.refresh_boundary_time)}"></div></div>
-        ${pending ? `<div class="field muted text-sm">新刷新时间 ${esc(settings.refresh_boundary_time)} 将于 ${esc(fmtDue(pending.effective_at))} 起生效；当前周期按原刷新时间 ${esc(pending.previous_time)} 继续走完。</div>` : ''}
+          <div class="retro-time" data-retro-for="pf-cycle-boundary" data-retro-mode="time" data-retro-value="${esc(settings.refresh_boundary_time)}"></div>
+          <p class="muted text-sm">新的刷新时间从下一规划周期开始生效，当前周期保持不变。</p></div>
+        ${pending ? `<div class="field muted text-sm">当前已有等待生效的修改：新刷新时间 ${esc(settings.refresh_boundary_time)} 将于 ${esc(fmtDue(pending.effective_at))} 起生效；当前周期按原刷新时间 ${esc(pending.previous_time)} 继续走完。</div>` : ''}
+        <div id="pf-boundary-conflicts"></div>
         <div class="field"><label class="inline"><input type="checkbox" id="pf-daily-refresh" ${settings.daily_refresh_enabled ? 'checked' : ''}> 每日待办自动刷新</label></div>
         <div class="field"><label class="inline"><input type="checkbox" id="pf-auto-recompute" ${settings.auto_recompute_enabled ? 'checked' : ''}> 自动重算（排列/完成等变化后等待一段时间自动重排）</label></div>
         <div class="field"><label>自动重算等待（分钟）</label>
           <input type="number" id="pf-auto-wait" min="1" max="1440" value="${esc(settings.auto_recompute_wait_minutes)}"></div>
-        <div class="field muted text-sm">新的刷新时间从下一规划周期开始生效，当前周期保持不变；修改长期规则只影响以后生成的轮次，已生成的待办不变。</div>`,
+        <div id="pf-cycle-error" hidden></div>`,
       footer: `<button class="btn btn-secondary" data-cancel>取消</button>
                <button class="btn btn-primary" data-ok>保存</button>`,
     });
     this.initRetroFields(root);
     root.querySelector('[data-cancel]').onclick = close;
-    root.querySelector('[data-ok]').onclick = async () => {
+    const submitBtn = root.querySelector('[data-ok]');
+    const conflictHost = root.querySelector('#pf-boundary-conflicts');
+    const errorArea = root.querySelector('#pf-cycle-error');
+    // 冲突清单就地渲染（同一流程内调整；校验一律按新 boundary 进行）
+    // 批次 9 UI 修复：dry-run 只返回仍未通过的冲突——已修正的待办不再
+    // 出现在下一次响应里，重绘会把 DOM 中它的调整行移除。调整以稳定
+    // task_id → 值 形式留在 modal 级集合中，逐项修正互不覆盖；重绘冲突
+    // 行时恢复该待办已录入的值。
+    const adjustmentsState = [];
+    const remembered = (taskId) => rememberedAdjustment(adjustmentsState, taskId);
+    const showConflictList = (conflicts, boundary) => {
+      conflictHost.innerHTML = conflicts.length ? `
+        <div class="field">
+          <label>以下待办的可安排时段跨越新刷新时间 ${esc(boundary)}，请在下方调整后再保存</label>
+          ${conflicts.map((c) => {
+            const prev = remembered(c.task_id);
+            return `
+            <div class="field" data-adjust-task="${c.task_id}">
+              <label class="inline">${esc(c.content)}：当前时段 ${esc(c.window_start_tod) || '无'} ～ ${esc(c.window_end_tod) || '无'}</label>
+              <div class="tag-row" style="align-items:center">
+                <span class="muted text-sm">最早开始</span>
+                <div class="retro-time" data-retro-for="pf-adj-start-${c.task_id}" data-retro-mode="time" data-retro-value="${esc((prev && prev.window_start_tod) || c.window_start_tod || '')}"></div>
+                <span class="muted text-sm">最晚完成</span>
+                <div class="retro-time" data-retro-for="pf-adj-end-${c.task_id}" data-retro-mode="time" data-retro-value="${esc((prev && prev.window_end_tod) || c.window_end_tod || '')}"></div>
+              </div>
+              <p class="muted text-sm">${esc(c.reason)}</p>
+            </div>`;
+          }).join('')}
+        </div>` : '';
+      if (conflicts.length) this.initRetroFields(conflictHost);
+    };
+    const collectAdjustments = () => {
+      // 只从仍在 DOM 中的冲突行收集本次填写值；与已录入集合按 task_id
+      // 合并（同 task 覆盖旧值、其余保留）——多项冲突逐个修正后，最终
+      // submit 携带全部调整，不只剩最后一个。
+      const collected = [...conflictHost.querySelectorAll('[data-adjust-task]')]
+        .map((row) => ({
+          task_id: Number(row.dataset.adjustTask),
+          window_start_tod: root.querySelector(`#pf-adj-start-${row.dataset.adjustTask}`).value || null,
+          window_end_tod: root.querySelector(`#pf-adj-end-${row.dataset.adjustTask}`).value || null,
+        }));
+      const merged = mergeBoundaryAdjustments(adjustmentsState, collected);
+      adjustmentsState.length = 0;
+      adjustmentsState.push(...merged);
+      return adjustmentsState;
+    };
+    const patch = (bodyObj) => gw('/admin/api/planning/cycle', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(bodyObj),
+    });
+    submitBtn.onclick = async () => {
       const boundary = root.querySelector('#pf-cycle-boundary').value;
       const daily = root.querySelector('#pf-daily-refresh').checked;
       const autoEnabled = root.querySelector('#pf-auto-recompute').checked;
       const autoWait = Number(root.querySelector('#pf-auto-wait').value);
-      // 接口一次只接受一个键；逐个下发实际发生变化的设置
-      const changes = [];
-      if (boundary && boundary !== settings.refresh_boundary_time) changes.push({ refresh_boundary_time: boundary });
-      if (daily !== settings.daily_refresh_enabled) changes.push({ daily_refresh_enabled: daily });
-      if (autoEnabled !== settings.auto_recompute_enabled) changes.push({ auto_recompute_enabled: autoEnabled });
-      if (Number.isInteger(autoWait) && autoWait >= 1 && autoWait <= 1440 && autoWait !== settings.auto_recompute_wait_minutes) {
-        changes.push({ auto_recompute_wait_minutes: autoWait });
-      }
+      const boundaryChanged = boundary && boundary !== settings.refresh_boundary_time;
+      errorArea.hidden = true;
+      submitBtn.disabled = true;
       try {
-        for (const change of changes) {
-          await gw('/admin/api/planning/cycle', {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(change),
+        // boundary 修改（§5.2.2 两阶段）：先 dry-run（绝对零写入）；命中冲突
+        // 则在同一弹窗内列出并等待用户调整，全部通过后一次原子保存；取消
+        // （关闭弹窗）则全部不保存。
+        let adjustments = [];
+        if (boundaryChanged) {
+          const dry = await patch({
+            refresh_boundary_time: boundary,
+            dry_run: true,
+            ...(conflictHost.querySelector('[data-adjust-task]')
+              ? { task_adjustments: collectAdjustments() } : {}),
+          });
+          if (dry.conflicts?.length) {
+            showConflictList(dry.conflicts, boundary);
+            submitBtn.disabled = false;
+            toast('存在跨越新刷新时间的待办，请调整其可安排时段后再保存', 'err');
+            return;
+          }
+          adjustments = conflictHost.querySelector('[data-adjust-task]')
+            ? collectAdjustments() : [];
+          // 最终保存：新 boundary 与关联调整一次原子生效；modal 打开期间
+          // 出现的新冲突被服务端 409 拒绝并整体不生效
+          await patch({
+            refresh_boundary_time: boundary,
+            ...(adjustments.length ? { task_adjustments: adjustments } : {}),
           });
         }
+        // 其余设置键保持原路径：一次只接受一个键，逐个下发实际变化
+        const changes = [];
+        if (daily !== settings.daily_refresh_enabled) changes.push({ daily_refresh_enabled: daily });
+        if (autoEnabled !== settings.auto_recompute_enabled) changes.push({ auto_recompute_enabled: autoEnabled });
+        if (Number.isInteger(autoWait) && autoWait >= 1 && autoWait <= 1440 && autoWait !== settings.auto_recompute_wait_minutes) {
+          changes.push({ auto_recompute_wait_minutes: autoWait });
+        }
+        for (const change of changes) await patch(change);
         close();
-        toast(changes.some((c) => c.refresh_boundary_time)
+        toast(boundaryChanged
           ? '已保存；新的刷新时间从下一规划周期开始生效，当前周期保持不变'
           : '周期设置已保存');
         await this.loadToday();
       } catch (error) {
+        submitBtn.disabled = false;
+        errorArea.hidden = false;
+        errorArea.innerHTML = errorBlock(esc(String(error.message || '')));
         toast(`保存失败：${error.message}`, 'err');
       }
     };
@@ -458,7 +540,11 @@ export default {
     }
     if (occ.actual_minutes != null) parts.push(`实际耗时 ${occ.actual_minutes}m`);
     if (occ.estimated_minutes) parts.push(`预估耗时 ${occ.estimated_minutes}m`);
-    if (occ.is_limited && occ.deadline_at) parts.push(`截止 ${fmtClock(occ.deadline_at)}`);
+    // 可安排时段是 user 排程约束，与系统预估起止是两套独立语义，分开呈现
+    const windowParts = [];
+    if (occ.window_start_at) windowParts.push(`不早于 ${fmtClock(occ.window_start_at)}`);
+    if (occ.window_end_at) windowParts.push(`最晚完成 ${fmtClock(occ.window_end_at)}`);
+    if (windowParts.length) parts.push(`时段 ${windowParts.join('，')}`);
     if (occ.partial_note) parts.push(`说明：${esc(occ.partial_note)}`);
     return parts.join(' · ');
   },
@@ -471,7 +557,7 @@ export default {
     if (occ.is_fixed) badges.push(tag('固定', 'slate'));
     if (occ.phase === 'start') badges.push(tag('开始阶段', 'plum'));
     if (occ.phase === 'end') badges.push(tag('结束阶段', 'plum'));
-    if (occ.is_limited) badges.push(tag('限时', 'red'));
+    if (this.conflictOccIds?.has(occ.id)) badges.push(tag('排程冲突', 'red'));
     if (occ.source === 'early') badges.push(tag('提前完成', 'muted'));
     return badges.join('');
   },
@@ -492,6 +578,10 @@ export default {
   renderBoard() {
     const board = this.board;
     if (!board || !this.root) return;
+    // 排程冲突是派生结果（不落库）：看板读取时由后端同一纯函数派生，
+    // 前端仅以徽章 + 详情原因呈现
+    this.conflictOccIds = new Set((board.conflicts || []).map((c) => c.occurrence_id));
+    this.conflictById = new Map((board.conflicts || []).map((c) => [c.occurrence_id, c]));
     const progress = this.root.querySelector('#planning-progress');
     const attention = this.root.querySelector('#planning-attention');
     const done = this.root.querySelector('#planning-done');
@@ -567,7 +657,7 @@ export default {
           <div class="plan-item-meta">
             <span>${taskTypeSummary(task)}</span>
             ${task.estimated_minutes ? `<span>预估耗时 ${task.estimated_minutes}m</span>` : ''}
-            ${task.time_mode === 'explicit' ? `<span>固定 ${task.est_start_tod || ''}～${task.est_end_tod || ''}</span>` : ''}
+            ${(task.window_start_tod || task.window_end_tod) ? `<span>时段 ${task.window_start_tod || '无'}～${task.window_end_tod || '无'}</span>` : ''}
             ${task.is_hollow ? '<span>中空待办</span>' : ''}
             ${task.next_due ? `<span>下次到期 ${fmtDue(task.next_due)}</span>` : ''}
             ${task.timer_minutes ? `<span>计时器 ${task.timer_minutes}m</span>` : ''}
@@ -575,7 +665,7 @@ export default {
         </div>
         <div class="plan-item-side"><div class="tag-row">
           ${tag(esc(TASK_TYPE_LABELS[task.task_type] || task.task_type), 'gold')}
-          ${task.is_limited ? tag('限时', 'red') : ''}
+          ${(task.window_start_tod || task.window_end_tod) ? tag('时段', 'slate') : ''}
           ${task.is_fixed ? tag('固定', 'slate') : ''}
           ${task.alarm_start || task.alarm_end ? tag('闹钟', 'plum') : ''}
           ${task.is_active ? '' : tag('已废弃', 'red')}
@@ -631,6 +721,10 @@ export default {
         <div class="kv"><span class="k">原始规划周期</span><span class="v">${esc(occ.schedule_date || occ.for_date)}</span></div>
         ${occ.display_cycle_date ? `<div class="kv"><span class="k">当前展示周期</span><span class="v">${esc(occ.display_cycle_date)}</span></div>` : ''}
         <div class="kv"><span class="k">预估时间</span><span class="v">${fmtRange(occ.est_start, occ.est_end)}</span></div>
+        ${(occ.window_start_at || occ.window_end_at) ? `<div class="kv"><span class="k">可安排时段</span><span class="v">${[
+          occ.window_start_at ? `不早于 ${fmtClock(occ.window_start_at)}` : '',
+          occ.window_end_at ? `最晚完成 ${fmtClock(occ.window_end_at)}` : '',
+        ].filter(Boolean).join('，')}</span></div>` : ''}
         <div class="kv"><span class="k">实际时间</span><span class="v">${fmtRange(occ.actual_start, occ.actual_end)}</span></div>
         <div class="kv"><span class="k">实际耗时</span><span class="v">${occ.actual_minutes != null ? occ.actual_minutes + 'm' : '-'}</span></div>
         <div class="kv"><span class="k">预估耗时</span><span class="v">${occ.estimated_minutes ? occ.estimated_minutes + 'm' : '-'}</span></div>
@@ -646,7 +740,8 @@ export default {
           </div>
           <p class="muted text-sm" style="margin:4px 0 0">改动保存到所属待办；计时器支持 1h30m 简写，留空保存即清除。</p>
         </span></div>
-        <div class="kv"><span class="k">当前状态</span><span class="v">${esc(occ.schedule_label)}</span></div>`,
+        <div class="kv"><span class="k">当前状态</span><span class="v">${esc(occ.schedule_label)}</span></div>
+        ${this.conflictById?.get(occ.id) ? `<div class="kv kv-block"><span class="k">排程冲突</span><span class="v">${esc(this.conflictById.get(occ.id).reason)}</span></div>` : ''}`,
       actions,
     });
   },
@@ -694,7 +789,7 @@ export default {
       parts.push(btn('partial', occ.status === 'partial' ? '更新部分完成说明' : '部分完成'));
       parts.push(btn('defer', '延后', 'clock'));
       parts.push(btn('discard-this', '此次不执行'));
-      parts.push(btn('edit-time', '编辑时间', 'edit'));
+      parts.push(btn('edit-time', '调整时段', 'edit'));
       parts.push(btn('spawn-remaining', '剩余另建待办', 'plus'));
       parts.push(btn('split', '拆分待办', 'layers'));
       parts.push(btn('discard', '废弃', 'x', 'btn-danger-line'));
@@ -747,9 +842,9 @@ export default {
       badges: `<div class="tag-row">${tag(esc(TASK_TYPE_LABELS[task.task_type] || ''), 'gold')}${task.refresh_enabled === false && task.is_active ? tag('刷新已暂停', 'slate') : ''}${task.is_active ? '' : tag('已废弃', 'red')}</div>`,
       html: `
         <div class="kv"><span class="k">重复规则</span><span class="v">${esc(taskTypeSummary(task))}</span></div>
-        <div class="kv"><span class="k">时间模式</span><span class="v">${task.time_mode === 'explicit'
-          ? `固定 ${esc(task.est_start_tod || '')}～${esc(task.est_end_tod || '')}`
-          : '仅预估耗时（可自动排程）'}</span></div>
+        <div class="kv"><span class="k">可安排时段</span><span class="v">${(task.window_start_tod || task.window_end_tod)
+          ? `${esc(task.window_start_tod || '无')} ～ ${esc(task.window_end_tod || '无')}${(task.window_start_tod && task.window_end_tod && task.window_end_tod < task.window_start_tod) ? '（结束在次日）' : ''}`
+          : '未设置（正常自动排程）'}</span></div>
         ${task.estimated_minutes ? `<div class="kv"><span class="k">预估耗时</span><span class="v">${task.estimated_minutes}m</span></div>` : ''}
         ${task.is_hollow ? `<div class="kv kv-block"><span class="k">中空待办</span><span class="v">
           开始：${esc(task.hollow_start_content || task.content)}（${task.hollow_start_minutes}m）
@@ -892,11 +987,33 @@ export default {
   async runRecompute() {
     try {
       const result = await gw('/admin/api/planning/recompute', { method: 'POST' });
-      toast(`已重新计算 ${result.updated} 项待办时间`);
+      if (result.conflicts?.length) {
+        // 冲突 = 本轮整体未生效（既有 est 保留）：三要素逐条呈现
+        this.showConflictsModal(result.conflicts, result.updated);
+      } else {
+        toast(`已重新计算，更新了 ${result.updated} 项待办时间`);
+      }
       await this.loadToday();
     } catch (error) {
       toast(`重算失败：${error.message}`, 'err');
     }
+  },
+
+  showConflictsModal(conflicts, updated) {
+    const contentOf = (c) => {
+      const occ = this.findOccurrence(c.occurrence_id);
+      return occ?.content || `待办 #${c.occurrence_id}`;
+    };
+    const { root, close } = modal({
+      title: '排程冲突',
+      body: `
+        <p class="muted text-sm">本轮重算整体未保存（已更新 ${updated ?? 0} 项，既有时间保持不变）：以下待办无法同时满足列表顺序与硬约束。请调整顺序或时段后重试。</p>
+        ${conflicts.map((c) => `
+          <div class="kv kv-block"><span class="k">${esc(contentOf(c))}${c.phase ? `（${c.phase === 'start' ? '开始阶段' : '结束阶段'}）` : ''}</span>
+          <span class="v">${esc(c.reason)}</span></div>`).join('')}`,
+      footer: `<button class="btn btn-primary" data-cancel>知道了</button>`,
+    });
+    root.querySelector('[data-cancel]').onclick = close;
   },
 
   async occurrenceAction(act, id) {
@@ -1097,7 +1214,12 @@ export default {
   },
 
   askEditTime(id) {
-    const occ = this.findOccurrence(id) || {};
+    // 调整时段（批次 8）：编辑当前实例的冻结窗口约束（最早开始 / 最晚完成），
+    // 不是编辑预估排程结果——收窄到恰好容纳耗时即钉住该时间；只有尚未开始
+    // 且开放的实例允许（后端 422/409 中文拒绝时在字段附近呈现并保持可改）。
+    const occ = this.findOccurrence(id)
+      || this.occurrences.find((o) => o.id === id)
+      || {};
     const toLocal = (iso) => {
       if (!iso) return '';
       const d = new Date(iso);
@@ -1105,34 +1227,43 @@ export default {
       const pad = (n) => String(n).padStart(2, '0');
       return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
     };
+    const hasWindow = !!(occ.window_start_at || occ.window_end_at);
     const { root, close } = modal({
-      title: '编辑预估时间',
+      title: '调整时段',
       body: `
-        <div class="field"><label>预估开始</label><input type="datetime-local" id="planning-edit-start" value="${toLocal(occ.est_start)}"></div>
-        <div class="field"><label>预估结束</label><input type="datetime-local" id="planning-edit-end" value="${toLocal(occ.est_end)}"></div>
-        <p class="muted text-sm">手动编辑后该条目按此时间固定，不再被自动重算移动。</p>`,
+        <p class="muted text-sm">调整当前这一轮的可安排时段（最早开始 / 最晚完成，两端可独立留空）。把时段收窄到恰好容纳预计耗时，就会把这条待办钉在该时间，不再被自动重算移动。</p>
+        <div class="field"><label>最早开始（可选）</label><input type="datetime-local" id="planning-adj-window-start" value="${toLocal(occ.window_start_at)}"></div>
+        <div class="field"><label>最晚完成（可选，越过即超时）</label><input type="datetime-local" id="planning-adj-window-end" value="${toLocal(occ.window_end_at)}"></div>
+        ${hasWindow ? '<p class="muted text-sm">这一轮已带时段约束：两端都清空会取消既有约束，后端会拒绝；请保留至少一端。</p>' : ''}
+        <div id="pf-adj-error" hidden></div>`,
       footer: `<button class="btn btn-secondary" data-cancel>取消</button>
                <button class="btn btn-primary" data-ok>保存</button>`,
     });
     root.querySelector('[data-cancel]').onclick = close;
     root.querySelector('[data-ok]').onclick = async () => {
-      const start = root.querySelector('#planning-edit-start').value;
-      const end = root.querySelector('#planning-edit-end').value;
-      if (!start) { toast('请填写开始时间', 'err'); return; }
+      const start = root.querySelector('#planning-adj-window-start').value;
+      const end = root.querySelector('#planning-adj-window-end').value;
       try {
-        // 结束时间留空时省略 est_end（不发送 null）：后端按有效耗时推导
-        // 结束时间；发送 null 会破坏「字段缺省」语义导致 400
-        const body = { est_start: new Date(start).toISOString() };
-        if (end) body.est_end = new Date(end).toISOString();
         await gw(`/admin/api/planning/occurrences/${id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
+          body: JSON.stringify({
+            window_start_at: start ? new Date(start).toISOString() : null,
+            window_end_at: end ? new Date(end).toISOString() : null,
+          }),
         });
         close();
-        toast('时间已更新');
+        toast('时段已更新；待办时间将按新时段重新安排');
         await this.loadToday();
+        await this.loadOccurrences();
       } catch (error) {
+        const message = String(error.message || '');
+        const area = root.querySelector('#pf-adj-error');
+        if (area) {
+          area.hidden = false;
+          area.innerHTML = errorBlock(esc(message));
+          area.scrollIntoView({ block: 'nearest' });
+        }
         toast(`保存失败：${error.message}`, 'err');
       }
     };
@@ -1286,6 +1417,13 @@ export default {
 
   openTaskForm(task) {
     const editing = !!task?.id;
+    // once 已生成当前实例 → 任务级排程身份锁定（§28.3）：目标日期与未来
+    // 窗口模板禁用并提示走当前实例调整；后端 400 仍是权威兜底。
+    // 批次 9 UI 修复：优先用后端随任务列表返回的 has_generated_occurrence
+    // （不依赖 occurrences 列表的加载状态与过滤条件），实例列表仅作兜底。
+    const onceLocked = editing && task.task_type === 'once'
+      && (task.has_generated_occurrence
+        || this.occurrences.some((o) => o.task_id === task.id));
     const value = (field, fallback = '') => (task ? (task[field] ?? fallback) : fallback);
     const typeOptions = TASK_TYPES.map((t) =>
       `<option value="${t}" ${value('task_type', 'daily') === t ? 'selected' : ''}>${TASK_TYPE_LABELS[t]}</option>`).join('');
@@ -1319,18 +1457,19 @@ export default {
         <div data-type-block="once" style="display:none">
           <div class="field"><label>目标日期</label>
             <div class="retro-time" data-retro-for="pf-target-date" data-retro-mode="date" data-retro-value="${esc(value('target_date'))}"></div></div>
+          <div id="pf-once-error" hidden></div>
         </div>
         <div class="field"><label>预估耗时（分钟，或 1h30m 简写）</label>
           <input type="text" id="pf-estimated" value="${esc(value('estimated_minutes', ''))}"></div>
-        <div class="field"><label>显式开始时间（可选，填写后不参与自动移动）</label>
-          <div class="retro-time" data-retro-for="pf-start-tod" data-retro-mode="time" data-retro-value="${esc(value('est_start_tod'))}"></div></div>
-        <div class="field"><label>显式结束时间（可选）</label>
-          <div class="retro-time" data-retro-for="pf-end-tod" data-retro-mode="time" data-retro-value="${esc(value('est_end_tod'))}"></div></div>
-        <div class="field"><label class="inline"><input type="checkbox" id="pf-fixed" ${value('is_fixed') ? 'checked' : ''}> 固定待办（不因重算移动）</label></div>
-        <div class="field"><label>限时截止（可选，当日时刻）</label>
-          <div class="retro-time" data-retro-for="pf-deadline" data-retro-mode="time" data-retro-value="${esc(value('deadline_tod'))}"></div></div>
-        <div class="field"><label>限时范围结束（可选，需先填截止）</label>
-          <div class="retro-time" data-retro-for="pf-deadline-end" data-retro-mode="time" data-retro-value="${esc(value('deadline_end_tod'))}"></div></div>
+        <div class="field"><label>可安排时段（可选）</label>
+          <div class="tag-row" style="align-items:center">
+            <span class="muted text-sm">最早开始</span>
+            <div class="retro-time" data-retro-for="pf-window-start" data-retro-mode="time" data-retro-value="${esc(value('window_start_tod'))}"></div>
+            <span class="muted text-sm">最晚完成</span>
+            <div class="retro-time" data-retro-for="pf-window-end" data-retro-mode="time" data-retro-value="${esc(value('window_end_tod'))}"></div>
+          </div>
+          <p class="muted text-sm">两端可独立留空：都不填=正常自动排程；只填最早开始=不早于该时刻；只填最晚完成=必须在此之前完成（越过即超时）；都填=系统在时段内寻找能完整容纳耗时的连续空闲块（不是整段占满）。结束早于开始表示结束在次日。</p></div>
+        <div id="pf-window-error" hidden></div>
         <div class="field"><label class="inline"><input type="checkbox" id="pf-hollow" ${value('is_hollow') ? 'checked' : ''}> 中空待办（开始/结束两个条目，中间可插入其他待办）</label></div>
         <div id="pf-hollow-block" style="display:none">
           <div class="field"><label>开始阶段内容</label><input type="text" id="pf-hollow-start" value="${esc(value('hollow_start_content'))}"></div>
@@ -1340,15 +1479,7 @@ export default {
           <div class="field"><label>结束阶段内容</label><input type="text" id="pf-hollow-end" value="${esc(value('hollow_end_content'))}"></div>
           <div class="field"><label>结束阶段耗时（分钟）</label><input type="number" id="pf-hollow-end-min" min="1" value="${esc(value('hollow_end_minutes', ''))}"></div>
         </div>
-        <div class="field"><label>提醒</label>
-          <div class="tag-row">
-            <label class="inline"><input type="checkbox" id="pf-alarm-start" ${value('alarm_start') ? 'checked' : ''}> 开始闹钟</label>
-            <label class="inline"><input type="checkbox" id="pf-alarm-end" ${value('alarm_end') ? 'checked' : ''}> 结束闹钟</label>
-            <label class="inline">计时器 <input type="text" id="pf-timer" placeholder="如 30m / 1h" value="${esc(value('timer_minutes', ''))}" style="width:90px"></label>
-          </div>
-          <p class="muted text-sm">开始/结束闹钟到点循环响铃；计时器从点「开始」起倒计时，结束播一次。页面关闭时不提醒。</p>
-        </div>
-        ${editing ? `<div class="field muted text-sm">修改规则只影响以后生成的轮次，当前已经生成的待办保持不变。</div>
+        ${editing ? `<div class="field muted text-sm">修改规则只影响以后生成的轮次，当前已经生成的待办保持不变；提醒（闹钟/计时器）在待办详情栏设置。</div>
         <div class="field"><label class="inline"><input type="checkbox" id="pf-active" ${value('is_active') ? 'checked' : ''}> 启用中</label></div>` : ''}`,
       footer: `<button class="btn btn-secondary" data-cancel>取消</button>
                <button class="btn btn-primary" data-ok>${editing ? '保存' : '创建'}</button>`,
@@ -1356,6 +1487,27 @@ export default {
 
     const typeSelect = root.querySelector('#pf-type');
     this.initRetroFields(root);  // BUG-14：表单内日期/时刻统一为复古选择器（值契约不变）
+    if (onceLocked) {
+      // 批次 9 UI 修复：复古选择器是 hidden input + 按钮——只 disable
+      // input 拦不住按钮弹层改值；按钮与 input 一起禁用才算真正锁死。
+      const lockRetro = (hostSelector) => {
+        const host = root.querySelector(hostSelector);
+        if (!host) return;
+        const input = host.querySelector('input');
+        const button = host.querySelector('button');
+        if (input) input.disabled = true;
+        if (button) {
+          button.disabled = true;
+          button.title = '该单次待办已生成当前实例：请在该待办详情栏使用「调整时段」';
+        }
+      };
+      lockRetro('.retro-time[data-retro-for="pf-target-date"]');
+      lockRetro('.retro-time[data-retro-for="pf-window-start"]');
+      lockRetro('.retro-time[data-retro-for="pf-window-end"]');
+      const lockNote = root.querySelector('[data-type-block="once"]');
+      if (lockNote) lockNote.insertAdjacentHTML('beforeend',
+        '<p class="muted text-sm">该单次待办已生成当前实例：任务日期与未来窗口模板已锁定，调整这一次请在该待办详情栏使用「调整时段」。</p>');
+    }
     const syncBlocks = () => {
       const type = typeSelect.value;
       root.querySelectorAll('[data-type-block]').forEach((block) => {
@@ -1393,31 +1545,17 @@ export default {
         };
         const estimated = root.querySelector('#pf-estimated').value.trim();
         if (estimated) body.estimated_minutes = estimated;
-        const startTod = root.querySelector('#pf-start-tod').value;
-        const endTod = root.querySelector('#pf-end-tod').value;
-        if (startTod) body.est_start_tod = startTod;
-        const deadline = root.querySelector('#pf-deadline').value;
-        const deadlineEnd = root.querySelector('#pf-deadline-end').value;
+        // 可安排时段（排程约束，非排程结果）：四种组合均可表达。
+        // 编辑模式显式发送双端清除值（null = 清除该端），不发送=没清除；
+        // 创建模式只提交已填端（缺省=不约束）。
+        const windowStart = root.querySelector('#pf-window-start').value;
+        const windowEnd = root.querySelector('#pf-window-end').value;
         if (editing) {
-          // 清除字段必须显式发送清除值（后端已支持 null/false 清除）：
-          // 不发送字段会让保存提示成功但数据库并未清除。
-          // 显式结束时间单独清除：保留开始、清空结束 → 显式发送
-          // est_end_tod: null（后端既有契约），旧结束时间真正写库清除；
-          // 无耗时兜底时后端返回明确 400，不写半区间。
-          if (!startTod && task.time_mode === 'explicit') {
-            // 显式起止清空 → 切回仅耗时模式（后端随之清除固定身份）
-            body.time_mode = 'duration';
-          } else {
-            body.est_end_tod = endTod || null;
-          }
-          body.is_fixed = root.querySelector('#pf-fixed').checked;
-          body.deadline_tod = deadline || null;
-          body.deadline_end_tod = deadlineEnd || null;
+          body.window_start_tod = windowStart || null;
+          body.window_end_tod = windowEnd || null;
         } else {
-          if (endTod) body.est_end_tod = endTod;
-          if (root.querySelector('#pf-fixed').checked) body.is_fixed = true;
-          if (deadline) body.deadline_tod = deadline;
-          if (deadlineEnd) body.deadline_end_tod = deadlineEnd;
+          if (windowStart) body.window_start_tod = windowStart;
+          if (windowEnd) body.window_end_tod = windowEnd;
         }
         if (type === 'interval') {
           body.interval_days = Number(root.querySelector('#pf-interval-days').value) || null;
@@ -1432,6 +1570,13 @@ export default {
             .split(/[,，\s]+/).map((v) => Number(v)).filter((v) => Number.isInteger(v) && v > 0);
         }
         if (type === 'once') body.target_date = root.querySelector('#pf-target-date').value || null;
+        if (editing && task.task_type === 'once' && task.has_generated_occurrence) {
+          // once 身份锁定的提交侧兜底（§28.3）：无论控件状态如何，target_date
+          // / 未来窗口模板一律回传任务现值（幂等请求放行、实际变化后端拒绝）
+          body.target_date = task.target_date ?? null;
+          body.window_start_tod = task.window_start_tod ?? null;
+          body.window_end_tod = task.window_end_tod ?? null;
+        }
         if (root.querySelector('#pf-hollow').checked) {
           body.is_hollow = true;
           body.hollow_start_content = root.querySelector('#pf-hollow-start').value.trim() || body.content;
@@ -1441,11 +1586,6 @@ export default {
           body.hollow_end_content = root.querySelector('#pf-hollow-end').value.trim() || body.content;
           body.hollow_end_minutes = Number(root.querySelector('#pf-hollow-end-min').value) || null;
         }
-        // 闹钟 / 计时器显式发送状态与清除值（留空保存即清除计时器）
-        body.alarm_start = root.querySelector('#pf-alarm-start').checked;
-        body.alarm_end = root.querySelector('#pf-alarm-end').checked;
-        const timer = root.querySelector('#pf-timer').value.trim();
-        body.timer_minutes = timer || null;
         if (editing) body.is_active = root.querySelector('#pf-active').checked;
 
         if (editing) {
@@ -1463,9 +1603,19 @@ export default {
         }
       } catch (error) {
         // 提交/API 阶段失败：先解锁恢复按钮再提示，提示自身异常不得
-        // 卡死提交资格（user 仍可修改后重新提交）
+        // 卡死提交资格（user 仍可修改后重新提交）。错误按字段就近呈现：
+        // 目标日期类错误进 once 区，可安排时段及其余错误进时段区。
         submitting = false;
         submitBtn.disabled = false;
+        const message = String(error.message || '');
+        const area = root.querySelector(
+          message.includes('目标日期') || message.includes('单次待办已生成')
+            ? '#pf-once-error' : '#pf-window-error');
+        if (area) {
+          area.hidden = false;
+          area.innerHTML = errorBlock(esc(message));
+          area.scrollIntoView({ block: 'nearest' });
+        }
         toast(`保存失败：${error.message}`, 'err');
         return;
       }

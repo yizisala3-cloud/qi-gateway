@@ -59,9 +59,11 @@ class _Query:
         self.op = "delete"
         return self
 
-    def upsert(self, data, ignore_duplicates=False):
+    def upsert(self, data, ignore_duplicates=False, on_conflict=None):
         self.op = "upsert"
-        self.payload = dict(data)
+        # 批次 6 一轮 Review BLOCKER 3：多行 upsert 模拟单条
+        # INSERT .. ON CONFLICT (id) DO UPDATE 的语句级原子语义。
+        self.payload = [dict(item) for item in data] if isinstance(data, list) else dict(data)
         self.ignore_duplicates = ignore_duplicates
         return self
 
@@ -71,6 +73,10 @@ class _Query:
 
     def in_(self, field, values):
         self.filters.append(("in", field, list(values)))
+        return self
+
+    def is_(self, field, value):
+        self.filters.append(("is", field, value))
         return self
 
     def gte(self, field, value):
@@ -111,6 +117,8 @@ class _Query:
                 return False
             if kind == "in" and row_value not in value:
                 return False
+            if kind == "is" and (row_value is None) != (value is None):
+                return False
             if kind in ("gte", "lte", "lt") and not self._compare(row_value, kind, value):
                 return False
         return True
@@ -138,6 +146,20 @@ class _Query:
                 inserted.append(dict(row))
             return SimpleNamespace(data=inserted)
         if self.op == "upsert":
+            if isinstance(self.payload, list):
+                updated = []
+                by_id = {row.get("id"): row for row in rows}
+                for item in self.payload:
+                    target = by_id.get(item.get("id"))
+                    if target is not None:
+                        target.update(item)
+                        updated.append(dict(target))
+                    elif not self.ignore_duplicates:
+                        new_row = dict(item)
+                        new_row.setdefault("id", self.client.next_id(self.table))
+                        rows.append(new_row)
+                        updated.append(dict(new_row))
+                return SimpleNamespace(data=updated)
             key = self.payload.get("id")
             matched = [row for row in rows if row.get("id") == key]
             if matched and not self.ignore_duplicates:
@@ -171,7 +193,8 @@ class _Client:
         self.rows = {
             "planning_task": [],
             "planning_occurrence": [],
-            "planning_recompute_state": [{"id": 1, "requested_at": None, "reason": None}],
+            "planning_recompute_state": [
+                {"id": 1, "requested_at": None, "reason": None, "request_token": None}],
             "app_settings": [],
         }
         self._counters = {}
@@ -179,6 +202,49 @@ class _Client:
     def next_id(self, table):
         self._counters[table] = self._counters.get(table, 0) + 1
         return self._counters[table]
+
+    def rpc(self, fn, params=None):
+        # 批次 6 二轮：round 原子补丁 RPC 的 fake 仿真（复用 phase1a 的
+        # 共享实现；真库语义由 pgserver 套件验证）。
+        from test_planning_phase1a import (emulate_planning_round_patch,
+            emulate_planning_once_task_guarded, emulate_planning_insert_once_occurrence,
+            emulate_planning_discard_task)
+        if fn == "planning_patch_occurrence_round":
+            emulate_planning_round_patch(self.rows["planning_occurrence"], dict(params or {}))
+            return SimpleNamespace(execute=lambda: SimpleNamespace(data=[]))
+        if fn == "planning_update_once_task_guarded":
+            emulate_planning_once_task_guarded(
+                self.rows["planning_task"], self.rows["planning_occurrence"],
+                dict(params or {}))
+            return SimpleNamespace(execute=lambda: SimpleNamespace(data=[]))
+        if fn == "planning_insert_once_occurrence":
+            emulate_planning_insert_once_occurrence(self, dict(params or {}))
+            return SimpleNamespace(execute=lambda: SimpleNamespace(data=[]))
+        if fn == "planning_insert_round_occurrence":
+            from test_planning_phase1a import emulate_planning_insert_round_occurrence
+            emulate_planning_insert_round_occurrence(self, dict(params or {}))
+            return SimpleNamespace(execute=lambda: SimpleNamespace(data=[]))
+        if fn == "planning_discard_task":
+            from test_planning_phase1a import emulate_planning_discard_task
+            emulate_planning_discard_task(
+                self.rows["planning_task"], self.rows["planning_occurrence"],
+                dict(params or {}))
+            return SimpleNamespace(execute=lambda: SimpleNamespace(data=[]))
+        if fn == "planning_request_recompute":
+            from test_planning_phase1a import emulate_planning_request_recompute
+            emulate_planning_request_recompute(
+                self.rows["planning_recompute_state"], dict(params or {}))
+            return SimpleNamespace(execute=lambda: SimpleNamespace(data=[]))
+        if fn == "planning_clear_recompute_mark":
+            from test_planning_phase1a import emulate_planning_clear_recompute_mark
+            emulate_planning_clear_recompute_mark(
+                self.rows["planning_recompute_state"], dict(params or {}))
+            return SimpleNamespace(execute=lambda: SimpleNamespace(data=[]))
+        if fn == "planning_update_cycle_boundary":
+            from test_planning_phase1a import emulate_planning_update_cycle_boundary
+            data = emulate_planning_update_cycle_boundary(self, dict(params or {}))
+            return SimpleNamespace(execute=lambda: SimpleNamespace(data=data))
+        raise AssertionError(f"unknown rpc: {fn}")
 
     def table(self, name):
         if name not in self.rows:
@@ -370,34 +436,9 @@ class TaskValidationTests(_Base):
 
         self.run_with(run)
 
-    def test_patch_rejects_window_fields_until_edit_semantics_land(self):
-        # Review HIGH 修复：窗口编辑语义（current/future 分流与完整校验）属
-        # 批次 6——PATCH 明确拒绝窗口字段（400，不静默忽略）；创建入口不受
-        # 影响，普通非窗口 PATCH 照常工作。
-        def run(client):
-            task = self.create_task(
-                client, cursor_date="2026-09-19",
-                window_start_tod="18:00", window_end_tod="22:00",
-            )
-            self.assertEqual(task["window_start_tod"], "18:00")
-            for payload in (
-                {"window_start_tod": "08:00"},
-                {"window_end_tod": "20:00"},
-                {"window_start_tod": "08:00", "window_end_tod": "20:00"},
-            ):
-                with self.subTest(payload=payload):
-                    with self.assertRaises(PlanningError) as raised:
-                        planning.update_task(task["id"], payload, self.NOW)
-                    self.assertEqual(raised.exception.status_code, 400)
-                    self.assertIn("可安排时段暂不支持编辑", str(raised.exception))
-            # 普通非窗口 PATCH 不受影响；模板保持创建时原值
-            planning.update_task(task["id"], {"content": "改名"}, self.NOW)
-            stored = next(
-                row for row in client.rows["planning_task"] if row["id"] == task["id"])
-            self.assertEqual(stored["content"], "改名")
-            self.assertEqual(stored["window_start_tod"], "18:00")
-            self.assertEqual(stored["window_end_tod"], "22:00")
-        self.run_with(run)
+    # 批次 6 起旧门禁测试 test_patch_rejects_window_fields_until_edit_semantics_land
+    # 退役：PATCH 正式接受窗口字段（current/future 编辑语义），编辑矩阵见
+    # test_planning_window_edit.py。
 
     def test_timer_shorthand_parsing(self):
         self.assertEqual(planning.parse_duration_shorthand("1h30m", "t"), 90)

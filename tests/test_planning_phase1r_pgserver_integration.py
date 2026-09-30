@@ -317,6 +317,16 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
                 return cur.fetchall()
             return []
 
+    def _query_expecting_concurrency_rejection(self, sql, params=None):
+        """执行并断言以固定的 PC001（乐观并发拒绝）失败——psycopg 将自定义
+        SQLSTATE PC001 映射为 ProgrammingError（携带 sqlstate），不是
+        RaiseException（P0001）。返回该异常供消息断言。"""
+        with self.assertRaises(psycopg.errors.ProgrammingError) as caught:
+            self._query(sql, params)
+        self.assertEqual(caught.exception.sqlstate, "PC001",
+                         repr(caught.exception))
+        return caught.exception
+
     def _task_id(self):
         row = self._query("select id from public.planning_task order by id limit 1")
         return row[0][0]
@@ -1722,6 +1732,1235 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
         assert self._constraint_count(
             "public.planning_occurrence",
             "planning_occurrence_window_at_order_check") == 1
+
+    # -- 批次 6 二轮：planning_patch_occurrence_round 真 PostgreSQL 验证 ──
+    # user 批准的最小同轮原子更新 RPC（迁移 20260928020000）。fake 测试只
+    # 覆盖行为，原子性 / 回滚 / 写集合的权威证明全部在本类（真库）完成。
+
+    ROUND_PATCH_SQL = "select public.planning_patch_occurrence_round(%s, %s, %s::jsonb, %s::jsonb)"
+    ROUND_PATCH_SQL_EXPECTED = ("select public.planning_patch_occurrence_round"
+                                "(%s, %s, %s::jsonb, %s::jsonb, %s::jsonb)")
+
+    def _hollow_pair(self, round_key="cycle:2026-09-24", window=(None, None),
+                     day=None):
+        # round_key 为 cycle: 前缀时必须与 schedule_date 一致（1A 身份 CHECK）
+        """创建一个中空任务并插入其同轮两阶段行，返回 (start_id, end_id)。
+
+        phase_group 与 1A 身份 CHECK / 触发器同源：
+        md5(task_id || ':' || round_key)；round 形状触发器要求 phase 行
+        属于 is_hollow 任务。
+        """
+        task_id = self._query(
+            """
+            insert into public.planning_task (
+                content, task_type, time_mode, estimated_minutes, is_active,
+                refresh_mode, refresh_enabled, is_hollow,
+                hollow_start_content, hollow_start_minutes,
+                hollow_wait_minutes, hollow_end_content, hollow_end_minutes,
+                created_at, updated_at
+            ) values (
+                '煮饭', 'daily', 'duration', 30, true,
+                'daily', true, true,
+                '煮饭', 30, 60, '收饭', 10,
+                '2026-09-23T07:00:00+08:00', '2026-09-23T07:00:00+08:00'
+            ) returning id
+            """,
+        )[0][0]
+        if day is None and round_key.startswith("cycle:"):
+            day = round_key.split(":", 1)[1]
+        ids = []
+        # hollow 成对约束触发器为 deferrable initially deferred：两阶段必须
+        # 在同一事务内提交（与应用层「一次请求同时插入两阶段」同形）。
+        with self.conn.transaction():
+            for phase in ("start", "end"):
+                row = self._query(
+                    """
+                    insert into public.planning_occurrence (
+                        task_id, for_date, round_key, schedule_date, display_cycle_date,
+                        display_reason, status, sort_order, is_fixed, estimated_time_source,
+                        fixed_source, schedule_managed, is_limited, source,
+                        content_snapshot, display_content, time_mode_snapshot,
+                        phase, phase_group, window_start_at, window_end_at,
+                        created_at, updated_at
+                    ) values (
+                        %(task_id)s, %(day)s, %(round_key)s, %(day)s, %(day)s,
+                        'initial', 'pending', 10, false, 'unassigned',
+                        null, true, false, 'schedule',
+                        '煮饭', '煮饭·' || %(phase)s, 'duration',
+                        %(phase)s, md5(%(task_id)s::text || ':' || %(round_key)s)::uuid,
+                        %(ws)s, %(we)s,
+                        '2026-09-24T06:00:00+08:00', '2026-09-24T06:00:00+08:00'
+                    ) returning id
+                    """,
+                    {"task_id": task_id, "round_key": round_key, "phase": phase,
+                     "day": day or "2026-09-24", "ws": window[0], "we": window[1]},
+                )
+                ids.append(row[0][0])
+        return ids[0], ids[1]
+
+    def _occ_row(self, occ_id):
+        return self._query(
+            "select * from public.planning_occurrence where id = %s", (occ_id,))[0]
+
+    def test_round_patch_rpc_updates_both_phases_with_own_patches(self):
+        start_id, end_id = self._hollow_pair()
+        self._query(self.ROUND_PATCH_SQL, (
+            start_id, end_id,
+            '{"window_start_at": "2026-09-24T18:00:00+08:00",'
+            ' "window_end_at": "2026-09-24T20:00:00+08:00",'
+            ' "partial_note": "目标行说明", "actual_end": "2026-09-24T12:00:00+08:00",'
+            ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+            '{"window_start_at": "2026-09-24T18:00:00+08:00",'
+            ' "window_end_at": "2026-09-24T20:00:00+08:00",'
+            ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+        ))
+        start_row = dict(zip(self._occ_columns(), self._occ_row(start_id)))
+        end_row = dict(zip(self._occ_columns(), self._occ_row(end_id)))
+        # 两行各自消费自己的补丁：说明 / 实际时间只落在目标行
+        assert start_row["partial_note"] == "目标行说明"
+        assert end_row["partial_note"] is None
+        assert start_row["actual_end"] is not None
+        assert end_row["actual_end"] is None
+        assert start_row["window_start_at"] == end_row["window_start_at"]
+
+    def _occ_columns(self):
+        cur = self.conn.cursor()
+        cur.execute("select * from public.planning_occurrence limit 0")
+        columns = [d[0] for d in cur.description]
+        cur.close()
+        return columns
+
+    def test_round_patch_rpc_second_row_failure_rolls_back_both(self):
+        # 第二行补丁违反实例窗口 CHECK（双端 end <= start）→ RPC 整体失败，
+        # 第一行也恢复原值：两行零部分提交（真库回滚证据）。
+        start_id, end_id = self._hollow_pair(
+            window=("2026-09-24T10:00:00+08:00", "2026-09-24T12:00:00+08:00"))
+        before_start, before_end = self._occ_row(start_id), self._occ_row(end_id)
+        with self.assertRaises(psycopg.errors.CheckViolation):
+            self._query(self.ROUND_PATCH_SQL, (
+                start_id, end_id,
+                '{"window_start_at": "2026-09-24T18:00:00+08:00",'
+                ' "window_end_at": "2026-09-24T22:00:00+08:00",'
+                ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+                '{"window_start_at": "2026-09-24T18:00:00+08:00",'
+                ' "window_end_at": "2026-09-24T22:00:00+08:00",'
+                ' "estimated_time_source": "manual", "is_fixed": false,'
+                ' "schedule_managed": true,'
+                ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+            ))
+        self.assertEqual(self._occ_row(start_id), before_start)
+        self.assertEqual(self._occ_row(end_id), before_end)
+
+    def test_round_patch_rpc_rejects_unknown_keys(self):
+        start_id, end_id = self._hollow_pair()
+        with self.assertRaises(psycopg.errors.RaiseException):
+            self._query(self.ROUND_PATCH_SQL, (
+                start_id, end_id,
+                '{"status": "completed"}', '{}',
+            ))
+        columns = self._occ_columns()
+        self.assertEqual(
+            dict(zip(columns, self._occ_row(start_id)))["status"], "pending")
+
+    def test_round_patch_rpc_rejects_non_round_pair(self):
+        start_id, _ = self._hollow_pair()
+        other_id, _ = self._hollow_pair(round_key="cycle:2026-09-25", day="2026-09-25")
+        with self.assertRaises(psycopg.errors.RaiseException):
+            self._query(self.ROUND_PATCH_SQL, (
+                start_id, other_id,
+                '{"window_start_at": "2026-09-24T18:00:00+08:00"}', '{}',
+            ))
+
+    def test_round_patch_rpc_rejects_non_phase_rows(self):
+        # 普通（无 phase）实例不是 hollow pair：拒绝经该 RPC 修改。
+        first = self._fresh_occurrence(schedule_date="2027-01-05")
+        second = self._fresh_occurrence(schedule_date="2027-01-06")
+        with self.assertRaises(psycopg.errors.RaiseException):
+            self._query(self.ROUND_PATCH_SQL, (
+                first, second,
+                '{"window_start_at": "2026-09-24T18:00:00+08:00"}', '{}',
+            ))
+
+    def test_round_patch_rpc_sibling_write_set_never_expanded(self):
+        # 十一 / 二轮 HIGH：sibling 未被请求的字段（说明 / 实际 / 生命周期）
+        # 保持完全不变——RPC 不做键集并集 / 旧值回写。
+        start_id, end_id = self._hollow_pair()
+        self._query(
+            "update public.planning_occurrence set partial_note = '既有说明'"
+            " where id = %s", (end_id,))
+        self._query(self.ROUND_PATCH_SQL, (
+            start_id, end_id,
+            '{"window_start_at": "2026-09-24T18:00:00+08:00",'
+            ' "window_end_at": "2026-09-24T20:00:00+08:00",'
+            ' "partial_note": "仅目标行",'
+            ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+            '{"window_start_at": "2026-09-24T18:00:00+08:00",'
+            ' "window_end_at": "2026-09-24T20:00:00+08:00",'
+            ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+        ))
+        end_row = dict(zip(self._occ_columns(), self._occ_row(end_id)))
+        self.assertEqual(end_row["partial_note"], "既有说明")
+        self.assertIsNone(end_row["actual_end"])
+        self.assertIsNone(end_row["handled_at"])
+        self.assertEqual(end_row["status"], "pending")
+        # 锁序下 sibling 的窗口确实联动更新
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        self.assertEqual(
+            end_row["window_end_at"],
+            _dt(2026, 9, 24, 20, tzinfo=_tz(_td(hours=8))))
+
+    # -- 批次 6 最终修复：锁内生命周期二次校验 / 窗口一致性 / 开放状态流转 ──
+
+    def _set_phase_state(self, occ_id, **fields):
+        self._query(
+            "update public.planning_occurrence set " + ", ".join(
+                f"{key} = %s" for key in fields) + " where id = %s",
+            (*fields.values(), occ_id))
+
+    def test_round_patch_rpc_rejects_row_completed_after_python_check(self):
+        # 问题 1：Python 检查通过（pending）后、RPC 执行前并发完成——锁内
+        # 二次校验拒绝，两行零写入。
+        start_id, end_id = self._hollow_pair()
+        self._set_phase_state(
+            start_id, status="completed", handled_at="2026-09-24T09:00:00+08:00",
+            closed_at="2026-09-24T09:00:00+08:00")
+        before_start, before_end = self._occ_row(start_id), self._occ_row(end_id)
+        self._query_expecting_concurrency_rejection(self.ROUND_PATCH_SQL, (
+            start_id, end_id,
+            '{"window_start_at": "2026-09-24T18:00:00+08:00",'
+            ' "window_end_at": "2026-09-24T20:00:00+08:00",'
+            ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+            '{"window_start_at": "2026-09-24T18:00:00+08:00",'
+            ' "window_end_at": "2026-09-24T20:00:00+08:00",'
+            ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+        ))
+        self.assertEqual(self._occ_row(start_id), before_start)
+        self.assertEqual(self._occ_row(end_id), before_end)
+
+    def test_round_patch_rpc_rejects_started_row_window_edit(self):
+        # 严格门：执行中（actual_start 事实）的行不接受窗口编辑。
+        start_id, end_id = self._hollow_pair()
+        self._set_phase_state(
+            start_id, status="in_progress", actual_start="2026-09-24T07:30:00+08:00")
+        before_start = self._occ_row(start_id)
+        self._query_expecting_concurrency_rejection(self.ROUND_PATCH_SQL, (
+            start_id, end_id,
+            '{"window_start_at": "2026-09-24T18:00:00+08:00",'
+            ' "window_end_at": "2026-09-24T20:00:00+08:00",'
+            ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+            '{"window_start_at": "2026-09-24T18:00:00+08:00",'
+            ' "window_end_at": "2026-09-24T20:00:00+08:00",'
+            ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+        ))
+        self.assertEqual(self._occ_row(start_id), before_start)
+
+    def test_round_patch_rpc_allows_open_status_transition(self):
+        # 宽松门：携带 status（延后）的补丁在开放行上成立；终态值拒绝。
+        start_id, end_id = self._hollow_pair()
+        self._query(self.ROUND_PATCH_SQL, (
+            start_id, end_id,
+            '{"status": "deferred", "est_start": "2026-09-24T18:00:00+08:00",'
+            ' "est_end": "2026-09-24T18:30:00+08:00",'
+            ' "estimated_time_source": "manual", "fixed_source": "manual",'
+            ' "is_fixed": true, "schedule_managed": false,'
+            ' "nominal_start": "2026-09-24T18:00:00+08:00",'
+            ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+            '{"updated_at": "2026-09-28T11:00:00+08:00"}',
+        ))
+        start_row = dict(zip(self._occ_columns(), self._occ_row(start_id)))
+        self.assertEqual(start_row["status"], "deferred")
+        with self.assertRaises(psycopg.errors.RaiseException):
+            self._query(self.ROUND_PATCH_SQL, (
+                start_id, end_id,
+                '{"status": "completed"}', '{}',
+            ))
+
+    def test_round_patch_rpc_rejects_disagreeing_windows(self):
+        # 问题 7：两阶段窗口不一致 → 整体失败、零写入。
+        start_id, end_id = self._hollow_pair()
+        before_start, before_end = self._occ_row(start_id), self._occ_row(end_id)
+        with self.assertRaises(psycopg.errors.RaiseException):
+            self._query(self.ROUND_PATCH_SQL, (
+                start_id, end_id,
+                '{"window_start_at": "2026-09-24T18:00:00+08:00",'
+                ' "window_end_at": "2026-09-24T20:00:00+08:00",'
+                ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+                '{"window_start_at": "2026-09-24T19:00:00+08:00",'
+                ' "window_end_at": "2026-09-24T21:00:00+08:00",'
+                ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+            ))
+        self.assertEqual(self._occ_row(start_id), before_start)
+        self.assertEqual(self._occ_row(end_id), before_end)
+
+    def test_single_row_conditional_window_update_misses_on_completed(self):
+        # 问题 1（单行）：条件 UPDATE 的生命周期条件在并发完成后未命中 →
+        # 0 行、零写入。
+        occ_id = self._fresh_occurrence(
+            schedule_date="2026-11-05",
+            window_start_at="2026-11-05T18:00:00+08:00",
+            window_end_at="2026-11-05T22:00:00+08:00")
+        # B：并发完成（状态 + 关闭事实）
+        self._set_phase_state(
+            occ_id, status="completed", handled_at="2026-11-05T21:00:00+08:00",
+            closed_at="2026-11-05T21:00:00+08:00")
+        before = self._occ_row(occ_id)
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            update public.planning_occurrence
+               set window_start_at = '2026-11-05T14:00:00+08:00'
+             where id = %s
+               and status in ('pending', 'deferred')
+               and actual_start is null and actual_end is null
+               and partial_at is null and handled_at is null
+               and closed_at is null
+            """,
+            (occ_id,),
+        )
+        self.assertEqual(cur.rowcount, 0)
+        cur.close()
+        self.assertEqual(self._occ_row(occ_id), before)
+
+    # -- 批次 6 最终验收修复：once 守护 RPC / status 不能降低窗口严格门 ──
+
+    ONCE_GUARD_SQL = "select public.planning_update_once_task_guarded(%s, %s::jsonb)"
+    ONCE_INSERT_SQL = ("select public.planning_insert_once_occurrence("
+                       "%s, %s, %s, %s, %s::jsonb)")
+
+    def _pending_occ_on(self, task_id, round_key="once", for_date="2026-09-24"):
+        """在指定 once 任务下插入一条 pending occurrence，返回 id。"""
+        return self._query(
+            """
+            insert into public.planning_occurrence (
+                task_id, for_date, round_key, schedule_date, display_cycle_date,
+                display_reason, status, sort_order, is_fixed, estimated_time_source,
+                fixed_source, schedule_managed, is_limited, source,
+                content_snapshot, display_content, time_mode_snapshot,
+                created_at, updated_at
+            ) values (
+                %s, %s, %s, %s, %s,
+                'initial', 'pending', 10, false, 'unassigned',
+                null, true, false, 'schedule',
+                '竞态', '竞态', 'duration',
+                '2026-09-24T06:00:00+08:00', '2026-09-24T06:00:00+08:00'
+            ) returning id
+            """,
+            (task_id, for_date, round_key, for_date, for_date),
+        )[0][0]
+
+    def _bare_once_task(self, target_date):
+        """插入一个无任何 occurrence 的 once 任务（自包含，避免用例间污染）。"""
+        return self._query(
+            """
+            insert into public.planning_task (
+                content, task_type, time_mode, estimated_minutes, is_active,
+                refresh_mode, refresh_enabled, target_date,
+                created_at, updated_at
+            ) values (
+                '自查', 'once', 'duration', 30, true,
+                'none', true, %s,
+                '2026-09-23T07:00:00+08:00', '2026-09-23T07:00:00+08:00'
+            ) returning id
+            """,
+            (target_date,),
+        )[0][0]
+
+    def _once_row_json(self, task_id):
+        return ('[{"task_id": %s, "for_date": "2026-09-24", "round_key": "once",'
+                ' "schedule_date": "2026-09-24", "display_cycle_date": "2026-09-24",'
+                ' "display_reason": "initial", "status": "pending", "sort_order": 10,'
+                ' "is_fixed": false, "estimated_time_source": "unassigned",'
+                ' "fixed_source": null, "schedule_managed": true, "is_limited": false,'
+                ' "source": "schedule", "content_snapshot": "x", "display_content": "x",'
+                ' "time_mode_snapshot": "duration", "created_at": "2026-09-24T06:00:00+08:00",'
+                ' "updated_at": "2026-09-24T06:00:00+08:00"}]' % task_id)
+
+    def test_once_guarded_update_rejects_when_occurrence_exists(self):
+        # 问题 3：编辑侧锁内复核——任务已有实例 → 拒绝（跨进程竞态封闭），
+        # 任务日期保持原值。
+        task_id = self._bare_once_task("2026-09-24")
+        self._query(self.ONCE_INSERT_SQL,
+                    (task_id, "2026-09-24", None, None, self._once_row_json(task_id)))
+        with self.assertRaises(psycopg.errors.RaiseException):
+            self._query(self.ONCE_GUARD_SQL, (
+                task_id, '{"target_date": "2026-09-26", "updated_at": "2026-09-28T11:00:00+08:00"}',
+            ))
+        current = self._query("select target_date from public.planning_task where id = %s",
+                              (task_id,))[0][0]
+        self.assertEqual(str(current), "2026-09-24")
+
+    def test_once_guarded_update_saves_when_no_occurrence(self):
+        task_id = self._bare_once_task("2026-09-24")
+        self._query(self.ONCE_GUARD_SQL, (
+            task_id, '{"target_date": "2026-09-26", "updated_at": "2026-09-28T11:00:00+08:00"}',
+        ))
+        current = self._query("select target_date from public.planning_task where id = %s",
+                              (task_id,))[0][0]
+        self.assertEqual(str(current), "2026-09-26")
+
+    def test_once_guarded_update_rejects_dangerous_fields(self):
+        task_id = self._bare_once_task("2026-09-24")
+        with self.assertRaises(psycopg.errors.RaiseException):
+            self._query(self.ONCE_GUARD_SQL, (
+                task_id, '{"request_state": "pending"}',
+            ))
+
+    def test_once_guarded_insert_rejects_definition_drift(self):
+        # 生成侧锁内复核：按旧定义预构造的行遇到已并发生效的新定义 → 拒绝。
+        task_id = self._bare_once_task("2026-09-26")
+        # expected = 旧定义（编辑前读取）；任务行当前已是 2026-09-26 → 漂移
+        with self.assertRaises(psycopg.errors.RaiseException):
+            self._query(self.ONCE_INSERT_SQL,
+                        (task_id, "2026-09-24", None, None, self._once_row_json(task_id)))
+        self.assertEqual(self._query(
+            "select count(*) from public.planning_occurrence where task_id = %s",
+            (task_id,))[0][0], 0)
+
+    def test_once_guarded_insert_success_and_uniqueness(self):
+        task_id = self._bare_once_task("2026-09-24")
+        row_json = self._once_row_json(task_id)
+        self._query(self.ONCE_INSERT_SQL, (task_id, "2026-09-24", None, None, row_json))
+        self.assertEqual(self._query(
+            "select count(*) from public.planning_occurrence where task_id = %s",
+            (task_id,))[0][0], 1)
+        # 轮次唯一键继续防重复
+        with self.assertRaises(psycopg.errors.UniqueViolation):
+            self._query(self.ONCE_INSERT_SQL, (task_id, "2026-09-24", None, None, row_json))
+
+    def test_round_patch_rpc_status_field_cannot_lower_window_gate(self):
+        # 问题 5：status='pending' + 窗口修改 + actual_start 事实存在 →
+        # 严格门拒绝（status 不能降低保护）。
+        start_id, end_id = self._hollow_pair()
+        self._set_phase_state(
+            start_id, status="in_progress", actual_start="2026-09-24T07:30:00+08:00")
+        before_start, before_end = self._occ_row(start_id), self._occ_row(end_id)
+        self._query_expecting_concurrency_rejection(self.ROUND_PATCH_SQL, (
+            start_id, end_id,
+            '{"status": "pending",'
+            ' "window_start_at": "2026-09-24T18:00:00+08:00",'
+            ' "window_end_at": "2026-09-24T20:00:00+08:00",'
+            ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+            '{"window_start_at": "2026-09-24T18:00:00+08:00",'
+            ' "window_end_at": "2026-09-24T20:00:00+08:00",'
+            ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+        ))
+        self.assertEqual(self._occ_row(start_id), before_start)
+        self.assertEqual(self._occ_row(end_id), before_end)
+
+    # -- 批次 6 最终 Debug：事务边界与并发写入口（真 PostgreSQL 双连接） --
+
+    def _conn2(self):
+        return psycopg.connect(self.server.get_uri(), autocommit=True)
+
+    def _once_task_id(self):
+        return self._query(
+            """
+            insert into public.planning_task (
+                content, task_type, time_mode, estimated_minutes, is_active,
+                refresh_mode, refresh_enabled, target_date,
+                created_at, updated_at
+            ) values (
+                '竞态', 'once', 'duration', 30, true,
+                'none', true, '2026-09-24',
+                '2026-09-23T07:00:00+08:00', '2026-09-23T07:00:00+08:00'
+            ) returning id
+            """,
+        )[0][0]
+
+    def test_once_edit_sees_uncommitted_insert_after_lock_wait(self):
+        """Codex 精确交错（两条真实连接 + 线程/事件编排）：
+
+        B(连接2): begin → 锁 task 行 → 插入旧日期 occurrence（不提交）
+        A(连接1): once 编辑 RPC 等待任务行锁（线程内启动并确认阻塞）
+        B: commit → A 获得锁 → 锁后新语句复核看见已提交实例 → 拒绝、
+        task.target_date 不变（无「新日期 task + 旧日期 occurrence」）。
+        """
+        task_id = self._once_task_id()
+        b = self._conn2()
+        a_result = {}
+
+        def run_a_edit():
+            try:
+                self._query(self.ONCE_GUARD_SQL, (
+                    task_id, '{"target_date": "2026-09-26",'
+                             ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+                ))
+                a_result["error"] = None
+            except Exception as exc:  # noqa: BLE001 - 线程边界捕获后回主线程断言
+                a_result["error"] = exc
+
+        try:
+            b.execute("begin")
+            b.execute("select id from public.planning_task where id = %s for update",
+                      (task_id,))
+            b.execute(
+                """
+                insert into public.planning_occurrence (
+                    task_id, for_date, round_key, schedule_date, display_cycle_date,
+                    display_reason, status, sort_order, is_fixed, estimated_time_source,
+                    fixed_source, schedule_managed, is_limited, source,
+                    content_snapshot, display_content, time_mode_snapshot,
+                    created_at, updated_at
+                ) values (
+                    %s, '2026-09-24', 'once', '2026-09-24', '2026-09-24',
+                    'initial', 'pending', 10, false, 'unassigned',
+                    null, true, false, 'schedule',
+                    '竞态', '竞态', 'duration',
+                    '2026-09-24T06:00:00+08:00', '2026-09-24T06:00:00+08:00'
+                )
+                """,
+                (task_id,),
+            )
+            # A 在独立线程启动：等待任务行锁（被 B 持有）
+            thread = threading.Thread(target=run_a_edit)
+            thread.start()
+            time.sleep(0.5)
+            # 确认 A 确实阻塞在 B 的行锁上（生产语义：等待而非绕过）。
+            # 注意：pg_locks 交叉验证必须走 B 的连接——self.conn 正被线程
+            # A 的锁等待占用，同连接并发查询会形成测试编排自死锁。
+            self.assertTrue(thread.is_alive(),
+                            "A 必须阻塞等待 B 的任务行锁（否则锁未生效）")
+            lock_waiters = b.execute(
+                "select count(*) from pg_stat_activity"
+                " where wait_event_type = 'Lock' and datname = current_database()"
+            ).fetchone()[0]
+            self.assertGreaterEqual(lock_waiters, 1, "应存在锁等待会话")
+            # B 提交：A 获得锁并在锁后新语句中看见已提交实例 → 拒绝
+            b.commit()
+            thread.join(timeout=15)
+            self.assertFalse(thread.is_alive(), "B 提交后 A 必须继续完成")
+            error = a_result.get("error")
+            self.assertIsInstance(error, psycopg.errors.RaiseException, repr(error))
+            self.assertIn("once identity locked", str(error))
+            # 零写入：task 日期保持旧值、实例保持旧日期
+            row = self._query(
+                "select target_date from public.planning_task where id = %s",
+                (task_id,))[0][0]
+            self.assertEqual(str(row), "2026-09-24")
+            occ = self._query(
+                "select schedule_date from public.planning_occurrence where task_id = %s",
+                (task_id,))[0][0]
+            self.assertEqual(str(occ), "2026-09-24")
+        finally:
+            try:
+                b.rollback()
+            except Exception:
+                pass
+            b.close()
+
+    def test_once_generation_rejects_inactive_drift_under_lock(self):
+        task_id = self._once_task_id()
+        self._query("update public.planning_task set is_active = false where id = %s",
+                    (task_id,))
+        with self.assertRaises(psycopg.errors.RaiseException) as caught:
+            self._query(self.ONCE_INSERT_SQL, (
+                task_id, "2026-09-24", None, None, self._once_row_json(task_id),
+            ))
+        self.assertIn("once definition changed", str(caught.exception))
+        self.assertEqual(self._query(
+            "select count(*) from public.planning_occurrence where task_id = %s",
+            (task_id,))[0][0], 0)
+
+    def test_round_patch_rpc_rejects_stale_recompute_snapshot(self):
+        start_id, end_id = self._hollow_pair(
+            window=("2026-09-24T09:00:00+08:00", "2026-09-24T12:00:00+08:00"))
+        self._set_phase_state(
+            start_id, est_start="2026-09-24T11:00:00+08:00",
+            est_end="2026-09-24T11:30:00+08:00", estimated_time_source="automatic")
+        self._set_phase_state(
+            end_id, est_start="2026-09-24T11:30:00+08:00",
+            est_end="2026-09-24T12:00:00+08:00", estimated_time_source="automatic")
+        for occ_id in (start_id, end_id):
+            self._set_phase_state(
+                occ_id, est_start="2026-09-24T19:00:00+08:00",
+                est_end="2026-09-24T19:30:00+08:00",
+                estimated_time_source="manual", fixed_source="manual",
+                is_fixed=True, schedule_managed=False,
+                window_start_at="2026-09-24T15:00:00+08:00",
+                window_end_at="2026-09-24T17:00:00+08:00")
+        before_start, before_end = self._occ_row(start_id), self._occ_row(end_id)
+        expected = ('[{"id": %d, "status": "pending",'
+                    ' "window_start_at": "2026-09-24T09:00:00+08:00",'
+                    ' "window_end_at": "2026-09-24T12:00:00+08:00",'
+                    ' "est_start": "2026-09-24T11:00:00+08:00",'
+                    ' "est_end": "2026-09-24T11:30:00+08:00",'
+                    ' "estimated_time_source": "automatic", "fixed_source": null,'
+                    ' "is_fixed": false, "schedule_managed": true},'
+                    ' {"id": %d, "status": "pending",'
+                    ' "window_start_at": "2026-09-24T09:00:00+08:00",'
+                    ' "window_end_at": "2026-09-24T12:00:00+08:00",'
+                    ' "est_start": "2026-09-24T11:30:00+08:00",'
+                    ' "est_end": "2026-09-24T12:00:00+08:00",'
+                    ' "estimated_time_source": "automatic", "fixed_source": null,'
+                    ' "is_fixed": false, "schedule_managed": true}]'
+                    % (start_id, end_id))
+        self._query_expecting_concurrency_rejection(self.ROUND_PATCH_SQL_EXPECTED, (
+            start_id, end_id,
+            '{"est_start": "2026-09-24T11:00:00+08:00",'
+            ' "est_end": "2026-09-24T11:30:00+08:00",'
+            ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+            '{"est_start": "2026-09-24T11:30:00+08:00",'
+            ' "est_end": "2026-09-24T12:00:00+08:00",'
+            ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+            expected,
+        ))
+        self.assertEqual(self._occ_row(start_id), before_start)
+        self.assertEqual(self._occ_row(end_id), before_end)
+
+    def test_sweep_closes_hollow_round_in_one_statement(self):
+        start_id, end_id = self._hollow_pair(
+            window=("2026-09-24T09:00:00+08:00", "2026-09-24T12:00:00+08:00"))
+        closed = self._query(
+            """
+            with updated as (
+                update public.planning_occurrence
+                   set status = 'timeout', closed_at = '2026-09-24T12:00:00+08:00',
+                       updated_at = '2026-09-24T12:00:01+08:00'
+                 where task_id = (select task_id from public.planning_occurrence
+                                  where id = %s)
+                   and round_key = (select round_key from public.planning_occurrence
+                                    where id = %s)
+                   and status in ('pending', 'in_progress', 'deferred', 'partial')
+                returning id
+            )
+            select count(*) from updated
+            """,
+            (start_id, start_id),
+        )[0][0]
+        self.assertEqual(closed, 2)
+        cur = self.conn.cursor()
+        cur.execute("select status from public.planning_occurrence where id in (%s, %s)",
+                    (start_id, end_id))
+        statuses = sorted(r[0] for r in cur.fetchall())
+        cur.close()
+        self.assertEqual(statuses, ["timeout", "timeout"])
+
+    def test_discard_task_rpc_rolls_back_on_task_failure(self):
+        task_id = self._once_task_id()
+        self._fresh_occurrence()
+        self._query("update public.planning_task set is_active = false where id = %s",
+                    (task_id,))
+        self._query_expecting_concurrency_rejection(
+            "select public.planning_discard_task(%s, %s)",
+            (task_id, "2026-09-28T11:00:00+08:00"))
+        self.assertEqual(self._query(
+            "select count(*) from public.planning_occurrence"
+            " where task_id = %s and status <> 'pending'", (task_id,))[0][0], 0)
+
+
+
+
+    # -- 批次 6 最终 Debug：once 全冻结输入 / discard 目标事实事务内写入 ──
+
+    ONCE_GUARD_UPDATE_SQL = ("select public.planning_insert_once_occurrence"
+                             "(%s, %s, %s, %s, %s::jsonb, %s::jsonb)")
+
+    def test_once_generation_rejects_content_drift(self):
+        # 问题 2 / M2：生成持旧 content 快照；B 改 content 并提交 →
+        # 锁内复核 content 漂移 → 拒绝、0 行。
+        task_id = self._bare_once_task("2026-09-24")
+        self._query("update public.planning_task set content = '新文案' where id = %s",
+                    (task_id,))
+        with self.assertRaises(psycopg.errors.RaiseException) as caught:
+            self._query(self.ONCE_GUARD_UPDATE_SQL, (
+                task_id, "2026-09-24", None, None, self._once_row_json(task_id),
+                '{"content": "旧文案", "estimated_minutes": 30,'
+                ' "time_mode": "duration", "is_hollow": false}',
+            ))
+        self.assertIn("once definition changed", str(caught.exception))
+        self.assertEqual(self._query(
+            "select count(*) from public.planning_occurrence where task_id = %s",
+            (task_id,))[0][0], 0)
+
+    def test_once_generation_rejects_estimated_minutes_drift(self):
+        # 问题 2 / M3：生成持旧 estimated_minutes=30 快照；B 改 60 并提交 →
+        # 拒绝、0 行（occurrence 不得以旧耗时出生）。
+        task_id = self._bare_once_task("2026-09-24")
+        self._query("update public.planning_task set estimated_minutes = 60 where id = %s",
+                    (task_id,))
+        with self.assertRaises(psycopg.errors.RaiseException) as caught:
+            self._query(self.ONCE_GUARD_UPDATE_SQL, (
+                task_id, "2026-09-24", None, None, self._once_row_json(task_id),
+                '{"content": "竞态", "estimated_minutes": 30,'
+                ' "time_mode": "duration", "is_hollow": false}',
+            ))
+        self.assertIn("once definition changed", str(caught.exception))
+        self.assertEqual(self._query(
+            "select count(*) from public.planning_occurrence where task_id = %s",
+            (task_id,))[0][0], 0)
+
+    def test_once_generation_accepts_matching_full_snapshot(self):
+        # 对照：content / estimated_minutes / time_mode / hollow 配置全部
+        # 一致 → 生成成功。
+        task_id = self._bare_once_task("2026-09-24")
+        self._query(self.ONCE_GUARD_UPDATE_SQL, (
+            task_id, "2026-09-24", None, None, self._once_row_json(task_id),
+            '{"content": "自查", "estimated_minutes": 30,'
+            ' "time_mode": "duration", "is_hollow": false}',
+        ))
+        self.assertEqual(self._query(
+            "select count(*) from public.planning_occurrence where task_id = %s",
+            (task_id,))[0][0], 1)
+
+    def test_discard_task_rpc_applies_target_facts_atomically(self):
+        # 问题 1B：目标行 actual_end / actual_minutes 作为 RPC 输入在同一
+        # 事务内写入；completed / timeout 历史保持不变。
+        task_id = self._bare_once_task("2026-09-24")
+        occ_id = self._query(
+            """
+            insert into public.planning_occurrence (
+                task_id, for_date, round_key, schedule_date, display_cycle_date,
+                display_reason, status, sort_order, is_fixed, estimated_time_source,
+                fixed_source, schedule_managed, is_limited, source,
+                content_snapshot, display_content, time_mode_snapshot,
+                created_at, updated_at
+            ) values (
+                %s, '2026-09-24', 'once', '2026-09-24', '2026-09-24',
+                'initial', 'pending', 10, false, 'unassigned',
+                null, true, false, 'schedule',
+                '竞态', '竞态', 'duration',
+                '2026-09-24T06:00:00+08:00', '2026-09-24T06:00:00+08:00'
+            ) returning id
+            """,
+            (task_id,),
+        )[0][0]
+        # 历史行：completed（不得被废弃改写）——挂在独立 once 任务上
+        #（once 任务行必须 round_key='once'，identity 触发器强制）
+        hist_task = self._bare_once_task("2026-09-23")
+        hist_id = self._query(
+            """
+            insert into public.planning_occurrence (
+                task_id, for_date, round_key, schedule_date, display_cycle_date,
+                display_reason, status, sort_order, is_fixed, estimated_time_source,
+                fixed_source, schedule_managed, is_limited, source, closed_at,
+                handled_at, content_snapshot, display_content, time_mode_snapshot,
+                created_at, updated_at
+            ) values (
+                %s, '2026-09-23', 'once', '2026-09-23', '2026-09-23',
+                'initial', 'completed', 5, false, 'unassigned',
+                null, true, false, 'schedule', '2026-09-23T12:00:00+08:00',
+                '2026-09-23T12:00:00+08:00', '历史', '历史', 'duration',
+                '2026-09-23T06:00:00+08:00', '2026-09-23T06:00:00+08:00'
+            ) returning id
+            """,
+            (hist_task,),
+        )[0][0]
+        self._query(
+            "select public.planning_discard_task(%s, %s, %s, %s::jsonb)",
+            (task_id, "2026-09-28T11:00:00+08:00", occ_id,
+             '{"actual_end": "2026-09-24T09:30:00+08:00",'
+             ' "actual_minutes": 25, "updated_at": "2026-09-28T11:00:00+08:00"}'),
+        )
+        # 目标行事实在事务内写入
+        occ_status, occ_actual_end, occ_minutes = self._query(
+            "select status, actual_end, actual_minutes from public.planning_occurrence"
+            " where id = %s", (occ_id,))[0]
+        self.assertEqual(occ_status, "discarded")
+        self.assertEqual(str(occ_actual_end), "2026-09-24 09:30:00+08:00")
+        self.assertEqual(occ_minutes, 25)
+        # 历史行不变
+        hist_status, hist_closed = self._query(
+            "select status, closed_at from public.planning_occurrence where id = %s",
+            (hist_id,))[0]
+        self.assertEqual(hist_status, "completed")
+        self.assertEqual(str(hist_closed), "2026-09-23 12:00:00+08:00")
+        # 任务已停用
+        self.assertEqual(self._query(
+            "select is_active from public.planning_task where id = %s",
+            (task_id,))[0][0], False)
+
+    def test_discard_task_rpc_fact_failure_rolls_back_task_disable(self):
+        # 问题 1 验证 3：目标行事实写入失败（actual_minutes 违反 CHECK）
+        # → 整个废弃命令回滚：task 仍启用、occurrence 仍 pending。
+        task_id = self._bare_once_task("2026-09-24")
+        occ_id = self._pending_occ_on(task_id)
+        with self.assertRaises(psycopg.errors.CheckViolation):
+            self._query(
+                "select public.planning_discard_task(%s, %s, %s, %s::jsonb)",
+                (task_id, "2026-09-28T11:00:00+08:00", occ_id,
+                 '{"actual_minutes": 99999,'
+                 ' "updated_at": "2026-09-28T11:00:00+08:00"}'),
+            )
+        self.assertEqual(self._query(
+            "select is_active from public.planning_task where id = %s",
+            (task_id,))[0][0], True)
+        self.assertEqual(self._query(
+            "select status from public.planning_occurrence where id = %s",
+            (occ_id,))[0][0], "pending")
+
+    def test_discard_task_preserves_target_completed_after_snapshot(self):
+        task_id = self._bare_once_task("2026-09-24")
+        occ_id = self._pending_occ_on(task_id)
+        self._query(
+            "update public.planning_occurrence set status = 'completed',"
+            " actual_start = '2026-09-24T10:00:00+08:00',"
+            " actual_end = '2026-09-24T11:00:00+08:00', actual_minutes = 60,"
+            " handled_at = '2026-09-24T11:00:00+08:00',"
+            " closed_at = '2026-09-24T11:00:00+08:00' where id = %s",
+            (occ_id,))
+        self._query(
+            "select public.planning_discard_task(%s, %s, %s, %s::jsonb)",
+            (task_id, "2026-09-24T12:00:00+08:00", occ_id,
+             '{"actual_end": "2026-09-24T12:00:00+08:00", "actual_minutes": 120}'),
+        )
+        row = self._query(
+            "select status, actual_minutes, actual_end, handled_at, closed_at"
+            " from public.planning_occurrence where id = %s", (occ_id,))[0]
+        self.assertEqual(row[0], "completed")
+        self.assertEqual(row[1], 60)
+        self.assertEqual(row[2], row[3])
+        self.assertEqual(row[3], row[4])
+        self.assertFalse(self._query(
+            "select is_active from public.planning_task where id = %s",
+            (task_id,))[0][0])
+
+
+
+
+    ROUND_GEN_SQL = ("select public.planning_insert_round_occurrence"
+                     "(%s, %s::jsonb, %s::jsonb)")
+
+    def _round_expected_task(self, task_id):
+        return self._query(
+            "select to_jsonb(t)::text from public.planning_task t where id = %s",
+            (task_id,))[0][0]
+
+    def _daily_task_row(self, content="周期", estimated=30):
+        task_id = self._query(
+            """
+            insert into public.planning_task (
+                content, task_type, time_mode, estimated_minutes, is_active,
+                refresh_mode, refresh_enabled,
+                created_at, updated_at
+            ) values (
+                %s, 'daily', 'duration', %s, true,
+                'daily', true,
+                '2026-09-23T07:00:00+08:00', '2026-09-23T07:00:00+08:00'
+            ) returning id
+            """,
+            (content, estimated),
+        )[0][0]
+        return task_id
+
+    def _round_row_json(self, task_id, content, estimated):
+        return ('[{"task_id": %d, "for_date": "2026-09-24",'
+                ' "round_key": "cycle:2026-09-24", "schedule_date": "2026-09-24",'
+                ' "display_cycle_date": "2026-09-24", "display_reason": "initial",'
+                ' "status": "pending", "sort_order": 10, "is_fixed": false,'
+                ' "estimated_time_source": "unassigned", "fixed_source": null,'
+                ' "schedule_managed": true, "is_limited": false, "source": "schedule",'
+                ' "content_snapshot": "%s", "display_content": "%s",'
+                ' "time_mode_snapshot": "duration", "planned_minutes": %d,'
+                ' "created_at": "2026-09-24T06:00:00+08:00",'
+                ' "updated_at": "2026-09-24T06:00:00+08:00"}]'
+                % (task_id, content, content, estimated))
+
+    def test_round_generation_rejects_inactive_drift(self):
+        # 明日可用 BLOCKER 2 / M2：生成持旧 active 快照；B 停用任务并提交 →
+        # 生成锁内复核 active → 拒绝、0 行。
+        task_id = self._daily_task_row()
+        expected = self._round_expected_task(task_id)
+        self._query("update public.planning_task set is_active = false where id = %s",
+                    (task_id,))
+        self._query_expecting_concurrency_rejection(self.ROUND_GEN_SQL, (
+            task_id, self._round_row_json(task_id, "周期", 30), expected))
+        self.assertEqual(self._query(
+            "select count(*) from public.planning_occurrence where task_id = %s",
+            (task_id,))[0][0], 0)
+
+    def test_round_generation_rejects_window_drift(self):
+        # M3：生成持旧窗口模板快照；B 修改窗口并提交 → 拒绝、0 行
+        #（occurrence 不得冻结旧窗口）。
+        task_id = self._daily_task_row()
+        self._query(
+            "update public.planning_task set window_start_tod = '18:00',"
+            " window_end_tod = '22:00' where id = %s", (task_id,))
+        expected = self._round_expected_task(task_id)
+        self._query(
+            "update public.planning_task set window_end_tod = '23:00' where id = %s",
+            (task_id,))
+        row_json = ('[{"task_id": %d, "for_date": "2026-09-24",'
+                    ' "round_key": "cycle:2026-09-24", "schedule_date": "2026-09-24",'
+                    ' "display_cycle_date": "2026-09-24", "display_reason": "initial",'
+                    ' "status": "pending", "sort_order": 10, "is_fixed": false,'
+                    ' "estimated_time_source": "unassigned", "fixed_source": null,'
+                    ' "schedule_managed": true, "is_limited": false, "source": "schedule",'
+                    ' "content_snapshot": "周期", "display_content": "周期",'
+                    ' "time_mode_snapshot": "duration", "planned_minutes": 30,'
+                    ' "window_start_at": "2026-09-24T18:00:00+08:00",'
+                    ' "window_end_at": "2026-09-24T22:00:00+08:00",'
+                    ' "created_at": "2026-09-24T06:00:00+08:00",'
+                    ' "updated_at": "2026-09-24T06:00:00+08:00"}]' % task_id)
+        self._query_expecting_concurrency_rejection(
+            self.ROUND_GEN_SQL, (task_id, row_json, expected))
+        self.assertEqual(self._query(
+            "select count(*) from public.planning_occurrence where task_id = %s",
+            (task_id,))[0][0], 0)
+
+    def test_round_generation_rejects_duration_drift(self):
+        # M3 补充：生成持旧 estimated_minutes=30 快照；B 改 60 → 拒绝、0 行。
+        task_id = self._daily_task_row()
+        expected = self._round_expected_task(task_id)
+        self._query("update public.planning_task set estimated_minutes = 60 where id = %s",
+                    (task_id,))
+        self._query_expecting_concurrency_rejection(self.ROUND_GEN_SQL, (
+            task_id, self._round_row_json(task_id, "周期", 30), expected))
+        self.assertEqual(self._query(
+            "select count(*) from public.planning_occurrence where task_id = %s",
+            (task_id,))[0][0], 0)
+
+    def test_round_generation_accepts_matching_snapshot(self):
+        # 对照：定义未漂移 → 生成成功。
+        task_id = self._daily_task_row()
+        self._query(self.ROUND_GEN_SQL, (
+            task_id, self._round_row_json(task_id, "周期", 30),
+            self._round_expected_task(task_id)))
+        self.assertEqual(self._query(
+            "select count(*) from public.planning_occurrence where task_id = %s",
+            (task_id,))[0][0], 1)
+    def test_round_generation_migration_removes_old_two_arg_overload(self):
+        self._query(
+            "create function public.planning_insert_round_occurrence(bigint, jsonb)"
+            " returns void language plpgsql as $$ begin null; end; $$"
+        )
+        migration = (MIGRATIONS_DIR /
+                     "20260928030000_planning_once_identity_locks.sql").read_text(
+                         encoding="utf-8")
+        self._query(migration)
+        signatures = self._query(
+            "select pg_get_function_identity_arguments(p.oid)"
+            " from pg_proc p join pg_namespace n on n.oid = p.pronamespace"
+            " where n.nspname = 'public'"
+            " and p.proname = 'planning_insert_round_occurrence'"
+        )
+        self.assertEqual(len(signatures), 1)
+        self.assertIn("p_expected_task jsonb", signatures[0][0])
+
+    # -- 批次 6 收尾（A1）：重算请求消费身份真 PostgreSQL 验证 ────────────
+
+    def _recompute_state_row(self):
+        rows = self._query(
+            "select requested_at, reason, request_token"
+            " from public.planning_recompute_state where id = 1")
+        return rows[0] if rows else (None, None, None)
+
+    def test_recompute_request_identity_unique_with_same_business_now(self):
+        # A、B 两次业务操作捕获同一 requested_at T：登记 RPC 在函数体内
+        # gen_random_uuid()——两次登记必然得到不同消费身份。
+        t = "2026-09-30T12:00:00+08:00"
+        token_a = self._query(
+            "select public.planning_request_recompute(%s, %s)", ("reorder", t))[0][0]
+        token_b = self._query(
+            "select public.planning_request_recompute(%s, %s)",
+            ("status_change", t))[0][0]
+        self.assertIsNotNone(token_a)
+        self.assertNotEqual(token_a, token_b)
+        requested_at, reason, row_token = self._recompute_state_row()
+        self.assertEqual(requested_at.isoformat(), t)
+        self.assertEqual(reason, "status_change")
+        self.assertEqual(row_token, token_b)
+
+    def test_recompute_clear_only_consumes_captured_token(self):
+        # old recompute 捕获 A → 同 T 的 B 登记 → 按 A 清除命中 0 行
+        #（B 保留）→ 按 B 清除成功 → 重复 / NULL 清除为 0 行 no-op。
+        t = "2026-09-30T12:00:00+08:00"
+        token_a = self._query(
+            "select public.planning_request_recompute(%s, %s)", ("reorder", t))[0][0]
+        token_b = self._query(
+            "select public.planning_request_recompute(%s, %s)",
+            ("status_change", t))[0][0]
+        # 按 A 的身份清除：数据库当前为 B → 0 行，B 保留
+        cleared = self._query(
+            "select public.planning_clear_recompute_mark(%s)", (token_a,))[0][0]
+        self.assertEqual(cleared, 0)
+        requested_at, reason, row_token = self._recompute_state_row()
+        self.assertEqual(requested_at.isoformat(), t)
+        self.assertEqual(reason, "status_change")
+        self.assertEqual(row_token, token_b)
+        # 下一轮消费 B：清除成功
+        cleared = self._query(
+            "select public.planning_clear_recompute_mark(%s)", (token_b,))[0][0]
+        self.assertEqual(cleared, 1)
+        requested_at, reason, row_token = self._recompute_state_row()
+        self.assertIsNone(requested_at)
+        self.assertIsNone(reason)
+        self.assertIsNone(row_token)
+        # 重复清除 / NULL token（捕获时本无请求）都是 0 行 no-op
+        self.assertEqual(self._query(
+            "select public.planning_clear_recompute_mark(%s)", (token_b,))[0][0], 0)
+        self.assertEqual(self._query(
+            "select public.planning_clear_recompute_mark(%s)", (None,))[0][0], 0)
+
+    def test_recompute_identity_column_and_functions_fingerprint(self):
+        # 结构指纹：request_token 列存在且可空；两个 RPC 的 identity
+        # arguments 与 Python 调用形态一致。
+        columns = self._query(
+            "select column_name, is_nullable from information_schema.columns"
+            " where table_schema = 'public' and table_name = 'planning_recompute_state'"
+            " and column_name = 'request_token'")
+        self.assertEqual(len(columns), 1)
+        self.assertEqual(columns[0][1], "YES")
+        signatures = self._query(
+            "select pg_get_function_identity_arguments(p.oid)"
+            " from pg_proc p join pg_namespace n on n.oid = p.pronamespace"
+            " where n.nspname = 'public'"
+            " and p.proname in ('planning_request_recompute',"
+            " 'planning_clear_recompute_mark')"
+            " order by p.proname")
+        self.assertEqual(len(signatures), 2)
+        # order by proname：clear 在前、request 在后
+        self.assertIn("p_request_token", signatures[0][0])
+        self.assertIn("p_reason", signatures[1][0])
+        self.assertIn("p_requested_at", signatures[1][0])
+
+
+    # -- 批次 7：planning_update_cycle_boundary 真 PostgreSQL 验证 ─────────
+
+    BOUNDARY_RPC_SQL = ("select public.planning_update_cycle_boundary"
+                        "(%s, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb)")
+    BOUNDARY_KEY = "planning.refresh_boundary_state"
+
+    def _windowed_task_row(self, content, start_tod, end_tod,
+                           is_active=True, refresh_enabled=True):
+        task_id = self._query(
+            """
+            insert into public.planning_task (
+                content, task_type, time_mode, estimated_minutes, is_active,
+                refresh_mode, refresh_enabled,
+                window_start_tod, window_end_tod,
+                created_at, updated_at
+            ) values (
+                %s, 'daily', 'duration', 30, %s,
+                'daily', %s,
+                %s, %s,
+                '2026-09-23T07:00:00+08:00', '2026-09-23T07:00:00+08:00'
+            ) returning id
+            """,
+            (content, is_active, refresh_enabled, start_tod, end_tod),
+        )[0][0]
+        return task_id
+
+    def _task_tods(self, task_id):
+        return self._query(
+            "select window_start_tod::text, window_end_tod::text"
+            " from public.planning_task where id = %s", (task_id,))[0]
+
+    def _boundary_state(self):
+        rows = self._query(
+            "select value from public.app_settings where key = %s",
+            (self.BOUNDARY_KEY,))
+        return rows[0][0] if rows else None
+
+    def _reset_boundary_fixture(self):
+        """boundary 定向测试的隔离夹具（快照-清空-恢复）。
+
+        boundary 校验要求受控任务集合；本类共享同一临时库，直接删行会
+        破坏其它测试（含字母序后行的测试）依赖的既存行——进入时快照
+        planning_task / planning_occurrence 与 boundary 状态，退出时清空
+        后逐行原样恢复（单事务内重插，满足中空成对 deferred 约束）。
+        """
+        snap_tasks = self._query("select * from public.planning_task")
+        snap_occs = self._query("select * from public.planning_occurrence")
+        snap_state = self._query(
+            "select value from public.app_settings where key = %s",
+            (self.BOUNDARY_KEY,))
+        self._query("delete from public.planning_occurrence")
+        self._query("delete from public.planning_task")
+        self._query("delete from public.app_settings where key = %s",
+                    (self.BOUNDARY_KEY,))
+        self._snapshots = (snap_tasks, snap_occs, snap_state)
+
+    def _restore_boundary_fixture(self):
+        if not getattr(self, "_snapshots", None):
+            return
+        snap_tasks, snap_occs, snap_state = self._snapshots
+        self._snapshots = None
+        # 测试期间可能写入新的 boundary 状态行：先清除，再按快照恢复
+        self._query("delete from public.app_settings where key = %s",
+                    (self.BOUNDARY_KEY,))
+        self._query("delete from public.planning_occurrence")
+        self._query("delete from public.planning_task")
+        with self.conn.transaction():
+            for table, rows in (("planning_task", snap_tasks),
+                                ("planning_occurrence", snap_occs)):
+                if not rows:
+                    continue
+                cur = self.conn.cursor()
+                cur.execute(f"select * from public.{table} limit 0")
+                columns = [d[0] for d in cur.description]
+                cur.close()
+                cols = ", ".join(columns)
+                marks = ", ".join(["%s"] * len(columns))
+                sql = (f"insert into public.{table} ({cols}) "
+                       f"overriding system value values ({marks})")
+                for row in rows:
+                    cur = self.conn.cursor()
+                    cur.execute(sql, row)
+                    cur.close()
+        if snap_state:
+            import json as _json
+            self._query(
+                "insert into public.app_settings (key, value) values (%s, %s::jsonb)",
+                (self.BOUNDARY_KEY, _json.dumps(snap_state[0][0])))
+
+    def test_boundary_rpc_atomic_success_with_adjustment(self):
+        self._reset_boundary_fixture()
+        self.addCleanup(self._restore_boundary_fixture)
+        cross_id = self._windowed_task_row("煮饭", "22:00", "05:00")
+        result = self._query(self.BOUNDARY_RPC_SQL, (
+            "04:00",
+            '{"boundary": "06:00", "transition": null}',
+            None,
+            "[]",
+            '[{"task_id": %d, "window_start_tod": "04:00", "window_end_tod": "09:00"}]'
+            % cross_id,
+        ))[0][0]
+        assert result["status"] == "ok"
+        assert result["updated_tasks"] == 1
+        # 关联任务窗口在同一事务内更新；状态行写入新 boundary + 过渡为空
+        assert self._task_tods(cross_id) == ("04:00:00", "09:00:00")
+        state = self._boundary_state()
+        assert state["boundary"] == "04:00"
+        assert state["transition"] is None
+        # 缺省状态行由 RPC 以默认值补插（此前已 reset）
+        assert state["absorbed"] == []
+
+    def test_boundary_rpc_conflicts_return_with_zero_writes(self):
+        self._reset_boundary_fixture()
+        self.addCleanup(self._restore_boundary_fixture)
+        cross_id = self._windowed_task_row("煮饭", "22:00", "05:00")
+        ok_id = self._windowed_task_row("散步", "09:00", "12:00")
+        result = self._query(self.BOUNDARY_RPC_SQL, (
+            "04:00",
+            '{"boundary": "06:00", "transition": null}',
+            None,
+            "[]",
+            "[]",
+        ))[0][0]
+        assert result["status"] == "conflicts"
+        assert result["conflicts"][0]["task_id"] == cross_id
+        assert result["conflicts"][0]["window_start_tod"] == "22:00"
+        # 零写入：任务窗口与状态行保持原值
+        assert self._task_tods(cross_id) == ("22:00:00", "05:00:00")
+        assert self._task_tods(ok_id) == ("09:00:00", "12:00:00")
+        assert self._boundary_state() is None
+
+    def test_boundary_rpc_stale_state_rejected_without_writes(self):
+        self._reset_boundary_fixture()
+        self.addCleanup(self._restore_boundary_fixture)
+        cross_id = self._windowed_task_row("煮饭", "22:00", "05:00")
+        # 预置已落库状态（另一 worker 已改为 05:00）
+        self._query(
+            "insert into public.app_settings (key, value) values (%s, %s)"
+            " on conflict (key) do update set value = excluded.value",
+            (self.BOUNDARY_KEY, '{"boundary": "05:00", "transition": null,'
+                                ' "absorbed": []}'))
+        result = self._query(self.BOUNDARY_RPC_SQL, (
+            "04:00",
+            '{"boundary": "06:00", "transition": null}',  # 预计算所依据的旧状态
+            None, "[]", "[]",
+        ))[0][0]
+        assert result["status"] == "stale_state"
+        assert self._task_tods(cross_id) == ("22:00:00", "05:00:00")
+        assert self._boundary_state()["boundary"] == "05:00"
+
+    def test_boundary_rpc_paused_not_exempt_and_disabled_excluded(self):
+        self._reset_boundary_fixture()
+        self.addCleanup(self._restore_boundary_fixture)
+        paused_id = self._windowed_task_row("暂停", "22:00", "05:00",
+                                            refresh_enabled=False)
+        disabled_id = self._windowed_task_row("停用", "22:00", "05:00",
+                                              is_active=False)
+        result = self._query(self.BOUNDARY_RPC_SQL, (
+            "04:00",
+            '{"boundary": "06:00", "transition": null}',
+            None, "[]", "[]",
+        ))[0][0]
+        assert result["status"] == "conflicts"
+        assert [item["task_id"] for item in result["conflicts"]] == [paused_id]
+        assert disabled_id not in [item["task_id"] for item in result["conflicts"]]
+
+    def test_boundary_rpc_failure_rolls_back_all_adjustments(self):
+        self._reset_boundary_fixture()
+        self.addCleanup(self._restore_boundary_fixture)
+        ok_id = self._windowed_task_row("散步", "09:00", "12:00")
+        # 状态行写入阶段注入失败（BEFORE UPDATE 触发器）→ RPC 整体失败：
+        # 已执行的任务窗口更新必须随事务回滚（单事务零部分提交证据）。
+        self._query(
+            """
+            create function public.__test_block_boundary_write() returns trigger as $$
+            begin
+              if new.key = 'planning.refresh_boundary_state' then
+                raise exception 'simulated state write failure';
+              end if;
+              return new;
+            end;
+            $$ language plpgsql
+            """
+        )
+        self._query(
+            "create trigger __test_block_boundary before update on public.app_settings"
+            " for each row execute function public.__test_block_boundary_write()"
+        )
+        try:
+            with self.assertRaises(psycopg.errors.RaiseException):
+                self._query(self.BOUNDARY_RPC_SQL, (
+                    "04:00",
+                    '{"boundary": "06:00", "transition": null}',
+                    None, "[]",
+                    '[{"task_id": %d, "window_start_tod": "04:00",'
+                    ' "window_end_tod": "09:00"}]' % ok_id,
+                ))
+        finally:
+            self._query("drop trigger __test_block_boundary on public.app_settings")
+            self._query("drop function public.__test_block_boundary_write()")
+        # 回滚证据：任务窗口更新未留存；状态行不存在（insert 的默认行未被
+        # UPDATE 触碰……insert 本身成功但状态值仍为默认）
+        assert self._task_tods(ok_id) == ("09:00:00", "12:00:00")
+        state = self._boundary_state()
+        assert state is None or state["boundary"] == "06:00"
+
+    def test_boundary_rpc_rejects_unsupported_adjustment_field(self):
+        self._reset_boundary_fixture()
+        self.addCleanup(self._restore_boundary_fixture)
+        cross_id = self._windowed_task_row("煮饭", "22:00", "05:00")
+        # 未知字段直接拒绝（patch 硬白名单；绝不动态拼 SQL）
+        with self.assertRaises(psycopg.errors.RaiseException):
+            self._query(self.BOUNDARY_RPC_SQL, (
+                "04:00",
+                '{"boundary": "06:00", "transition": null}',
+                None, "[]",
+                '[{"task_id": %d, "window_start_tod": "04:00",'
+                ' "window_end_tod": "09:00", "target_date": "2026-09-30"}]' % cross_id,
+            ))
+        # start == end 形状非法拒绝
+        with self.assertRaises(psycopg.errors.RaiseException):
+            self._query(self.BOUNDARY_RPC_SQL, (
+                "04:00",
+                '{"boundary": "06:00", "transition": null}',
+                None, "[]",
+                '[{"task_id": %d, "window_start_tod": "05:00",'
+                ' "window_end_tod": "05:00"}]' % cross_id,
+            ))
+        assert self._task_tods(cross_id) == ("22:00:00", "05:00:00")
+        assert self._boundary_state() is None
+
+    def test_boundary_rpc_never_touches_occurrences(self):
+        self._reset_boundary_fixture()
+        self.addCleanup(self._restore_boundary_fixture)
+        cross_id = self._windowed_task_row("煮饭", "22:00", "05:00")
+        before = self._query("select count(*) from public.planning_occurrence")[0][0]
+        self._query(self.BOUNDARY_RPC_SQL, (
+            "04:00",
+            '{"boundary": "06:00", "transition": null}',
+            None,
+            "[]",
+            '[{"task_id": %d, "window_start_tod": "04:00", "window_end_tod": "09:00"}]'
+            % cross_id,
+        ))[0][0]
+        # boundary 修改对已生成实例零写路径（B5：不重写窗口 / 身份 / 展示）
+        assert self._query(
+            "select count(*) from public.planning_occurrence")[0][0] == before
 
 
 if __name__ == "__main__":

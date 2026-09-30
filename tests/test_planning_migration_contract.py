@@ -21,6 +21,27 @@ WINDOW_MIGRATION = (
     / "20260927010000_planning_window_model.sql"
 )
 
+RECOMPUTE_IDENTITY_MIGRATION = (
+    Path(__file__).resolve().parents[1]
+    / "supabase"
+    / "migrations"
+    / "20260930010000_planning_recompute_request_identity.sql"
+)
+
+BOUNDARY_RPC_MIGRATION = (
+    Path(__file__).resolve().parents[1]
+    / "supabase"
+    / "migrations"
+    / "20260930020000_planning_update_cycle_boundary.sql"
+)
+
+BOUNDARY_WINDOW_GUARD_MIGRATION = (
+    Path(__file__).resolve().parents[1]
+    / "supabase"
+    / "migrations"
+    / "20260930030000_planning_boundary_window_guard.sql"
+)
+
 
 class PlanningMigrationContractTests(unittest.TestCase):
     @classmethod
@@ -277,6 +298,582 @@ class PlanningFixedExpirationFreezeMigrationContractTests(unittest.TestCase):
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, self.folded)
+
+
+ROUND_PATCH_RPC_MIGRATION = (
+    Path(__file__).resolve().parents[1]
+    / "supabase"
+    / "migrations"
+    / "20260928020000_planning_patch_occurrence_round.sql"
+)
+
+
+class PlanningRoundPatchRpcMigrationContractTests(unittest.TestCase):
+    """hollow 同轮原子补丁 RPC 迁移契约（20260928020000，批次 6 二轮裁决）。
+
+    user 批准的最小数据库事务能力：实现批次 6 已有的同轮原子编辑语义，
+    不是新产品功能。只 CREATE OR REPLACE 单个函数——不新增表列 / 触发器、
+    不改旧迁移、不回填数据、重放安全。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = ROUND_PATCH_RPC_MIGRATION.read_text(encoding="utf-8")
+        cls.folded = cls.sql.casefold()
+
+    def _top_level_statements(self):
+        """函数体（$$ 块）之外的顶层语句序列。"""
+        statements, buf = [], []
+        in_dollar = False
+        for line in self.sql.splitlines():
+            stripped = line.strip()
+            if not in_dollar and stripped.casefold().startswith("create or replace function"):
+                buf.append(stripped)
+                in_dollar = True
+                continue
+            if in_dollar:
+                if stripped == "$$;":
+                    in_dollar = False
+                continue
+            if stripped:
+                buf.append(stripped)
+        return [item.casefold() for item in buf]
+
+    def test_migration_is_atomic(self):
+        folded = self.folded
+        self.assertIn("begin;", folded)
+        self.assertIn("commit;", folded)
+
+    def test_creates_exactly_the_round_patch_function(self):
+        top = self._top_level_statements()
+        creating = [item for item in top if item.startswith("create")]
+        self.assertEqual(creating, [
+            "create or replace function "
+            "public.planning_patch_occurrence_round("])
+
+    def test_no_table_column_trigger_index_changes(self):
+        for forbidden in (
+            "alter table", "add column", "create trigger", "create table",
+            "create index", "add constraint", "set not null", "set default",
+            "comment on column",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.folded)
+
+    def test_never_drops_or_rewrites_existing_structure(self):
+        for forbidden in (
+            "drop column", "drop constraint", "drop trigger", "drop index",
+            "drop table", "drop function", "drop policy",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.folded)
+
+    def test_no_data_backfill(self):
+        top = [item for item in self._top_level_statements()
+               if not item.startswith(("begin;", "commit;"))]
+        for item in top:
+            for forbidden in ("update ", "insert into", "delete from"):
+                with self.subTest(statement=item, forbidden=forbidden):
+                    self.assertFalse(item.startswith(forbidden))
+
+    def test_function_is_replay_safe_by_replace(self):
+        self.assertIn(
+            "create or replace function public.planning_patch_occurrence_round(",
+            self.folded)
+
+    def test_function_has_hard_whitelist_and_pair_validation(self):
+        # 硬白名单（未知 key 拒绝）、行锁、同轮身份校验、兄弟行白名单更小
+        folded = self.folded
+        self.assertIn("contains unsupported field", folded)
+        self.assertIn("for update", folded)
+        self.assertIn("order by id", folded)
+        self.assertIn("rows are not a hollow start/end pair", folded)
+        self.assertIn("occurrence rows not found", folded)
+        self.assertNotIn("format(", folded)  # 无动态 SQL 拼接
+        self.assertIn("sibling patch contains unsupported field", folded)
+        self.assertIn("target patch contains unsupported field", folded)
+
+    def test_function_enforces_in_lock_lifecycle_gate(self):
+        # 最终修复问题 1：锁内生命周期二次校验——窗口字段永远严格门（问题 5
+        # 收紧：status 不能降低保护）；仅纯开放状态流转用宽松门。拒绝统一
+        # 携带固定 ERRCODE PC001（问题 6：稳定错误标识，不模糊字符串匹配）。
+        folded = self.folded
+        self.assertIn("only open statuses can be written", folded)
+        self.assertEqual(folded.count("round is no longer editable"), 2)
+        self.assertEqual(folded.count("using errcode = 'pc001'"), 3)
+        self.assertIn("or not (p_target_patch ? 'status')", folded)
+        self.assertIn("status not in ('pending', 'deferred')", folded)
+        self.assertIn("status not in ('pending', 'in_progress', 'deferred', 'partial')", folded)
+        self.assertIn("actual_start is not null", folded)
+        self.assertIn("partial_at is not null", folded)
+        self.assertIn("closed_at is not null", folded)
+        self.assertIn("handled_at is not null", folded)
+
+    def test_function_verifies_expected_snapshot(self):
+        # 最终验收修复问题 3：重算的 expected snapshot 锁内复核——状态 /
+        # 窗口 / est 预态 / 所有权任一漂移即拒绝（stale schedule 不写回）。
+        folded = self.folded
+        self.assertIn("p_expected jsonb default null", folded)
+        self.assertIn("schedule inputs drifted", folded)
+        self.assertIn("jsonb_array_elements(p_expected)", folded)
+        self.assertIn("is distinct from (e.value->>'window_start_at')::timestamptz", folded)
+        self.assertIn("is distinct from e.value->>'estimated_time_source'", folded)
+
+
+
+    def test_function_enforces_window_consistency(self):
+        # 最终修复问题 7：任一补丁触及窗口字段时两阶段生效后窗口必须一致。
+        folded = self.folded
+        self.assertIn("hollow phases disagree on window", folded)
+        self.assertIn("p_sibling_patch ? 'window_start_at'", folded)
+        self.assertIn("p_sibling_patch ? 'window_end_at'", folded)
+
+    def test_function_never_writes_terminal_status(self):
+        # RPC 是同轮开放生命周期的原子编辑载体：终态值一律拒绝。
+        folded = self.folded
+        self.assertIn(
+            "coalesce(p_target_patch->>'status') not in", folded)
+        self.assertIn("('pending', 'in_progress', 'deferred', 'partial')", folded)
+
+    def test_function_does_not_execute_with_security_definer(self):
+        # 与既有 planning RPC（takeover/absorb）一致：保持 invoker 语义，
+        # 权限沿用网关连接，不新增 definer 提权面。
+        self.assertNotIn("security definer", self.folded)
+
+
+ONCE_IDENTITY_LOCKS_MIGRATION = (
+    Path(__file__).resolve().parents[1]
+    / "supabase"
+    / "migrations"
+    / "20260928030000_planning_once_identity_locks.sql"
+)
+
+
+class PlanningOnceIdentityLocksMigrationContractTests(unittest.TestCase):
+    """once 身份编辑 / 生成的跨进程任务行锁守护 RPC 契约（20260928030000）。
+
+    user 批准的最小数据库锁机制（最终修复问题 3）：编辑侧锁任务行 → 复核
+    无 occurrence → 原子保存；生成侧锁同一任务行 → 校验定义未漂移 → 插入。
+    仅 create or replace function；不新增锁表、不改表结构、重放安全。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = ONCE_IDENTITY_LOCKS_MIGRATION.read_text(encoding="utf-8")
+        cls.folded = cls.sql.casefold()
+
+    def _top_level_statements(self):
+        statements, buf = [], []
+        in_dollar = False
+        for line in self.sql.splitlines():
+            stripped = line.strip()
+            if not in_dollar and stripped.casefold().startswith("create or replace function"):
+                buf.append(stripped)
+                in_dollar = True
+                continue
+            if in_dollar:
+                if stripped == "$$;":
+                    in_dollar = False
+                continue
+            if stripped:
+                buf.append(stripped)
+        return [item.casefold() for item in buf]
+
+    def test_migration_is_atomic(self):
+        self.assertIn("begin;", self.folded)
+        self.assertIn("commit;", self.folded)
+
+    def test_creates_exactly_three_guard_functions(self):
+        creating = [item for item in self._top_level_statements() if item.startswith("create")]
+        self.assertEqual(len(creating), 3)
+        self.assertIn("public.planning_update_once_task_guarded(", creating[0])
+        self.assertIn("public.planning_insert_once_occurrence(", creating[1])
+        self.assertIn("public.planning_insert_round_occurrence(", creating[2])
+
+    def test_creates_round_occurrence_guard(self):
+        # 明日可用 BLOCKER 2：非 once 生成的锁内复核 RPC（active / 定义漂移）。
+        folded = self.folded
+        self.assertIn("create or replace function public.planning_insert_round_occurrence(", folded)
+        self.assertIn("planning_insert_round_occurrence: task no longer active", folded)
+        self.assertIn("planning_insert_round_occurrence: task definition changed during generation", folded)
+        self.assertIn("p_expected_task jsonb", folded)
+        self.assertIn("'window_end_tod'", folded)
+        self.assertIn("current_row.window_end_tod is distinct from", folded)
+        self.assertIn("current_row.refresh_anchor_at is distinct from", folded)
+        self.assertIn("drop function if exists public.planning_insert_round_occurrence(bigint, jsonb)", folded)
+
+    def test_no_table_or_trigger_changes_and_no_backfill(self):
+        for forbidden in (
+            "alter table", "add column", "create trigger", "create table",
+            "create index", "drop table", "insert into public.planning_task",
+            "update public.planning_task set ", "delete from public.",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.folded)
+
+    def test_edit_guard_locks_task_row_and_rechecks_occurrence(self):
+        folded = self.folded
+        self.assertIn("for update", folded)
+        self.assertIn("once identity locked: occurrence exists", folded)
+        self.assertIn("patch contains unsupported field", folded)
+
+    def test_generation_guard_validates_definition_drift(self):
+        folded = self.folded
+        self.assertIn("once definition changed during generation", folded)
+        self.assertIn("rows must be pending schedule occurrences", folded)
+        self.assertIn("target_date is distinct from p_expected_target_date", folded)
+
+    def test_generation_guard_verifies_all_frozen_inputs(self):
+        # 最终 Debug 问题 2：锁内复核全部会冻结进 occurrence 的任务输入
+        #（content / estimated_minutes / time_mode / hollow 形状配置）。
+        folded = self.folded
+        self.assertIn("p_expected_task jsonb default null", folded)
+        self.assertIn("expected task contains unsupported field", folded)
+        self.assertIn("content is distinct from p_expected_task->>'content'", folded)
+        self.assertIn(
+            "estimated_minutes is distinct from (p_expected_task->>'estimated_minutes')::integer",
+            folded)
+        self.assertIn("time_mode is distinct from p_expected_task->>'time_mode'", folded)
+        self.assertIn(
+            "is_hollow is distinct from (p_expected_task->>'is_hollow')::boolean", folded)
+
+
+DISCARD_TASK_RPC_MIGRATION = (
+    Path(__file__).resolve().parents[1]
+    / "supabase"
+    / "migrations"
+    / "20260928040000_planning_discard_task_rpc.sql"
+)
+
+
+class PlanningDiscardTaskRpcMigrationContractTests(unittest.TestCase):
+    """「废弃整个任务」原子 RPC 契约（20260928040000，最终验收修复问题 5）。
+
+    跨 task + occurrence 的原子命令：锁任务行 → 单语句关闭全部开放
+    occurrence（中空两阶段同语句命中）→ 单语句停用任务；任务停用未命中
+    （并发停用）→ PC001 整体回滚。仅承载既有废弃语义，非通用事务框架。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = DISCARD_TASK_RPC_MIGRATION.read_text(encoding="utf-8")
+        cls.folded = cls.sql.casefold()
+
+    def test_migration_is_atomic(self):
+        self.assertIn("begin;", self.folded)
+        self.assertIn("commit;", self.folded)
+
+    def test_creates_exactly_the_discard_function(self):
+        top = [ln.strip().casefold() for ln in self.sql.splitlines() if ln.strip()]
+        creating = [item for item in top if item.startswith("create")]
+        self.assertEqual(creating, [
+            "create or replace function public.planning_discard_task("])
+
+    def test_locks_task_and_closes_occurrences_before_deactivate(self):
+        folded = self.folded
+        # 锁任务行（FOR UPDATE）→ occurrence 关闭 → task 停用的顺序
+        lock_pos = folded.find("for update")
+        occ_pos = folded.find("update public.planning_occurrence")
+        task_pos = folded.find("update public.planning_task")
+        self.assertGreaterEqual(lock_pos, 0)
+        self.assertLess(occ_pos, task_pos)
+        # 关闭只写终态字段；命中开放状态
+        self.assertIn("status = 'discarded'", folded)
+        self.assertIn("status in ('pending', 'in_progress', 'deferred', 'partial')", folded)
+        self.assertIn("is_active = false", folded)
+        # 并发停用拒绝携带 PC001
+        self.assertIn("task already inactive (concurrent change)", folded)
+        self.assertIn("using errcode = 'pc001'", folded)
+
+    def test_no_wider_than_formal_discard_semantics(self):
+        folded = self.folded
+        # 仅改 is_active / updated_at（任务行）与 status/closed_at/updated_at
+        # + 目标行 actual 字段（occurrence 行）；不 DROP、不回填、不做任意
+        # 补丁（jsonb 仅用于目标行 actual 白名单传参）。
+        self.assertNotIn("drop ", folded)
+        self.assertNotIn("delete from", folded)
+        self.assertIn("target patch contains unsupported field", folded)
+
+    def test_replay_safe(self):
+        self.assertIn(
+            "create or replace function public.planning_discard_task(", self.folded)
+
+    def test_target_facts_write_inside_transaction(self):
+        # 最终 Debug 问题 1B：目标行 actual 事实作为 RPC 输入在同一事务内
+        # 写入（白名单仅 actual 字段）；不再允许 RPC 外补写关键事实。
+        folded = self.folded
+        self.assertIn("p_target_id bigint default null", folded)
+        self.assertIn("p_target_patch jsonb default null", folded)
+        self.assertIn("target patch contains unsupported field", folded)
+        target_pos = folded.find("update public.planning_occurrence")
+        task_pos = folded.find("update public.planning_task")
+        target_facts_pos = folded.find("p_target_patch ? 'actual_end'")
+        self.assertGreaterEqual(target_facts_pos, 0)
+        # 目标行事实写入发生在 task 停用之前（同一事务内顺序）
+        self.assertLess(target_facts_pos if target_facts_pos >= 0 else 0, task_pos)
+        # 白名单仅 actual 字段
+        self.assertIn(
+            "'actual_start', 'actual_end', 'actual_minutes', 'updated_at'", folded)
+
+
+class PlanningRecomputeIdentityMigrationContractTests(unittest.TestCase):
+    """重算请求消费身份契约（20260930010000，批次 6 收尾 A1）。
+
+    requested_at 来自业务 now、不能充当消费身份：登记 RPC 在函数体内原子
+    生成 uuid request_token；清除 RPC 只命中 token 等值行。不建通用版本
+    框架；requested_at 保留展示语义。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = RECOMPUTE_IDENTITY_MIGRATION.read_text(encoding="utf-8")
+        cls.folded = cls.sql.casefold()
+
+    def test_migration_is_atomic(self):
+        self.assertIn("begin;", self.folded)
+        self.assertIn("commit;", self.folded)
+
+    def test_adds_only_request_token_column(self):
+        self.assertIn(
+            "add column if not exists request_token uuid", self.folded)
+        # 不 DROP、不回填、不改既有列
+        self.assertNotIn("drop ", self.folded)
+        self.assertNotIn("update public.planning_recompute_state set request_token",
+                         self.folded.replace("set requested_at = null", ""))
+        alters = [ln.strip().casefold() for ln in self.sql.splitlines()
+                  if ln.strip().casefold().startswith("alter table")]
+        self.assertEqual(alters, [
+            "alter table public.planning_recompute_state",
+        ])
+
+    def test_creates_exactly_the_two_identity_functions(self):
+        top = [ln.strip().casefold() for ln in self.sql.splitlines() if ln.strip()]
+        creating = [item for item in top if item.startswith("create")]
+        self.assertEqual(creating, [
+            "create or replace function public.planning_request_recompute(",
+            "create or replace function public.planning_clear_recompute_mark(",
+        ])
+
+    def test_request_token_generated_in_database(self):
+        # 消费身份必须数据库原子生成：函数体内 gen_random_uuid，
+        # 不存在 Python 读-改-写路径。
+        self.assertIn("gen_random_uuid()", self.folded)
+        func_pos = self.folded.find(
+            "create or replace function public.planning_request_recompute(")
+        token_pos = self.folded.find("gen_random_uuid()", func_pos)
+        self.assertGreater(token_pos, func_pos)
+        # upsert 冲突分支同样写入新 token（每次登记必然换新身份）
+        self.assertIn("on conflict (id) do update", self.folded)
+        self.assertIn("request_token = excluded.request_token", self.folded)
+
+    def test_clear_only_matches_captured_token(self):
+        folded = self.folded
+        # 清除条件是 token 等值，而不是 requested_at 等值
+        clear_pos = folded.find(
+            "create or replace function public.planning_clear_recompute_mark(")
+        cond_pos = folded.find("and request_token = p_request_token", clear_pos)
+        self.assertGreater(cond_pos, clear_pos)
+        self.assertNotIn("and requested_at = p_request_token", folded)
+        # token 为 NULL（捕获时本无待处理请求）不清除
+        self.assertIn("if p_request_token is null then", folded)
+        # 清除同时归空展示字段与身份
+        self.assertIn("requested_at = null", folded)
+        self.assertIn("request_token = null", folded)
+
+    def test_replay_safe(self):
+        self.assertIn(
+            "create or replace function public.planning_request_recompute(",
+            self.folded)
+        self.assertIn(
+            "create or replace function public.planning_clear_recompute_mark(",
+            self.folded)
+
+
+class PlanningUpdateCycleBoundaryMigrationContractTests(unittest.TestCase):
+    """boundary 原子保存 RPC 契约（20260930020000，批次 7 §5.2.2）。
+
+    单事务：状态行 CAS → 调整项校验 → 锁内按新 boundary 全量校验启用中
+    模板 → 冲突零写入返回 → 关联任务窗口更新 + 过渡状态写入；任一失败
+    整体回滚。只服务 boundary 这一个业务操作（非通用配置事务框架）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = BOUNDARY_RPC_MIGRATION.read_text(encoding="utf-8")
+        cls.folded = cls.sql.casefold()
+        # 函数体（去掉头部注释）——注释里提及的表名不算语句触碰
+        cls.body = "\n".join(
+            ln for ln in cls.sql.splitlines() if not ln.strip().startswith("--")
+        ).casefold()
+
+    def test_migration_is_atomic(self):
+        self.assertIn("begin;", self.folded)
+        self.assertIn("commit;", self.folded)
+
+    def test_creates_exactly_the_boundary_function(self):
+        top = [ln.strip().casefold() for ln in self.sql.splitlines() if ln.strip()]
+        creating = [item for item in top if item.startswith("create")]
+        self.assertEqual(creating, [
+            "create or replace function public.planning_update_cycle_boundary("])
+
+    def test_validation_precedes_any_write(self):
+        folded = self.folded
+        cas_pos = folded.find("stale_state")
+        conflicts_pos = folded.find("status', 'conflicts")
+        task_update_pos = folded.find("update public.planning_task")
+        state_update_pos = folded.find("update public.app_settings")
+        self.assertGreaterEqual(cas_pos, 0)
+        self.assertGreater(conflicts_pos, cas_pos)
+        # 冲突返回在任务更新与状态写入之前（零写入拒绝）
+        self.assertLess(conflicts_pos, task_update_pos)
+        self.assertLess(conflicts_pos, state_update_pos)
+
+    def test_state_cas_guards_concurrent_workers(self):
+        folded = self.folded
+        self.assertIn("stale_state", folded)
+        # 缺省行补插在提交阶段；补插后重核 CAS（并发首写不互相覆盖）
+        insert_pos = folded.find("insert into public.app_settings")
+        recas_pos = folded.find("stale_state", insert_pos)
+        self.assertGreater(recas_pos, insert_pos)
+
+    def test_window_validation_uses_clockwise_open_interval(self):
+        folded = self.folded
+        # 双侧窗口才校验；端点接触合法（严格不等）；跨午夜（start > end）覆盖
+        self.assertIn("v_eff_start is not null and v_eff_end is not null", folded)
+        self.assertIn("p_new_boundary > v_eff_start and p_new_boundary < v_eff_end", folded)
+        self.assertIn("p_new_boundary > v_eff_start or p_new_boundary < v_eff_end", folded)
+        # 锁定启用中任务（稳定 id 序）；for update 行锁
+        self.assertIn("order by t.id", folded)
+        self.assertIn("for update", folded)
+        # start == end 形状非法拒绝
+        self.assertIn("window start and end must differ", folded)
+
+    def test_task_write_whitelist_is_window_fields_only(self):
+        folded = self.body
+        # 只写窗口模板字段与 updated_at；不触碰身份 / 规则 / 游标 / target_date
+        self.assertIn("window_start_tod =", folded)
+        self.assertIn("window_end_tod =", folded)
+        self.assertIn("updated_at = now()", folded)
+        self.assertNotIn("target_date =", folded)
+        self.assertNotIn("refresh_generated_through", folded)
+        self.assertNotIn("round_key =", folded)
+        # 已生成实例零写路径：整个函数体不触碰 planning_occurrence
+        self.assertNotIn("planning_occurrence", folded)
+        # 只更新启用中任务
+        self.assertIn("and is_active", folded)
+
+    def test_no_drop_no_data_backfill(self):
+        folded = self.folded
+        self.assertNotIn("drop ", folded)
+        self.assertNotIn("delete from", folded)
+        self.assertNotIn("backfill", folded)
+
+    def test_replay_safe(self):
+        self.assertIn(
+            "create or replace function public.planning_update_cycle_boundary(",
+            self.folded)
+
+    def test_advisory_lock_serializes_with_task_writes(self):
+        # 批次 9 Review HIGH #3：boundary 修改与 active 任务创建 / 模板窗口
+        # 编辑 / inactive→active 经同一把事务级 advisory lock 串行化
+        folded = self.folded
+        lock_at = folded.find("pg_advisory_xact_lock")
+        state_read_at = folded.find("from public.app_settings")
+        self.assertGreaterEqual(lock_at, 0)
+        self.assertIn(
+            "hashtextextended('planning.refresh_boundary_state', 0)", folded)
+        # 锁先于状态行读取（步骤 0 → 步骤 1）
+        self.assertLess(lock_at, state_read_at)
+
+    def test_state_write_precedes_task_updates(self):
+        # 批次 9 Review HIGH：步骤 6 状态写入先于步骤 7 任务更新——任务
+        # UPDATE 触发的守卫按本事务的新 boundary 重校验；同时缺省行补插
+        # 与其 CAS 重核必须仍在任何任务写入之前（拒绝路径零写入）
+        folded = self.folded
+        state_update_pos = folded.find("update public.app_settings")
+        task_update_pos = folded.find("update public.planning_task")
+        default_insert_pos = folded.find("insert into public.app_settings")
+        self.assertGreater(default_insert_pos, 0)
+        self.assertLess(default_insert_pos, task_update_pos)
+        self.assertLess(state_update_pos, task_update_pos)
+
+
+class PlanningBoundaryWindowGuardMigrationContractTests(unittest.TestCase):
+    """boundary/window 写入互斥守卫契约（20260930030000，批次 9 HIGH #3/#4）。
+
+    守卫触发器只对「真正改变 boundary/window 合法性的写入」生效：启用中
+    且双侧窗口的 INSERT / UPDATE；持锁后按 configured boundary 重校验；
+    跨越判定与 Python / boundary RPC 同一顺时针开区间规则。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = BOUNDARY_WINDOW_GUARD_MIGRATION.read_text(encoding="utf-8")
+        cls.folded = cls.sql.casefold()
+        cls.body = "\n".join(
+            ln for ln in cls.sql.splitlines() if not ln.strip().startswith("--")
+        ).casefold()
+
+    def test_migration_is_atomic(self):
+        self.assertIn("begin;", self.folded)
+        self.assertIn("commit;", self.folded)
+
+    def test_creates_exactly_guard_function_and_trigger(self):
+        top = [ln.strip().casefold() for ln in self.sql.splitlines() if ln.strip()]
+        creating = [item for item in top if item.startswith("create")]
+        self.assertEqual(creating, [
+            "create or replace function public.planning_validate_window_boundary_guard()",
+            "create trigger planning_boundary_window_guard",
+        ])
+
+    def test_lock_matches_boundary_rpc_key(self):
+        # 与 planning_update_cycle_boundary 同一把事务级 advisory lock
+        self.assertIn(
+            "hashtextextended('planning.refresh_boundary_state', 0)", self.folded)
+        self.assertIn("pg_advisory_xact_lock", self.folded)
+        # 锁在校验（读取 app_settings）之前：持锁后读 boundary
+        lock_at = self.folded.find("pg_advisory_xact_lock")
+        read_at = self.folded.find("from public.app_settings")
+        self.assertLess(lock_at, read_at)
+
+    def test_scope_is_active_both_sided_windows_only(self):
+        folded = self.folded
+        # UPDATE 早退：窗口两端与 is_active 均未变化（生成游标等内容写入
+        # 不取锁、不校验）
+        self.assertIn("new.window_start_tod is not distinct from old.window_start_tod", folded)
+        self.assertIn("new.window_end_tod is not distinct from old.window_end_tod", folded)
+        self.assertIn("new.is_active is not distinct from old.is_active", folded)
+        # 仅启用中且双侧窗口参与；start == end 交由既有 CHECK 拒绝
+        self.assertIn("not new.is_active", folded)
+        self.assertIn("new.window_start_tod is null", folded)
+        self.assertIn("new.window_start_tod = new.window_end_tod", folded)
+
+    def test_crossing_check_is_clockwise_open_interval(self):
+        folded = self.folded
+        # 与 Python / boundary RPC 同一规则：端点接触合法、跨午夜覆盖
+        self.assertIn("new.window_start_tod < new.window_end_tod", folded)
+        self.assertIn("v_boundary > new.window_start_tod", folded)
+        self.assertIn("v_boundary < new.window_end_tod", folded)
+        self.assertIn("new.window_start_tod > new.window_end_tod", folded)
+
+    def test_reads_configured_boundary_with_default(self):
+        # 校验基准 = app_settings 的 configured boundary（与 Python 创建
+        # 校验同源）；行缺失回退缺省 06:00
+        self.assertIn("value->>'boundary'", self.folded)
+        self.assertIn("coalesce(v_boundary_text, '06:00')", self.folded)
+
+    def test_no_occurrence_touch_no_drop_no_backfill(self):
+        folded = self.body
+        self.assertNotIn("planning_occurrence", folded)
+        self.assertNotIn("drop ", folded)
+        self.assertNotIn("delete from", folded)
+
+    def test_replay_safe(self):
+        self.assertIn(
+            "create or replace function public.planning_validate_window_boundary_guard()",
+            self.folded)
+        self.assertIn(
+            "create trigger planning_boundary_window_guard", self.folded)
 
 
 if __name__ == "__main__":

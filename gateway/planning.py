@@ -44,6 +44,8 @@ from .planning_window import (
     resolve_window,
     resolve_window_on_date,
     validate_template_window,
+    window_at_crosses_boundary,
+    window_crosses_boundary,
     window_feasible,
 )
 
@@ -84,9 +86,16 @@ DEFAULT_LIST_ROWS = 200
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+# 真实 PostgREST 把 time 列序列化为 ``HH:MM:SS``（批次 8 HIGH #1）：编辑
+# 表单把未触碰的窗口端原样回传，业务契约是分钟精度（秒恒为 0），语义同值
+# 必须接受——与 _canonical_template_value 的 fromisoformat 规范化同口径。
+_TIME_WITH_SECONDS_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d):([0-5]\d)$")
 _SHORTHAND_RE = re.compile(r"^(?:(\d+)\s*h)?(?:(\d+)\s*m)?(?:(\d+)\s*s)?$")
 
-_maintenance_lock = threading.Lock()
+# 可重入锁（最终修复问题 3）：既做维护循环互斥，也做 once 身份编辑与
+# 全部生成入口的任务级互斥——update_task 持锁期间调用
+# _generate_due_quietly 靠可重入避免自锁。
+_maintenance_lock = threading.RLock()
 PLANNING_BOUNDARY_STATE_KEY = "planning.refresh_boundary_state"
 PLANNING_DAILY_REFRESH_KEY = "planning.daily_refresh_enabled"
 PLANNING_AUTO_RECOMPUTE_ENABLED_KEY = "planning.auto_recompute_enabled"
@@ -94,10 +103,13 @@ PLANNING_AUTO_RECOMPUTE_WAIT_KEY = "planning.auto_recompute_wait_minutes"
 
 
 class PlanningError(RuntimeError):
-    def __init__(self, code: str, message: str, status_code: int = 400):
+    def __init__(self, code: str, message: str, status_code: int = 400,
+                 details: dict[str, Any] | None = None):
         super().__init__(message)
         self.code = code
         self.status_code = status_code
+        # 结构化附加数据（如 boundary 冲突清单）：API 层随错误响应返回
+        self.details = details
 
 
 # ── 时间工具 ──────────────────────────────────────────────────────
@@ -144,9 +156,20 @@ def _parse_date(value: Any, field: str) -> date:
 def _parse_tod(value: Any, field: str) -> time:
     if isinstance(value, time):
         return value.replace(second=0, microsecond=0)
-    if isinstance(value, str) and _TIME_RE.match(value.strip()):
-        hour, minute = value.strip().split(":")
-        return time(int(hour), int(minute))
+    if isinstance(value, str):
+        text = value.strip()
+        match = _TIME_RE.match(text)
+        if match:
+            hour, minute = text.split(":")
+            return time(int(hour), int(minute))
+        # ``HH:MM:SS``（真实 PostgREST time 列形状）：分钟精度契约下秒恒为 0，
+        # 截断接受；秒非 0 不是合法模板时刻。
+        match = _TIME_WITH_SECONDS_RE.match(text)
+        if match:
+            hour, minute, second = text.split(":")
+            if int(second) != 0:
+                raise PlanningError("invalid_payload", f"{field} must be HH:MM")
+            return time(int(hour), int(minute))
     raise PlanningError("invalid_payload", f"{field} must be HH:MM")
 
 
@@ -289,80 +312,252 @@ def get_cycle_settings(now: datetime | None = None) -> dict[str, Any]:
     return result
 
 
+def _load_raw_boundary_state() -> dict[str, Any]:
+    """boundary 状态行的原始存储（批次 7）：不做过渡活跃性解释。
+
+    dry-run 预计算、最终保存的 CAS 基准都必须基于同一份原始状态；读取
+    失败 503（与 _load_boundary_state 同一语义）。
+    """
+    raw = db.load_app_setting(PLANNING_BOUNDARY_STATE_KEY)
+    if raw is db.APP_SETTING_QUERY_FAILED:
+        raise PlanningError("database_unavailable", "规划周期配置暂时无法读取", 503)
+    if not isinstance(raw, dict):
+        raw = _default_boundary_state()
+    return raw
+
+
+def _parse_boundary_adjustments(value: Any) -> list[dict[str, Any]]:
+    """boundary 修改流程中的关联任务窗口调整项（§5.2.2）。
+
+    每一项必须携带完整双端窗口（window_start_tod / window_end_tod，各自
+    可空——允许调整成单侧或无窗口以避开新 boundary）；start == end 无效；
+    重复 task_id 与未知字段拒绝。返回 RPC 调整项 payload。
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise PlanningError("invalid_payload", "task_adjustments 必须是数组", 400)
+    seen: set[int] = set()
+    out: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise PlanningError("invalid_payload", "task_adjustments 项必须是对象", 400)
+        if (set(item) - {"task_id", "window_start_tod", "window_end_tod"}
+                or not {"task_id", "window_start_tod", "window_end_tod"} <= set(item)):
+            raise PlanningError(
+                "invalid_payload",
+                "task_adjustments 项必须包含 task_id 与完整的双端可安排时段", 400)
+        task_id = item["task_id"]
+        if isinstance(task_id, bool) or not isinstance(task_id, int):
+            raise PlanningError("invalid_payload", "task_adjustments 的 task_id 必须是整数", 400)
+        if task_id in seen:
+            raise PlanningError("invalid_payload", "task_adjustments 中存在重复的待办", 400)
+        seen.add(task_id)
+        try:
+            start = (time.fromisoformat(str(item["window_start_tod"]))
+                     if item["window_start_tod"] is not None else None)
+            end = (time.fromisoformat(str(item["window_end_tod"]))
+                   if item["window_end_tod"] is not None else None)
+        except (TypeError, ValueError) as exc:
+            raise PlanningError(
+                "invalid_payload",
+                "可安排时段的时间格式无效：请使用 HH:MM（例如 09:00）", 400,
+            ) from exc
+        if start is not None:
+            start = start.replace(second=0, microsecond=0)
+        if end is not None:
+            end = end.replace(second=0, microsecond=0)
+        if start is not None and end is not None and start == end:
+            raise PlanningError(
+                "invalid_payload",
+                "可安排时段的开始与结束不能相同（相同时刻不代表 24 小时窗口）", 400)
+        out.append({
+            "task_id": task_id,
+            "window_start_tod": start.strftime("%H:%M") if start else None,
+            "window_end_tod": end.strftime("%H:%M") if end else None,
+        })
+    return out
+
+
+def _boundary_window_conflicts(
+    new_boundary: time,
+    adjustments: dict[int, tuple[str | None, str | None]],
+    tasks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """以准备生效的新 boundary 校验全部启用中任务（§5.2.2；dry-run 与
+    最终保存共用同一预计算）。
+
+    本请求调整的待办使用提交的新值，未调整者使用数据库当前值；双侧窗口
+    禁止跨越（boundary 落在开始/结束时刻的顺时针开区间内即非法，端点
+    接触合法）；单侧约束 / 无窗口不构成区间、不做跨越校验（§6.7）。
+    暂停刷新（refresh_enabled=false）不豁免——调用方只按 is_active 过滤。
+    """
+    conflicts: list[dict[str, Any]] = []
+    for task in tasks:
+        task_id = task.get("id")
+        if task_id in adjustments:
+            start, end = adjustments[task_id]
+        else:
+            start = (_canonical_template_value("window_start_tod", task.get("window_start_tod"))
+                     if task.get("window_start_tod") else None)
+            end = (_canonical_template_value("window_end_tod", task.get("window_end_tod"))
+                   if task.get("window_end_tod") else None)
+        if not start or not end:
+            continue
+        template = WindowTemplate(
+            start_tod=time.fromisoformat(start), end_tod=time.fromisoformat(end))
+        if window_crosses_boundary(template, new_boundary):
+            conflicts.append({
+                "task_id": task_id,
+                "content": task.get("content"),
+                "window_start_tod": start,
+                "window_end_tod": end,
+                "reason": (
+                    f"新刷新时间 {new_boundary.strftime('%H:%M')} 落在该待办"
+                    "可安排时段的起止时刻之间（时段不能跨越每日刷新时间）"
+                ),
+            })
+    return conflicts
+
+
+def _save_cycle_boundary(
+    boundary: time, raw_state: dict[str, Any],
+    adjustments_payload: list[dict[str, Any]], now: datetime,
+) -> dict[str, Any]:
+    """最终保存（批次 7）：boundary + 关联调整在一个数据库事务内原子生效。
+
+    Python 先按当前状态预计算过渡（复用 BoundaryTransition.plan 语义），
+    RPC 内重新全量校验全部启用中模板（modal 打开期间因时间流逝或他人
+    操作产生的新冲突同样被拒绝）并原子写入；状态已被其他 worker 改变时
+    CAS 未命中 → 409 要求重新计划；冲突 → 409 + 冲突清单。
+    """
+    client = _require_client()
+    committed = set()
+    for value in raw_state.get("absorbed") or []:
+        try:
+            committed.add(date.fromisoformat(value))
+        except (TypeError, ValueError):
+            continue
+    boundary_now = parse_refresh_boundary(
+        raw_state.get("boundary") or DEFAULT_REFRESH_BOUNDARY.strftime("%H:%M"))
+    info = raw_state.get("transition")
+    stored = None
+    if isinstance(info, dict):
+        # 旧过渡的有效点用它被规划时的边界（= 写入时的当前配置）评估，
+        # 不能用本次要改的新边界，否则会把未完成的过渡误判为已完成。
+        try:
+            stored = BoundaryTransition.plan(
+                date.fromisoformat(info["spanning_key"]),
+                parse_refresh_boundary(info["spanning_boundary"]),
+                _parse_dt(info["change_at"], "refresh_boundary_change_at"),
+                boundary_now,
+            )
+        except (KeyError, TypeError, ValueError):
+            stored = None
+    if stored is not None and stored.active_at(now):
+        # 连续修改：跨越周期冻结不变，只重算生效点；旧计划吸收尚未发生，
+        # 随新计划整体重算，不入账。
+        planned = BoundaryTransition.plan(
+            stored.spanning_key, stored.spanning_boundary, now, boundary)
+        new_absorbed = committed
+    else:
+        if stored is not None:
+            # 旧过渡已经真正走完：其计划吸收成为事实，转入永久登记。
+            committed |= set(stored.absorbed_cycle_keys())
+        planned = (
+            BoundaryTransition.plan_first(boundary_now, now, boundary)
+            if boundary != boundary_now else None
+        )
+        new_absorbed = committed
+    transition_payload = None
+    if planned is not None:
+        transition_payload = {
+            "spanning_key": planned.spanning_key.isoformat(),
+            "spanning_boundary": planned.spanning_boundary.strftime("%H:%M"),
+            "change_at": _iso(planned.change_at),
+        }
+    # CAS 基准 = 预计算所依据的原始状态（boundary 文本 + 原始过渡记录）。
+    expected_state = {
+        "boundary": raw_state.get("boundary"),
+        "transition": info if isinstance(info, dict) else None,
+    }
+    try:
+        resp = client.rpc("planning_update_cycle_boundary", {
+            "p_new_boundary": boundary.strftime("%H:%M"),
+            "p_expected_state": expected_state,
+            "p_transition": transition_payload,
+            "p_absorbed": sorted(d.isoformat() for d in new_absorbed),
+            "p_adjustments": adjustments_payload,
+        }).execute()
+    except Exception as exc:
+        log.exception("boundary 原子保存失败: %s", type(exc).__name__)
+        raise PlanningError("database_unavailable", "规划周期配置保存失败", 503) from exc
+    data = getattr(resp, "data", None)
+    if isinstance(data, dict) and data.get("status") == "stale_state":
+        raise PlanningError(
+            "boundary_state_conflict",
+            "规划周期配置已被其他修改更新，请重新加载后再试", 409)
+    if isinstance(data, dict) and data.get("status") == "conflicts":
+        conflicts = data.get("conflicts") or []
+        raise PlanningError(
+            "boundary_window_conflicts",
+            "存在跨越新刷新时间的待办，请先调整其可安排时段", 409,
+            details={"conflicts": conflicts})
+    if not (isinstance(data, dict) and data.get("status") == "ok"):
+        raise PlanningError("database_unavailable", "规划周期配置保存失败", 503)
+    result = get_cycle_settings(now)
+    result["adjusted_tasks"] = int(data.get("updated_tasks") or 0)
+    return result
+
+
 def set_cycle_settings(payload: Any, now: datetime | None = None) -> dict[str, Any]:
-    """Persist one planning setting; a boundary change is a single atomic
-    state write that schedules the next-cycle transition instead of
+    """Persist one planning setting; a boundary change is an atomic
+    transaction (dry-run precheck + task adjustments + transition state,
+    批次 7 §5.2.2) that schedules the next-cycle transition instead of
     reinterpreting the cycle already in progress."""
     now = now or _now()
     allowed = {
         "refresh_boundary_time", "daily_refresh_enabled",
         "auto_recompute_enabled", "auto_recompute_wait_minutes",
+        "dry_run", "task_adjustments",
     }
-    if not isinstance(payload, dict) or len(payload) != 1 or set(payload) - allowed:
-        raise PlanningError("invalid_payload", f"一次仅接受以下之一：{', '.join(sorted(allowed))}", 400)
+    if not isinstance(payload, dict) or not payload or set(payload) - allowed:
+        raise PlanningError("invalid_payload", f"一次仅接受以下之一：refresh_boundary_time, daily_refresh_enabled, auto_recompute_enabled, auto_recompute_wait_minutes", 400)
+    if "refresh_boundary_time" not in payload and ("dry_run" in payload or "task_adjustments" in payload):
+        raise PlanningError(
+            "invalid_payload", "boundary 试算与关联调整只能与 refresh_boundary_time 一同提交", 400)
+    if set(payload) & {"daily_refresh_enabled", "auto_recompute_enabled", "auto_recompute_wait_minutes"} and len(payload) != 1:
+        raise PlanningError("invalid_payload", f"一次仅接受以下之一：refresh_boundary_time, daily_refresh_enabled, auto_recompute_enabled, auto_recompute_wait_minutes", 400)
     if "refresh_boundary_time" in payload:
         try:
             boundary = parse_refresh_boundary(payload["refresh_boundary_time"])
         except ValueError as exc:
             raise PlanningError("invalid_payload", "刷新时间必须是 00:00 至 23:59", 400) from exc
-        # B1：吸收事实只在过渡真正走完时入账。读取原始状态以区分
-        # 「已完成过渡的吸收」与「等待生效过渡的计划吸收」。
-        raw_state = db.load_app_setting(PLANNING_BOUNDARY_STATE_KEY)
-        if raw_state is db.APP_SETTING_QUERY_FAILED:
-            raise PlanningError("database_unavailable", "规划周期配置暂时无法读取", 503)
-        if not isinstance(raw_state, dict):
-            raw_state = _default_boundary_state()
-        committed = set()
-        for value in raw_state.get("absorbed") or []:
-            try:
-                committed.add(date.fromisoformat(value))
-            except (TypeError, ValueError):
-                continue
-        info = raw_state.get("transition")
-        boundary_now = parse_refresh_boundary(
-            raw_state.get("boundary") or DEFAULT_REFRESH_BOUNDARY.strftime("%H:%M")
-        )
-        stored = None
-        if isinstance(info, dict):
-            # 旧过渡的有效点用它被规划时的边界（= 写入时的当前配置）评估，
-            # 不能用本次要改的新边界，否则会把未完成的过渡误判为已完成。
-            try:
-                stored = BoundaryTransition.plan(
-                    date.fromisoformat(info["spanning_key"]),
-                    parse_refresh_boundary(info["spanning_boundary"]),
-                    _parse_dt(info["change_at"], "refresh_boundary_change_at"),
-                    boundary_now,
-                )
-            except (KeyError, TypeError, ValueError):
-                stored = None
-        if stored is not None and stored.active_at(now):
-            # 连续修改：跨越周期冻结不变，只重算生效点；旧计划吸收尚未发生，
-            # 随新计划整体重算，不入账。
-            planned = BoundaryTransition.plan(
-                stored.spanning_key, stored.spanning_boundary, now, boundary)
-            new_absorbed = committed
-        else:
-            if stored is not None:
-                # 旧过渡已经真正走完：其计划吸收成为事实，转入永久登记。
-                committed |= set(stored.absorbed_cycle_keys())
-            planned = (
-                BoundaryTransition.plan_first(boundary_now, now, boundary)
-                if boundary != boundary_now else None
-            )
-            new_absorbed = committed
-        if planned is not None:
-            state = {
-                "boundary": boundary.strftime("%H:%M"),
-                "transition": {
-                    "spanning_key": planned.spanning_key.isoformat(),
-                    "spanning_boundary": planned.spanning_boundary.strftime("%H:%M"),
-                    "change_at": _iso(planned.change_at),
-                },
-                "absorbed": sorted(d.isoformat() for d in new_absorbed),
+        dry_run = payload.get("dry_run", False)
+        if not isinstance(dry_run, bool):
+            raise PlanningError("invalid_payload", "dry_run 必须是布尔值", 400)
+        adjustments_payload = _parse_boundary_adjustments(payload.get("task_adjustments"))
+        adjustments = {
+            item["task_id"]: (item["window_start_tod"], item["window_end_tod"])
+            for item in adjustments_payload
+        }
+        # dry-run（§5.2.2）：以准备生效的新 boundary 校验全部启用中任务，
+        # 绝对零写入；冲突清单（待办 / 现窗口 / 原因）随响应返回。
+        tasks = _rows(_require_client(), "planning_task", lambda q: q.eq("is_active", True))
+        conflicts = _boundary_window_conflicts(boundary, adjustments, tasks)
+        if dry_run:
+            return {
+                "dry_run": True,
+                "boundary_time": boundary.strftime("%H:%M"),
+                "conflicts": conflicts,
             }
-            # 一次原子写入：配置、过渡记录与吸收周期登记不会出现半更新。
-            if not db.save_app_setting(PLANNING_BOUNDARY_STATE_KEY, state):
-                raise PlanningError("database_unavailable", "规划周期配置保存失败", 503)
+        if conflicts:
+            raise PlanningError(
+                "boundary_window_conflicts",
+                "存在跨越新刷新时间的待办，请先调整其可安排时段", 409,
+                details={"conflicts": conflicts})
+        raw_state = _load_raw_boundary_state()
+        return _save_cycle_boundary(boundary, raw_state, adjustments_payload, now)
     if "daily_refresh_enabled" in payload:
         if not isinstance(payload["daily_refresh_enabled"], bool):
             raise PlanningError("invalid_payload", "daily_refresh_enabled 必须是布尔值", 400)
@@ -477,8 +672,10 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
     只处理出现的字段。未知字段一律拒绝。2026-09-27 窗口批次：可安排时段
     （``window_start_tod`` / ``window_end_tod``，§6.7）取代显式起止与限时
     截止成为新业务事实来源；旧 explicit / deadline 字段停止新写入（白名单
-    移除即拒绝），列与存量行按历史语义保留。创建与编辑白名单分离（Review
-    HIGH 修复）：窗口字段仅在创建入口接受，编辑入口在批次 6 前明确拒绝。
+    移除即拒绝），列与存量行按历史语义保留。批次 6（2026-09-28）：窗口
+    字段正式开放编辑（current/future 分流）——模板窗口编辑属「未来轮次」
+    语义（§18.3、§28.1），只影响尚未生成的实例，已生成实例的冻结窗口
+    不受影响；保存校验见 :func:`_validate_template_window_constraints`。
     """
     if not isinstance(payload, dict):
         raise PlanningError("invalid_payload", "request body must be a JSON object")
@@ -491,14 +688,8 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
         "hollow_end_minutes",
         "alarm_start", "alarm_end", "timer_minutes", "is_active",
         "refresh_mode", "refresh_anchor_at", "refresh_enabled",
+        "window_start_tod", "window_end_tod",
     }
-    if not partial:
-        # 创建与编辑白名单分离（2026-09-27 Review HIGH）：窗口字段仅在创建
-        # 入口接受；编辑（PATCH）在批次 6 的 current/future 语义与完整校验
-        # 落地前明确拒绝（见下方专用检查），不得静默忽略或绕过校验写入。
-        allowed |= {"window_start_tod", "window_end_tod"}
-    if partial and ("window_start_tod" in payload or "window_end_tod" in payload):
-        raise PlanningError("invalid_payload", "可安排时段暂不支持编辑", 400)
     unknown = set(payload) - allowed
     if unknown:
         raise PlanningError("invalid_payload", f"unsupported fields: {', '.join(sorted(unknown))}")
@@ -572,12 +763,21 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
             raise PlanningError(
                 "invalid_payload", "预计耗时不能清空：请填写 1–1440 分钟的有效预计耗时", 400,
             )
-    if "window_start_tod" in payload:
-        raw = payload.get("window_start_tod")
-        result["window_start_tod"] = _tod_str(raw, "window_start_tod")
-    if "window_end_tod" in payload:
-        raw = payload.get("window_end_tod")
-        result["window_end_tod"] = _tod_str(raw, "window_end_tod")
+    if "window_start_tod" in payload or "window_end_tod" in payload:
+        # 批次 6 二轮 MEDIUM：模板编辑入口的时间格式错误统一为项目中文
+        # PlanningError（"abc" / 非法时间类型等），不向外暴露英文解析文案。
+        try:
+            if "window_start_tod" in payload:
+                result["window_start_tod"] = _tod_str(
+                    payload.get("window_start_tod"), "window_start_tod")
+            if "window_end_tod" in payload:
+                result["window_end_tod"] = _tod_str(
+                    payload.get("window_end_tod"), "window_end_tod")
+        except PlanningError as exc:
+            raise PlanningError(
+                "invalid_payload",
+                "可安排时段的时间格式无效：请使用 HH:MM（例如 09:00）", 400,
+            ) from exc
     if result.get("window_start_tod") or result.get("window_end_tod"):
         # 形状校验与批次 1 领域构造同源：start == end 无效（不解释为 24h
         # 窗口）；单侧约束合法。boundary 跨越与可行性在创建入口校验。
@@ -782,6 +982,8 @@ def serialize_task(task: dict[str, Any], now: datetime) -> dict[str, Any]:
         "alarm_end": task.get("alarm_end", False),
         "timer_minutes": task.get("timer_minutes"),
         "is_active": task["is_active"],
+        # once 已生成标记（§28.3；list_tasks 聚合填充，其它入口缺省 False）
+        "has_generated_occurrence": bool(task.get("has_generated_occurrence")),
         "cursor_date": task.get("cursor_date"),
         "next_due": next_due,
         "created_at": task.get("created_at"),
@@ -819,12 +1021,49 @@ def _window_occupancy_minutes(task: dict[str, Any]) -> int | None:
     return task.get("estimated_minutes")
 
 
+def _validate_template_window_constraints(row: dict[str, Any], now: datetime) -> None:
+    """模板窗口的保存校验（§30.6；创建与规则编辑共用同一套领域约束）。
+
+    * 任何非空模板都要求有效占用跨度（预计耗时；中空 = 完整包络）；
+    * 双侧窗口禁止跨越每日刷新 boundary（端点接触合法；单侧约束不构成
+      区间，不做跨越校验）——复用批次 1 ``validate_template_window``；
+    * 形状非法（start == end）经批次 1 领域构造拒绝，并在本入口统一转换
+      为项目中文 PlanningError（2026-09-28 一轮 Review MEDIUM：单字段
+      PATCH 的合并形状错误不得向 API 泄漏原始 ValueError）；
+    * 剩余空间可行性是**创建入口**的拒绝项（§12.1/§30.6），不属于模板
+      保存校验：未来轮次装不下时由生成后的排程冲突派生呈现（§18.1）。
+    """
+    try:
+        template = _task_window_template(row)
+    except ValueError as exc:
+        raise PlanningError(
+            "invalid_payload",
+            "可安排时段的开始与结束不能相同（相同时刻不代表 24 小时窗口）", 400,
+        ) from exc
+    if template is None:
+        return
+    occupancy = _window_occupancy_minutes(row)
+    if not isinstance(occupancy, int) or occupancy < 1:
+        raise PlanningError("invalid_payload", "填写了可安排时段的待办必须提供有效预计耗时", 400)
+    if not template.is_bounded:
+        return
+    boundary, _, _ = _load_boundary_state(now)
+    try:
+        validate_template_window(template, boundary)
+    except ValueError as exc:
+        raise PlanningError(
+            "invalid_payload",
+            f"可安排时段不能跨越每日刷新时间 {boundary.strftime('%H:%M')}，请调整时段", 400,
+        ) from exc
+
+
 def _validate_window_creation(row: dict[str, Any], now: datetime) -> None:
     """创建入口的窗口与产品边界校验（§10 / §12.1 / §30.6 / §32.40 / §32.41）。
 
     * once 目标日期不得早于当前业务日期（Asia/Shanghai 当日，自然日比较）；
       系统补生成路径不经过本入口，不受此限；
-    * 双侧窗口禁止跨越每日刷新 boundary（端点接触合法；单侧约束不校验）；
+    * 模板保存校验（占用跨度 + boundary 跨越）见
+      :func:`_validate_template_window_constraints`（批次 6 起与规则编辑共用）；
     * 指定日期 once 按严格自然日解析（不按生成时刻顺延），窗口在创建时
       已经不可容纳占用跨度 → 直接拒绝（不顺延到下一候选）；only-earliest
       保持「只有下界」语义，不凭空补截止；
@@ -839,20 +1078,11 @@ def _validate_window_creation(row: dict[str, Any], now: datetime) -> None:
                 "invalid_payload",
                 f"目标日期不能早于当前业务日期（{today.isoformat()}）", 400,
             )
+    _validate_template_window_constraints(row, now)
     template = _task_window_template(row)
     if template is None:
         return
     occupancy = _window_occupancy_minutes(row)
-    if not isinstance(occupancy, int) or occupancy < 1:
-        raise PlanningError("invalid_payload", "填写了可安排时段的待办必须提供有效预计耗时", 400)
-    boundary, _, _ = _load_boundary_state(now)
-    try:
-        validate_template_window(template, boundary)
-    except ValueError as exc:
-        raise PlanningError(
-            "invalid_payload",
-            f"可安排时段不能跨越每日刷新时间 {boundary.strftime('%H:%M')}，请调整时段", 400,
-        ) from exc
     if row["task_type"] == "once":
         # 指定日期 once：user 自然日期 + 时刻组合成固定绝对约束，不做
         # 候选取舍（§32.41）；创建时已不可用即拒绝，绝不顺延。
@@ -954,32 +1184,166 @@ def _generate_due_quietly(client, now: datetime) -> None:
     create 的 created 计数会丢失，见 `_should_recompute_after_generation`）
     时，顺带重算一次，让用户立刻看到带起止时间的列表；重算以排列顺序与
     固定槽为准，不会动用户已固定的内容。
+    最终修复（问题 3）：与 once 身份编辑共享 _maintenance_lock——生成
+    （含本入口）不得与 once 编辑的「检查 + 保存」交错产生半状态。
     """
-    try:
-        result = generate_due(now)
-    except Exception as exc:
-        log.warning(
-            "planning 同步生成失败（等待后台循环重试）: error=%s", type(exc).__name__,
-        )
-        return
-    if not _should_recompute_after_generation(result):
-        return
-    try:
-        recompute_today(now)
-    except Exception as exc:
-        log.warning("planning 同步重算失败: error=%s", type(exc).__name__)
+    with _maintenance_lock:
+        try:
+            result = generate_due(now)
+        except Exception as exc:
+            log.warning(
+                "planning 同步生成失败（等待后台循环重试）: error=%s", type(exc).__name__,
+            )
+            return
+        if not _should_recompute_after_generation(result):
+            return
+        try:
+            recompute_today(now)
+        except Exception as exc:
+            log.warning("planning 同步重算失败: error=%s", type(exc).__name__)
 
 
 SCHEDULE_FIELDS = {
     "task_type", "interval_days", "weekdays", "month_days", "target_date",
     "refresh_mode", "refresh_anchor_at",
-    "time_mode", "estimated_minutes", "est_start_tod", "est_end_tod",
+    "time_mode", "estimated_minutes",
+    "window_start_tod", "window_end_tod",
     "hollow_start_minutes", "hollow_wait_minutes", "hollow_end_minutes",
     "hollow_start_content", "hollow_end_content", "hollow_wait_note",
 }
+# 批次 6 一轮 Review 裁决（2026-09-28）：模板窗口不是 recurrence 字段——
+# window_start_tod / window_end_tod 只是未来 occurrence 的窗口模板 snapshot
+# 来源，不改变周期事件轴，编辑它们不得重置 recurrence 生成游标；未来尚未
+# 生成的 occurrence 自然从任务当前模板冻结新值。窗口字段保留在
+# SCHEDULE_FIELDS 只为触发写后的幂等补生成（无游标副作用）。
+# 旧 est_start_tod / est_end_tod 已停止接受写入（批次 3 白名单移除），作为
+# 调度规则字段一并退役。存量行读取兼容不受影响。
+# 真正改变 recurrence 事件轴的字段：interval_days / weekdays / month_days
+# （refresh_mode / refresh_anchor_at / task_type 在已有轮次时被 409 锁定；
+# 无轮次时经 _prepare_refresh_definition 的 mode_changed 分支重置游标）。
+_RECURRENCE_SWITCH_FIELDS = {"interval_days", "weekdays", "month_days"}
+_ONCE_LOCKED_TEMPLATE_FIELDS = ("target_date", "window_start_tod", "window_end_tod")
+
+
+def _canonical_template_value(field: str, value: Any) -> Any:
+    """模板字段的语义规范值（批次 6 二轮 HIGH：同值比较不得用原始字符串）。
+
+    数据库返回 ``09:00:00`` 而编辑入口规范化为 ``09:00``——二者语义相同；
+    比较前统一经 ``time.fromisoformat``（现有 TOD 解析）规范化，避免
+    「DB 09:00:00 + PATCH 09:00 被误判为实际修改」。target_date 经
+    ``_parse_date().isoformat()`` 规范化；其它字段原样返回。
+    """
+    if value is None:
+        return None
+    if field in ("window_start_tod", "window_end_tod"):
+        return time.fromisoformat(value).strftime("%H:%M")
+    if field == "target_date":
+        return _parse_date(value, field).isoformat()
+    return value
+
+
+def _close_out_recurrence_before_switch(client, old_task: dict[str, Any], now: datetime) -> None:
+    """规则切换 Phase A（2026-09-28 一轮 Review BLOCKER 1 裁决）：旧规则收尾。
+
+    rule_switch_at = 本次规则编辑生效时刻（= now）。旧规则负责全部
+    ``due_at <= rule_switch_at`` 的轮次——用**修改前的任务快照**按既有
+    reconcile 语义补齐旧轴已到期但尚未生成的漏轮、执行既有的固定到期
+    清理与开放轮次顺延。收尾失败（生成异常等）时异常向上传播：新规则
+    一律不保存（Phase B 不执行），已补齐的旧轴轮次是旧规则欠下的合法
+    事实，重试整个编辑时 Phase A 幂等（轮次唯一键）。
+    """
+    configured, transition, absorbed = _load_boundary_state(now)
+    cycle = planning_cycle_at(now, configured, transition)
+    daily_enabled = get_cycle_settings(now)["daily_refresh_enabled"]
+    _reconcile_task_rounds(
+        client, old_task, cycle, now, configured, transition, absorbed, daily_enabled,
+    )
+
+
+def _first_rule_event_after(
+    task: dict[str, Any], switch_at: datetime,
+    configured: time, transition: BoundaryTransition | None,
+    absorbed: frozenset[date],
+) -> tuple[date, datetime] | None:
+    """规则切换 Phase C 的下界定位：该任务**当前规则**事件轴上
+    ``due`` 严格晚于 ``switch_at`` 的第一个事件 ``(day, due)``。
+
+    现有按日游标 ``refresh_generated_through`` 借助本计算**精确**表达
+    切换点：把游标写成「首个新事件日期的前一天」，生成循环的
+    ``day <= cursor`` 跳过恰好吞掉切换日上位于 switch_at 之前的同日
+    事件，且不丢失其后任何事件——无需近似「昨天/今天」，也无需新增
+    持久化字段。事件数学与 ``_fixed_rounds`` / ``_following_fixed_event``
+    完全同源（不复制第二套 recurrence 数学）。返回 None 表示规则数据
+    异常无法定位（调用方拒绝本次编辑，绝不静默丢轮）。
+    """
+    mode = task.get("refresh_mode")
+    if mode == "fixed_interval":
+        anchor = _parse_dt(task.get("refresh_anchor_at"), "refresh_anchor_at")
+        interval = task.get("interval_days")
+        if not isinstance(interval, int) or interval < 1:
+            return None
+        due = anchor
+        switch_abs = switch_at.astimezone(timezone.utc)
+        for _ in range(4000):  # 防御上限；锚点到切换点的轴步数远小于此
+            if due.astimezone(timezone.utc) > switch_abs:
+                return due.date(), due
+            due += timedelta(days=interval)
+        return None
+    created = _parse_dt(task.get("created_at"), "created_at")
+    start = planning_cycle_at(created, configured, transition).key
+    day = start
+    first_due: datetime | None = None
+    for _ in range(400):
+        if day not in absorbed and _should_occur(task, day):
+            boundary = cycle_start_boundary(day, configured, transition)
+            due = (max(created, PlanningCycle.for_key(day, boundary).start)
+                   if day == start else PlanningCycle.for_key(day, boundary).start)
+            if due >= created:
+                first_due = due
+                break
+        day += timedelta(days=1)
+    if first_due is None:
+        return None
+    due, event_day = first_due, day
+    switch_abs = switch_at.astimezone(timezone.utc)
+    while due.astimezone(timezone.utc) <= switch_abs:
+        nxt = _following_fixed_event(task, event_day, due, configured, transition, absorbed)
+        if nxt is None:
+            return None
+        event_day, due = nxt.date(), nxt
+    return event_day, due
+
+
+def _recurrence_switch_cursor(
+    new_task: dict[str, Any], switch_at: datetime,
+) -> str:
+    """规则切换 Phase C：新规则生成游标下界（只枚举 due > switch_at）。
+
+    cursor = 首个新事件日期的前一天。生成循环随后按 ``day > cursor``
+    枚举：切换日上早于切换时刻的新轴同日事件被精确跳过（不追溯），
+    其后事件正常生成（旧轴漏轮已在 Phase A 按旧规则补齐，不依赖游标
+    重置）。无法定位首个新事件时拒绝本次编辑（409），绝不静默丢轮。
+    """
+    configured, transition, absorbed = _load_boundary_state(switch_at)
+    first = _first_rule_event_after(new_task, switch_at, configured, transition, absorbed)
+    if first is None:
+        raise PlanningError(
+            "invalid_task", "无法确定新规则在编辑时刻之后的首个轮次，规则编辑未保存", 409)
+    day, _ = first
+    return (day - timedelta(days=1)).isoformat()
 
 
 def update_task(task_id: int, payload: Any, now: datetime | None = None) -> dict[str, Any]:
+    """任务编辑入口（最终修复问题 3）：与全部生成入口共享
+    ``_maintenance_lock``——once 身份编辑的「检查无实例 → 保存新日期」与
+    生成创建 once 实例互斥，杜绝「任务日期 ≠ 唯一实例」的交错半状态。
+    不改 once 轮次唯一键语义、不新增状态字段。
+    """
+    with _maintenance_lock:
+        return _update_task(task_id, payload, now)
+
+
+def _update_task(task_id: int, payload: Any, now: datetime | None = None) -> dict[str, Any]:
     now = now or _now()
     client = _require_client()
     task = _fetch_task(client, task_id)
@@ -1007,6 +1371,48 @@ def update_task(task_id: int, payload: Any, now: datetime | None = None) -> dict
     if (task.get("time_mode") == "explicit" and merged.get("time_mode") == "duration"
             and not merged.get("estimated_minutes")):
         raise PlanningError("invalid_payload", "仅耗时待办必须提供有效预估耗时", 400)
+    # once 已生成后的任务级排程身份锁定（2026-09-28 一轮 Review HIGH 裁决；
+    # 二轮 HIGH：「实际变化」判定先做语义规范化——DB ``09:00:00`` ≡ PATCH
+    # ``09:00``，不用原始字符串比较）。once 没有「未来轮次」可消费新模板，
+    # 已生成实例存在时禁止实际变化地修改 target_date / 未来窗口模板——
+    # 否则形成「任务显示新日期、唯一实例仍属旧日期、新日期永不生成」的半
+    # 重定向状态。仅语义无变化的幂等 PATCH 按现有语义放行；调整已生成的
+    # 这一次走当前实例窗口编辑。身份锁定先于值校验。
+    once_identity_edit = merged.get("task_type") == "once" and any(
+            field in row
+            and _canonical_template_value(field, row.get(field))
+            != _canonical_template_value(field, task.get(field))
+            for field in _ONCE_LOCKED_TEMPLATE_FIELDS)
+    if once_identity_edit:
+        # 预检（友好错误；权威复核在写入阶段的锁内 RPC——最终修复问题 3）：
+        # once 没有「未来轮次」可消费新模板，已生成实例存在时禁止实际变化
+        # 地修改任务日期 / 未来窗口模板。
+        existing_once = _rows(
+            client, "planning_occurrence", lambda q: q.eq("task_id", task_id).limit(1))
+        if existing_once:
+            raise PlanningError(
+                "invalid_payload",
+                "单次待办已生成当前实例，请编辑当前实例，不可再修改任务日期或未来窗口模板", 400,
+            )
+    # 批次 6（§18.3 未来轮次 / §28.1）：模板窗口正式开放编辑——保存校验
+    # 复用创建入口同一套领域约束（占用跨度有效性 + 双侧 boundary 跨越）。
+    # 语义是修改「未来模板」：已生成实例的冻结窗口不做任何同步、不改写、
+    # 不按新模板重新解析（§6.7 冻结事实、不变量 36）。单字段 PATCH 的
+    # 合并形状错误（如 09:00–12:00 仅改 start=12:00 → 12:00–12:00）在
+    # 这里以项目中文 PlanningError 规范化拒绝，不泄漏领域 ValueError。
+    if "window_start_tod" in row or "window_end_tod" in row:
+        _validate_template_window_constraints(merged, now)
+    # 产品边界（§10/§30.6/§32.40）：编辑重定向 target_date 不得早于当前
+    # 业务日期（Asia/Shanghai 当日，自然日比较）；仅当 target_date 实际
+    # 变化时校验（仅未生成 once 可达——已生成已被上方锁定拒绝）。
+    if ("target_date" in row and row.get("target_date") != task.get("target_date")
+            and merged.get("task_type") == "once"):
+        today = _cst_date(now)
+        if _parse_date(row["target_date"], "target_date") < today:
+            raise PlanningError(
+                "invalid_payload",
+                f"目标日期不能早于当前业务日期（{today.isoformat()}）", 400,
+            )
 
     # 废弃整个任务：终止后续刷新，并关闭所有仍开放的出现实例。
     reactivated = bool(row.get("is_active")) and not task.get("is_active")
@@ -1015,67 +1421,128 @@ def update_task(task_id: int, payload: Any, now: datetime | None = None) -> dict
         raise PlanningError(
             "invalid_transition", "该任务来自已被取代的重排请求，不能重新启用", 409,
         )
-    if row.get("is_active") is False and task.get("is_active"):
-        open_rows = _rows(
-            client, "planning_occurrence",
-            lambda q: q.eq("task_id", task_id).in_("status", list(OPEN_STATUSES)),
+    if reactivated:
+        # 批次 9 Review HIGH #4：重新启用必须按「重新启用时的当前正式
+        # boundary」重新验证模板窗口——inactive 任务不参与 boundary 修改
+        # 流程的全量扫描（§5.2.2），停用期间 boundary 可能已变。预检给
+        # 中文错误；并发下由 planning_boundary_window_guard 守卫在 advisory
+        # lock 内权威复核（PostgREST / RPC / 直接 SQL 全覆盖，HIGH #3）。
+        _validate_template_window_constraints(merged, now)
+    # 最终 Debug（明日可用 HIGH）：is_active=false 与其它实际修改字段同请求
+    # 会形成「RPC 已提交停用废弃、后续字段保存失败」的半成功——方案 A：
+    # 写入前明确拒绝，要求停用操作单独提交（validation-before-write，
+    # 零写入）。幂等无变化字段不触发本限制。
+    if (row.get("is_active") is False and task.get("is_active")
+            and any(key not in ("is_active", "updated_at")
+                    and _canonical_template_value(key, row[key])
+                    != _canonical_template_value(key, task.get(key))
+                    for key in row)):
+        raise PlanningError(
+            "invalid_payload",
+            "停用待办不能与其它修改同时提交：请单独执行停用操作", 400,
         )
-        for occ in open_rows:
-            client.table("planning_occurrence").update({
-                "status": "discarded",
-                "closed_at": _iso(now),
-                "updated_at": _iso(now),
-            }).eq("id", occ["id"]).execute()
+    if row.get("is_active") is False and task.get("is_active"):
+        # 最终 Debug（问题 1A）：停用/废弃整个任务 = 单事务命令——复用
+        # planning_discard_task（锁任务行 → 单语句关闭全部开放 occurrence
+        # → 单语句停用任务，任一失败整体回滚）。occurrence 关闭不再发生于
+        # 事务之外；is_active 由 RPC 写入，主任务更新不再重复该字段。
+        _discard_task_atomically(client, task_id, now)
+        # 停用命令已在 RPC 内完成全部写入。这里不得再发普通 UPDATE：即使
+        # 只写 updated_at，失败也会造成 API 报错而任务实际已停用。
+        # 批次 6 收尾（BUG B）：停用关闭了开放实例、从排程释放时间槽——
+        # 成功后必须登记重算请求，让后续实例填补释放的槽位；登记是
+        # post-commit side effect，失败不伪装成停用失败（quiet）。
+        _request_recompute_quietly("task_discarded", now)
+        updated = {**task, "is_active": False, "updated_at": _iso(now)}
+        return serialize_task(updated, now)
 
     row["updated_at"] = _iso(now)
-    # 仅当调度规则字段**实际发生变化**时才视为规则编辑：refresh_enabled
-    # （暂停/恢复刷新）等内容类 PATCH 不得重置生成游标，否则恢复刷新会把
-    # 游标改写到恢复日前一天，跳过暂停期间的固定轴轮次（需求 24B）。
-    schedule_touched = any(
-        field in row and row[field] != task.get(field) for field in SCHEDULE_FIELDS
+    # 批次 6 一轮 Review BLOCKER 1（2026-09-28 user 裁决）：recurrence 规则
+    # 编辑采用「切换时刻」语义——rule_switch_at = 本次编辑生效时刻；旧规则
+    # 负责 due <= rule_switch_at 的全部轮次，新规则只负责 due > rule_switch_at。
+    # 正确顺序：Phase A 用修改前快照把旧规则截至切换时刻欠下的漏轮补齐（含
+    # 既有固定到期清理与顺延）→ Phase B 保存新规则 → Phase C 把生成游标
+    # 写成「新规则首个合法事件（due > switch_at）日期的前一天」，精确表达
+    # 切换下界。绝不把新规则用于编辑前时刻，也绝不因游标重置跳掉旧轴漏轮
+    # （轮次唯一键只防重复，不定义切换语义）。
+    # 批次 6 二轮 Review BLOCKER 2（user 批准继续）：**窗口模板实际变化同样
+    # 先结清旧模板漏轮**——window-only / 组合编辑都用完整修改前快照做一次
+    # Phase A（旧漏轮冻结旧 recurrence + 旧窗口模板），Phase B 一次保存全部
+    # 新值；window-only 不触碰生成游标（Phase C 仅 recurrence 变化时执行），
+    # 后续真正未来轮自然从当前模板冻结新窗口。同请求 recurrence + window
+    # 只执行一次 closeout，绝不重复收尾两遍。模板窗口 / 耗时等内容类编辑
+    # 不重置生成游标（旧「重置到昨天」设计已废除）。
+    recurrence_changed = any(
+        field in row and row[field] != task.get(field)
+        for field in _RECURRENCE_SWITCH_FIELDS)
+    window_changed = any(
+        field in row
+        and _canonical_template_value(field, row.get(field))
+        != _canonical_template_value(field, task.get(field))
+        for field in ("window_start_tod", "window_end_tod"))
+    switching = (
+        (recurrence_changed or window_changed)
+        and task.get("refresh_mode") in _FIXED_EXPIRING_MODES
+        and task.get("is_active")
+        and row.get("is_active") is not False
     )
+    if switching:
+        # Phase A：旧定义（旧 recurrence + 旧窗口模板）收尾——失败即异常
+        # 上抛，新值一律不保存，任务行保持旧定义；已补齐的旧轴轮次是合法
+        # 事实，重试幂等。同请求 recurrence + window 只收尾这一次。
+        _close_out_recurrence_before_switch(client, task, now)
+        if recurrence_changed:
+            # Phase C：仅规则变化时写新规则下界（基于合并后的新规则计算）。
+            row["refresh_generated_through"] = _recurrence_switch_cursor(merged, now)
     # 恢复刷新（False→True）沿用创建入口的同步补生成先例：恢复后立即进入
     # 现有生成体系，当期应有轮次不等下一个维护周期。
     resume_refresh = row.get("refresh_enabled") is True and task.get("refresh_enabled") is False
+    schedule_touched = any(
+        field in row
+        and _canonical_template_value(field, row[field])
+        != _canonical_template_value(field, task.get(field))
+        for field in SCHEDULE_FIELDS
+    )
     schedule_changed = False
     if reactivated or (schedule_touched and task.get("is_active")):
         # 新轮次由规则与持久身份决定。编辑规则不删除既有业务轮次。
         schedule_changed = True
-    if schedule_touched:
-        row["refresh_generated_through"] = (_current_cycle(now).key - timedelta(days=1)).isoformat()
 
-    # 已生成实例冻结：任务规则编辑不重建、不删除、不改写任何已生成轮次的
-    # 身份或实例级数据。唯一的同步是限时窗口（需求 18.3）：开放实例必须
-    # 立即跟随新的有效时间范围（is_limited 与 deadline_at 快照一起更新），
-    # 超时判定才不会失真；已关闭历史不得按现在的截止时间重新解释。
-    if "deadline_tod" in row or "deadline_end_tod" in row:
-        limited = merged.get("deadline_tod") is not None
-        end_tod = merged.get("deadline_end_tod") or merged.get("deadline_tod")
-        for occ_row in _rows(
-            client, "planning_occurrence",
-            lambda q: q.eq("task_id", task_id).in_("status", list(OPEN_STATUSES)),
-        ):
-            if not occ_row.get("round_key"):
-                continue
-            new_deadline = None
-            if limited and end_tod and occ_row.get("schedule_date"):
-                new_deadline = _iso(_combine(
-                    _parse_date(occ_row["schedule_date"], "schedule_date"),
-                    time.fromisoformat(end_tod),
-                ))
-            if (occ_row.get("is_limited") == limited
-                    and occ_row.get("deadline_at") == new_deadline):
-                continue
-            client.table("planning_occurrence").update({
-                "is_limited": limited, "deadline_at": new_deadline,
-                "updated_at": _iso(now),
-            }).eq("id", occ_row["id"]).execute()
+    # 批次 6：需求 18.3「限时修改同步开放实例」块正式退役（迁移表「最终
+    # 退役」）。写入侧自批次 3 起不再接受 deadline_tod / deadline_end_tod
+    # （白名单拒绝），该同步块已不可达；旧 is_limited / deadline_at 为存量
+    # 行历史兼容字段，仅序列化兼容读取，不构成任何业务判定来源（超时唯一
+    # 权威自批次 5 起为实例行 window_end_at）。任务模板编辑对已生成实例
+    # 无任何同步（§18.3 / §28.1：已生成即已生成，不因模板编辑重新出生）。
 
-    response = client.table("planning_task").update(row).eq("id", task_id).execute()
-    updated = (response.data or [{}])[0]
+    if once_identity_edit:
+        # 最终修复（问题 3）：once 身份编辑的「检查无实例 → 保存新值」在
+        # 数据库事务内以任务行 FOR UPDATE 锁原子完成（与生成的锁内插入
+        # 互斥）——跨进程 / 多 worker 下不再可能产生「任务日期 ≠ 唯一
+        # 实例」。锁内复核发现实例已存在 → 与预检同一中文错误、零写入。
+        try:
+            client.rpc("planning_update_once_task_guarded", {
+                "p_task_id": task_id, "p_patch": row,
+            }).execute()
+        except PlanningError:
+            raise
+        except Exception as exc:
+            if "once identity locked" in str(exc):
+                raise PlanningError(
+                    "invalid_payload",
+                    "单次待办已生成当前实例，请编辑当前实例，不可再修改任务日期或未来窗口模板", 400,
+                ) from exc
+            raise
+        updated = {**task, **row}
+    else:
+        response = client.table("planning_task").update(row).eq("id", task_id).execute()
+        updated = (response.data or [{}])[0]
+    deactivated = row.get("is_active") is False or task.get("is_active") is False
     if row.get("is_active") is False:
         request_recompute("task_discarded", now)
-    elif schedule_changed or resume_refresh:
+    elif (schedule_changed or resume_refresh) and not deactivated:
+        # 停用命令（is_active=False）不得触发补生成——废弃后新轮次必须
+        # 不存在（最终 Debug 问题 1A：single-transaction discard）。
         # 规则变更后只尝试当前应有轮次；唯一键保护既有轮次。
         _generate_due_quietly(client, now)
     return serialize_task(updated, now)
@@ -1110,7 +1577,19 @@ def list_tasks(include_inactive: bool = True, now: datetime | None = None) -> li
     # 被取代 / 已收尾的内部重排请求不是用户独立待办，不出现在任务列表。
     rows = [row for row in rows if row.get("request_state") != "superseded"]
     rows.sort(key=lambda r: r["id"])
-    return [serialize_task(row, now) for row in rows]
+    # once 已生成的锁定标记（§28.3，批次 9 UI #1）：前端编辑表单必须在不
+    # 依赖 occurrences 列表加载状态的前提下可靠禁用 target_date / 未来窗
+    # 口模板。只查 once 任务的实例存在性（每条 once 至多一个实例，集合有界）。
+    once_ids = [row["id"] for row in rows if row.get("task_type") == "once"]
+    generated: set[int] = set()
+    if once_ids:
+        occ_rows = _rows(
+            client, "planning_occurrence", lambda q: q.in_("task_id", once_ids).select("task_id"))
+        generated = {occ["task_id"] for occ in occ_rows}
+    return [
+        serialize_task({**row, "has_generated_occurrence": row["id"] in generated}, now)
+        for row in rows
+    ]
 
 
 # ── 出现实例生成（只依据任务定义与规则游标） ──────────────────────
@@ -1323,13 +1802,66 @@ def _create_occurrences(
         # 保证重放 / 并发只产生一份结果。
         for row in rows:
             row["generation_request_key"] = generation_request_key
+    if task.get("task_type") == "once" and task.get("refresh_mode") == "none":
+        # 最终修复（问题 3）：once 生成在锁内复核任务定义未漂移——编辑与
+        # 生成的交错使按旧定义预构造的行作废（下一次维护按新定义重新
+        # 生成），「任务日期 ≠ 唯一实例」不可能落库。
+        try:
+            client.rpc("planning_insert_once_occurrence", {
+                "p_task_id": task["id"],
+                "p_expected_target_date": task.get("target_date"),
+                "p_expected_window_start_tod": task.get("window_start_tod"),
+                "p_expected_window_end_tod": task.get("window_end_tod"),
+                "p_rows": rows,
+                # 最终 Debug（问题 2）：全部会冻结进 occurrence 的任务输入
+                # 快照——锁内逐一复核，任一漂移即放弃旧 snapshot 生成。
+                "p_expected_task": {
+                    "content": task.get("content"),
+                    "estimated_minutes": task.get("estimated_minutes"),
+                    "time_mode": task.get("time_mode"),
+                    "is_hollow": bool(task.get("is_hollow")),
+                    "hollow_start_minutes": task.get("hollow_start_minutes"),
+                    "hollow_wait_minutes": task.get("hollow_wait_minutes"),
+                    "hollow_end_minutes": task.get("hollow_end_minutes"),
+                },
+            }).execute()
+        except Exception as exc:
+            if "planning_occurrence_round_phase_uq" in str(exc):
+                log.info("planning 轮次已存在: task=%s round=%s", task["id"], round_key)
+                return 0
+            if "once definition changed during generation" in str(exc):
+                log.info("planning once 定义在生成期间被编辑，本轮作废: task=%s", task["id"])
+                return 0
+            raise
+        return len(rows)
+    # 最终 Debug（明日可用 BLOCKER 2）：非 once 生成同样在任务行锁内复核
+    # 定义未漂移（active / refresh_enabled / content / 耗时 / 窗口模板）——
+    # 停用或模板修改与生成的交错使旧 snapshot 行作废（0 行），后续维护按
+    # 新定义重新生成；不先 INSERT 再补救删除。
     try:
-        # One PostgREST request: both hollow phases commit or fail together.
-        client.table("planning_occurrence").insert(rows if len(rows) > 1 else rows[0]).execute()
+        client.rpc("planning_insert_round_occurrence", {
+            "p_task_id": task["id"], "p_rows": rows,
+            "p_expected_task": {field: task.get(field) for field in (
+                "task_type", "refresh_mode", "refresh_enabled", "is_active",
+                "request_state", "content", "time_mode", "estimated_minutes",
+                "is_hollow", "hollow_start_minutes", "hollow_wait_minutes",
+                "hollow_end_minutes", "hollow_start_content", "hollow_end_content",
+                "interval_days", "weekdays", "month_days", "target_date",
+                "created_at", "refresh_anchor_at",
+                "last_handled_at", "refresh_next_due_at", "window_start_tod",
+                "window_end_tod",
+            )},
+        }).execute()
     except Exception as exc:
         if "planning_occurrence_round_phase_uq" in str(exc):
             log.info("planning 轮次已存在: task=%s round=%s", task["id"], round_key)
             return 0
+        if getattr(exc, "code", None) == CONCURRENCY_ERRCODE                 or "task no longer active" in str(exc)                 or "task definition changed during generation" in str(exc):
+            # 固定轮生成外层随后会推进 refresh_generated_through。定义漂移
+            # 不能作为「0 个新行」返回，否则游标跳过尚未出生的事件。
+            raise ConcurrencyRejected(
+                "concurrent_modified", "规划任务定义在生成期间变化，本轮稍后重试", 409,
+            ) from exc
         raise
     return len(rows)
 
@@ -1642,9 +2174,25 @@ def _reconcile_task_rounds(
                         created += _create_occurrences(client, task, schedule, now, due_at=due,
                                                        display_cycle_date=today,
                                                        fixed_expires_at=expires)
-                        client.table("planning_task").update({
+                        cursor_update = client.table("planning_task").update({
                             "refresh_generated_through": day.isoformat(), "updated_at": _iso(now),
-                        }).eq("id", task["id"]).execute()
+                        }).eq("id", task["id"])
+                        old_updated_at = task.get("updated_at")
+                        cursor_update = (cursor_update.eq("updated_at", old_updated_at)
+                                         if old_updated_at is not None else
+                                         cursor_update.is_("updated_at", None))
+                        old_cursor = task.get("refresh_generated_through")
+                        cursor_update = (cursor_update.eq("refresh_generated_through", old_cursor)
+                                         if old_cursor is not None else
+                                         cursor_update.is_("refresh_generated_through", None))
+                        if not cursor_update.execute().data:
+                            # 插入已先提交，可由唯一键幂等重放；并发编辑已更改
+                            # 任务定义/游标，本次旧生成器不能覆盖新游标。
+                            raise ConcurrencyRejected(
+                                "concurrent_modified", "规划任务在生成期间变化，游标未推进", 409,
+                            )
+                        task["refresh_generated_through"] = day.isoformat()
+                        task["updated_at"] = _iso(now)
                 except Exception as exc:
                     generation_error = exc
                     raise
@@ -1756,6 +2304,7 @@ def sweep_timeouts(now: datetime | None = None) -> dict[str, int]:
     timed_out = 0
     seen: set[int] = set()
     tasks: dict[int, dict[str, Any]] = {}
+    round_closures: dict[tuple[int, str | None, str], list[dict[str, Any]]] = {}
     while True:
         page = _rows(
             client, "planning_occurrence",
@@ -1786,10 +2335,50 @@ def sweep_timeouts(now: datetime | None = None) -> dict[str, int]:
                 boundary = _fixed_death_boundary(occ)
                 if boundary is not None and boundary <= now and boundary < closed_at:
                     closed_at = boundary
-            result = client.table("planning_occurrence").update({
-                "status": "timeout", "closed_at": _iso(closed_at), "updated_at": _iso(now),
-            }).eq("id", occ["id"]).in_("status", list(OPEN_STATUSES)).execute()
-            timed_out += len(result.data or [])
+            scanned_window = _iso(_parse_dt(end_at, "window_end_at"))
+            key = (occ["task_id"], occ.get("round_key"), _iso(closed_at), scanned_window)
+            round_closures.setdefault(key, []).append(occ)
+        # 按轮分组提交（最终验收修复问题 4）；最终 Debug（明日可用 BLOCKER 1）
+        # 增加**写时复核**：读取与写入之间用户可能修改窗口（陈旧 12:00 不得
+        # 关闭已改为 18:00 的实例）或产生生命周期事实——每行 UPDATE 内联
+        # ``window_end_at`` 等值 + 状态及生命周期事实与扫描值一致、当前
+        # 时间仍超过窗口；未命中的行放弃本次旧扫描结果，且不得让
+        # 同轮其它命中行保持半关闭——round 级语句先以 SQL 复核
+        # ``window_end_at`` 一致后才关闭，未命中即整轮放弃。
+        for (task_id, round_key, closed_at_iso, scanned_window), group in                 round_closures.items():
+            if round_key is None:
+                for representative in group:
+                    query = client.table("planning_occurrence").update({
+                        "status": "timeout", "closed_at": closed_at_iso,
+                        "updated_at": _iso(now),
+                    }).eq("id", representative["id"]).eq(
+                        "window_end_at", scanned_window,
+                    ).eq("status", representative["status"])
+                    query = query.lt("window_end_at", now_iso)
+                    for field in LIFECYCLE_FACT_FIELDS:
+                        value = representative.get(field)
+                        query = query.is_(field, None) if value is None else query.eq(field, value)
+                    result = query.execute()
+                    timed_out += len(result.data or [])
+            else:
+                # round 级复核：仅当该轮全部开放阶段的 window_end_at 仍等于
+                # 扫描值时才关闭；任一漂移 → SQL 内直接 0 行（整轮放弃）。
+                ids = [row["id"] for row in group]
+                result = client.table("planning_occurrence").update({
+                    "status": "timeout", "closed_at": closed_at_iso,
+                    "updated_at": _iso(now),
+                }).eq("task_id", task_id).eq("round_key", round_key).in_(
+                    "id", ids,
+                ).eq("window_end_at", scanned_window).lt("window_end_at", now_iso)
+                if len(group) == 1:
+                    result = result.eq("status", group[0]["status"])
+                    for field in LIFECYCLE_FACT_FIELDS:
+                        value = group[0].get(field)
+                        result = result.is_(field, None) if value is None else result.eq(field, value)
+                else:
+                    result = result.in_("status", list(OPEN_STATUSES))
+                result = result.execute()
+                timed_out += len(result.data or [])
         seen.update(row["id"] for row in page)
     if timed_out:
         log.info("planning 超时打标: count=%s", timed_out)
@@ -1807,9 +2396,14 @@ def _freely_schedulable(occ: dict[str, Any], task: dict[str, Any]) -> bool:
     窗口批次（2026-09-27）：带冻结窗口的实例同样参与重算（§14.2），只是
     排程时必须落在其窗口内；零自由度窗口实例在生成期已预锚定 rule 固定
     （is_fixed），经本谓词天然排除、作为固定槽存在，不进入普通排程流程。
+    最终修复（2026-09-28 问题 5）：可排程实例必须同时满足「状态允许 + 无
+    任何生命周期事实」（`_has_lifecycle_fact` 单一定义，与实例编辑门控
+    同源）——pending + actual_end / pending + partial_at 等脏状态行不得
+    进入重新排程，不复制第二套判断。
     """
     return (
         occ["status"] == "pending"
+        and not _has_lifecycle_fact(occ)
         and not occ.get("is_fixed")
         and occ.get("schedule_managed") is True
         and occ.get("fixed_source") is None
@@ -2179,12 +2773,151 @@ def compute_schedule(
     return ScheduleResult(placed=placed, conflicts=conflicts)
 
 
+# 已知的乐观并发拒绝标识（最终修复问题 6）：仅这两类数据库错误可被
+# 重算安全吞掉（skip）；RPC 缺失 / 连接故障 / 非预期约束违反 / 未知错误
+# 一律向上传播，使 maintenance / 手动重算失败可见，且不错误清除等待标记。
+# 标识 = 迁移内固定的 ERRCODE 'PC001' + 固定消息常量（双保险，不模糊匹配）。
+CONCURRENCY_ERRCODE = "PC001"
+_CONCURRENCY_REJECTION_MESSAGES = (
+    "round is no longer editable",
+    "schedule inputs drifted",
+)
+
+
+class ConcurrencyRejected(PlanningError):
+    """已知的乐观并发拒绝：锁内生命周期门 / expected snapshot 漂移。"""
+
+
+def _is_rpc_concurrency_rejection(exc: BaseException) -> bool:
+    if getattr(exc, "sqlstate", None) == CONCURRENCY_ERRCODE             or getattr(exc, "code", None) == CONCURRENCY_ERRCODE:
+        return True
+    message = str(exc)
+    return any(const in message for const in _CONCURRENCY_REJECTION_MESSAGES)
+
+
+def _conditional_lifecycle_update(client, occ: dict[str, Any], patch: dict[str, Any],
+                                  current_status: str) -> bool:
+    """编辑写入的条件 UPDATE（最终修复问题 1）：状态等值 + 生命周期事实
+    集合内联 WHERE——检查与写入之间的并发变化使条件未命中 → 0 行 → 调用方
+    以 409 拒绝。返回是否实际写入。"""
+    query = client.table("planning_occurrence").update(patch).eq("id", occ["id"])
+    query = query.eq("status", current_status)
+    for field in LIFECYCLE_FACT_FIELDS:
+        query = query.is_(field, None)
+    result = query.execute()
+    return bool(result.data)
+
+
+def _conditional_schedulable_update(client, occ: dict[str, Any], patch: dict[str, Any]) -> bool:
+    """重算写入的条件 UPDATE（最终修复问题 1）：生命周期事实集合内联 WHERE
+    ——Python 判定可排程与真正写入之间的并发完成 / 开始 / 关闭使条件未命中
+    → 0 行命中 → 放弃该次排程结果（不覆盖已有事实、不报业务错误——并发
+    变化属于正常失败）。返回是否实际写入。
+    最终验收修复（问题 3）：expected snapshot——compute_schedule 实际读取
+    的排程输入（所有权元组 / 冻结窗口 / 既有 est 预态）在写入时必须仍与
+    读取时一致（NULL 旧值同样参与判断）；并发的手动安排 / 窗口调整 / 固定
+    使任一依据漂移 → 放弃旧排程结果（静默，正常失败）。"""
+    query = client.table("planning_occurrence").update(patch).eq("id", occ["id"])
+    query = query.eq("status", "pending")
+    for field in LIFECYCLE_FACT_FIELDS:
+        query = query.is_(field, None)
+    # 最终 Debug（问题 3）：sort_order 是 compute_schedule 的遍历顺序输入
+    # ——读取后用户 save_order 改序即漂移，旧顺序排程结果必须放弃。
+    query = query.eq("sort_order", occ["sort_order"])
+    for field in ("is_fixed", "schedule_managed", "estimated_time_source",
+                  "fixed_source", "window_start_at", "window_end_at",
+                  "est_start", "est_end"):
+        value = occ.get(field)
+        if value is None:
+            query = query.is_(field, None)
+        else:
+            query = query.eq(field, value)
+    result = query.execute()
+    return bool(result.data)
+
+
+def _recompute_expected_snapshot(occ: dict[str, Any]) -> dict[str, Any]:
+    """重算某行的 expected snapshot（最终验收修复问题 3）：compute_schedule
+    实际读取并决定「可排 / 可覆盖 / 窗口」的输入字段——状态、生命周期
+    事实、所有权元组、冻结窗口与既有 est 预态。NULL 显式参与复核。"""
+    return {
+        "id": occ["id"],
+        "status": "pending",
+        "window_start_at": occ.get("window_start_at"),
+        "window_end_at": occ.get("window_end_at"),
+        "est_start": occ.get("est_start"),
+        "est_end": occ.get("est_end"),
+        "estimated_time_source": occ.get("estimated_time_source"),
+        "fixed_source": occ.get("fixed_source"),
+        "is_fixed": bool(occ.get("is_fixed")),
+        "schedule_managed": bool(occ.get("schedule_managed")),
+    }
+
+
+def _atomic_round_write(client, target: dict[str, Any], main_patch: dict[str, Any],
+                        sibling: dict[str, Any] | None,
+                        sibling_patch: dict[str, Any] | None,
+                        expected: list[dict[str, Any]] | None = None) -> None:
+    """同轮编辑的原子提交（批次 6 二轮 user 批准 RPC；最终修复问题 1/6）。
+
+    * 单行实例 = 条件 UPDATE（状态 + 生命周期事实集合内联 WHERE）——检查
+      与写入之间的并发变化使条件未命中 → 409、零写入（编辑路径不携带
+      expected：严格门后 minutes 必为请求自洽）；
+    * 中空同轮两阶段 = 一次 ``planning_patch_occurrence_round`` RPC——函数
+      内完成行锁、round 身份确认、硬白名单、锁内生命周期二次校验（问题 5：
+      窗口字段永远严格门）、expected snapshot 复核（最终验收修复问题 3）、
+      窗口一致性、两行各自补丁与整体 rollback；
+    * 错误分类（最终验收修复问题 6）：仅固定 ERRCODE 'PC001' / 已知拒绝
+      消息映射为并发跳过（``ConcurrencyRejected``）；RPC 缺失 / 连接故障 /
+      非预期约束违反 / 未知错误一律向上传播。``expected`` 非 None（重算
+      路径）时基础设施失败也直接传播——由 maintenance / 手动重算如实失败；
+      编辑路径（None）包装为用户可见 503。
+    * 调用方必须在进入本函数前完成全部 payload 校验（validation-before-write）。
+    """
+    if sibling is None or sibling_patch is None:
+        if not _conditional_lifecycle_update(client, target, main_patch,
+                                             current_status=target["status"]):
+            raise ConcurrencyRejected(
+                "concurrent_modified",
+                "该待办已被并发操作改变，本次编辑未执行，请刷新后重试", 409,
+            )
+        return
+    try:
+        client.rpc("planning_patch_occurrence_round", {
+            "p_target_id": target["id"],
+            "p_sibling_id": sibling["id"],
+            "p_target_patch": main_patch,
+            "p_sibling_patch": sibling_patch,
+            "p_expected": expected,
+        }).execute()
+    except PlanningError:
+        raise
+    except Exception as exc:
+        if _is_rpc_concurrency_rejection(exc):
+            raise ConcurrencyRejected(
+                "concurrent_modified",
+                "同轮原子编辑因并发状态变化被数据库拒绝，本次编辑未执行", 409,
+            ) from exc
+        if expected is not None:
+            # 重算路径：基础设施失败向上传播——maintenance / 手动重算如实
+            # 失败（保留等待标记），绝不伪装成并发跳过（最终修复问题 6）。
+            raise
+        raise PlanningError(
+            "database_unavailable",
+            "同轮原子编辑暂时无法完成，请稍后重试", 503,
+        ) from exc
+
+
 def recompute_today(now: datetime | None = None) -> dict[str, Any]:
     """手动 / 自动重算：只更新当天可自动排程实例的预估起止。
 
     窗口批次（§19.1 原子性）：任一排程冲突 → 本轮整体不持久化，保留最近
     一次成功排程的既有 est 不清空；冲突清单（派生结果，不落库）随响应
     返回，并由 today 看板按同一纯函数读取时派生展示。
+    最终修复（问题 1）：写入阶段以条件 UPDATE 复核生命周期事实集合——
+    读取后实例被并发完成 / 开始 / 关闭时放弃该行排程结果（静默跳过）。
+    最终修复（问题 2）：中空同轮两阶段同时被重排时经原子 RPC 一次提交
+    （锁内复核 + 任意失败整体回滚），不存在「A 新时间、B 旧时间」半提交。
     """
     now = now or _now()
     today = _current_cycle(now).key
@@ -2203,6 +2936,7 @@ def recompute_today(now: datetime | None = None) -> dict[str, Any]:
         return {"updated": 0, "at": _iso(now), "conflicts": result.conflicts}
     placed = result.placed
     updated = 0
+    pending_rows: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
     for occ_id, (start, end) in placed.items():
         occ = next(row for row in open_rows if row["id"] == occ_id)
         old_start = _parse_dt(occ["est_start"], "est_start") if occ.get("est_start") else None
@@ -2213,10 +2947,53 @@ def recompute_today(now: datetime | None = None) -> dict[str, Any]:
         patch["updated_at"] = _iso(now)
         if not occ.get("nominal_start"):
             patch["nominal_start"] = _iso(start)
-        client.table("planning_occurrence").update(patch).eq("id", occ_id).execute()
-        updated += 1
-    log.info("planning 重算完成: updated=%s date=%s", updated, today.isoformat())
-    return {"updated": updated, "at": _iso(now), "conflicts": []}
+        pending_rows[occ_id] = (occ, patch)
+    # 按轮分组：中空同轮两阶段一起经原子 RPC；其余单行条件 UPDATE。
+    rounds: dict[tuple[int, str], list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    singles: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for occ, patch in pending_rows.values():
+        if occ.get("phase") and occ.get("round_key"):
+            rounds.setdefault((occ["task_id"], occ["round_key"]), []).append((occ, patch))
+        else:
+            singles.append((occ, patch))
+    stale_skipped = 0
+    for occ, patch in singles:
+        if _conditional_schedulable_update(client, occ, patch):
+            updated += 1
+        else:
+            stale_skipped += 1
+    for entries in rounds.values():
+        if len(entries) >= 2:
+            (target, target_patch), (sibling, sibling_patch) = entries[0], entries[1]
+            # expected snapshot（最终验收修复问题 3）：两阶段各自的读取快照
+            # 随 RPC 进入锁内复核——窗口 / 所有权 / est 预态漂移 = 旧计算作废。
+            expected = [_recompute_expected_snapshot(row) for row, _ in entries]
+            try:
+                _atomic_round_write(client, target, target_patch, sibling,
+                                    sibling_patch, expected=expected)
+            except ConcurrencyRejected as exc:
+                # 仅已知的乐观并发拒绝（锁内生命周期门 / 快照漂移）可静默
+                # 放弃该轮排程结果；数据库故障 / 契约错误必须向上传播
+                #（最终修复问题 6：不吞基础设施失败）。
+                log.info("planning 中空轮次重算因并发状态变化放弃: %s", exc)
+                stale_skipped += len(entries)
+                continue
+            updated += len(entries)
+        else:
+            occ, patch = entries[0]
+            if _conditional_schedulable_update(client, occ, patch):
+                updated += 1
+            else:
+                stale_skipped += 1
+    log.info("planning 重算完成: updated=%s stale_skipped=%s date=%s",
+             updated, stale_skipped, today.isoformat())
+    result = {"updated": updated, "at": _iso(now), "conflicts": []}
+    if stale_skipped:
+        # 最终 Debug（问题 3）：存在因快照漂移（含 sort_order）被放弃的行
+        # ——本次结果不完整，调用方不得据此清掉重算等待标记；下一次重算
+        # 按最新输入重新执行。
+        result["stale_skipped"] = stale_skipped
+    return result
 
 
 # ── 重算等待标记 ──────────────────────────────────────────────────
@@ -2238,18 +3015,53 @@ def request_recompute(reason: str, now: datetime | None = None) -> None:
         # 关闭自动重算（需求 16.3）：顺序仍保存，但不进入「等待自动重算」状态。
         return
     client = _require_client()
-    client.table("planning_recompute_state").upsert(
-        {"id": 1, "requested_at": _iso(now), "reason": reason[:100], "updated_at": _iso(now)},
-        ignore_duplicates=False,
-    ).execute()
+    # 批次 6 收尾（A1）：消费身份由数据库原子生成（request_token uuid）。
+    # requested_at 来自业务 now，两次业务操作可能捕获同一时间戳 T——它不能
+    # 充当请求身份；token 在 RPC 函数体内生成，同一时间戳的两次登记必然
+    # 得到不同的消费身份。
+    client.rpc("planning_request_recompute", {
+        "p_reason": reason[:100],
+        "p_requested_at": _iso(now),
+    }).execute()
 
 
-def clear_recompute_mark(now: datetime | None = None) -> None:
+def _request_recompute_quietly(reason: str, now: datetime) -> None:
+    """停用 / 废弃成功后的排程请求登记（批次 6 收尾 BUG B）。
+
+    主业务结果（任务已停用、开放实例已关闭）在 RPC 事务内提交成功后，
+    ``request_recompute`` 属 post-commit side effect：登记失败不得伪装成
+    停用失败（用户已看到废弃成功），但也不得静默假装后续工作完成——记
+    警告日志保留可观测性，失败时由用户手动重算 / 后续维护循环兜底
+    （与 ``_generate_due_quietly`` 同一 quiet 语义）。
+    """
+    try:
+        request_recompute(reason, now)
+    except Exception as exc:
+        log.warning(
+            "planning 停用后重算请求登记失败（等待手动重算或后续触发兜底）: reason=%s error=%s",
+            reason, type(exc).__name__,
+        )
+
+
+def clear_recompute_mark(now: datetime | None = None,
+                         expected_request_token: str | None = None) -> None:
+    """清除重算等待标记；提供 ``expected_request_token`` 时仅条件清除。
+
+    批次 6 收尾（BUG A → A1 升级）：一次 recompute 只能消费它**开始时**
+    捕获的那一版请求。消费身份是数据库原子生成的 ``request_token``——
+    requested_at 来自业务 now，两次业务操作可能捕获同一时间戳 T，等值
+    条件会把执行期间并发登记的同 T 新请求一并清掉；token 等值条件命中
+    0 行，新请求保留给下一轮消费。
+    ``expected_request_token`` 为 None（捕获时本无待处理请求）时不清除：
+    执行期间到达的新请求同样必须保留。
+    """
     now = now or _now()
+    if expected_request_token is None:
+        return
     client = _require_client()
-    client.table("planning_recompute_state").update({
-        "requested_at": None, "reason": None, "updated_at": _iso(now),
-    }).eq("id", 1).execute()
+    client.rpc("planning_clear_recompute_mark", {
+        "p_request_token": expected_request_token,
+    }).execute()
 
 
 def get_recompute_state(now: datetime | None = None) -> dict[str, Any]:
@@ -2258,6 +3070,7 @@ def get_recompute_state(now: datetime | None = None) -> dict[str, Any]:
     client = _require_client()
     rows = _rows(client, "planning_recompute_state", lambda q: q.eq("id", 1).limit(1))
     requested_at = rows[0].get("requested_at") if rows else None
+    request_token = rows[0].get("request_token") if rows else None
     pending = bool(requested_at) and enabled
     wait_minutes = None
     if pending:
@@ -2268,6 +3081,8 @@ def get_recompute_state(now: datetime | None = None) -> dict[str, Any]:
         # 自动重算开关随状态返回：关闭时前端不得提示「等待自动重算」（需求 16.3）
         "enabled": enabled,
         "requested_at": requested_at,
+        # 消费身份（A1）：内部条件清除使用，不进入前端展示契约
+        "request_token": request_token,
         "reason": rows[0].get("reason") if rows else None,
         "wait_minutes": wait_minutes,
     }
@@ -2279,11 +3094,17 @@ def trigger_recompute(now: datetime | None = None) -> dict[str, Any]:
     成功判定只看 conflicts 是否为空：updated=0（无可修改但合法完成）同样
     属于成功；存在冲突则本轮整体未生效，等待标记保留，不新增状态或重试
     机制——后续触发 / 维护循环按既有语义再次执行。
+    批次 6 收尾（BUG A → A1 升级）：清除以开始时捕获的 request_token 为
+    条件——手动重算执行期间并发产生的新请求（如拖动排序，即使其业务时间
+    与捕获值相同）不由本次消费，保留给下一轮。
     """
     now = now or _now()
+    request_token = get_recompute_state(now).get("request_token")
     result = recompute_today(now)
-    if not result.get("conflicts"):
-        clear_recompute_mark(now)
+    # 最终 Debug（问题 3）：stale_skipped = 本次计算基于旧快照、结果被部分
+    # 放弃（如并发 save_order 改序）——并发产生的新重算请求必须保留。
+    if not result.get("conflicts") and not result.get("stale_skipped"):
+        clear_recompute_mark(now, expected_request_token=request_token)
     return result
 
 
@@ -2390,6 +3211,23 @@ def _compute_actual_minutes(occ: dict[str, Any]) -> int | None:
     return _minutes_between(start, end)
 
 
+def _add_actual_staleness_guards(query, occ: dict[str, Any], row: dict[str, Any]):
+    """actual_minutes 的读派生输入带乐观条件（最终修复问题 4）：由读取值
+    （而非本次请求值）参与分钟计算的 actual_start / actual_end，其旧值——
+    **包括 NULL**——必须作为等值 / IS NULL 条件内联 WHERE；并发的实际时间
+    写入使条件未命中 → 0 行 → 拒绝旧请求，三字段不一致不可能落库。"""
+    if "actual_minutes" not in row:
+        return query
+    for field in ("actual_start", "actual_end"):
+        if field in row:
+            continue  # 本次请求自带该值：分钟与其自洽，无需守卫
+        if occ.get(field):
+            query = query.eq(field, occ[field])
+        else:
+            query = query.is_(field, None)
+    return query
+
+
 def _estimate_patch(
     start: datetime | None, end: datetime | None, *, source: str,
     fixed_source: str | None = None,
@@ -2459,14 +3297,242 @@ def _manual_estimate_patch(
     return patch
 
 
-def _sync_hollow_display(client, occ: dict[str, Any], patch: dict[str, Any], now: datetime) -> None:
+def _hollow_display_patch(occ: dict[str, Any], patch: dict[str, Any], now: datetime) -> dict[str, Any] | None:
+    """同轮两阶段的展示周期字段（批次 6 一轮 Review BLOCKER 3：写前计算，
+    不再单独写库——由调用方并入原子写入）。"""
     if not occ.get("phase_group") or "display_cycle_date" not in patch:
-        return
-    client.table("planning_occurrence").update({
+        return None
+    return {
         "display_cycle_date": patch["display_cycle_date"],
         "display_reason": patch["display_reason"],
         "updated_at": _iso(now),
-    }).eq("task_id", occ["task_id"]).eq("round_key", occ["round_key"]).execute()
+    }
+
+
+# ── 当前实例窗口编辑（§18.3 / §12.1 / §13.2，批次 6 接线） ─────────
+
+def _hollow_sibling_of(client, occ: dict[str, Any]) -> dict[str, Any] | None:
+    """同轮另一阶段行（只读查找；缺失返回 None，由调用方决定语义）。"""
+    if not occ.get("phase"):
+        return None
+    sibling_phase = "end" if occ["phase"] == "start" else "start"
+    return next(
+        (
+            row for row in _rows(
+                client, "planning_occurrence",
+                lambda q: q.eq("task_id", occ["task_id"]).eq("phase", sibling_phase)
+                .eq("round_key", occ["round_key"]).eq("phase_group", occ["phase_group"]),
+            )
+            if row["id"] != occ["id"]
+        ),
+        None,
+    )
+
+
+def _occurrence_round_rows(client, occ: dict[str, Any]) -> list[dict[str, Any]]:
+    """窗口编辑涉及的轮次行：普通实例只有本行；中空实例是同轮两阶段。
+
+    实例窗口是轮次级约束（生成时两阶段随行写入同值，§17.4 包络语义），
+    编辑必须对同轮两阶段一致生效，不得留下两阶段窗口分叉的轮次。
+    """
+    if not occ.get("phase"):
+        return [occ]
+    sibling = _hollow_sibling_of(client, occ)
+    if not sibling:
+        raise PlanningError("invalid_round", "中空待办缺少同轮关联阶段", 409)
+    return [occ, sibling]
+
+
+def _occurrence_window_occupancy(rows: list[dict[str, Any]], task: dict[str, Any]) -> timedelta:
+    """实例窗口可行性判断的占用跨度（§12.1 / §17.4）：普通 = 有效耗时
+    （est 区间事实优先、耗时快照其次，:func:`_duration_of` 单一权威）；
+    中空 = 开始 + 等待 + 结束的完整包络（等待读结束阶段行自带的
+    ``planned_wait_minutes``，缺失回退任务定义）。"""
+    if len(rows) == 1:
+        return _duration_of(rows[0], task)
+    start_row = next(row for row in rows if row.get("phase") == "start")
+    end_row = next(row for row in rows if row.get("phase") == "end")
+    wait = end_row.get("planned_wait_minutes")
+    if isinstance(wait, bool) or not isinstance(wait, int) or not 1 <= wait <= 1440:
+        wait = task.get("hollow_wait_minutes")
+    try:
+        return hollow_envelope_duration(
+            _duration_of(start_row, task, "start"), wait, _duration_of(end_row, task, "end"))
+    except ValueError as exc:
+        raise PlanningError("invalid_payload", "中空待办的阶段耗时或等待时长无效，无法调整时段", 400) from exc
+
+
+# 生命周期事实字段（批次 6 最终修复问题 4/5 的「统一生命周期门控」单一
+# 定义）：任何开始 / 处理 / 关闭事实的存在都使实例不再是「尚未开始」。
+LIFECYCLE_FACT_FIELDS = ("actual_start", "actual_end", "partial_at", "handled_at", "closed_at")
+# 尚未开始且仍开放的状态集合（与实例窗口编辑门控一致）。
+UNTOUCHED_OPEN_STATUSES = ("pending", "deferred")
+# 开放生命周期状态集合（延后等状态流转仍可触达）。
+OPEN_ONLY_STATUSES = ("pending", "in_progress", "deferred", "partial")
+
+
+def _has_lifecycle_fact(row: dict[str, Any]) -> bool:
+    """实例是否携带任何开始 / 处理 / 关闭事实（单一判定，禁止复制）。"""
+    return any(row.get(field) for field in LIFECYCLE_FACT_FIELDS)
+
+
+def _is_untouched_open(row: dict[str, Any]) -> bool:
+    """实例是否「尚未开始且仍开放」：状态允许 + 无任何生命周期事实。"""
+    return row.get("status") in UNTOUCHED_OPEN_STATUSES and not _has_lifecycle_fact(row)
+
+
+def _window_edit_gate(
+    rows: list[dict[str, Any]], task: dict[str, Any],
+    action: str = "调整可安排时段",
+) -> None:
+    """当前实例编辑的统一生命周期门控（2026-09-28 一轮 Review 裁决 4/5；
+    最终修复问题 4：预估时间编辑复用同一门控）。
+
+    只允许**尚未开始且仍开放**的实例（`_is_untouched_open`：状态 ∈
+    pending/deferred 且无 actual_start / actual_end / partial_at /
+    handled_at / closed_at 任何事实）；in_progress、partial、completed、
+    timeout 等已开始 / 终态一律拒绝；被取代重排请求（superseded）的任务
+    实例同样拒绝。**中空按整轮判断**：同轮任一阶段不再可编辑则整轮
+    拒绝。本门控先于 zero-slack 分支执行，钉住不得绕过。
+    """
+    if task.get("request_state") == "superseded":
+        raise PlanningError(
+            "invalid_transition", f"该待办来自已被取代的重排请求，不能{action}", 409,
+        )
+    for row in rows:
+        if not _is_untouched_open(row):
+            raise PlanningError(
+                "invalid_transition",
+                f"只有尚未开始且开放的待办可以{action}；执行中、部分完成或已关闭的记录是历史事实", 422,
+            )
+
+
+def _occurrence_window_edit(
+    client, occ: dict[str, Any], task: dict[str, Any], payload: dict[str, Any], now: datetime,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """当前实例窗口编辑：绝对时间收窄 / 平移 / 改单边 / 钉住（§18.3，批次 6）。
+
+    **纯校验 + 补丁计算，零数据库写入**（2026-09-28 一轮 Review BLOCKER 3：
+    调用方在全部 payload 校验完成后统一原子写入）。语义与校验：
+
+    * 只修改当前轮的实例窗口约束——**绝不**回写任务模板；模板编辑走任务
+      PATCH（未来轮次），两条路径无任何同步（§18.3 / §28）；
+    * 生命周期门控（:func:`_window_edit_gate`）先于一切形状 / 可行性判断，
+      zero-slack 钉住不得绕过（裁决 4/5：仅尚未开始的开放实例；中空整轮
+      共同判断）；
+    * 中空轮次对同轮两阶段一致生效（轮次级约束，§17.4）；
+    * 双端时终点晚于起点（绝对瞬间域比较）；禁止跨越每日刷新 boundary
+      （端点接触合法，批次 1 ``window_at_crosses_boundary`` 同源）；有最晚
+      完成时剩余空间须容纳占用跨度——与创建校验 / 排程冲突共用
+      ``window_feasible``（§4.1 单一领域逻辑，§12.1 剩余空间按编辑时刻）；
+    * **不允许清空既有窗口**（裁决 6）：已带任一窗口约束的当前轮不得
+      PATCH 成双 NULL——不得通过当前编辑取消这一轮既有的窗口 / 超时
+      约束；可收窄、平移、改为单边、零自由度钉住。本来就无窗口的双 NULL
+      是 no-op；
+    * 不可移动锚点守卫（裁决：门控先于 zero-slack）：重算不会移动的
+      est（manual / rule 固定锚点）落在新窗口之外 → 拒绝，不偷偷搬锚点；
+    * 收窄至恰等占用跨度（零自由度）→ manual 锚点钉住（§13.2：复用
+      ``_manual_estimate_patch`` 完整所有权元组；中空两阶段一起钉住，开始
+      阶段锚在窗口起点、结束阶段经等待链在窗口终点收口；已有锚点恰好
+      等于窗口本身时保持原所有权，不改写为 manual）；
+    * 其余情形 est 不动。
+
+    返回 ``(目标行补丁, 同轮另一阶段补丁 | None)``；两补丁均已含窗口字段。
+    """
+    rows = _occurrence_round_rows(client, occ)
+    _window_edit_gate(rows, task)
+    current = rows[0]
+    start_raw = (payload["window_start_at"] if "window_start_at" in payload
+                 else current.get("window_start_at"))
+    end_raw = (payload["window_end_at"] if "window_end_at" in payload
+               else current.get("window_end_at"))
+    start = _parse_dt(start_raw, "window_start_at") if start_raw else None
+    end = _parse_dt(end_raw, "window_end_at") if end_raw else None
+    start_abs = start.astimezone(timezone.utc) if start else None
+    end_abs = end.astimezone(timezone.utc) if end else None
+    if start_abs and end_abs and end_abs <= start_abs:
+        raise PlanningError("invalid_payload", "可安排时段的结束必须晚于开始", 400)
+    if start_abs and end_abs:
+        boundary, _, _ = _load_boundary_state(now)
+        if window_at_crosses_boundary(start, end, boundary):
+            raise PlanningError(
+                "invalid_payload",
+                f"可安排时段不能跨越每日刷新时间 {boundary.strftime('%H:%M')}，请调整时段", 400,
+            )
+    # 裁决 6：不允许通过当前编辑整轮清空既有窗口约束（单边保留合法）。
+    had_window = any(row.get("window_start_at") or row.get("window_end_at") for row in rows)
+    if had_window and start is None and end is None:
+        raise PlanningError(
+            "invalid_payload",
+            "不能清空已生成待办的既有可安排时段约束；可以收窄、平移或改为单边时段", 400,
+        )
+    occupancy = _occurrence_window_occupancy(rows, task)
+    if end_abs and not window_feasible(
+            ResolvedWindow(start_at=start, end_at=end), now, occupancy):
+        raise PlanningError(
+            "invalid_payload",
+            f"可安排时段剩余空间不足以容纳执行耗时 {_format_duration(occupancy)}，请调整时段或耗时", 400,
+        )
+    zero_freedom = start_abs is not None and end_abs is not None and (end_abs - start_abs) == occupancy
+    # 不可移动锚点守卫：先于 zero-slack 分支（裁决：不得借钉住搬运既有
+    # 固定 est；锚点在新窗口外一律拒绝）。
+    anchored_equal_window = False
+    for row in rows:
+        slot = _slot_range(row)
+        if slot is None or _freely_schedulable(row, task):
+            continue
+        slot_start, slot_end = slot
+        slot_start_abs = slot_start.astimezone(timezone.utc)
+        slot_end_abs = slot_end.astimezone(timezone.utc)
+        inside = ((start_abs is None or slot_start_abs >= start_abs)
+                  and (end_abs is None or slot_end_abs <= end_abs))
+        if not inside:
+            raise PlanningError(
+                "invalid_payload",
+                "该待办已有固定的预估时间在新的可安排时段之外，请先调整预估时间或扩大时段", 400,
+            )
+        if zero_freedom and slot_start_abs == start_abs and slot_end_abs == end_abs:
+            anchored_equal_window = True  # 锚点已是唯一合法位置：保持原所有权
+    patch: dict[str, Any] = {
+        "window_start_at": _iso(start) if start else None,
+        "window_end_at": _iso(end) if end else None,
+    }
+    sibling_row = rows[1] if len(rows) > 1 else None
+    if zero_freedom and not anchored_equal_window:
+        # 零自由度窗口 → 钉住（§13.2）：est = 窗口本身，manual 所有权元组。
+        # 中空两阶段一起钉住：开始阶段锚在窗口起点，结束阶段经等待链在窗口
+        # 终点收口（开始 + 等待 + 结束 = 窗口长，位置由此唯一确定）。
+        if sibling_row is None:
+            patch.update(_manual_estimate_patch(
+                occ, task, {"est_start": _iso(start), "est_end": _iso(end)}, now))
+        else:
+            start_row = next(row for row in rows if row.get("phase") == "start")
+            end_row = next(row for row in rows if row.get("phase") == "end")
+            start_duration = _duration_of(start_row, task, "start")
+            end_duration = _duration_of(end_row, task, "end")
+            phase_patches = {
+                start_row["id"]: _manual_estimate_patch(
+                    start_row, task,
+                    {"est_start": _iso(start), "est_end": _iso(start + start_duration)}, now),
+                end_row["id"]: _manual_estimate_patch(
+                    end_row, task,
+                    {"est_start": _iso(end - end_duration), "est_end": _iso(end)}, now),
+            }
+            for phase_patch in phase_patches.values():
+                phase_patch["window_start_at"] = patch["window_start_at"]
+                phase_patch["window_end_at"] = patch["window_end_at"]
+                phase_patch["updated_at"] = _iso(now)
+            main_patch = dict(phase_patches[occ["id"]])
+            sibling_patch = (
+                dict(phase_patches[sibling_row["id"]]) if sibling_row["id"] in phase_patches
+                else {**patch, "updated_at": _iso(now)})
+            return main_patch, sibling_patch
+    elif sibling_row is not None:
+        sibling_patch = {**patch, "updated_at": _iso(now)}
+        patch["updated_at"] = _iso(now)
+        return patch, sibling_patch
+    patch["updated_at"] = _iso(now)
+    return patch, None
 
 
 def _reschedule_occurrence(
@@ -2479,11 +3545,15 @@ def _reschedule_occurrence(
 def _shift_sibling_phase(
     client, occ: dict[str, Any], task: dict[str, Any], old_start: datetime | None,
     new_start: datetime, now: datetime,
-) -> None:
+) -> dict[str, Any] | None:
     """中空待办单阶段被延后 / 手动改时间时，另一阶段按相同时间差平移，
-    避免两阶段日期倒挂；结束阶段的精确锚定随后由重算完成。"""
+    避免两阶段日期倒挂；结束阶段的精确锚定随后由重算完成。
+
+    批次 6 一轮 Review BLOCKER 3：改为**纯补丁计算**（零数据库写入）——
+    返回关联阶段的写入字段，由调用方并入写前完整校验后的原子写入。
+    返回 None 表示无需平移。"""
     if not occ.get("phase"):
-        return
+        return None
     if not occ.get("phase_group") or not occ.get("round_key"):
         raise PlanningError("invalid_round", "中空阶段缺少同轮身份", 409)
     if old_start:
@@ -2494,7 +3564,7 @@ def _shift_sibling_phase(
         anchor = _combine(date.fromisoformat(occ["display_cycle_date"]), new_start.time())
         delta = new_start - anchor
     if delta == timedelta(0):
-        return
+        return None
     sibling_phase = "end" if occ["phase"] == "start" else "start"
     sibling = next(
         (
@@ -2514,13 +3584,13 @@ def _shift_sibling_phase(
     old_sibling_start = _parse_dt(sibling["est_start"], "est_start") if sibling.get("est_start") else None
     old_sibling_end = _parse_dt(sibling["est_end"], "est_end") if sibling.get("est_end") else None
     if old_sibling_start is None:
-        return
+        return None
     shifted_start = old_sibling_start + delta
     shifted_end = (old_sibling_end + delta if old_sibling_end
                    else shifted_start + _duration_of(sibling, task, sibling_phase))
     patch = _estimate_patch(shifted_start, shifted_end, source="automatic")
     patch["updated_at"] = _iso(now)
-    client.table("planning_occurrence").update(patch).eq("id", sibling["id"]).execute()
+    return patch
 
 
 def reschedule_timeout_as_new(
@@ -3108,6 +4178,34 @@ def _finalize_reschedule_occurrence(
     }
 
 
+def _discard_task_atomically(client, task_id: int, now: datetime,
+                             target_id: int | None = None,
+                             target_patch: dict[str, Any] | None = None) -> None:
+    """废弃整个任务 = 跨 task + occurrence 的原子命令（最终验收修复问题 5）：
+    `planning_discard_task` 在单个数据库事务内锁任务行 → 单语句关闭全部
+    开放 occurrence（中空同轮两阶段同语句命中）→ 单语句停用任务；任一
+    失败整体回滚。仅已知的并发停用拒绝映射为 409；数据库故障向上传播。"""
+    try:
+        client.rpc("planning_discard_task", {
+            "p_task_id": task_id, "p_now": _iso(now),
+            "p_target_id": target_id,
+            "p_target_patch": target_patch,
+        }).execute()
+    except PlanningError:
+        raise
+    except Exception as exc:
+        if getattr(exc, "code", None) == CONCURRENCY_ERRCODE                 or "task already inactive" in str(exc):
+            raise PlanningError(
+                "concurrent_modified",
+                "该待办已被并发操作废弃，本次操作未执行", 409,
+            ) from exc
+        # 基础设施失败（连接 / 非预期约束 / RPC 缺失）必须用户可见，不伪装成功。
+        raise PlanningError(
+            "database_unavailable",
+            "停用待办暂时无法完成，请稍后重试", 503,
+        ) from exc
+
+
 def set_occurrence_status(occurrence_id: int, payload: Any, now: datetime | None = None) -> dict[str, Any]:
     now = now or _now()
     if not isinstance(payload, dict):
@@ -3173,7 +4271,23 @@ def set_occurrence_status(occurrence_id: int, payload: Any, now: datetime | None
         # 无处理事实的历史以更正时刻记录 handled_at（见 newly_handled）。
         raise PlanningError("invalid_transition", f"cannot complete from {current}", 422)
 
+    # 重复型任务的「废弃」= 整个待办不再执行（需求 4d）。判定前移——
+    # 废弃命令（跨 task + occurrence）在主写入前以原子 RPC 执行
+    #（最终验收修复问题 5）。
+    discarding_whole_task = (
+        target == "discarded"
+        and task["task_type"] in REPEATING_TASK_TYPES
+        and task.get("is_active")
+        and current not in CLOSED_STATUSES
+    )
+
     row: dict[str, Any] = {"status": target, "updated_at": _iso(now)}
+    # 中空同轮两阶段联动（最终修复问题 2）：延后等带时间的开放状态流转会
+    # 同时修改同轮兄弟行（est 平移 + 展示一致）——两行补丁统一经原子 RPC
+    # 提交，禁止「update A; update B」顺序写；终态流转只写目标行（单行
+    # 条件 UPDATE 本身原子），不经 RPC（白名单永不携带终态）。
+    sibling: dict[str, Any] | None = None
+    sibling_row: dict[str, Any] | None = None
 
     if target == "partial":
         note = _clean_text(payload.get("partial_note"), "partial_note", required=True, maximum=MAX_NOTE_LENGTH)
@@ -3185,14 +4299,23 @@ def set_occurrence_status(occurrence_id: int, payload: Any, now: datetime | None
         if current in CLOSED_STATUSES or current == "timeout":
             row["partial_note"] = None
 
-    if new_start:
+    if new_start and not discarding_whole_task:
+        # 废弃整个任务（不再执行）与「指定新执行时间」矛盾：废弃路径不做
+        # 时间平移（原子命令覆盖全部开放实例）。
         row.update(_reschedule_occurrence(occ, task, new_start, now))
-        _shift_sibling_phase(
+        shift_patch = _shift_sibling_phase(
             client, occ, task,
             _parse_dt(occ["est_start"], "est_start") if occ.get("est_start") else None,
             new_start, now,
         )
-        _sync_hollow_display(client, occ, row, now)
+        display_patch = _hollow_display_patch(occ, row, now)
+        if display_patch:
+            row.update(display_patch)
+        if shift_patch is not None:
+            sibling = _hollow_sibling_of(client, occ)
+            sibling_row = {**shift_patch}
+            if display_patch:
+                sibling_row.update(display_patch)
 
     if target == "in_progress" and not occ.get("actual_start"):
         row["actual_start"] = _iso(now)
@@ -3229,32 +4352,46 @@ def set_occurrence_status(occurrence_id: int, payload: Any, now: datetime | None
             merged = {**occ, **row}
             row["actual_minutes"] = _compute_actual_minutes(merged)
 
-    client.table("planning_occurrence").update(row).eq("id", occurrence_id).execute()
-
-    # 重复型任务的「废弃」= 整个待办不再执行（需求 4d）：停用任务并关闭
-    # 其余开放实例，与 update_task(is_active=False) 同效果；单次待办只关
-    # 当前实例。前端确认文案「后续不再自动出现」据此成立。
-    # B6：「废弃整个任务」是 user 在开放实例上执行的业务命令；把已关闭历史
-    # 的状态标签更正为 discarded 只修改这一条历史记录，不得停用任务定义、
-    # 关闭其他开放轮次或停止未来刷新。
-    discarding_whole_task = (
-        target == "discarded"
-        and task["task_type"] in REPEATING_TASK_TYPES
-        and task.get("is_active")
-        and current not in CLOSED_STATUSES
-    )
     if discarding_whole_task:
-        client.table("planning_task").update({
-            "is_active": False, "updated_at": _iso(now),
-        }).eq("id", task["id"]).execute()
-        for other in _rows(
-            client, "planning_occurrence",
-            lambda q: q.eq("task_id", task["id"]).in_("status", list(OPEN_STATUSES)),
-        ):
-            client.table("planning_occurrence").update({
-                "status": "discarded", "closed_at": _iso(now), "updated_at": _iso(now),
-            }).eq("id", other["id"]).execute()
+        # 最终 Debug（问题 1B）：废弃整个任务 = 单事务命令。目标行的关闭
+        # 事实（actual_end / actual_minutes / actual_start——废弃命令成功
+        # 必须产生的结果）作为 RPC 输入在同一事务内写入；RPC commit 后
+        # 不再有事务外补写（fact 更新失败 = 整个废弃回滚，task 不会已被
+        # 停用）。closed_at / status 由 RPC 的批量关闭覆盖。
+        target_facts = {key: row[key] for key in
+                        ("actual_start", "actual_end", "actual_minutes")
+                        if key in row}
+        target_facts["updated_at"] = _iso(now)
+        _discard_task_atomically(client, task["id"], now,
+                                 target_id=occ["id"], target_patch=target_facts)
+        # 批次 6 收尾（BUG B）：整任务废弃提前 return，绕过了下方 closing
+        # 分支——废弃释放的时间槽必须由一次重算重新分配；登记为 post-commit
+        # side effect，失败不伪装成废弃失败（quiet，可观测日志兜底）。
+        _request_recompute_quietly("task_discarded", now)
         task = {**task, "is_active": False}
+        refreshed = _fetch_occurrence(client, occurrence_id) or {**occ, **row}
+        return serialize_occurrence(refreshed, task, now)
+
+    if sibling_row is not None:
+        # 最终修复（问题 2）：中空同轮两阶段（目标行状态流转 + 兄弟行时间
+        # 联动 + 展示一致）经原子 RPC 一次提交；注入失败两行整体回滚。
+        # RPC 锁内以宽松门（开放且无关闭事实）复核生命周期——延后自
+        # in_progress / partial 仍合法（既有语义），并发完成 / 关闭则拒绝。
+        _atomic_round_write(client, occ, row, sibling, sibling_row)
+    else:
+        # 单行流转：条件 UPDATE（状态等值条件 + actual_minutes 读派生输入
+        # 的等值 / IS NULL 条件内联——乐观并发：并发状态或实际时间变化使
+        # 条件未命中 → 409、零写入）。
+        query = client.table("planning_occurrence").update(
+            row).eq("id", occurrence_id).eq(
+            "status", "discarded" if discarding_whole_task else current)
+        query = _add_actual_staleness_guards(query, occ, row)
+        result = query.execute()
+        if not result.data:
+            raise PlanningError(
+                "concurrent_modified",
+                "该待办已被并发操作改变，状态修改未执行，请刷新后重试", 409,
+            )
 
     # Phase 1B: only an explicit full handling of the currently open round
     # starts the next after-completion interval. Partial completion stays open
@@ -3290,11 +4427,20 @@ def finish_occurrence(occurrence_id: int, now: datetime | None = None) -> dict[s
 
 
 def patch_occurrence(occurrence_id: int, payload: Any, now: datetime | None = None) -> dict[str, Any]:
-    """手动编辑 / 兜底：手动改预估起止、补填或修改实际起止、部分完成说明。"""
+    """手动编辑 / 兜底：手动改预估起止、调整当前实例窗口（§18.3）、补填或
+    修改实际起止、部分完成说明。
+
+    批次 6 一轮 Review BLOCKER 3：**写前完整校验**——payload 的全部字段
+    （窗口 / 生命周期门控 / partial_note / 实际时间 / 混合字段限制 / 中空
+    轮次一致性 / 固定锚点 / 可行性）都在第一个数据库写入之前校验完成；
+    之后中空同轮多行修改经 :func:`_atomic_round_write` 单语句原子提交，
+    任何失败下两行都保持修改前状态（无半写）。
+    """
     now = now or _now()
     if not isinstance(payload, dict):
         raise PlanningError("invalid_payload", "request body must be a JSON object")
-    allowed = {"est_start", "est_end", "actual_start", "actual_end", "partial_note", "is_fixed"}
+    allowed = {"est_start", "est_end", "actual_start", "actual_end", "partial_note", "is_fixed",
+               "window_start_at", "window_end_at"}
     unknown = set(payload) - allowed
     if unknown:
         raise PlanningError("invalid_payload", f"unsupported fields: {', '.join(sorted(unknown))}")
@@ -3302,6 +4448,13 @@ def patch_occurrence(occurrence_id: int, payload: Any, now: datetime | None = No
         raise PlanningError("invalid_payload", "no writable fields supplied")
     if "is_fixed" in payload:
         _clean_bool(payload["is_fixed"], "is_fixed")
+    window_edited = any(field in payload for field in ("window_start_at", "window_end_at"))
+    if window_edited and any(field in payload for field in ("est_start", "est_end", "is_fixed")):
+        # 两条编辑路径语义不同（实例窗口 = 排程约束；est = 排程结果 / 人工
+        # 锚点），不提供同请求混合语义（校验先行，零写入）。
+        raise PlanningError(
+            "invalid_payload", "可安排时段与预估时间不能在同一次请求中同时修改", 400,
+        )
 
     client = _require_client()
     occ = _fetch_occurrence(client, occurrence_id)
@@ -3313,29 +4466,86 @@ def patch_occurrence(occurrence_id: int, payload: Any, now: datetime | None = No
     if not task:
         raise PlanningError("not_found", "planning task not found", 404)
 
-    row: dict[str, Any] = {"updated_at": _iso(now)}
-    if any(field in payload for field in ("est_start", "est_end", "is_fixed")):
-        row.update(_manual_estimate_patch(occ, task, payload, now))
+    # ── 校验与补丁计算（零写入） ──────────────────────────────────
+    main_row: dict[str, Any] = {"updated_at": _iso(now)}
+    sibling: dict[str, Any] | None = None
+    sibling_row: dict[str, Any] | None = None
+    est_edited = any(field in payload for field in ("est_start", "est_end", "is_fixed"))
+    if est_edited:
+        # 最终修复（问题 4）：预估时间编辑复用统一生命周期门控（与窗口编辑
+        # 同一谓词）——已发生事实实例（completed / timeout / in_progress /
+        # partial）不得重新排程；实际时间 / 说明的事实修正走下方专用路径、
+        # 不受此限（§23 历史修正）。中空按整轮判断（平移会触及同轮兄弟行）。
+        _window_edit_gate(_occurrence_round_rows(client, occ), task, action="修改预估时间")
+        main_row.update(_manual_estimate_patch(occ, task, payload, now))
+    if window_edited:
+        window_patch, sibling_window_patch = _occurrence_window_edit(
+            client, occ, task, payload, now)
+        main_row.update(window_patch)
+        if sibling_window_patch is not None:
+            sibling = _occurrence_round_rows(client, occ)[1]
+            sibling_row = {**sibling_window_patch}
     if "est_start" in payload and payload["est_start"]:
-        _shift_sibling_phase(
+        shift_patch = _shift_sibling_phase(
             client, occ, task,
             _parse_dt(occ["est_start"], "est_start") if occ.get("est_start") else None,
-            _parse_dt(row["est_start"], "est_start"), now,
+            _parse_dt(main_row["est_start"], "est_start"), now,
         )
-        _sync_hollow_display(client, occ, row, now)
+        display_patch = _hollow_display_patch(occ, main_row, now)
+        if shift_patch is not None:
+            if display_patch:
+                shift_patch.update(display_patch)
+            if sibling_row is not None:
+                sibling_row.update(shift_patch)
+            else:
+                sibling = _hollow_sibling_of(client, occ)
+                sibling_row = shift_patch
+        elif display_patch:
+            # 无需平移但展示周期变化：中空同轮两阶段展示字段一致生效。
+            if sibling_row is not None:
+                sibling_row.update(display_patch)
+                main_row.update(display_patch)
+            elif occ.get("phase"):
+                sibling = _hollow_sibling_of(client, occ)
+                sibling_row = display_patch
     if "partial_note" in payload:
-        row["partial_note"] = _clean_text(
+        main_row["partial_note"] = _clean_text(
             payload.get("partial_note"), "partial_note", required=False, maximum=MAX_NOTE_LENGTH,
         )
     if "actual_start" in payload:
-        row["actual_start"] = _iso(_parse_dt(payload["actual_start"], "actual_start")) if payload["actual_start"] else None
+        main_row["actual_start"] = _iso(_parse_dt(payload["actual_start"], "actual_start")) if payload["actual_start"] else None
     if "actual_end" in payload:
-        row["actual_end"] = _iso(_parse_dt(payload["actual_end"], "actual_end")) if payload["actual_end"] else None
-    if "actual_start" in row or "actual_end" in row:
-        row["actual_minutes"] = _compute_actual_minutes({**occ, **row})
+        main_row["actual_end"] = _iso(_parse_dt(payload["actual_end"], "actual_end")) if payload["actual_end"] else None
+    if "actual_start" in main_row or "actual_end" in main_row:
+        main_row["actual_minutes"] = _compute_actual_minutes({**occ, **main_row})
 
-    client.table("planning_occurrence").update(row).eq("id", occurrence_id).execute()
-    refreshed = _fetch_occurrence(client, occurrence_id) or {**occ, **row}
+    # ── 写入阶段（全部校验已通过） ────────────────────────────────
+    if est_edited or window_edited:
+        # 窗口 / 预估编辑：单行 = 条件 UPDATE（生命周期门控条件内联——
+        # 最终修复问题 1，普通单行写不绕过锁内保护）；中空同轮两阶段统一
+        # 经 _atomic_round_write 的 RPC 原子完成——不存在「同轮两行顺序写」
+        # 路径（批次 6 二轮 十一）。
+        _atomic_round_write(client, occ, main_row, sibling, sibling_row)
+        if window_edited:
+            # 窗口是排程约束：约束变化后可重排实例的 est 由下一次重算在窗口内
+            # 重新派生（§16.2「其他明确要求重新排程的状态变化」；钉住实例的
+            # est 已随编辑确定，重算把其视为固定槽，行为不变）。
+            request_recompute("occurrence_window_edit", now)
+    else:
+        # 实际时间 / 说明的事实修正（§23 历史修正，允许发生于已发生事实
+        # 实例）：单行乐观条件写——actual_minutes 的读派生输入（含 NULL
+        # 旧值）携带等值 / IS NULL 条件，并发修改使条件未命中 → 409、
+        # 零写入（最终修复问题 6 / 4）。
+        query = client.table("planning_occurrence").update(
+            main_row).eq("id", occurrence_id)
+        query = _add_actual_staleness_guards(query, occ, main_row)
+        result = query.execute()
+        if not result.data:
+            raise PlanningError(
+                "concurrent_modified",
+                "该待办的实际时间已被并发修改，本次补填未执行，请刷新后重试", 409,
+            )
+    refreshed = _fetch_occurrence(client, occurrence_id) or {**occ, **main_row}
     return serialize_occurrence(refreshed, task, now)
 
 
@@ -3923,14 +5133,19 @@ def run_maintenance(now: datetime | None = None) -> dict[str, Any]:
             enabled, wait = _auto_recompute_config(now)
             state = get_recompute_state(now)
             requested_at = state.get("requested_at")
+            request_token = state.get("request_token")
             if enabled and requested_at and (now - _parse_dt(requested_at, "requested_at")) >= wait:
                 auto = recompute_today(now)
                 results["auto_recompute"] = auto
                 # 窗口批次修复轮（2026-09-28 Review MEDIUM-1）：仅零冲突（成功）
                 # 清空等待标记；冲突本轮整体未生效，标记保留，等待条件改变后
                 # 由后续维护循环按既有语义再次执行（不新增状态 / 重试机制）。
-                if not auto.get("conflicts"):
-                    clear_recompute_mark(now)
+                # 批次 6 收尾（BUG A → A1 升级）：清除以本次消费的
+                # request_token 为条件——执行期间并发写入的新请求（即使其
+                # requested_at 与捕获值相同）不被本次清除，保留给下一轮
+                # 维护循环消费。
+                if not auto.get("conflicts") and not auto.get("stale_skipped"):
+                    clear_recompute_mark(now, expected_request_token=request_token)
             else:
                 results["auto_recompute"] = {"skipped": True}
         except Exception as exc:

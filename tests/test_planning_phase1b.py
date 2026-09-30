@@ -462,8 +462,14 @@ def test_early_completion_resets_after_completion_baseline_but_not_fixed_axis():
 
 
 def test_early_api_requires_idempotency_key_and_preserves_auth_order():
+    # Backlog #10 修复（相对锚点）：固定 3 天轴以「创建时刻 = 真实当前时间
+    # 前一天」为基准构造，complete-early 内部 reconcile 在轴首个到期事件
+    # 之前执行——场景不再随真实日期流逝腐化（原固定锚点 2026-09-24 07:00
+    # 自 9/27 07:00 起轴轮到期，行为正确但用例腐化）。
     with Context() as c, mock.patch.object(cfg, "GATEWAY_TOKEN", "phase1b-token"):
-        task = c.create("interval", at(24), refresh_mode="fixed_interval", interval_days=3)
+        anchor = (datetime.now(CST) - timedelta(days=1)).replace(second=0, microsecond=0)
+        task = c.create(
+            "interval", anchor, refresh_mode="fixed_interval", interval_days=3)
         http = TestClient(Starlette(routes=list(planning_api_routes)))
         url = f"/admin/api/planning/tasks/{task['id']}/complete-early"
         assert http.post(url).status_code == 401

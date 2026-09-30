@@ -29,10 +29,13 @@ def _authorized(request: Request) -> bool:
     return bool(token) and hmac.compare_digest(token, cfg.GATEWAY_TOKEN)
 
 
-def _error(message: str, status: int = 400, code: str | None = None) -> JSONResponse:
+def _error(message: str, status: int = 400, code: str | None = None,
+           details: dict[str, Any] | None = None) -> JSONResponse:
     body: dict[str, Any] = {"error": message}
     if code:
         body["error_code"] = code
+    if details:
+        body["details"] = details
     return JSONResponse(body, status_code=status)
 
 
@@ -49,7 +52,7 @@ async def _dispatch(
         result = await _run(fn, *args, **kwargs)
         return JSONResponse(result, status_code=201 if created else 200)
     except planning.PlanningError as exc:
-        return _error(str(exc), exc.status_code, exc.code)
+        return _error(str(exc), exc.status_code, exc.code, exc.details)
     except ValueError as exc:
         return _error(f"invalid query or payload value: {exc}", 400, "invalid_payload")
     except Exception as exc:

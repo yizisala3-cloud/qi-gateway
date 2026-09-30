@@ -766,3 +766,38 @@ def test_strict_path_differs_from_candidate_path_on_midnight_latest():
     template = WindowTemplate(end_tod=time(0, 0))
     assert resolve_window(template, ANCHOR, at(ANCHOR, 0)).end_at == at(NEXT, 0)
     assert resolve_window_on_date(template, ANCHOR).end_at == at(ANCHOR, 0)
+
+
+# ── G. 绝对实例窗口的 boundary 跨越（批次 6：当前实例窗口编辑） ────
+
+from gateway.planning_window import window_at_crosses_boundary
+
+
+def test_absolute_window_crossing_matrix():
+    day = date(2026, 9, 24)
+    nxt = day + timedelta(days=1)
+    # 跨越：boundary 严格落在窗口开区间内。
+    assert window_at_crosses_boundary(at(day, 5), at(day, 7), BOUNDARY) is True
+    # 端点接触（touch）合法：start == boundary、end == boundary 均不跨越。
+    assert window_at_crosses_boundary(at(day, 6), at(day, 8), BOUNDARY) is False
+    assert window_at_crosses_boundary(at(day, 4), at(day, 6), BOUNDARY) is False
+    # 跨自然午夜窗口不覆盖 boundary：23:00→次日 02:00，boundary 06:00 在外。
+    assert window_at_crosses_boundary(at(day, 23), at(nxt, 2), BOUNDARY) is False
+    # 跨自然午夜且覆盖 boundary：23:00→次日 07:00，boundary 次日 06:00 在内。
+    assert window_at_crosses_boundary(at(day, 23), at(nxt, 7), BOUNDARY) is True
+    # 含秒的绝对时刻同样正确（实例窗口允许秒级事实）。
+    with_seconds = datetime.combine(day, time(5, 30, 30), tzinfo=BUSINESS_TIMEZONE)
+    assert window_at_crosses_boundary(with_seconds, at(day, 7), BOUNDARY) is True
+    assert window_at_crosses_boundary(with_seconds, at(day, 6), BOUNDARY) is False
+
+
+def test_absolute_window_boundary_formats_and_guards():
+    day = date(2026, 9, 24)
+    # boundary 接受 "HH:MM" 字符串（与模板侧同一契约）。
+    assert window_at_crosses_boundary(at(day, 5), at(day, 7), "06:00") is True
+    # naive 时刻拒绝（绝对窗口必须带时区）。
+    naive = datetime(2026, 9, 24, 5, 0)
+    with pytest.raises(ValueError):
+        window_at_crosses_boundary(naive, at(day, 7), BOUNDARY)
+    with pytest.raises(ValueError):
+        window_at_crosses_boundary(at(day, 5), naive, BOUNDARY)

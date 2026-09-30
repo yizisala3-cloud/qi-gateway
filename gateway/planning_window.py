@@ -33,6 +33,7 @@ __all__ = [
     "resolve_window",
     "resolve_window_on_date",
     "validate_template_window",
+    "window_at_crosses_boundary",
     "window_crosses_boundary",
     "window_feasible",
 ]
@@ -148,6 +149,41 @@ def validate_template_window(template: WindowTemplate, boundary: time | str) -> 
     """
     if template.is_bounded and window_crosses_boundary(template, boundary):
         raise ValueError("template window must not cross the daily refresh boundary")
+
+
+def window_at_crosses_boundary(
+    start_at: datetime, end_at: datetime, boundary: time | str,
+) -> bool:
+    """绝对实例窗口是否跨越每日刷新 boundary（§6.7；端点接触合法）。
+
+    与 :func:`window_crosses_boundary`（模板钟面圈）是同一规则的两种表达：
+    模板窗口以当日时刻表达、在钟面圈上判断跨越；实例窗口（当前实例窗口
+    编辑，批次 6）是绝对时间区间且可含秒，直接逐日取 boundary 的绝对出现
+    判断——任一出现落在 ``[start_at, end_at]`` 开区间内即跨越，端点相等
+    （touch）不跨越。 ``boundary`` 逐日单调递增，越过窗口终点即终止。
+
+    aware 时刻的比较一律在固定 UTC 域进行（见 :func:`_absolute`）；回拨日
+    的重复钟面按 fold 0/1 两个绝对出现枚举（防御性回归，与
+    :func:`_resolve_candidate` 同一处理，正式产品日期域不可达）。
+    """
+    boundary = parse_refresh_boundary(boundary)
+    for value, field in ((start_at, "instance window start"), (end_at, "instance window end")):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(f"{field} must have a timezone")
+    start_abs = _absolute(start_at)
+    end_abs = _absolute(end_at)
+    if end_abs <= start_abs:
+        return False  # 有序性由调用方校验；空 / 逆序区间不构成跨越
+    day = start_at.astimezone(BUSINESS_TIMEZONE).date()
+    while True:
+        naive = datetime.combine(day, boundary, tzinfo=BUSINESS_TIMEZONE)
+        for fold in (0, 1):
+            candidate = _absolute(naive.replace(fold=fold))
+            if start_abs < candidate < end_abs:
+                return True
+        if _absolute(naive) >= end_abs:
+            return False  # 本日 boundary（fold=0）已越过窗口终点：其后只会更晚
+        day += timedelta(days=1)
 
 
 def _absolute(instant: datetime) -> datetime:

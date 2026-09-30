@@ -153,8 +153,28 @@ def _fail_fixed_round_inserts(c, task_id, fail_from=1):
             query.execute = execute
         return query
 
+    original_rpc = c.db.rpc
+
+    def failing_rpc(fn, params=None):
+        # 最终 Debug：生成已收口到 planning_insert_round_occurrence 等 RPC——
+        # 注入同样覆盖 RPC 路径（等价的瞬时 DB 失败）。
+        if fn in ("planning_insert_round_occurrence",
+                  "planning_insert_once_occurrence"):
+            rows = (params or {}).get("p_rows")
+            items = rows if isinstance(rows, list) else ([rows] if rows else [])
+            if any(isinstance(item, dict) and item.get("task_id") == task_id
+                   for item in items):
+                state["attempts"] += 1
+                if state["attempts"] >= fail_from:
+                    raise RuntimeError("simulated transient insert failure")
+        return original_rpc(fn, params)
+
     c.db.table = failing_table
-    return lambda: setattr(c.db, "table", original_table)
+    c.db.rpc = failing_rpc
+    return lambda: (
+        setattr(c.db, "table", original_table),
+        setattr(c.db, "rpc", original_rpc),
+    )
 
 
 def test_dual_death_boundary_fixed_expiration_earlier_wins():

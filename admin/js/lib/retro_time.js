@@ -37,7 +37,9 @@ function fmtDisplay(mode, value) {
     return m ? `${m[1]}年${m[2]}月${m[3]}日` : '';
   }
   if (mode === 'time') {
-    const m = text.match(/^(\d{2}):(\d{2})$/);
+    // 真实 PostgREST time 列形状为 HH:MM:SS（批次 8 HIGH #1）：编辑表单
+    // 会把任务现有窗口原样装进 data-retro-value，必须按同值显示而非空。
+    const m = text.match(/^(\d{2}):(\d{2})(?::\d{2})?$/);
     return m ? `${m[1]}:${m[2]}` : '';
   }
   const m = text.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
@@ -89,7 +91,9 @@ export function openRetroTimePop(anchor, input, apply, mode = 'datetime') {
       ? { year: Number(m[1]), month: Number(m[2]), day: Number(m[3]) }
       : { year: Number(nowM[1]), month: Number(nowM[2]), day: null };
   } else if (mode === 'time') {
-    const m = current.match(/^(\d{2}):(\d{2})$/);
+    // HH:MM:SS 初始值（真实 PostgREST time 列形状）按 HH:MM 打开选择器，
+    // 避免已有窗口在编辑时回退为「当前时刻」初始态（批次 8 HIGH #1）。
+    const m = current.match(/^(\d{2}):(\d{2})(?::\d{2})?$/);
     state = { hour: m ? m[1] : nowM[4], minute: m ? m[2] : nowM[5] };
   } else {
     const m = current.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);

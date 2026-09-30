@@ -12,6 +12,8 @@
 import json
 import re
 import unittest
+
+from gateway import planning
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +29,14 @@ EMOJI_PATTERN = re.compile(
 )
 
 LEGACY_NAV_KEYS = ("memories", "digest", "emotion", "persona", "config", "logs")
+
+
+def _task_form_source(page):
+    """提取 openTaskForm 函数体（openCycleSettings 也有同名 submitBtn 逻辑，
+    全局搜索会误取；表单区契约均以本函数圈定区域）。"""
+    match = re.search(r"  openTaskForm\(task\) \{(.*?)\n  \},", page, re.S)
+    assert match is not None, "openTaskForm must exist"
+    return match.group(1)
 
 
 def _try_import_quickjs():
@@ -248,27 +258,30 @@ class PlanningPageContractTests(unittest.TestCase):
         self.assertIn("min-height: 34px", css)
 
     def test_no_native_date_or_time_inputs_use_retro_picker(self):
-        # BUG-14：原生 time/date 控件统一为复古选择器（lib/retro_time.js）
+        # BUG-14 + 批次 8：原生 time/date 控件统一为复古选择器
         self.assertNotIn('type="time"', self.page)
         self.assertNotIn('type="date"', self.page)
         self.assertIn("lib/retro_time.js", self.page)
         self.assertIn("createRetroTimeField", self.page)
-        # 时间模式 ×5（显式开始/结束、限时截止/范围、周期设置刷新时间），
-        # 日期模式 ×2（筛选日期、单次目标日期）
+        # 时间模式 ×5（可安排时段双端、周期设置刷新时间、boundary 冲突
+        # 调整项双端动态模板），日期模式 ×2（筛选日期、单次目标日期）
         self.assertEqual(self.page.count('data-retro-mode="time"'), 5)
         self.assertEqual(self.page.count('data-retro-mode="date"'), 2)
-        # 隐藏 input 保留原 id 契约，提交逻辑无需改动
         for field_id in (
-            "pf-start-tod", "pf-end-tod", "pf-deadline", "pf-deadline-end",
+            "pf-window-start", "pf-window-end",
             "pf-target-date", "planning-filter-date", "pf-cycle-boundary",
+            "pf-adj-start-${c.task_id}", "pf-adj-end-${c.task_id}",
         ):
             with self.subTest(field=field_id):
-                self.assertIn(f'data-retro-for="{field_id}"', self.page)
+                self.assertIn(f'data-retro-for="{field_id}', self.page)
         # 复古选择器模块的三种模式齐备
         lib = RETRO_TIME.read_text(encoding="utf-8")
         for marker in ("'datetime'", "'date'", "'time'", "openRetroTimePop", "createRetroTimeField"):
             with self.subTest(marker=marker):
                 self.assertIn(marker, lib)
+        # 批次 9 HIGH #1：真实 PostgREST time 列形状 HH:MM:SS——time 模式的
+        # 显示与弹层初始态都必须按同值接受（否则编辑已有窗口回退为空/当前时刻）
+        self.assertIn(r"(\d{2}):(\d{2})(?::\d{2})?", lib)
 
     def test_detail_terms_are_plain_language(self):
         # BUG-15：「排列标签」→「当前状态」；生成游标 / 下次到期降为 muted 小字
@@ -295,11 +308,23 @@ class PlanningPageContractTests(unittest.TestCase):
                 self.assertIn(marker, self.page)
         self.assertNotIn("至少填写两部分", self.page)
 
-    def test_edit_time_omits_empty_est_end(self):
-        # 编辑时间结束留空：省略 est_end（不发送 null），后端按有效耗时推导
-        body = "const body = { est_start: new Date(start).toISOString() };\n        if (end) body.est_end = new Date(end).toISOString();"
-        self.assertIn(body, self.page)
-        self.assertNotIn("est_end: end ? new Date(end).toISOString() : null", self.page)
+    def test_adjust_window_sends_both_ends_with_clear_semantics(self):
+        # 批次 8：详情栏「编辑时间」→「调整时段」——编辑当前实例冻结窗口
+        #（最早开始 / 最晚完成），双端显式提交（null = 清除该端）；
+        # 422/409 门控拒绝在字段附近中文呈现且保持可继续编辑
+        for marker in (
+            "title: '调整时段',",
+            "window_start_at: start ? new Date(start).toISOString() : null,",
+            "window_end_at: end ? new Date(end).toISOString() : null,",
+            "pf-adj-error",
+            "这一轮已带时段约束：两端都清空会取消既有约束，后端会拒绝；请保留至少一端。",
+            "把时段收窄到恰好容纳预计耗时，就会把这条待办钉在该时间",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.page)
+        # 旧 est 手动编辑入口退役
+        self.assertNotIn("title: '编辑预估时间',", self.page)
+        self.assertNotIn("planning-edit-start", self.page)
 
     def test_hollow_task_hides_early_complete_button(self):
         # 中空待办提前完成必然 409：按任务形态隐藏不适用入口
@@ -310,21 +335,141 @@ class PlanningPageContractTests(unittest.TestCase):
         self.assertIn("this.board?.recompute?.enabled === false", self.page)
         self.assertIn("自动重算已关闭", self.page)
 
-    def test_task_form_sends_explicit_clear_values(self):
-        # 清除字段：编辑模式显式发送 null/false 清除值，不再「不发送=没清除」；
-        # 显式结束时间单独清除同样显式发送（est_end_tod: null 为后端既有契约）
+    def test_task_form_sends_window_clear_values(self):
+        # 批次 8：可安排时段取代显式起止 / 限时 / 固定开关。编辑模式显式
+        # 发送双端清除值（null = 清除该端，不发送=没清除）；创建模式只
+        # 提交已填端（四种窗口组合都可表达、不强制成对填写）。
         for marker in (
-            "body.is_fixed = root.querySelector('#pf-fixed').checked;",
-            "body.deadline_tod = deadline || null;",
-            "body.deadline_end_tod = deadlineEnd || null;",
-            "body.alarm_start = root.querySelector('#pf-alarm-start').checked;",
-            "body.alarm_end = root.querySelector('#pf-alarm-end').checked;",
-            "body.timer_minutes = timer || null;",
-            "body.time_mode = 'duration';",
-            "body.est_end_tod = endTod || null;",
+            "body.window_start_tod = windowStart || null;",
+            "body.window_end_tod = windowEnd || null;",
+            "if (windowStart) body.window_start_tod = windowStart;",
+            "if (windowEnd) body.window_end_tod = windowEnd;",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.page)
+
+    def _task_form_source(self):
+        match = re.search(r"  openTaskForm\(task\) \{(.*?)\n  \},", self.page, re.S)
+        self.assertIsNotNone(match, "openTaskForm must exist")
+        return match.group(1)
+
+    def test_task_form_stops_submitting_legacy_fields(self):
+        # C13：前端停止提交 est_start_tod / est_end_tod / deadline_tod /
+        # deadline_end_tod / 任务级 is_fixed / time_mode 切换；闹钟/计时器
+        # 移出新建表单（详情栏承载，能力不丢）
+        form = self._task_form_source()
+        for legacy in (
+            "est_start_tod", "est_end_tod", "deadline_tod", "deadline_end_tod",
+            "pf-fixed", "is_fixed", "time_mode", "pf-alarm-start", "pf-alarm-end",
+            "pf-timer", "alarm_start", "timer_minutes",
+        ):
+            with self.subTest(legacy=legacy):
+                self.assertNotIn(legacy, form)
+
+    def test_task_form_window_four_combos_and_hint(self):
+        # C2：四种窗口组合 + 语义提示（在时段内寻找连续空闲块，不是整段
+        # 占满）；两个选择器互相独立、不强制成对填写
+        form = self._task_form_source()
+        for marker in (
+            "可安排时段（可选）", "最早开始", "最晚完成",
+            "系统在时段内寻找能完整容纳耗时的连续空闲块", "两端可独立留空",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, form)
+
+    def test_task_form_inline_chinese_errors(self):
+        # C3：保存失败在字段附近以中文呈现（时段区 / 目标日期区），保留
+        # user 已填写内容，不误报为必填错误
+        form = self._task_form_source()
+        for marker in (
+            "pf-window-error", "pf-once-error", "errorBlock(esc(message))",
+            "message.includes('目标日期')", "message.includes('单次待办已生成')",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, form)
+
+    def test_once_generated_locks_task_identity_ui(self):
+        # C4 / §28.3：已生成 once 的任务日期与未来窗口模板禁用并提示走
+        # 当前实例调整（「调整时段」）；后端 400 仍是权威兜底。
+        # 批次 9 UI #1 修复：锁定判定以后端 has_generated_occurrence 为权威
+        # （不依赖 occurrences 列表加载状态）；复古选择器 input + 按钮
+        # 一起禁用（只禁 input 拦不住按钮弹层改值）；提示挂在
+        # [data-type-block="once"]；提交侧兜底强制回传任务现值。
+        form = self._task_form_source()
+        for marker in (
+            "onceLocked",
+            "task.has_generated_occurrence",
+            "o.task_id === task.id",
+            "该单次待办已生成当前实例",
+            "调整时段",
+            "input.disabled = true;",
+            "button.disabled = true;",
+            '[data-type-block="once"]',
+            "body.target_date = task.target_date ?? null;",
+            "body.window_start_tod = task.window_start_tod ?? null;",
+            "body.window_end_tod = task.window_end_tod ?? null;",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, form)
+
+    def test_boundary_adjustments_keep_merged_state(self):
+        # 批次 9 UI #2 修复：多项冲突逐个修正时，已修正者从下一次 dry-run
+        # 响应消失、重绘移除其 DOM 行——调整必须留在稳定 task_id 集合中，
+        # 最终 submit 携带全部调整（不能只剩最后一个）。
+        for marker in (
+            "mergeBoundaryAdjustments(adjustmentsState, collected)",
+            "rememberedAdjustment(adjustmentsState, taskId)",
+            "const remembered = (taskId) =>",
+            "(prev && prev.window_start_tod) || c.window_start_tod",
+            "(prev && prev.window_end_tod) || c.window_end_tod",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.page)
+
+    def test_cycle_settings_two_phase_boundary_flow(self):
+        # C12 / §5.2.2：boundary 修改先 dry-run（零写入）→ 冲突在同一弹窗
+        # 内列出并就地调整（校验按新 boundary）→ 一次原子保存（携带
+        # task_adjustments）；下一周期生效提示；取消 = 不点保存即零写入
+        for marker in (
+            "dry_run: true",
+            "task_adjustments: collectAdjustments()",
+            "task_adjustments: adjustments",
+            "showConflictList",
+            "跨越新刷新时间",
+            "新的刷新时间从下一规划周期开始生效，当前周期保持不变",
+            "pf-boundary-conflicts",
+            "pf-cycle-error",
+            "pf-adj-start-${c.task_id}",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.page)
+
+    def test_manual_recompute_shows_conflict_list(self):
+        # C6/C7：手动重算冲突以弹窗呈现（待办 / 约束 / 原因三要素）+ 更新数量反馈
+        for marker in (
+            "showConflictsModal",
+            "排程冲突",
+            "本轮重算整体未保存",
+            "已重新计算，更新了 ${result.updated} 项待办时间",
+            "esc(c.reason)",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.page)
+
+    def test_window_and_conflict_display_semantics(self):
+        # C7：user 窗口与 est 排程结果分开呈现；冲突徽章 + 详情原因；
+        # 限时徽章随判定源退役（存量行保留兼容 kv 展示）
+        for marker in (
+            "windowParts.push(`不早于 ${fmtClock(occ.window_start_at)}`);",
+            "windowParts.push(`最晚完成 ${fmtClock(occ.window_end_at)}`);",
+            "this.conflictOccIds?.has(occ.id)",
+            "this.conflictById?.get(occ.id)",
+            '<span class="k">可安排时段</span>',
+            "task.window_start_tod || task.window_end_tod",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.page)
+        self.assertNotIn("if (occ.is_limited) badges.push(tag('限时', 'red'));", self.page)
 
     def test_poll_does_not_overwrite_unsaved_detail_input(self):
         # 30 秒轮询：详情栏有未保存输入时跳过重绘，不覆盖用户正在编辑的内容
@@ -423,12 +568,13 @@ class PlanningNavigationContractTests(unittest.TestCase):
         # disabled（按钮聚焦后按 Enter/空格仍触发 click）。两阶段语义：
         # 提交/API 阶段失败 → 解锁可重试；服务器保存成功 → committed 终态，
         # 此后 toast/close/loadAll 后处理失败不得解锁、不得误报「保存失败」。
+        form = _task_form_source(self.page)
         match = re.search(
             r"const submitBtn = root\.querySelector\('\[data-ok\]'\);\s*"
             r"let submitting = false;\s*"
             r"let committed = false;\s*"
             r"submitBtn\.onclick = async \(\) => \{(.*?)\n    \};",
-            self.page, re.S)
+            form, re.S)
         self.assertIsNotNone(match, "task form submit handler must hold a submitting lock")
         block = match.group(1)
         for marker in (
@@ -478,7 +624,10 @@ class PlanningNavigationContractTests(unittest.TestCase):
         quickjs = _try_import_quickjs()
         if quickjs is None:
             self.skipTest("quickjs is not installed")
-        handler = re.search(r"submitBtn\.onclick = (async \(\) => \{.*?\n    \});", self.page, re.S).group(1)
+        # 提交 handler 必须取自 openTaskForm 块内（openCycleSettings 也有
+        # 同名 submitBtn.onclick，全局搜索会误取）
+        form = _task_form_source(self.page)
+        handler = re.search(r"submitBtn\.onclick = (async \(\) => \{.*?\n    \});", form, re.S).group(1)
         openform = re.search(r"  openTaskForm\(task\) \{(.*?)\n  \},", self.page, re.S)
         self.assertIsNotNone(openform, "openTaskForm not found in planning.js")
         harness = """
@@ -508,7 +657,11 @@ class PlanningNavigationContractTests(unittest.TestCase):
                   if (s.failClose) throw new Error('close boom');
                   s.closed += 1;
                 };
-                const stub = { value: '', checked: false };
+                const errorBlock = (msg) => '<err>' + msg + '</err>';
+                const esc = (v) => String(v == null ? '' : v);
+                const stub = { value: '', checked: false, disabled: false,
+                               hidden: true, innerHTML: '',
+                               scrollIntoView: () => {} };
                 const root = {
                   querySelector: (sel) => {
                     if (s.throwSel === sel) throw new Error('dom boom');
@@ -672,7 +825,8 @@ class PlanningNavigationContractTests(unittest.TestCase):
                 const TASK_TYPE_LABELS = { daily: '每日', weekly: '每周', monthly: '每月',
                                            interval: '间歇', once: '单次' };
                 const WEEKDAY_NAMES = ['一', '二', '三', '四', '五', '六', '日'];
-                const self2 = { initRetroFields: () => {}, loadAll: async () => {} };
+                const self2 = { initRetroFields: () => {}, loadAll: async () => {},
+                                occurrences: [] };
                 const openForm = __OPENFORM_FACTORY__(modal, esc, icon, TASK_TYPES,
                                                      TASK_TYPE_LABELS, WEEKDAY_NAMES, gw, toast);
                 openForm.call(self2, {});
@@ -777,6 +931,102 @@ class PlanningNavigationContractTests(unittest.TestCase):
         self.assertEqual(out["g_form2"]["closedForms"], 2)
         self.assertTrue(out["g_form2"]["identicalPayload"],
                         "second identical create must send an identical payload")
+
+
+class PlanningPayloadBackendAcceptanceTests(unittest.TestCase):
+    """C14 桥接验证：前端实际发出的 payload 被当前后端接受。
+
+    前端契约只证明「发什么」；本类用同一份 payload 驱动真实后端入口
+    （create_task / update_task / patch_occurrence），证明批次 3/6/7 的
+    后端白名单与校验按预期接受或拒绝。
+    """
+
+    def _context(self):
+        from test_planning_phase1b import Context
+        return Context()
+
+    def test_create_four_window_combos_are_accepted(self):
+        from test_planning_phase1b import at
+        # 无窗口
+        with self._context() as c:
+            task = c.create("daily", at(24, 10), estimated_minutes=30)
+            row = c.db.rows["planning_task"][0]
+            assert row.get("window_start_tod") is None and row.get("window_end_tod") is None
+        # 只填最早开始
+        with self._context() as c:
+            c.create("daily", at(24, 10), estimated_minutes=30,
+                     window_start_tod="09:00")
+            row = c.db.rows["planning_task"][0]
+            assert row.get("window_start_tod") == "09:00" and row.get("window_end_tod") is None
+        # 只填最晚完成
+        with self._context() as c:
+            c.create("daily", at(24, 10), estimated_minutes=30,
+                     window_end_tod="18:00")
+            row = c.db.rows["planning_task"][0]
+            assert row.get("window_start_tod") is None and row.get("window_end_tod") == "18:00"
+        # 两端都填（30 分钟 + 09:00–12:00 = 系统在窗口内寻找连续 30 分钟）
+        with self._context() as c:
+            c.create("daily", at(24, 10), estimated_minutes=30,
+                     window_start_tod="09:00", window_end_tod="12:00")
+            row = c.db.rows["planning_task"][0]
+            assert (row.get("window_start_tod"), row.get("window_end_tod")) == ("09:00", "12:00")
+
+    def test_create_30min_window_schedules_inside_window(self):
+        from test_planning_phase1b import at
+        with self._context() as c:
+            # 08:00 创建、窗口 09:00–12:00：est = 窗口起点的连续 30 分钟
+            #（09:00–09:30），绝不是占满 09:00–12:00 整段
+            c.create("daily", at(24, 8), estimated_minutes=30,
+                     window_start_tod="09:00", window_end_tod="12:00")
+            occ = c.rows[0]
+            assert occ["window_start_at"].endswith("T09:00:00+08:00")
+            assert occ["window_end_at"].endswith("T12:00:00+08:00")
+            assert occ["est_start"] == occ["window_start_at"]
+            assert occ["est_end"] == occ["window_start_at"].replace("T09:00", "T09:30")
+
+    def test_edit_template_patch_with_window_fields_is_accepted(self):
+        from test_planning_phase1b import at
+        with self._context() as c:
+            task = c.create("daily", at(24, 10), estimated_minutes=30)
+            planning.update_task(
+                task["id"],
+                {"window_start_tod": "10:00", "window_end_tod": None},
+                at(24, 11))
+            row = c.db.rows["planning_task"][0]
+            assert (row.get("window_start_tod"), row.get("window_end_tod")) == ("10:00", None)
+
+    def test_current_occurrence_window_edit_is_accepted(self):
+        from test_planning_phase1b import at
+        with self._context() as c:
+            c.create("daily", at(24, 10), estimated_minutes=30)
+            occ = c.rows[0]
+            planning.patch_occurrence(
+                occ["id"],
+                {"window_start_at": at(24, 15).isoformat(),
+                 "window_end_at": at(24, 19).isoformat()},
+                at(24, 11))
+            assert occ["window_start_at"] == at(24, 15).isoformat()
+            assert occ["window_end_at"] == at(24, 19).isoformat()
+
+    def test_backend_rejects_legacy_fields_frontend_no_longer_sends(self):
+        from gateway import planning as planning_module
+        from test_planning_phase1b import at
+        with self._context() as c:
+            task = c.create("daily", at(24, 10), estimated_minutes=30)
+            for legacy in (
+                {"est_start_tod": "09:00"}, {"est_end_tod": "18:00"},
+                {"deadline_tod": "20:00"}, {"deadline_end_tod": "21:00"},
+                {"is_fixed": True},
+            ):
+                with self.assertRaises(planning_module.PlanningError) as caught:
+                    planning_module.update_task(task["id"], legacy, at(24, 11))
+                assert caught.exception.status_code == 400
+            with self.assertRaises(planning_module.PlanningError) as caught:
+                planning_module.create_task(
+                    {"content": "x", "task_type": "daily",
+                     "estimated_minutes": 30, "est_start_tod": "09:00"},
+                    at(24, 10))
+            assert caught.exception.status_code == 400
 
 
 class PlanningAudioAssetTests(unittest.TestCase):

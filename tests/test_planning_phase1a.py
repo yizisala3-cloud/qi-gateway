@@ -1,6 +1,7 @@
 """Phase 1A invariants, independent of legacy generation and scheduler tests."""
 
 import unittest
+import contextlib
 import re
 import sqlite3
 from importlib.util import find_spec
@@ -260,8 +261,12 @@ class PlanningDomainTests(unittest.TestCase):
 
 
 class PlanningBoundaryApiTests(unittest.TestCase):
-    def test_boundary_endpoint_requires_token_and_persists_changed_cycle(self):
-        stored = {}
+    """批次 7 起 boundary 保存需要读取启用中任务做全量校验：本类统一
+    patch 一个空任务库的 fake client（任务级校验语义由批次 7 定向测试
+    test_planning_cycle_boundary.py 覆盖）。"""
+
+    def _settings(self, stored):
+        """返回 (contextmanager, load, save)：app_settings 存储与空任务库。"""
 
         def load(key):
             return stored.get(key)
@@ -270,9 +275,27 @@ class PlanningBoundaryApiTests(unittest.TestCase):
             stored[key] = value
             return True
 
-        with mock.patch.object(cfg, "GATEWAY_TOKEN", "phase1a-test"), \
-             mock.patch.object(planning.db, "load_app_setting", load), \
-             mock.patch.object(planning.db, "save_app_setting", save):
+        @contextlib.contextmanager
+        def ctx():
+            tokens = [
+                mock.patch.object(planning, "get_client", return_value=_Database()),
+                mock.patch.object(planning.db, "load_app_setting", load),
+                mock.patch.object(planning.db, "save_app_setting", save),
+            ]
+            for token in tokens:
+                token.start()
+            try:
+                yield
+            finally:
+                for token in reversed(tokens):
+                    token.stop()
+
+        return ctx(), load, save
+
+    def test_boundary_endpoint_requires_token_and_persists_changed_cycle(self):
+        stored = {}
+        settings, _load, _save = self._settings(stored)
+        with mock.patch.object(cfg, "GATEWAY_TOKEN", "phase1a-test"), settings:
             client = TestClient(Starlette(routes=list(planning_api_routes)))
             self.assertEqual(client.get("/admin/api/planning/cycle").status_code, 401)
             headers = {"Authorization": "Bearer phase1a-test"}
@@ -295,16 +318,8 @@ class PlanningBoundaryApiTests(unittest.TestCase):
         # 边界继续，过渡记录等待 9/25 09:30 生效，而不是立即重排当天。
         instant = datetime(2026, 9, 23, 22, 0, tzinfo=UTC)
         stored = {}
-
-        def load(key):
-            return stored.get(key)
-
-        def save(key, value):
-            stored[key] = value
-            return True
-
-        with mock.patch.object(planning.db, "load_app_setting", load), \
-             mock.patch.object(planning.db, "save_app_setting", save):
+        settings, _load, _save = self._settings(stored)
+        with settings:
             self.assertEqual(planning.get_cycle_settings(instant)["cycle_key"], "2026-09-24")
             changed = planning.set_cycle_settings({"refresh_boundary_time": "09:30"}, instant)
             self.assertEqual(changed["cycle_key"], "2026-09-24")
@@ -339,8 +354,8 @@ class PlanningBoundaryApiTests(unittest.TestCase):
             return True
 
         instant = datetime(2026, 9, 25, 12, tzinfo=BEIJING)
-        with mock.patch.object(planning.db, "load_app_setting", load), \
-             mock.patch.object(planning.db, "save_app_setting", save):
+        settings, _load, _save = self._settings(stored)
+        with settings:
             pending = planning.get_cycle_settings(instant)["pending_boundary"]
             self.assertEqual(pending["previous_time"], "06:00")
             changed = planning.set_cycle_settings({"refresh_boundary_time": "06:00"}, instant)
@@ -356,22 +371,19 @@ class PlanningBoundaryApiTests(unittest.TestCase):
             self.assertEqual(state["absorbed"], [])
 
     def test_boundary_state_write_failure_leaves_no_partial_commit(self):
-        # HIGH #3：边界修改是单 key 原子写入；写入失败时整体保持修改前状态。
+        # HIGH #3：边界修改是单事务原子保存（批次 7 经 RPC）；状态写入失败
+        # 时整体保持修改前状态（含关联任务窗口模板零更新）。
         original = {
             planning.PLANNING_BOUNDARY_STATE_KEY: {
                 "boundary": "06:00", "transition": None, "absorbed": [],
             },
         }
-
-        def load(key):
-            return original.get(key)
-
-        def save(key, value):
-            return False  # 真实 save_app_setting 失败时返回 falsy，不抛异常
-
+        settings, _load, _save = self._settings(original)
+        # 真实 save_app_setting 失败时返回 falsy，不抛异常
+        failing_save = mock.patch.object(
+            planning.db, "save_app_setting", lambda key, value: False)
         instant = datetime(2026, 9, 25, 7, tzinfo=BEIJING)
-        with mock.patch.object(planning.db, "load_app_setting", load), \
-             mock.patch.object(planning.db, "save_app_setting", save):
+        with settings, failing_save:
             with self.assertRaises(planning.PlanningError) as error:
                 planning.set_cycle_settings({"refresh_boundary_time": "08:00"}, instant)
             self.assertEqual(error.exception.status_code, 503)
@@ -382,16 +394,8 @@ class PlanningBoundaryApiTests(unittest.TestCase):
     def test_transition_absorbed_cycles_are_registered_and_persist(self):
         # 08:00 → 06:00 吸收 9/25；过渡结束后登记仍然生效，不得补生成该周期。
         stored = {}
-
-        def load(key):
-            return stored.get(key)
-
-        def save(key, value):
-            stored[key] = value
-            return True
-
-        with mock.patch.object(planning.db, "load_app_setting", load), \
-             mock.patch.object(planning.db, "save_app_setting", save):
+        settings, _load, _save = self._settings(stored)
+        with settings:
             planning.set_cycle_settings(
                 {"refresh_boundary_time": "06:00"},
                 datetime(2026, 9, 23, 7, tzinfo=BEIJING),
@@ -556,6 +560,10 @@ class _Query:
         self.filters.append((key, set(values)))
         return self
 
+    def is_(self, key, value):
+        self.filters.append((key, ("is", value)))
+        return self
+
     def gte(self, key, value):
         self.filters.append((key, ("gte", value)))
         return self
@@ -583,15 +591,36 @@ class _Query:
         self.action = "delete"
         return self
 
-    def upsert(self, value, ignore_duplicates=False):
+    def upsert(self, value, ignore_duplicates=False, on_conflict=None):
         self.action = "upsert"
-        self.payload = dict(value)
+        # 批次 6 一轮 Review BLOCKER 3：多行 upsert 模拟单条
+        # INSERT .. ON CONFLICT (id) DO UPDATE 的语句级原子语义——
+        # 要么全部行应用、要么（异常注入时）全部不应用。
+        self.payload = [dict(item) for item in value] if isinstance(value, list) else dict(value)
         self.ignore_duplicates = ignore_duplicates
+        self.on_conflict = on_conflict
         return self
 
     def execute(self):
         rows = self.db.rows[self.name]
         if self.action == "upsert":
+            if isinstance(self.payload, list):
+                self.db.writes.append((self.name, {"__upsert_rows__": len(self.payload)}))
+                updated = []
+                by_id = {row.get("id"): row for row in rows}
+                for item in self.payload:
+                    target = by_id.get(item.get("id"))
+                    if target is not None:
+                        target.update(item)
+                        updated.append(dict(target))
+                    elif self.ignore_duplicates:
+                        continue
+                    else:
+                        new_row = dict(item)
+                        new_row.setdefault("id", self.db.next_id(self.name))
+                        rows.append(new_row)
+                        updated.append(dict(new_row))
+                return SimpleNamespace(data=updated)
             key = self.payload.get("id")
             matched = [row for row in rows if row.get("id") == key]
             if matched:
@@ -624,6 +653,8 @@ class _Query:
                     match = actual is not None and actual >= value[1]
                 elif isinstance(value, tuple) and value[0] == "lt":
                     match = actual is not None and actual < value[1]
+                elif isinstance(value, tuple) and value[0] == "is":
+                    match = (actual is None) == (value[1] is None)
                 else:
                     match = actual == value
                 if not match:
@@ -641,6 +672,385 @@ class _Query:
             for row in matched:
                 rows.remove(row)
         return SimpleNamespace(data=[dict(row) for row in matched])
+
+
+# 批次 6 二轮：planning_patch_occurrence_round（迁移 20260928020000）的 fake
+# 仿真——白名单 / 同轮身份 / 逐行各自补丁 / 键缺省保持现值 / 锁内生命周期
+# 二次校验 / 窗口一致性。fake 只服务行为测试；原子性权威证明由 pgserver
+# 真 PostgreSQL 套件提供。
+ROUND_PATCH_TARGET_FIELDS = frozenset({
+    "window_start_at", "window_end_at", "est_start", "est_end", "nominal_start",
+    "estimated_time_source", "fixed_source", "schedule_managed", "is_fixed",
+    "partial_note", "actual_start", "actual_end", "actual_minutes",
+    "status", "closed_at", "handled_at", "partial_at",
+    "display_cycle_date", "display_reason", "updated_at",
+})
+ROUND_PATCH_SIBLING_FIELDS = frozenset({
+    "window_start_at", "window_end_at", "est_start", "est_end", "nominal_start",
+    "estimated_time_source", "fixed_source", "schedule_managed", "is_fixed",
+    "display_cycle_date", "display_reason", "updated_at",
+})
+
+
+def emulate_planning_round_patch(rows, params):
+    """按迁移函数语义把同轮两行补丁应用到内存行；违规抛 RuntimeError。"""
+    target_patch = params.get("p_target_patch") or {}
+    sibling_patch = params.get("p_sibling_patch") or {}
+    if set(target_patch) - ROUND_PATCH_TARGET_FIELDS:
+        raise RuntimeError(
+            "planning_patch_occurrence_round: target patch contains unsupported field")
+    if set(sibling_patch) - ROUND_PATCH_SIBLING_FIELDS:
+        raise RuntimeError(
+            "planning_patch_occurrence_round: sibling patch contains unsupported field")
+    if "status" in target_patch and target_patch["status"] not in (
+            "pending", "in_progress", "deferred", "partial"):
+        raise RuntimeError(
+            "planning_patch_occurrence_round: only open statuses can be written")
+    target = next((r for r in rows if r.get("id") == params.get("p_target_id")), None)
+    sibling = next((r for r in rows if r.get("id") == params.get("p_sibling_id")), None)
+    if target is None or sibling is None:
+        raise RuntimeError("planning_patch_occurrence_round: occurrence rows not found")
+    if (target.get("task_id") != sibling.get("task_id")
+            or target.get("round_key") != sibling.get("round_key")
+            or target.get("phase_group") != sibling.get("phase_group")
+            or not target.get("phase") or not sibling.get("phase")
+            or target.get("phase") == sibling.get("phase")):
+        raise RuntimeError(
+            "planning_patch_occurrence_round: rows are not a hollow start/end pair")
+    # expected snapshot 复核（最终验收修复问题 3）：重算输入漂移 → 拒绝
+    if params.get("p_expected") is not None:
+        for e in params["p_expected"]:
+            row = next((r for r in rows if r.get("id") == e.get("id")), None)
+            if row is None:
+                raise RuntimeError(
+                    "planning_patch_occurrence_round: schedule inputs drifted")
+            for key, value in e.items():
+                if key == "id":
+                    continue
+                if row.get(key) != value:
+                    raise RuntimeError(
+                        "planning_patch_occurrence_round: schedule inputs drifted "
+                        "(stale recompute result)")
+    # 锁内生命周期二次校验（最终修复问题 1；问题 5 收紧）：窗口字段永远
+    # 严格门（status 不能降低保护）；纯预估编辑严格门；仅不触及窗口的
+    # 开放状态流转（延后等）用宽松门。
+    window_touched = any(key in target_patch or key in sibling_patch
+                         for key in ("window_start_at", "window_end_at"))
+    if window_touched or "status" not in target_patch:
+        gated = any(
+            row.get("status") not in ("pending", "deferred")
+            or any(row.get(field) is not None for field in (
+                "actual_start", "actual_end", "partial_at", "handled_at", "closed_at"))
+            for row in (target, sibling))
+    else:
+        gated = any(
+            row.get("status") not in ("pending", "in_progress", "deferred", "partial")
+            or row.get("closed_at") is not None or row.get("handled_at") is not None
+            for row in (target, sibling))
+    if gated:
+        raise RuntimeError(
+            "planning_patch_occurrence_round: round is no longer editable "
+            "(concurrent lifecycle change)")
+    # 窗口一致性（最终修复问题 7）
+    if any(key in target_patch or key in sibling_patch
+           for key in ("window_start_at", "window_end_at")):
+        for key in ("window_start_at", "window_end_at"):
+            expected = target_patch.get(key, target.get(key))
+            sibling_value = sibling_patch.get(key, sibling.get(key))
+            if expected != sibling_value:
+                raise RuntimeError(
+                    "planning_patch_occurrence_round: hollow phases disagree on window")
+    for row, patch in ((target, target_patch), (sibling, sibling_patch)):
+        for key, value in patch.items():
+            row[key] = value
+
+
+# 批次 6 最终修复（问题 3）：once 身份编辑 / 生成的任务行锁守护 RPC 仿真。
+ONCE_TASK_PATCH_FIELDS = frozenset({
+    "content", "task_type", "interval_days", "weekdays", "month_days",
+    "target_date", "refresh_mode", "refresh_anchor_at", "refresh_enabled",
+    "estimated_minutes", "window_start_tod", "window_end_tod",
+    "alarm_start", "alarm_end", "timer_minutes", "is_active",
+    "is_hollow", "hollow_start_content", "hollow_start_minutes",
+    "hollow_wait_minutes", "hollow_wait_note", "hollow_end_content",
+    "hollow_end_minutes", "time_mode", "est_start_tod", "est_end_tod",
+    "is_fixed", "refresh_generated_through", "last_handled_at",
+    "refresh_next_due_at", "updated_at",
+})
+_ONCE_LOCKED_MSG = ("planning_update_once_task_guarded: task missing or "
+                    "once identity locked: occurrence exists")
+
+
+def emulate_planning_once_task_guarded(task_rows, occ_rows, params):
+    """锁内复核 once 无实例并原子保存任务补丁；违规抛 RuntimeError。"""
+    patch = params.get("p_patch") or {}
+    if set(patch) - ONCE_TASK_PATCH_FIELDS:
+        raise RuntimeError(
+            "planning_update_once_task_guarded: patch contains unsupported field")
+    task = next((r for r in task_rows if r.get("id") == params.get("p_task_id")), None)
+    if task is None or any(o.get("task_id") == task["id"] for o in occ_rows):
+        raise RuntimeError(_ONCE_LOCKED_MSG)
+    for key, value in patch.items():
+        task[key] = value
+
+
+ONCE_EXPECTED_TASK_FIELDS = frozenset({
+    "content", "estimated_minutes", "time_mode", "is_hollow",
+    "hollow_start_minutes", "hollow_wait_minutes", "hollow_end_minutes"})
+
+
+def emulate_planning_insert_once_occurrence(db, params):
+    """锁内校验 once 定义未漂移后插入预构造行；漂移 / 违规抛 RuntimeError。"""
+    task_rows, occ_rows = db.rows["planning_task"], db.rows["planning_occurrence"]
+    task = next((r for r in task_rows if r.get("id") == params.get("p_task_id")), None)
+    if task is None:
+        raise RuntimeError("planning_insert_once_occurrence: task not found")
+    if (task.get("target_date") != params.get("p_expected_target_date")
+            or task.get("window_start_tod") != params.get("p_expected_window_start_tod")
+            or task.get("window_end_tod") != params.get("p_expected_window_end_tod")):
+        raise RuntimeError(
+            "planning_insert_once_occurrence: once definition changed during generation")
+    expected_task = params.get("p_expected_task") or {}
+    if set(expected_task) - ONCE_EXPECTED_TASK_FIELDS:
+        raise RuntimeError(
+            "planning_insert_once_occurrence: expected task contains unsupported field")
+    for key, value in expected_task.items():
+        # is_hollow 在真实表为 NOT NULL DEFAULT false；fake 行缺键得 None，
+        # 与 False 同语义（与 real RPC 的 boolean 比较一致）。
+        actual = bool(task.get(key)) if key == "is_hollow" else task.get(key)
+        if actual != value:
+            raise RuntimeError(
+                "planning_insert_once_occurrence: once definition changed "
+                "during generation")
+    for item in params.get("p_rows") or []:
+        if item.get("status") != "pending" or item.get("source") != "schedule":
+            raise RuntimeError(
+                "planning_insert_once_occurrence: rows must be pending schedule occurrences")
+        # 轮次唯一键（真实库由 planning_occurrence_round_phase_uq 拒绝）
+        for existing in occ_rows:
+            if (existing.get("task_id") == item.get("task_id")
+                    and existing.get("round_key") == item.get("round_key")
+                    and existing.get("phase") == item.get("phase")):
+                raise RuntimeError("planning_occurrence_round_phase_uq")
+        row = dict(item)
+        row.setdefault("id", db.next_id("planning_occurrence"))
+        occ_rows.append(row)
+
+
+ROUND_DISCARD_TARGET_FIELDS = frozenset({
+    "actual_start", "actual_end", "actual_minutes", "updated_at"})
+ROUND_EXPECTED_TASK_FIELDS = frozenset({
+    "task_type", "refresh_mode", "refresh_enabled", "is_active",
+    "request_state", "content", "time_mode", "estimated_minutes",
+    "is_hollow", "hollow_start_minutes", "hollow_wait_minutes",
+    "hollow_end_minutes", "hollow_start_content", "hollow_end_content",
+    "interval_days", "weekdays", "month_days", "target_date",
+    "created_at", "refresh_anchor_at",
+    "last_handled_at", "refresh_next_due_at", "window_start_tod",
+    "window_end_tod",
+})
+
+
+def emulate_planning_insert_round_occurrence(db, params):
+    """非 once 生成锁内复核：active/refresh_enabled/定义漂移/唯一键。"""
+    task_rows, occ_rows = db.rows["planning_task"], db.rows["planning_occurrence"]
+    task = next((r for r in task_rows if r.get("id") == params.get("p_task_id")), None)
+    if task is None:
+        raise RuntimeError("planning_insert_round_occurrence: task not found")
+    if (task.get("is_active", True) is not True
+            or task.get("refresh_enabled", True) is False):
+        raise RuntimeError("planning_insert_round_occurrence: task no longer active")
+    expected = params.get("p_expected_task") or {}
+    if not ROUND_EXPECTED_TASK_FIELDS <= set(expected):
+        raise RuntimeError("planning_insert_round_occurrence: expected task incomplete")
+    for field in ROUND_EXPECTED_TASK_FIELDS:
+        actual = task.get(field)
+        if field == "is_hollow" and actual is not None:
+            actual = bool(actual)
+        if field in ("window_start_tod", "window_end_tod"):
+            actual = str(actual)[:5] if actual is not None else None
+            wanted = str(expected[field])[:5] if expected[field] is not None else None
+        else:
+            wanted = expected[field]
+        if actual != wanted:
+            raise RuntimeError(
+                "planning_insert_round_occurrence: task definition changed during generation")
+    for item in params.get("p_rows") or []:
+        if item.get("content_snapshot") != task.get("content"):
+            raise RuntimeError(
+                "planning_insert_round_occurrence: task definition changed during generation")
+        # planned_minutes 快照与任务定义一致（hollow 阶段行按各自阶段分钟；
+        # 普通行按 estimated_minutes）
+        if item.get("phase"):
+            expected_planned = (
+                task.get("hollow_start_minutes") if item["phase"] == "start"
+                else task.get("hollow_end_minutes"))
+        else:
+            expected_planned = task.get("estimated_minutes")
+        if (item.get("planned_minutes") or None) != (expected_planned or None):
+            raise RuntimeError(
+                "planning_insert_round_occurrence: task definition changed during generation")
+        if item.get("status") != "pending" or item.get("source") != "schedule":
+            raise RuntimeError(
+                "planning_insert_round_occurrence: rows must be pending schedule occurrences")
+        for existing in occ_rows:
+            if (existing.get("task_id") == item.get("task_id")
+                    and existing.get("round_key") == item.get("round_key")
+                    and existing.get("phase") == item.get("phase")):
+                raise RuntimeError("planning_occurrence_round_phase_uq")
+        row = dict(item)
+        row.setdefault("id", db.next_id("planning_occurrence"))
+        occ_rows.append(row)
+
+
+def emulate_planning_discard_task(task_rows, occ_rows, params):
+    """废弃整个任务：锁内关闭全部开放 occurrence + 停用任务（单事务语义）。
+    可选目标行事实补齐（actual 字段白名单）在同一语义内写入。"""
+    task = next((r for r in task_rows if r.get("id") == params.get("p_task_id")), None)
+    if task is None:
+        raise RuntimeError("planning_discard_task: task not found")
+    if not task.get("is_active"):
+        raise RuntimeError("planning_discard_task: task already inactive (concurrent change)")
+    now = params.get("p_now")
+    target_patch = params.get("p_target_patch") or {}
+    if set(target_patch) - ROUND_DISCARD_TARGET_FIELDS:
+        raise RuntimeError(
+            "planning_discard_task: target patch contains unsupported field")
+    if params.get("p_target_id") is not None:
+        target = next((r for r in occ_rows
+                       if r.get("id") == params.get("p_target_id")
+                       and r.get("task_id") == task["id"]), None)
+        if (target is not None and target.get("status") == "pending"
+                and all(target.get(key) is None for key in
+                        ("actual_start", "actual_end", "closed_at", "handled_at"))):
+            target.update(target_patch)
+    for row in occ_rows:
+        if (row.get("task_id") == task["id"]
+                and row.get("status") in ("pending", "in_progress", "deferred", "partial")):
+            row["status"] = "discarded"
+            row["closed_at"] = now
+            row["updated_at"] = now
+    task["is_active"] = False
+
+
+def emulate_planning_request_recompute(state_rows, params):
+    """批次 6 A1：登记重算请求——数据库原子消费身份的 fake 仿真。
+
+    每次调用生成新的 request_token（真库 gen_random_uuid 在函数体内生成，
+    同一 requested_at 的两次登记必然得到不同 token）；fake 用自增整数 +
+    uuid 混合保证可读与唯一。
+    """
+    row = next((r for r in state_rows if r.get("id") == 1), None)
+    if row is None:
+        row = {"id": 1}
+        state_rows.append(row)
+    token = emulate_planning_request_recompute._counter = (
+        getattr(emulate_planning_request_recompute, "_counter", 0) + 1)
+    row["requested_at"] = params.get("p_requested_at")
+    row["reason"] = (params.get("p_reason") or "")[:100]
+    row["request_token"] = f"token-{token}"
+    row["updated_at"] = params.get("p_requested_at")
+    return row["request_token"]
+
+
+def emulate_planning_clear_recompute_mark(state_rows, params):
+    """批次 6 A1：条件清除——只命中 request_token 等值的行（0 行 = 新请求
+    保留给下一轮消费）。token 为 NULL 时不清除（捕获时本无待处理请求）。"""
+    token = params.get("p_request_token")
+    if not token:
+        return 0
+    row = next((r for r in state_rows if r.get("id") == 1), None)
+    if row is not None and row.get("request_token") == token:
+        row["requested_at"] = None
+        row["reason"] = None
+        row["request_token"] = None
+        row["updated_at"] = None
+        return 1
+    return 0
+
+
+def emulate_planning_update_cycle_boundary(db, params):
+    """批次 7：boundary 原子保存 RPC 的 fake 仿真（真库语义由 pgserver 验证）。
+
+    镜像迁移 20260930020000 的单事务语义：状态行 CAS → 调整项校验 →
+    锁内按新 boundary 全量校验启用中模板（调整者用提交值）→ 冲突零写入
+    返回 → 全部通过才一次性提交（任务更新 + 状态写入，任一失败整体
+    不生效——fake 以「先验证后提交」表达数据库事务回滚）。boundary 状态
+    经 planning.db.load_app_setting / save_app_setting（与调用方同一份
+    patched 设置存储）；跨越判断复用批次 1 领域函数（与 SQL 同一规则）。
+    """
+    from gateway.planning_window import WindowTemplate, window_crosses_boundary
+    state_key = planning.PLANNING_BOUNDARY_STATE_KEY
+    current = planning.db.load_app_setting(state_key)
+    if not isinstance(current, dict):
+        current = {"boundary": "06:00", "transition": None, "absorbed": []}
+    expected = params.get("p_expected_state") or {}
+
+    def _transition_identity(t):
+        if not isinstance(t, dict):
+            return ("", "")
+        return (t.get("spanning_key") or "", t.get("change_at") or "")
+
+    cur_t = _transition_identity(current.get("transition"))
+    exp_t = _transition_identity(expected.get("transition"))
+    if ((current.get("boundary") or "06:00") != (expected.get("boundary") or "06:00")
+            or cur_t != exp_t):
+        return {"status": "stale_state"}
+
+    boundary = params.get("p_new_boundary") or "06:00"
+    adjustments = params.get("p_adjustments") or []
+    adj_by_id = {}
+    for item in adjustments:
+        task_id = item["task_id"]
+        if task_id in adj_by_id:
+            raise RuntimeError("planning_update_cycle_boundary: duplicate adjustment task")
+        start, end = item.get("window_start_tod"), item.get("window_end_tod")
+        if start and end and time.fromisoformat(str(start)) == time.fromisoformat(str(end)):
+            raise RuntimeError(
+                "planning_update_cycle_boundary: window start and end must differ")
+        adj_by_id[task_id] = (start, end)
+
+    conflicts = []
+    pending_updates = []
+    for task in db.rows["planning_task"]:
+        if not task.get("is_active"):
+            continue
+        if task["id"] in adj_by_id:
+            start, end = adj_by_id[task["id"]]
+            # 调整项无论形状（双侧 / 单侧 / 清空）都参与同一事务提交
+            pending_updates.append((task, (start, end)))
+        else:
+            start, end = task.get("window_start_tod"), task.get("window_end_tod")
+        if not start or not end:
+            continue  # 无窗口 / 单侧约束不构成区间（§6.7）
+        template = WindowTemplate(
+            start_tod=time.fromisoformat(str(start)) if start else None,
+            end_tod=time.fromisoformat(str(end)) if end else None)
+        if window_crosses_boundary(template, boundary):
+            conflicts.append({
+                "task_id": task["id"], "content": task.get("content"),
+                "window_start_tod": start, "window_end_tod": end,
+            })
+    if conflicts:
+        return {"status": "conflicts", "conflicts": conflicts}
+
+    new_state = {
+        "boundary": boundary,
+        "transition": params.get("p_transition"),
+        "absorbed": params.get("p_absorbed") or [],
+    }
+    # 提交（单事务语义）：状态写入失败 → 抛出且任务更新不落 fake 行；
+    # 状态写入成功 → 任务窗口模板更新一并生效。
+    if not planning.db.save_app_setting(state_key, new_state):
+        raise RuntimeError("planning_update_cycle_boundary: state save failed")
+    updated = 0
+    for task, (start, end) in pending_updates:
+        if (task.get("window_start_tod") or None) != (start or None) or (
+                task.get("window_end_tod") or None) != (end or None):
+            task["window_start_tod"] = start
+            task["window_end_tod"] = end
+            updated += 1
+    return {"status": "ok", "updated_tasks": updated}
 
 
 class _RpcCall:
@@ -678,6 +1088,36 @@ class _RpcCall:
                 row.get("request_absorbed_keys"), expected)
             row["updated_at"] = now
             return SimpleNamespace(data=True)
+        if self.fn == "planning_patch_occurrence_round":
+            emulate_planning_round_patch(self.db.rows["planning_occurrence"], self.params)
+            return SimpleNamespace(data=[])
+        if self.fn == "planning_update_once_task_guarded":
+            emulate_planning_once_task_guarded(
+                self.db.rows["planning_task"], self.db.rows["planning_occurrence"],
+                self.params)
+            return SimpleNamespace(data=[])
+        if self.fn == "planning_insert_once_occurrence":
+            emulate_planning_insert_once_occurrence(self.db, self.params)
+            return SimpleNamespace(data=[])
+        if self.fn == "planning_insert_round_occurrence":
+            emulate_planning_insert_round_occurrence(self.db, self.params)
+            return SimpleNamespace(data=[])
+        if self.fn == "planning_discard_task":
+            emulate_planning_discard_task(
+                self.db.rows["planning_task"], self.db.rows["planning_occurrence"],
+                self.params)
+            return SimpleNamespace(data=[])
+        if self.fn == "planning_request_recompute":
+            emulate_planning_request_recompute(
+                self.db.rows["planning_recompute_state"], self.params)
+            return SimpleNamespace(data=[])
+        if self.fn == "planning_clear_recompute_mark":
+            emulate_planning_clear_recompute_mark(
+                self.db.rows["planning_recompute_state"], self.params)
+            return SimpleNamespace(data=[])
+        if self.fn == "planning_update_cycle_boundary":
+            data = emulate_planning_update_cycle_boundary(self.db, self.params)
+            return SimpleNamespace(data=data)
         if self.fn == "planning_absorb_reschedule_request":
             key = self.params.get("p_request_key")
             if (not row or not key
@@ -694,7 +1134,9 @@ class _RpcCall:
 class _Database:
     def __init__(self):
         self.rows = {"planning_task": [], "planning_occurrence": [],
-                     "planning_recompute_state": [{"id": 1, "requested_at": None, "reason": None}]}
+                     "planning_recompute_state": [
+                         {"id": 1, "requested_at": None, "reason": None,
+                          "request_token": None}]}
         self.counters, self.writes = {}, []
 
     def next_id(self, name):
