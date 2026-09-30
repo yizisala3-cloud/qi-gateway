@@ -1583,8 +1583,11 @@ def list_tasks(include_inactive: bool = True, now: datetime | None = None) -> li
     once_ids = [row["id"] for row in rows if row.get("task_type") == "once"]
     generated: set[int] = set()
     if once_ids:
+        # 过滤链尾不得再接 .select(...)：requirements 锁定的 supabase 2.15.1
+        # 的 postgrest builder 不支持 in_→select 链序（AttributeError，生产
+        # 2026-10-01 smoke 复现）；列裁剪交给 _rows 既有 select("*")，集合有界。
         occ_rows = _rows(
-            client, "planning_occurrence", lambda q: q.in_("task_id", once_ids).select("task_id"))
+            client, "planning_occurrence", lambda q: q.in_("task_id", once_ids))
         generated = {occ["task_id"] for occ in occ_rows}
     return [
         serialize_task({**row, "has_generated_occurrence": row["id"] in generated}, now)

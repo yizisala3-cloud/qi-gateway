@@ -239,3 +239,17 @@ def test_ui1_list_tasks_marks_generated_once():
         tasks = {t["id"]: t for t in planning.list_tasks(now=at(24, 14))}
         # 非 once 任务同样携带字段（once 表单判定只消费 once 行，其它值无副作用）
         assert isinstance(tasks[daily["id"]]["has_generated_occurrence"], bool)
+
+
+# ── 部署兼容守卫：postgrest 过滤链尾不得再接 .select(...) ────────────
+# requirements 锁定的 supabase 2.15.1 的 postgrest builder 不支持
+# in_→select 链序（AttributeError；生产 2026-10-01 smoke 复现，本地开发
+# 环境 2.31.0 可链因此单测无法暴露）。列裁剪交给 _rows 的 select("*")。
+
+def test_query_filter_chain_never_appends_select():
+    import re
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / "gateway" / "planning.py").read_text(
+        encoding="utf-8")
+    leaked = re.findall(r"\.in_\([^)]*\)\s*\.\s*select\(", source)
+    assert leaked == [], f"postgrest in_→select 链序回归（supabase 2.15.1 不兼容）: {leaked}"
