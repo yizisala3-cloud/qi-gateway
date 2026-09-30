@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from .persona import load_persona
-from .memory_search import search_memories, format_memories_for_injection
+from .memory_search import search_memories, format_memories_for_injection, format_event_time
 from . import app_settings
 from . import db
 from . import eventide_bridge
@@ -98,7 +98,11 @@ def build_recent_chat_context(limit: int = 10) -> str:
             content = msg.get("content", "")
             if content:
                 prefix = "叶子" if role == "user" else "栖"
-                lines.append(f"{prefix}: {content[:200]}")
+                # Only rows selected for short-term recall receive their stored
+                # message time. Naive chat_messages timestamps are Beijing time.
+                message_time = format_event_time(msg.get("created_at"))
+                time_label = f"（{message_time} 北京时间）" if message_time else ""
+                lines.append(f"{prefix}{time_label}: {content[:200]}")
 
         return "\n".join(lines)
     except Exception as e:
