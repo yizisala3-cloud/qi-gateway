@@ -448,6 +448,105 @@ ONCE_IDENTITY_LOCKS_MIGRATION = (
     / "20260928030000_planning_once_identity_locks.sql"
 )
 
+DISCARD_LOCK_ORDER_MIGRATION = (
+    Path(__file__).resolve().parents[1]
+    / "supabase"
+    / "migrations"
+    / "20261002020000_planning_discard_task_lock_order.sql"
+)
+
+
+class PlanningDiscardLockOrderMigrationContractTests(unittest.TestCase):
+    """#20（2026-10-02）：删除与中空编辑反向锁序死锁修复迁移契约。
+
+    仅 create or replace 同签名函数（4 参数，无 overload、重放安全）；
+    不新增表列 / 触发器 / 约束 / 数据回填（actual_minutes CHECK 放开仍属
+    20261001010000，本迁移不重复）。核心：语句 1b 之前按稳定 id 序统一
+    获取全部开放行锁；其余语句与 20261001010000 逐字一致。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = DISCARD_LOCK_ORDER_MIGRATION.read_text(encoding="utf-8")
+        cls.folded = cls.sql.casefold()
+
+    def _top_level_statements(self):
+        statements, buf = [], []
+        in_dollar = False
+        for line in self.sql.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("--"):
+                continue  # 头部说明注释不属于语句序列
+            if not in_dollar and stripped.casefold().startswith("create or replace function"):
+                buf.append(stripped)
+                in_dollar = True
+                continue
+            if in_dollar:
+                if stripped == "$$;":
+                    in_dollar = False
+                continue
+            if stripped:
+                buf.append(stripped)
+        return [item.casefold() for item in buf]
+
+    def test_migration_is_atomic_and_replay_safe(self):
+        folded = self.folded
+        self.assertIn("begin;", folded)
+        self.assertIn("commit;", folded)
+        self.assertIn(
+            "create or replace function public.planning_discard_task(", folded)
+
+    def test_same_signature_no_overload(self):
+        folded = self.folded
+        self.assertIn("p_task_id bigint", folded)
+        self.assertIn("p_now timestamptz", folded)
+        self.assertIn("p_target_id bigint default null", folded)
+        self.assertIn("p_target_patch jsonb default null", folded)
+        self.assertNotIn("drop function", folded)
+
+    def test_only_function_replacement_no_schema_changes(self):
+        top = [item for item in self._top_level_statements()
+               if not item.startswith(("begin;", "commit;"))]
+        self.assertEqual(top, [
+            "create or replace function public.planning_discard_task("])
+        for forbidden in (
+            "alter table", "add column", "create trigger", "create table",
+            "create index", "drop constraint", "add constraint", "drop table",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.folded)
+
+    def test_lock_order_statement_before_target_patch(self):
+        # 语句 1a 必须先于语句 1b 的目标行 UPDATE：稳定 id 序统一加锁是
+        # 本修复的唯一新增语句（死锁根因 = 前段 UPDATE 不遵守锁序）。
+        folded = self.folded
+        # 首个 "order by id" 属语句 1a（1a 先于 1b 与 1c 出现）；首个
+        # "update public.planning_occurrence set" 属语句 1b。
+        lock_scan = folded.index("order by id")
+        target_update = folded.index("update public.planning_occurrence set")
+        self.assertLess(lock_scan, target_update)
+        self.assertEqual(folded.count("for update"), 3)  # 任务行 + 1a + 1c
+        # 1a 与 1c 的开放行谓词一致（同一组行、同一锁序）；语句 2 的批量
+        # 关闭沿用同一谓词——三处同源，共 3 次出现。
+        self.assertEqual(folded.count(
+            "status in ('pending', 'in_progress', 'deferred', 'partial')"), 3)
+
+    def test_existing_statements_preserved(self):
+        # 既有语义逐字保留：pending 原守卫、全开放行事实补齐与耗时重算、
+        # 批量关闭、停用与 PC001、round-half-even 分钟契约。
+        folded = self.folded
+        self.assertIn("planning_discard_task: task not found", folded)
+        self.assertIn("target patch contains unsupported field", folded)
+        self.assertIn("and status = 'pending'", folded)
+        self.assertIn("and partial_at is null", folded)
+        self.assertIn("actual_end must not precede actual_start", folded)
+        self.assertIn("planning_discard_task: task already inactive (concurrent change)", folded)
+        self.assertIn("using errcode = 'pc001'", folded)
+        self.assertIn("status in ('pending', 'in_progress', 'deferred', 'partial');", folded)
+        self.assertIn("set status = 'discarded', closed_at = p_now, updated_at = p_now", folded)
+        self.assertIn("set is_active = false, updated_at = p_now", folded)
+        self.assertNotIn("security definer", folded)
+
 ROUND_PATCH_EXPECTED_CONTRACT_MIGRATION = (
     Path(__file__).resolve().parents[1]
     / "supabase"

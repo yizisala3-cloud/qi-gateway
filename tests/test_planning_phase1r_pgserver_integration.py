@@ -3240,6 +3240,200 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
             "select is_active from public.planning_task where id = %s",
             (task_id,))[0][0])
 
+    # -- 清单 #20（2026-10-02）：删除目标行与中空编辑的反向锁序死锁 ──────
+    # 交错编排与存档复现探针一致（审查日志/规划管理-合并前检查-26.10.1.18.23/
+    # 锁顺序死锁复现探针.py）：独立连接持小 id 行锁模拟被暂停的同轮编辑，
+    # 业务删除走真实 Python 路径 + 真实 RPC 在独立连接执行；删除进入预期
+    # 行锁等待后再放行编辑。修复（迁移 20261002020000）要求删除在任何目标
+    # 行写入前按稳定 id 序统一获取开放行锁，与 round patch 的 id 升序锁序
+    # 一致——不再产生 40P01。
+
+    def _wait_for_lock_wait(self, waiter_conn, blocker_conn, timeout=8.0):
+        """轮询 pg_stat_activity 直到 waiter 以 Lock 事件等待 blocker。"""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            rows = self._query(
+                "select wait_event_type, pg_blocking_pids(pid)"
+                " from pg_stat_activity where pid = %s",
+                (waiter_conn.info.backend_pid,))
+            if rows and rows[0][0] == "Lock" \
+                    and blocker_conn.info.backend_pid in rows[0][1]:
+                return
+            time.sleep(0.02)
+        raise AssertionError("delete did not reach the expected row-lock wait")
+
+    def _discard_round_edit_interleave(self, *, target_phase=None,
+                                       no_target_entry=False):
+        """中空 pending 配对 + 真实多连接交错：返回 (first, second, task_id, result)。
+
+        holder 连接持 start（小 id）行锁；deleter 连接执行业务删除
+        （no_target_entry=False 时删除目标 = ``target_phase`` 阶段行，
+        True 时走任务详情无目标入口）；删除进入行锁等待后，holder 连接
+        作为「被暂停的同轮编辑」真实执行 round patch（first, second）并
+        提交。
+        """
+        from gateway import planning
+        first, second = self._hollow_pair()
+        target_id = None if target_phase is None else (
+            first if target_phase == "start" else second)
+        task_id = self._business_fetch("planning_occurrence", first)["task_id"]
+        holder = psycopg.connect(self.server.get_uri(), autocommit=False)
+        deleter = psycopg.connect(self.server.get_uri(), autocommit=True)
+        deleter.execute("set deadlock_timeout = '200ms'")
+        holder.execute("set deadlock_timeout = '2s'")
+        result = {}
+        thread = None
+        try:
+            holder.execute(
+                "select id from public.planning_occurrence where id = %s for update",
+                (first,))
+            client = _LocalDiscardClient(deleter)
+            with contextlib.ExitStack() as stack:
+                self._enter_business_patches(
+                    stack, SimpleNamespace(client=client, conn=deleter))
+
+                def delete():
+                    try:
+                        if no_target_entry:
+                            planning.update_task(
+                                task_id, {"is_active": False},
+                                datetime.fromisoformat("2026-09-24T08:00:00+08:00"))
+                        else:
+                            planning.set_occurrence_status(
+                                target_id, {"status": "discarded"},
+                                datetime.fromisoformat("2026-09-24T08:00:00+08:00"))
+                        result["delete"] = "success"
+                    except planning.PlanningError as exc:
+                        result.update({"delete": exc.code, "http": exc.status_code,
+                                       "sqlstate": getattr(exc.__cause__,
+                                                           "sqlstate", None)})
+                    except Exception as exc:
+                        result["unexpected"] = repr(exc)
+
+                thread = threading.Thread(target=delete)
+                thread.start()
+                # 删除按稳定 id 序先锁 start（小 id）→ 等待 holder。
+                self._wait_for_lock_wait(deleter, holder)
+                # 主事务即被暂停的同轮编辑：持 start 锁后真实执行 round
+                # patch（first, second）→ 提交。
+                window_patch = json.dumps({
+                    "window_start_at": "2026-09-24T09:00:00+08:00",
+                    "window_end_at": "2026-09-24T12:00:00+08:00"})
+                holder.execute(
+                    "select public.planning_patch_occurrence_round"
+                    "(%s, %s, %s::jsonb, %s::jsonb, null)",
+                    (first, second, window_patch, window_patch))
+                holder.commit()
+                result["edit"] = "success"
+                thread.join(timeout=8)
+                self.assertFalse(thread.is_alive(), repr(result))
+            return first, second, task_id, result
+        finally:
+            holder.rollback()
+            holder.close()
+            if thread:
+                thread.join(timeout=8)
+            deleter.close()
+
+    def test_discard_lock_order_no_deadlock_target_higher_id(self):
+        # 探针原场景：删除目标 = 大 id（end）、编辑持小 id（start）——
+        # 修复前语句 1b 先锁 target 形成反向锁序 → 40P01 / 503；修复后
+        # 删除与编辑同序，两操作串行完成、无死锁。
+        first, second, task_id, result = self._discard_round_edit_interleave(
+            target_phase="end")
+        self.assertNotIn("unexpected", result, repr(result))
+        self.assertEqual(result.get("delete"), "success", repr(result))
+        self.assertEqual(result.get("edit"), "success")
+        # 编辑获胜在先、删除按最新事实执行：窗口为编辑值，两阶段关闭，
+        # 任务停用；无半关闭 / 半停用。
+        for occ_id in (first, second):
+            row = self._business_fetch("planning_occurrence", occ_id)
+            self.assertEqual(row["status"], "discarded")
+            self.assertEqual(row["window_start_at"],
+                             "2026-09-24T09:00:00+08:00")
+        self.assertFalse(self._business_fetch("planning_task", task_id)["is_active"])
+
+    def test_discard_lock_order_no_deadlock_target_lower_id(self):
+        # 对照：删除目标 = 小 id（start）——与编辑同序，交错后同样无死锁。
+        first, second, task_id, result = self._discard_round_edit_interleave(
+            target_phase="start")
+        self.assertNotIn("unexpected", result, repr(result))
+        self.assertEqual(result.get("delete"), "success", repr(result))
+        self.assertEqual(result.get("edit"), "success")
+        self.assertFalse(self._business_fetch("planning_task", task_id)["is_active"])
+
+    def test_discard_lock_order_no_deadlock_task_detail_entry(self):
+        # 对照：任务详情入口（update_task is_active=false，无目标 id /
+        # patch）与中空编辑交错——同样无死锁，删除完整落库。
+        first, second, task_id, result = self._discard_round_edit_interleave(
+            no_target_entry=True)
+        self.assertNotIn("unexpected", result, repr(result))
+        self.assertEqual(result.get("delete"), "success", repr(result))
+        self.assertEqual(result.get("edit"), "success")
+        row = self._business_fetch("planning_occurrence", first)
+        self.assertEqual(row["status"], "discarded")
+        self.assertEqual(row["window_start_at"], "2026-09-24T09:00:00+08:00")
+        self.assertFalse(self._business_fetch("planning_task", task_id)["is_active"])
+
+    def test_discard_wins_then_round_edit_rejected_pc001(self):
+        # 反向结果对照：持锁方先释放 → 删除获胜完整落库；其后的同轮编辑
+        # 按既定并发契约 PC001 拒绝（轮已关闭，零写入）。
+        from gateway import planning
+        first, second = self._hollow_pair()
+        task_id = self._business_fetch("planning_occurrence", first)["task_id"]
+        holder = psycopg.connect(self.server.get_uri(), autocommit=False)
+        deleter = psycopg.connect(self.server.get_uri(), autocommit=True)
+        result = {}
+        thread = None
+        try:
+            holder.execute(
+                "select id from public.planning_occurrence where id = %s for update",
+                (first,))
+            client = _LocalDiscardClient(deleter)
+            with contextlib.ExitStack() as stack:
+                self._enter_business_patches(
+                    stack, SimpleNamespace(client=client, conn=deleter))
+
+                def delete():
+                    try:
+                        planning.set_occurrence_status(
+                            second, {"status": "discarded"},
+                            datetime.fromisoformat("2026-09-24T08:00:00+08:00"))
+                        result["delete"] = "success"
+                    except planning.PlanningError as exc:
+                        result.update({"delete": exc.code, "http": exc.status_code})
+
+                thread = threading.Thread(target=delete)
+                thread.start()
+                self._wait_for_lock_wait(deleter, holder)
+                holder.rollback()  # 释放 start 行锁：删除获胜
+                thread.join(timeout=8)
+                self.assertFalse(thread.is_alive(), repr(result))
+            self.assertEqual(result.get("delete"), "success", repr(result))
+            # 删除获胜：事实完整（两阶段关闭、任务停用），后续同轮编辑
+            # 按门控明确拒绝（PC001），窗口保持原值（零写入）。
+            for occ_id in (first, second):
+                row = self._business_fetch("planning_occurrence", occ_id)
+                self.assertEqual(row["status"], "discarded")
+                self.assertIsNone(row["window_start_at"])
+            self.assertFalse(self._business_fetch("planning_task", task_id)["is_active"])
+            self._query_expecting_concurrency_rejection(
+                self.ROUND_PATCH_SQL, (
+                    first, second,
+                    '{"window_start_at": "2026-09-24T09:00:00+08:00",'
+                    ' "window_end_at": "2026-09-24T12:00:00+08:00"}',
+                    '{"window_start_at": "2026-09-24T09:00:00+08:00",'
+                    ' "window_end_at": "2026-09-24T12:00:00+08:00"}',
+                ))
+            self.assertIsNone(self._business_fetch(
+                "planning_occurrence", first)["window_start_at"])
+        finally:
+            holder.rollback()
+            holder.close()
+            if thread:
+                thread.join(timeout=8)
+            deleter.close()
+
     def test_discard_task_rpc_fills_patch_start_when_row_start_missing(self):
         # 第三轮 #1：执行中行 actual_start=NULL、删除请求提供开始 08:00 /
         # 结束 09:00——补入的开始时间必须落库（只把它用于算耗时而落库
