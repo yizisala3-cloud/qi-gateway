@@ -2,3 +2,7 @@
 # quickjs 让前端纯函数模块（admin/js/lib/absorb_display.js）在无 Node 环境
 # 下被测试真实执行；未安装时相关测试明确 skip。
 quickjs>=1.19 ; python_version >= "3.8"
+# postgrest 是 supabase 的传递依赖；RealPostgrestOverlapsSerializationTests
+# 直接构造其内部 SyncFilterRequestBuilder，版本漂移会破坏构造签名
+# （2026-09-26 曾因浮升至新版导致 3 个用例失败），钉住已验证版本。
+postgrest==1.0.2
