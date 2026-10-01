@@ -20,6 +20,8 @@ Opt-in（启动一次性 pgserver 实例，成本较高）：
 被测迁移文件逐字节从磁盘执行；测试绝不触碰任何生产数据库。
 """
 
+import contextlib
+import json
 import os
 import re
 import shutil
@@ -27,8 +29,11 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import date, datetime
 from datetime import time as _time
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATIONS_DIR = ROOT / "supabase" / "migrations"
@@ -259,6 +264,81 @@ insert into public.planning_occurrence (
     '2026-09-24T06:00:00+08:00', '2026-09-24T06:00:00+08:00'
 ) returning id;
 """
+
+
+class _LocalTableWrite:
+    """最小 UPDATE 查询构建器（eq / is_ 条件）→ 本连接真实 SQL，RETURNING *。
+
+    供 start_occurrence 等状态流转在独立连接上真实执行（多连接交错测试）；
+    列名来自 planning 内部固定代码路径，仅测试使用。
+    """
+
+    def __init__(self, conn, table):
+        self._conn = conn
+        self._table = table
+        self._payload = None
+        self._conds = []
+        self._params = []
+
+    def update(self, payload):
+        self._payload = payload
+        return self
+
+    def eq(self, field, value):
+        self._conds.append(f"{field} = %s")
+        self._params.append(value)
+        return self
+
+    def is_(self, field, value):
+        assert value is None
+        self._conds.append(f"{field} is null")
+        return self
+
+    def execute(self):
+        assert self._payload is not None
+        from psycopg.rows import dict_row
+        assignments = ", ".join(f"{field} = %s" for field in self._payload)
+        where = (" where " + " and ".join(self._conds)) if self._conds else ""
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                f"update public.{self._table} set {assignments}{where} returning *",
+                [*self._payload.values(), *self._params])
+            return SimpleNamespace(data=cur.fetchall())
+
+
+class _LocalDiscardClient:
+    """discard / start 业务路径触达的 client 面：rpc() 与 table().update()。
+
+    RPC 与状态 UPDATE 均不替身——在本 client 绑定的连接上真实执行当前
+    迁移链的 SQL。before_rpc 在真实 RPC 执行前注入确定性交错（提交前的
+    并发事实修正）；多连接交错测试经独立连接 + 线程编排。
+    """
+
+    def __init__(self, conn, before_rpc=None):
+        self._conn = conn
+        self.before_rpc = before_rpc
+        self.calls = []
+
+    def rpc(self, name, params):
+        assert name == "planning_discard_task"
+        self.calls.append(dict(params))
+
+        def execute():
+            if self.before_rpc is not None:
+                callback, self.before_rpc = self.before_rpc, None
+                callback()
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "select public.planning_discard_task(%s, %s, %s, %s::jsonb)",
+                    (params["p_task_id"], params["p_now"], params["p_target_id"],
+                     json.dumps(params["p_target_patch"])
+                     if params["p_target_patch"] is not None else None))
+                return SimpleNamespace(data=cur.fetchall())
+
+        return SimpleNamespace(execute=execute)
+
+    def table(self, name):
+        return _LocalTableWrite(self._conn, name)
 
 
 class PlanningInvariantsOnPostgresTests(unittest.TestCase):
@@ -2447,17 +2527,22 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
         )[0][0]
         self._query(
             "select public.planning_discard_task(%s, %s, %s, %s::jsonb)",
-            (task_id, "2026-09-28T11:00:00+08:00", occ_id,
-             '{"actual_end": "2026-09-24T09:30:00+08:00",'
-             ' "actual_minutes": 25, "updated_at": "2026-09-28T11:00:00+08:00"}'),
+            (task_id, "2026-09-24T09:30:00+08:00", occ_id,
+             '{"actual_start": "2026-09-24T08:00:00+08:00",'
+             ' "actual_end": "2026-09-24T09:30:00+08:00",'
+             ' "actual_minutes": 90, "updated_at": "2026-09-24T09:30:00+08:00"}'),
         )
-        # 目标行事实在事务内写入
-        occ_status, occ_actual_end, occ_minutes = self._query(
-            "select status, actual_end, actual_minutes from public.planning_occurrence"
+        # 目标行事实在事务内写入（pending 分支按补丁原样应用；补丁携带的
+        # 耗时由 Python 按同一请求的起止算出、自洽——不再手填与起止无关
+        # 的耗时值）
+        occ_status, occ_actual_start, occ_actual_end, occ_minutes = self._query(
+            "select status, actual_start, actual_end, actual_minutes"
+            " from public.planning_occurrence"
             " where id = %s", (occ_id,))[0]
         self.assertEqual(occ_status, "discarded")
+        self.assertEqual(str(occ_actual_start), "2026-09-24 08:00:00+08:00")
         self.assertEqual(str(occ_actual_end), "2026-09-24 09:30:00+08:00")
-        self.assertEqual(occ_minutes, 25)
+        self.assertEqual(occ_minutes, 90)
         # 历史行不变
         hist_status, hist_closed = self._query(
             "select status, closed_at from public.planning_occurrence where id = %s",
@@ -2472,13 +2557,14 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
     def test_discard_task_rpc_fact_failure_rolls_back_task_disable(self):
         # 问题 1 验证 3：目标行事实写入失败（actual_minutes 违反 CHECK）
         # → 整个废弃命令回滚：task 仍启用、occurrence 仍 pending。
+        # CHECK 已放开七天上界（持续开放型真实耗时合法），非负下限仍兜底。
         task_id = self._bare_once_task("2026-09-24")
         occ_id = self._pending_occ_on(task_id)
         with self.assertRaises(psycopg.errors.CheckViolation):
             self._query(
                 "select public.planning_discard_task(%s, %s, %s, %s::jsonb)",
                 (task_id, "2026-09-28T11:00:00+08:00", occ_id,
-                 '{"actual_minutes": 99999,'
+                 '{"actual_minutes": -1,'
                  ' "updated_at": "2026-09-28T11:00:00+08:00"}'),
             )
         self.assertEqual(self._query(
@@ -2514,8 +2600,648 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
             "select is_active from public.planning_task where id = %s",
             (task_id,))[0][0])
 
+    def test_discard_task_rpc_fills_inprogress_target_facts(self):
+        # 清单 #16（第一轮）：目标行执行中（in_progress，actual_start 已
+        # 记录）时废弃整个任务——结束事实随废弃命令在同一事务内写入；耗时
+        # 按最终采用的起止在事务内重算（本例与 Python 快照计算一致）。
+        task_id = self._bare_once_task("2026-09-24")
+        occ_id = self._pending_occ_on(task_id)
+        self._query(
+            "update public.planning_occurrence set status = 'in_progress',"
+            " actual_start = '2026-09-24T10:00:00+08:00' where id = %s",
+            (occ_id,))
+        self._query(
+            "select public.planning_discard_task(%s, %s, %s, %s::jsonb)",
+            (task_id, "2026-09-24T11:30:00+08:00", occ_id,
+             '{"actual_end": "2026-09-24T11:30:00+08:00",'
+             ' "actual_minutes": 90, "updated_at": "2026-09-24T11:30:00+08:00"}'),
+        )
+        row = self._query(
+            "select status, closed_at, actual_start, actual_end, actual_minutes"
+            " from public.planning_occurrence where id = %s", (occ_id,))[0]
+        self.assertEqual(row[0], "discarded")
+        self.assertEqual(str(row[1]), "2026-09-24 11:30:00+08:00")
+        self.assertEqual(str(row[2]), "2026-09-24 10:00:00+08:00")
+        self.assertEqual(str(row[3]), "2026-09-24 11:30:00+08:00")
+        self.assertEqual(row[4], 90)
+        self.assertFalse(self._query(
+            "select is_active from public.planning_task where id = %s",
+            (task_id,))[0][0])
 
+    def test_discard_task_rpc_inprogress_keeps_concurrent_facts(self):
+        # BLOCKER 3（执行中分支同样成立）：执行中行在 Python 快照之后被并发
+        # 写入 actual_end / actual_minutes（开放生命周期内的实际时间补记），
+        # 旧 target patch 不得覆盖起止；耗时按保留的起止重算校准（本例与
+        # 并发写入值一致）。
+        task_id = self._bare_once_task("2026-09-24")
+        occ_id = self._pending_occ_on(task_id)
+        self._query(
+            "update public.planning_occurrence set status = 'in_progress',"
+            " actual_start = '2026-09-24T10:00:00+08:00',"
+            " actual_end = '2026-09-24T11:00:00+08:00', actual_minutes = 60"
+            " where id = %s",
+            (occ_id,))
+        self._query(
+            "select public.planning_discard_task(%s, %s, %s, %s::jsonb)",
+            (task_id, "2026-09-24T11:00:00+08:00", occ_id,
+             '{"actual_end": "2026-09-24T12:00:00+08:00",'
+             ' "actual_minutes": 120, "updated_at": "2026-09-24T11:00:00+08:00"}'),
+        )
+        row = self._query(
+            "select status, actual_start, actual_end, actual_minutes"
+            " from public.planning_occurrence where id = %s", (occ_id,))[0]
+        self.assertEqual(row[0], "discarded")
+        self.assertEqual(str(row[1]), "2026-09-24 10:00:00+08:00")
+        self.assertEqual(str(row[2]), "2026-09-24 11:00:00+08:00")
+        self.assertEqual(row[3], 60)
 
+    def test_discard_task_rpc_recomputes_minutes_after_interleaved_start_correction(self):
+        # R1 场景 1（审查确认复现）：Python 读到开始 08:00、09:00 删除并按
+        # 快照算出 60 分钟；RPC 提交前另一操作把开始修正为 08:30（实际时间
+        # 补填接口的合法状态）。提交后耗时必须与最终起止一致（30 分钟）——
+        # patch 携带的旧快照耗时 60 不得落库。
+        task_id = self._bare_once_task("2026-09-24")
+        occ_id = self._pending_occ_on(task_id)
+        self._query(
+            "update public.planning_occurrence set status = 'in_progress',"
+            " actual_start = '2026-09-24T08:00:00+08:00' where id = %s",
+            (occ_id,))
+        # 交错：RPC 执行前、Python 读取快照之后的合法并发事实修正
+        self._query(
+            "update public.planning_occurrence"
+            " set actual_start = '2026-09-24T08:30:00+08:00' where id = %s",
+            (occ_id,))
+        self._query(
+            "select public.planning_discard_task(%s, %s, %s, %s::jsonb)",
+            (task_id, "2026-09-24T09:00:00+08:00", occ_id,
+             '{"actual_end": "2026-09-24T09:00:00+08:00",'
+             ' "actual_minutes": 60, "updated_at": "2026-09-24T09:00:00+08:00"}'),
+        )
+        row = self._query(
+            "select status, actual_start, actual_end, actual_minutes"
+            " from public.planning_occurrence where id = %s", (occ_id,))[0]
+        self.assertEqual(row[0], "discarded")
+        self.assertEqual(str(row[1]), "2026-09-24 08:30:00+08:00")
+        self.assertEqual(str(row[2]), "2026-09-24 09:00:00+08:00")
+        self.assertEqual(row[3], 30)
+
+    def test_discard_task_rpc_request_start_yields_to_db_fact_with_consistent_minutes(self):
+        # R1 场景 2（同根，无需并发）：库内开始 10:00；status 请求提供开始
+        # 09:00、结束 11:30 → Python 按请求起止算 150 分钟进 patch。已有
+        # 开始事实让位保留（BLOCKER 3），耗时按最终采用起止重算为 90。
+        task_id = self._bare_once_task("2026-09-24")
+        occ_id = self._pending_occ_on(task_id)
+        self._query(
+            "update public.planning_occurrence set status = 'in_progress',"
+            " actual_start = '2026-09-24T10:00:00+08:00' where id = %s",
+            (occ_id,))
+        self._query(
+            "select public.planning_discard_task(%s, %s, %s, %s::jsonb)",
+            (task_id, "2026-09-24T11:30:00+08:00", occ_id,
+             '{"actual_start": "2026-09-24T09:00:00+08:00",'
+             ' "actual_end": "2026-09-24T11:30:00+08:00",'
+             ' "actual_minutes": 150, "updated_at": "2026-09-24T11:30:00+08:00"}'),
+        )
+        row = self._query(
+            "select status, actual_start, actual_end, actual_minutes"
+            " from public.planning_occurrence where id = %s", (occ_id,))[0]
+        self.assertEqual(row[0], "discarded")
+        self.assertEqual(str(row[1]), "2026-09-24 10:00:00+08:00")
+        self.assertEqual(str(row[2]), "2026-09-24 11:30:00+08:00")
+        self.assertEqual(row[3], 90)
+
+    def test_discard_task_rpc_inverted_interval_rolls_back(self):
+        # 倒置区间与应用层同契约拒绝（_compute_actual_minutes：end < start
+        # → 拒绝）：并发把开始修正到补丁结束之后 → 整个废弃命令回滚，
+        # 任务不停用、实例保持执行中原状。
+        task_id = self._bare_once_task("2026-09-24")
+        occ_id = self._pending_occ_on(task_id)
+        self._query(
+            "update public.planning_occurrence set status = 'in_progress',"
+            " actual_start = '2026-09-24T09:30:00+08:00' where id = %s",
+            (occ_id,))
+        with self.assertRaises(psycopg.errors.RaiseException) as caught:
+            self._query(
+                "select public.planning_discard_task(%s, %s, %s, %s::jsonb)",
+                (task_id, "2026-09-24T09:00:00+08:00", occ_id,
+                 '{"actual_end": "2026-09-24T09:00:00+08:00",'
+                 ' "actual_minutes": 60, "updated_at": "2026-09-24T09:00:00+08:00"}'),
+            )
+        self.assertIn("actual_end must not precede actual_start",
+                      str(caught.exception))
+        self.assertTrue(self._query(
+            "select is_active from public.planning_task where id = %s",
+            (task_id,))[0][0])
+        row = self._query(
+            "select status, actual_start, actual_end, actual_minutes"
+            " from public.planning_occurrence where id = %s", (occ_id,))[0]
+        self.assertEqual(row[0], "in_progress")
+        self.assertEqual(str(row[1]), "2026-09-24 09:30:00+08:00")
+        self.assertIsNone(row[2])
+        self.assertIsNone(row[3])
+
+    def test_discard_task_rpc_without_target_fills_inprogress_facts(self):
+        # R2：任务详情删除入口（update_task is_active=false → 不传目标 id /
+        # patch）。执行中实例在批量关闭前于事务内补齐结束事实（p_now 收口）
+        # 与按最终起止重算的耗时；pending 兄弟阶段不补（原有行为）；中空
+        # 配对仍由语句 2 同语句原子关闭。
+        start_id, end_id = self._hollow_pair()
+        self._query(
+            "update public.planning_occurrence set status = 'in_progress',"
+            " actual_start = '2026-09-24T08:00:00+08:00' where id = %s",
+            (start_id,))
+        task_id = self._query(
+            "select task_id from public.planning_occurrence where id = %s",
+            (start_id,))[0][0]
+        closed = self._query(
+            "select public.planning_discard_task(%s, %s, %s, %s::jsonb)",
+            (task_id, "2026-09-24T09:00:00+08:00", None, None))[0][0]
+        self.assertEqual(closed, 2)
+        start = self._query(
+            "select status, closed_at, actual_start, actual_end, actual_minutes"
+            " from public.planning_occurrence where id = %s", (start_id,))[0]
+        self.assertEqual(start[0], "discarded")
+        self.assertEqual(str(start[1]), "2026-09-24 09:00:00+08:00")
+        self.assertEqual(str(start[2]), "2026-09-24 08:00:00+08:00")
+        self.assertEqual(str(start[3]), "2026-09-24 09:00:00+08:00")
+        self.assertEqual(start[4], 60)
+        end = self._query(
+            "select status, closed_at, actual_start, actual_end, actual_minutes"
+            " from public.planning_occurrence where id = %s", (end_id,))[0]
+        self.assertEqual(end[0], "discarded")
+        self.assertEqual(str(end[1]), "2026-09-24 09:00:00+08:00")
+        self.assertIsNone(end[2])
+        self.assertIsNone(end[3])
+        self.assertIsNone(end[4])
+        self.assertFalse(self._query(
+            "select is_active from public.planning_task where id = %s",
+            (task_id,))[0][0])
+
+    def test_discard_task_rpc_without_target_keeps_existing_end_and_completed_history(self):
+        # R2 边界：已有结束事实的执行中行不覆盖（end/耗时保持并发写入的
+        # 一致事实对）；已关闭历史（completed）不动；任务照常停用。
+        start_id, end_id = self._hollow_pair()
+        self._query(
+            "update public.planning_occurrence set status = 'in_progress',"
+            " actual_start = '2026-09-24T08:00:00+08:00',"
+            " actual_end = '2026-09-24T08:40:00+08:00', actual_minutes = 40"
+            " where id = %s", (start_id,))
+        self._query(
+            "update public.planning_occurrence set status = 'completed',"
+            " handled_at = '2026-09-24T10:00:00+08:00',"
+            " closed_at = '2026-09-24T10:00:00+08:00',"
+            " actual_start = '2026-09-24T09:00:00+08:00',"
+            " actual_end = '2026-09-24T10:00:00+08:00', actual_minutes = 60"
+            " where id = %s", (end_id,))
+        task_id = self._query(
+            "select task_id from public.planning_occurrence where id = %s",
+            (start_id,))[0][0]
+        closed = self._query(
+            "select public.planning_discard_task(%s, %s, %s, %s::jsonb)",
+            (task_id, "2026-09-24T12:00:00+08:00", None, None))[0][0]
+        self.assertEqual(closed, 1)
+        start = self._query(
+            "select status, actual_end, actual_minutes"
+            " from public.planning_occurrence where id = %s", (start_id,))[0]
+        self.assertEqual(start[0], "discarded")
+        self.assertEqual(str(start[1]), "2026-09-24 08:40:00+08:00")
+        self.assertEqual(start[2], 40)
+        end = self._query(
+            "select status, handled_at, closed_at, actual_end, actual_minutes"
+            " from public.planning_occurrence where id = %s", (end_id,))[0]
+        self.assertEqual(end[0], "completed")
+        self.assertEqual(str(end[1]), "2026-09-24 10:00:00+08:00")
+        self.assertEqual(str(end[2]), "2026-09-24 10:00:00+08:00")
+        self.assertEqual(str(end[3]), "2026-09-24 10:00:00+08:00")
+        self.assertEqual(end[4], 60)
+        self.assertFalse(self._query(
+            "select is_active from public.planning_task where id = %s",
+            (task_id,))[0][0])
+
+    def test_discard_task_rpc_without_target_inverted_start_rolls_back(self):
+        # R2 倒置边界：执行中行开始事实在 p_now 之后（时钟漂移等异常状态）
+        # → 拒绝并整体回滚（任务不停用、实例原样）。
+        start_id, _end_id = self._hollow_pair()
+        self._query(
+            "update public.planning_occurrence set status = 'in_progress',"
+            " actual_start = '2026-09-24T10:00:00+08:00' where id = %s",
+            (start_id,))
+        task_id = self._query(
+            "select task_id from public.planning_occurrence where id = %s",
+            (start_id,))[0][0]
+        with self.assertRaises(psycopg.errors.RaiseException) as caught:
+            self._query(
+                "select public.planning_discard_task(%s, %s, %s, %s::jsonb)",
+                (task_id, "2026-09-24T09:00:00+08:00", None, None))
+        self.assertIn("actual_end must not precede actual_start",
+                      str(caught.exception))
+        self.assertTrue(self._query(
+            "select is_active from public.planning_task where id = %s",
+            (task_id,))[0][0])
+        row = self._query(
+            "select status, actual_end, actual_minutes"
+            " from public.planning_occurrence where id = %s", (start_id,))[0]
+        self.assertEqual(row[0], "in_progress")
+        self.assertIsNone(row[1])
+        self.assertIsNone(row[2])
+
+    def test_discard_task_rpc_without_target_inprogress_without_start_gets_end_only(self):
+        # 执行中但无开始事实（兼容/异常状态）：仅收口结束时间，耗时保持
+        # NULL（与应用层 f(NULL, end) = None 一致）。
+        task_id = self._bare_once_task("2026-09-24")
+        occ_id = self._pending_occ_on(task_id)
+        self._query(
+            "update public.planning_occurrence set status = 'in_progress'"
+            " where id = %s", (occ_id,))
+        self._query(
+            "select public.planning_discard_task(%s, %s, %s, %s::jsonb)",
+            (task_id, "2026-09-24T09:00:00+08:00", None, None))
+        row = self._query(
+            "select status, actual_end, actual_minutes"
+            " from public.planning_occurrence where id = %s", (occ_id,))[0]
+        self.assertEqual(row[0], "discarded")
+        self.assertEqual(str(row[1]), "2026-09-24 09:00:00+08:00")
+        self.assertIsNone(row[2])
+
+    def test_discard_task_rpc_skips_target_facts_for_partial_and_deferred(self):
+        # 清单 #16 修复边界：仅 pending / in_progress 补写事实；partial /
+        # deferred 行维持原行为——patch 跳过，行由语句 2 关闭，actual 字段
+        # 保持 NULL（存量语义走完生命周期，不因本修复重新解释）；
+        # partial 行的 partial_at / partial_note 在废弃历史中保留。
+        partial_task = self._bare_once_task("2026-09-24")
+        partial_id = self._pending_occ_on(partial_task)
+        self._query(
+            "update public.planning_occurrence set status = 'partial',"
+            " partial_at = '2026-09-24T10:30:00+08:00',"
+            " partial_note = '做了一半' where id = %s",
+            (partial_id,))
+        deferred_task = self._bare_once_task("2026-09-26")
+        deferred_id = self._pending_occ_on(deferred_task, for_date="2026-09-26")
+        # est_start 属所有权矩阵：unassigned 要求 est_start 为空，带时间须
+        # 同步升为 automatic；est 半区间禁令要求起止成对（phase1a identity
+        # CHECK）。
+        self._query(
+            "update public.planning_occurrence set status = 'deferred',"
+            " est_start = '2026-09-26T09:00:00+08:00',"
+            " est_end = '2026-09-26T09:30:00+08:00',"
+            " estimated_time_source = 'automatic' where id = %s",
+            (deferred_id,))
+        patch = ('{"actual_end": "2026-09-28T11:00:00+08:00",'
+                 ' "actual_minutes": 60, "updated_at": "2026-09-28T11:00:00+08:00"}')
+        self._query(
+            "select public.planning_discard_task(%s, %s, %s, %s::jsonb)",
+            (partial_task, "2026-09-28T11:00:00+08:00", partial_id, patch))
+        self._query(
+            "select public.planning_discard_task(%s, %s, %s, %s::jsonb)",
+            (deferred_task, "2026-09-28T11:00:00+08:00", deferred_id, patch))
+        for occ_id in (partial_id, deferred_id):
+            row = self._query(
+                "select status, actual_end, actual_minutes"
+                " from public.planning_occurrence where id = %s", (occ_id,))[0]
+            self.assertEqual(row[0], "discarded")
+            self.assertIsNone(row[1])
+            self.assertIsNone(row[2])
+        partial_note_at = self._query(
+            "select partial_at, partial_note from public.planning_occurrence"
+            " where id = %s", (partial_id,))[0]
+        self.assertEqual(str(partial_note_at[0]), "2026-09-24 10:30:00+08:00")
+        self.assertEqual(partial_note_at[1], "做了一半")
+
+    # -- 清单 #16 第二轮：真实 Python 业务函数 → 真实 PostgreSQL RPC ──────
+    # 替换面与复现探针一致：仅替换 PostgREST 数据访问（_require_client /
+    # _fetch_task / _fetch_occurrence）与提交后重算副作用；状态逻辑、actual
+    # 计算、RPC SQL 均为现有实际实现。交错用 before_rpc 确定性注入。
+
+    def _business_fetch(self, table, key, conn=None):
+        """按 PostgREST 返回形状读取单行（时间 ISO 字符串 / uuid 字符串）。"""
+        assert table in ("planning_task", "planning_occurrence")
+        from psycopg.rows import dict_row
+        conn = conn or self.conn
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(f"SELECT * FROM public.{table} WHERE id = %s", (key,))
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            k: v.isoformat() if isinstance(v, (date, datetime, _time))
+            else str(v) if k == "phase_group" and v is not None
+            else v
+            for k, v in row.items()
+        }
+
+    def _enter_business_patches(self, stack, tls):
+        """真实业务函数 → 真库写链路的模块替换（复现探针同一替换面）：
+        仅替换 PostgREST 数据访问（_require_client / _fetch_task /
+        _fetch_occurrence）与提交后重算副作用；RPC 与状态 UPDATE 不替身，
+        真实执行当前迁移链 SQL。每线程经 tls 解析自己的 client / 连接，
+        支撑多连接并发测试。"""
+        from gateway import planning
+        stack.enter_context(mock.patch.object(
+            planning, "_require_client", side_effect=lambda: tls.client))
+        stack.enter_context(mock.patch.object(
+            planning, "_fetch_task",
+            side_effect=lambda c, k: self._business_fetch(
+                "planning_task", k, conn=tls.conn)))
+        stack.enter_context(mock.patch.object(
+            planning, "_fetch_occurrence",
+            side_effect=lambda c, k: self._business_fetch(
+                "planning_occurrence", k, conn=tls.conn)))
+        stack.enter_context(mock.patch.object(
+            planning, "_request_recompute_quietly", return_value=None))
+
+    def _business_context(self, before_rpc=None):
+        from gateway import planning
+        client = _LocalDiscardClient(self.conn, before_rpc=before_rpc)
+        stack = contextlib.ExitStack()
+        self._enter_business_patches(
+            stack, SimpleNamespace(client=client, conn=self.conn))
+        return planning, client, stack
+
+    def _inprogress_hollow_start(self):
+        """中空配对：start 阶段执行中（08:00 开始），返回 (start_id, task_id)。"""
+        start_id, _end_id = self._hollow_pair()
+        self._query(
+            "update public.planning_occurrence set status = 'in_progress',"
+            " actual_start = '2026-09-24T08:00:00+08:00' where id = %s",
+            (start_id,))
+        task_id = self._query(
+            "select task_id from public.planning_occurrence where id = %s",
+            (start_id,))[0][0]
+        return start_id, task_id
+
+    def test_business_status_discard_interleaved_start_correction_is_consistent(self):
+        # R1（真实业务路径 + 真 RPC，审查场景 1）：Python 读快照（开始
+        # 08:00）→ RPC 提交前开始被并发修正为 08:30 → 提交后耗时必须与
+        # 最终起止一致（30），旧快照计算的 60 不得落库。
+        start_id, task_id = self._inprogress_hollow_start()
+        planning, client, stack = self._business_context(before_rpc=lambda: self._query(
+            "update public.planning_occurrence"
+            " set actual_start = '2026-09-24T08:30:00+08:00' where id = %s",
+            (start_id,)))
+        with stack:
+            planning.set_occurrence_status(
+                start_id, {"status": "discarded"},
+                datetime.fromisoformat("2026-09-24T09:00:00+08:00"))
+        self.assertEqual(client.calls[-1]["p_target_id"], start_id)
+        self.assertEqual(client.calls[-1]["p_target_patch"]["actual_minutes"], 60)
+        row = self._business_fetch("planning_occurrence", start_id)
+        self.assertEqual(row["status"], "discarded")
+        self.assertEqual(row["actual_start"], "2026-09-24T08:30:00+08:00")
+        self.assertEqual(row["actual_end"], "2026-09-24T09:00:00+08:00")
+        self.assertEqual(row["actual_minutes"], 30)
+        # 一致性不变量：落库耗时 == 按落库起止用应用层同一函数重算
+        self.assertEqual(row["actual_minutes"], planning._compute_actual_minutes(row))
+        self.assertFalse(self._query(
+            "select is_active from public.planning_task where id = %s",
+            (task_id,))[0][0])
+
+    def test_business_status_discard_request_start_yields_to_db_fact(self):
+        # R1（真实业务路径，审查场景 3，无需并发）：库内开始 10:00，请求
+        # 提供开始 09:00 / 结束 11:30 → Python 按请求算 150；落库保留库内
+        # 开始事实，耗时按最终起止重算为 90。
+        start_id, task_id = self._inprogress_hollow_start()
+        self._query(
+            "update public.planning_occurrence"
+            " set actual_start = '2026-09-24T10:00:00+08:00' where id = %s",
+            (start_id,))
+        planning, client, stack = self._business_context()
+        with stack:
+            planning.set_occurrence_status(
+                start_id,
+                {"status": "discarded",
+                 "actual_start": "2026-09-24T09:00:00+08:00",
+                 "actual_end": "2026-09-24T11:30:00+08:00"},
+                datetime.fromisoformat("2026-09-24T11:30:00+08:00"))
+        self.assertEqual(client.calls[-1]["p_target_patch"]["actual_minutes"], 150)
+        row = self._business_fetch("planning_occurrence", start_id)
+        self.assertEqual(row["status"], "discarded")
+        self.assertEqual(row["actual_start"], "2026-09-24T10:00:00+08:00")
+        self.assertEqual(row["actual_end"], "2026-09-24T11:30:00+08:00")
+        self.assertEqual(row["actual_minutes"], 90)
+        self.assertEqual(row["actual_minutes"], planning._compute_actual_minutes(row))
+        self.assertFalse(self._query(
+            "select is_active from public.planning_task where id = %s",
+            (task_id,))[0][0])
+
+    def test_business_task_detail_delete_fills_inprogress_facts(self):
+        # R2（真实业务路径 + 真 RPC）：任务详情删除（update_task
+        # is_active=false，无目标 id / patch）——执行中实例 08:00 开始、
+        # 09:00 删除 → 落库 end=09:00、耗时 60、closed_at=09:00；pending
+        # 兄弟阶段事实保持 NULL；任务停用。
+        start_id, task_id = self._inprogress_hollow_start()
+        planning, client, stack = self._business_context()
+        with stack:
+            planning.update_task(
+                task_id, {"is_active": False},
+                datetime.fromisoformat("2026-09-24T09:00:00+08:00"))
+        self.assertIsNone(client.calls[-1]["p_target_id"])
+        self.assertIsNone(client.calls[-1]["p_target_patch"])
+        row = self._business_fetch("planning_occurrence", start_id)
+        self.assertEqual(row["status"], "discarded")
+        self.assertEqual(row["closed_at"], "2026-09-24T09:00:00+08:00")
+        self.assertEqual(row["actual_start"], "2026-09-24T08:00:00+08:00")
+        self.assertEqual(row["actual_end"], "2026-09-24T09:00:00+08:00")
+        self.assertEqual(row["actual_minutes"], 60)
+        self.assertEqual(row["actual_minutes"], planning._compute_actual_minutes(row))
+        end_id = self._query(
+            "select id from public.planning_occurrence"
+            " where task_id = %s and phase = 'end'", (task_id,))[0][0]
+        end_row = self._business_fetch("planning_occurrence", end_id)
+        self.assertEqual(end_row["status"], "discarded")
+        self.assertIsNone(end_row["actual_end"])
+        self.assertIsNone(end_row["actual_minutes"])
+        self.assertFalse(self._query(
+            "select is_active from public.planning_task where id = %s",
+            (task_id,))[0][0])
+
+    def test_discard_task_rpc_fills_patch_start_when_row_start_missing(self):
+        # 第三轮 #1：执行中行 actual_start=NULL、删除请求提供开始 08:00 /
+        # 结束 09:00——补入的开始时间必须落库（只把它用于算耗时而落库
+        # NULL 开始，会得到「开始 NULL、耗时 60」的自相矛盾历史）。
+        task_id = self._bare_once_task("2026-09-24")
+        occ_id = self._pending_occ_on(task_id)
+        self._query(
+            "update public.planning_occurrence set status = 'in_progress'"
+            " where id = %s", (occ_id,))
+        self._query(
+            "select public.planning_discard_task(%s, %s, %s, %s::jsonb)",
+            (task_id, "2026-09-24T09:00:00+08:00", occ_id,
+             '{"actual_start": "2026-09-24T08:00:00+08:00",'
+             ' "actual_end": "2026-09-24T09:00:00+08:00",'
+             ' "actual_minutes": 60, "updated_at": "2026-09-24T09:00:00+08:00"}'),
+        )
+        row = self._query(
+            "select status, actual_start, actual_end, actual_minutes"
+            " from public.planning_occurrence where id = %s", (occ_id,))[0]
+        self.assertEqual(row[0], "discarded")
+        self.assertEqual(str(row[1]), "2026-09-24 08:00:00+08:00")
+        self.assertEqual(str(row[2]), "2026-09-24 09:00:00+08:00")
+        self.assertEqual(row[3], 60)
+
+    def test_business_status_discard_supplies_missing_start(self):
+        # 第三轮 #1（真实业务路径）：执行中无开始事实，请求补填开始 08:00
+        # → Python 按补填起止算 60 进 patch；落库必须保留补入的开始时间，
+        # 耗时与落库起止自洽。daily 任务使 discarded 走整任务 RPC 入口。
+        task_id = self._daily_task_row()
+        occ_id = self._pending_occ_on(task_id, round_key="cycle:2026-09-24")
+        self._query(
+            "update public.planning_occurrence set status = 'in_progress'"
+            " where id = %s", (occ_id,))
+        planning, client, stack = self._business_context()
+        with stack:
+            planning.set_occurrence_status(
+                occ_id,
+                {"status": "discarded",
+                 "actual_start": "2026-09-24T08:00:00+08:00"},
+                datetime.fromisoformat("2026-09-24T09:00:00+08:00"))
+        self.assertEqual(client.calls[-1]["p_target_patch"]["actual_minutes"], 60)
+        row = self._business_fetch("planning_occurrence", occ_id)
+        self.assertEqual(row["status"], "discarded")
+        self.assertEqual(row["actual_start"], "2026-09-24T08:00:00+08:00")
+        self.assertEqual(row["actual_end"], "2026-09-24T09:00:00+08:00")
+        self.assertEqual(row["actual_minutes"], 60)
+        self.assertEqual(row["actual_minutes"],
+                         planning._compute_actual_minutes(row))
+
+    def test_discard_start_race_fills_late_started_row(self):
+        # 第三轮 #2（真实多连接交错）：删除在事实补齐阶段等待第一条执行中
+        # 行的行锁；等待期间另一中空阶段经真实 start_occurrence 开始并提交。
+        # 锁扫描必须覆盖全部开放行并在锁内复核最新版本（EPQ）——扫描后才
+        # 开始的行同样补齐结束事实；只锁扫描瞬间已执行中的行会漏掉它。
+        first_id, second_id = self._hollow_pair(
+            round_key="cycle:2026-09-25", day="2026-09-25")
+        self._query(
+            "update public.planning_occurrence set status = 'in_progress',"
+            " actual_start = '2026-09-25T08:00:00+08:00' where id = %s",
+            (first_id,))
+        task_id = self._query(
+            "select task_id from public.planning_occurrence where id = %s",
+            (first_id,))[0][0]
+        delete_conn = psycopg.connect(self.server.get_uri(), autocommit=True)
+        holder_conn = psycopg.connect(self.server.get_uri(), autocommit=False)
+        errors = []
+        done = threading.Event()
+        tls = SimpleNamespace(client=None, conn=None)
+        try:
+            # 并发方：持有第一条执行中行的行锁，删除必须在此等待
+            holder_conn.execute(
+                "select id from public.planning_occurrence where id = %s for update",
+                (first_id,))
+            from gateway import planning as planning_module
+            stack = contextlib.ExitStack()
+            self._enter_business_patches(stack, tls)
+            with stack:
+                def run_delete():
+                    try:
+                        tls.client = _LocalDiscardClient(delete_conn)
+                        tls.conn = delete_conn
+                        planning_module.update_task(
+                            task_id, {"is_active": False},
+                            datetime.fromisoformat("2026-09-25T09:00:00+08:00"))
+                    except BaseException as exc:  # 透传到主线程断言
+                        errors.append(exc)
+                    finally:
+                        done.set()
+
+                worker = threading.Thread(target=run_delete)
+                worker.start()
+                deadline = time.monotonic() + 8
+                while time.monotonic() < deadline:
+                    waiting = self._query(
+                        "select 1 from pg_stat_activity"
+                        " where pid <> pg_backend_pid() and wait_event_type = 'Lock'"
+                        " and query ilike '%planning_discard_task%'")
+                    if waiting:
+                        break
+                    time.sleep(0.02)
+                else:
+                    self.fail("delete did not reach row-lock wait; errors=%r"
+                              % (errors,))
+                # 等待期间：另一中空阶段经真实 start_occurrence 开始并提交
+                #（独立连接、未提交事实随后随 commit 原子可见）
+                tls.client = _LocalDiscardClient(holder_conn)
+                tls.conn = holder_conn
+                planning_module.start_occurrence(
+                    second_id, datetime.fromisoformat("2026-09-25T08:30:00+08:00"))
+                holder_conn.commit()
+                self.assertTrue(done.wait(8), "delete did not finish")
+                worker.join(8)
+            self.assertEqual(errors, [])
+            self.assertEqual(self._query(
+                "select is_active from public.planning_task where id = %s",
+                (task_id,))[0][0], False)
+            first = self._business_fetch("planning_occurrence", first_id)
+            self.assertEqual(first["status"], "discarded")
+            self.assertEqual(first["actual_start"], "2026-09-25T08:00:00+08:00")
+            self.assertEqual(first["actual_end"], "2026-09-25T09:00:00+08:00")
+            self.assertEqual(first["actual_minutes"], 60)
+            second = self._business_fetch("planning_occurrence", second_id)
+            self.assertEqual(second["status"], "discarded")
+            self.assertEqual(second["actual_start"], "2026-09-25T08:30:00+08:00")
+            self.assertEqual(second["actual_end"], "2026-09-25T09:00:00+08:00")
+            self.assertEqual(second["actual_minutes"], 30)
+            self.assertEqual(second["actual_minutes"],
+                             planning_module._compute_actual_minutes(second))
+        finally:
+            holder_conn.rollback()
+            holder_conn.close()
+            delete_conn.close()
+
+    def test_start_after_delete_is_rejected(self):
+        # 第三轮 #2 另一分支契约：删除先完成（pending 阶段未开始即被关闭），
+        # 后续真实 start 必须拒绝（不复活）；已关闭历史不被改写。
+        first_id, second_id = self._hollow_pair(
+            round_key="cycle:2026-09-25", day="2026-09-25")
+        self._query(
+            "update public.planning_occurrence set status = 'in_progress',"
+            " actual_start = '2026-09-25T08:00:00+08:00' where id = %s",
+            (first_id,))
+        task_id = self._query(
+            "select task_id from public.planning_occurrence where id = %s",
+            (first_id,))[0][0]
+        planning, client, stack = self._business_context()
+        with stack:
+            planning.update_task(
+                task_id, {"is_active": False},
+                datetime.fromisoformat("2026-09-25T09:00:00+08:00"))
+            with self.assertRaises(planning.PlanningError) as caught:
+                planning.start_occurrence(
+                    second_id, datetime.fromisoformat("2026-09-25T09:30:00+08:00"))
+        self.assertEqual(caught.exception.status_code, 422)
+        second = self._business_fetch("planning_occurrence", second_id)
+        self.assertEqual(second["status"], "discarded")
+        self.assertIsNone(second["actual_end"])
+        self.assertIsNone(second["actual_minutes"])
+        self.assertFalse(self._query(
+            "select is_active from public.planning_task where id = %s",
+            (task_id,))[0][0])
+
+    def test_business_task_detail_delete_long_execution_saves_full_minutes(self):
+        # 第三轮 #3：无截止窗口单次待办执行八天（需求 §9.4 持续开放型 /
+        # §12.2 实际时间只记录执行事实）——任务详情删除必须成功且真实耗时
+        # 完整保存（11520），不截断、不伪造、不清空开始时间绕过。
+        task_id = self._bare_once_task("2026-09-24")
+        occ_id = self._pending_occ_on(task_id)
+        self._query(
+            "update public.planning_occurrence set status = 'in_progress',"
+            " actual_start = '2026-09-16T09:00:00+08:00' where id = %s",
+            (occ_id,))
+        planning, client, stack = self._business_context()
+        with stack:
+            planning.update_task(
+                task_id, {"is_active": False},
+                datetime.fromisoformat("2026-09-24T09:00:00+08:00"))
+        self.assertIsNone(client.calls[-1]["p_target_id"])
+        row = self._business_fetch("planning_occurrence", occ_id)
+        self.assertEqual(row["status"], "discarded")
+        self.assertEqual(row["actual_start"], "2026-09-16T09:00:00+08:00")
+        self.assertEqual(row["actual_end"], "2026-09-24T09:00:00+08:00")
+        self.assertEqual(row["actual_minutes"], 11520)
+        self.assertEqual(row["actual_minutes"],
+                         planning._compute_actual_minutes(row))
+        self.assertFalse(self._query(
+            "select is_active from public.planning_task where id = %s",
+            (task_id,))[0][0])
 
     ROUND_GEN_SQL = ("select public.planning_insert_round_occurrence"
                      "(%s, %s::jsonb, %s::jsonb)")

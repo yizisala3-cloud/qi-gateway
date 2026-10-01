@@ -616,6 +616,155 @@ class PlanningDiscardTaskRpcMigrationContractTests(unittest.TestCase):
             "'actual_start', 'actual_end', 'actual_minutes', 'updated_at'", folded)
 
 
+DISCARD_INPROGRESS_FACTS_MIGRATION = (
+    Path(__file__).resolve().parents[1]
+    / "supabase"
+    / "migrations"
+    / "20261001010000_planning_discard_task_inprogress_facts.sql"
+)
+
+
+class PlanningDiscardTaskInprogressFactsMigrationContractTests(unittest.TestCase):
+    """「废弃整个任务」执行中事实补齐契约（20261001010000，清单 #16 第二轮）。
+
+    审查 R1：耗时是起止的派生输出——执行中行的耗时必须按锁内最终采用的
+    起止在事务内重算，不得接受按旧快照计算的 patch 耗时。审查 R2：任务
+    详情删除（无目标 id / patch）入口同样在事务内补齐执行中行结束事实。
+    pending 分支与 20260928040000 逐字等价；并发写入的事实让位（BLOCKER
+    3）；函数签名不变（同签名 create or replace 仅替换函数体，不产生新
+    overload）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = DISCARD_INPROGRESS_FACTS_MIGRATION.read_text(encoding="utf-8")
+        cls.folded = cls.sql.casefold()
+
+    def test_migration_is_atomic(self):
+        self.assertIn("begin;", self.folded)
+        self.assertIn("commit;", self.folded)
+
+    def test_creates_exactly_the_discard_function(self):
+        top = [ln.strip().casefold() for ln in self.sql.splitlines() if ln.strip()]
+        creating = [item for item in top if item.startswith("create")]
+        self.assertEqual(creating, [
+            "create or replace function public.planning_discard_task("])
+
+    def test_signature_is_unchanged_no_new_overload(self):
+        # 同签名 create or replace：参数列表与 20260928040000 完全一致，
+        # 不产生新签名 overload（清单 #15 发布核查前提）；唯一的 DROP 是
+        # actual_minutes CHECK 的放开重加（第三轮 #3），不 DROP 任何函数、
+        # 表或其他对象。
+        folded = self.folded
+        self.assertIn("p_task_id bigint,", folded)
+        self.assertIn("p_now timestamptz,", folded)
+        self.assertIn("p_target_id bigint default null,", folded)
+        self.assertIn("p_target_patch jsonb default null", folded)
+        self.assertIn("returns integer", folded)
+        self.assertNotIn("drop function", folded)
+        self.assertNotIn("drop table", folded)
+        self.assertNotIn("drop index", folded)
+        self.assertNotIn("drop trigger", folded)
+        self.assertEqual(folded.count("drop constraint"), 1)
+        self.assertIn(
+            "drop constraint planning_occurrence_actual_minutes_check", folded)
+
+    def test_widens_actual_minutes_check_for_long_open_executions(self):
+        # 第三轮 #3：七天上限（0–10080）与需求 §12.2 / §9.4 持续开放型冲突
+        # （长执行实例真实耗时合法，如八天 = 11520）——放开上界、保留非负
+        # 下限；倒置区间由 RPC 语句 1c 显式拒绝。
+        folded = self.folded
+        self.assertIn(
+            "add constraint planning_occurrence_actual_minutes_check", folded)
+        self.assertIn("check (actual_minutes is null or actual_minutes >= 0)",
+                      folded)
+        self.assertNotIn("10080", folded)
+
+    def test_pending_guard_is_preserved(self):
+        # pending 且完全无事实：原守卫条件原样保留（行为等价）。
+        folded = self.folded
+        self.assertIn("status = 'pending'", folded)
+        self.assertIn("actual_start is null", folded)
+        self.assertIn("actual_end is null", folded)
+        self.assertIn("partial_at is null", folded)
+        self.assertIn("handled_at is null", folded)
+        self.assertIn("closed_at is null", folded)
+
+    def test_inprogress_loop_derives_minutes_from_final_interval(self):
+        # R1 / 第三轮 #1：执行中行按锁内最终起止重算耗时并把补入的开始
+        # 时间一并落库（其变化纳入更新判断）；patch 耗时只被 pending 分支
+        # 消费一次，执行中循环不接受 patch 携带的耗时。倒置区间整体拒绝。
+        folded = self.folded
+        self.assertIn("v_row.status = 'in_progress'", folded)
+        self.assertIn("and v_row.handled_at is null", folded)
+        self.assertIn("and v_row.closed_at is null", folded)
+        self.assertIn("for v_row in", folded)
+        self.assertIn("order by id", folded)
+        self.assertIn("for update", folded)
+        self.assertIn("v_end := p_now", folded)
+        self.assertIn("v_raw := extract(epoch from (v_end - v_start)) / 60.0", folded)
+        self.assertIn("when v_frac > 0.5 then 1", folded)
+        self.assertIn("when v_frac < 0.5 then 0", folded)
+        self.assertIn("(v_whole::bigint % 2) = 0", folded)
+        self.assertIn("greatest(0, ", folded)
+        self.assertIn(
+            "planning_discard_task: actual_end must not precede actual_start",
+            folded)
+        # 第三轮 #1：补入的开始时间落库，变化纳入更新判断
+        self.assertIn("set actual_start = v_start,", folded)
+        self.assertIn("v_start is distinct from v_row.actual_start", folded)
+        # 目标行缺失起止以补丁值补齐（已有事实让位），但 patch 的耗时键
+        # 仅由 pending 分支消费一次
+        self.assertIn("p_target_patch ? 'actual_start'", folded)
+        self.assertIn("p_target_patch ? 'actual_end'", folded)
+        self.assertEqual(
+            self.folded.count("p_target_patch ? 'actual_minutes'"), 1)
+
+    def test_lock_scan_covers_all_open_rows(self):
+        # 第三轮 #2：事实补齐的锁扫描覆盖全部开放行（for v_row in … order by
+        # id 稳定锁序，行锁获取时 EPQ 以最新版本复核）——删除等待期间刚开
+        # 始的行同样补齐结束事实；批量关闭与锁扫描命中同一组行。
+        folded = self.folded
+        scan_pos = folded.find(
+            "status in ('pending', 'in_progress', 'deferred', 'partial')")
+        loop_pos = folded.find("for v_row in")
+        safety_pos = folded.find(
+            "status in ('pending', 'in_progress', 'deferred', 'partial')",
+            scan_pos + 1)
+        self.assertGreaterEqual(scan_pos, 0)
+        self.assertGreaterEqual(safety_pos, 0)
+        # for v_row in（循环头）→ 锁扫描 WHERE → 语句 2 的批量关闭 WHERE
+        self.assertLess(loop_pos, scan_pos)
+        self.assertLess(scan_pos, safety_pos)
+
+    def test_command_shape_unchanged(self):
+        folded = self.folded
+        # 语句顺序：锁任务行 → 白名单校验 → pending 目标补丁 → 全开放行
+        # 锁扫描与执行中事实补齐 → 单语句关闭全部开放 occurrence → 单语句
+        # 停用任务；并发停用拒绝仍携带 PC001。
+        lock_pos = folded.find("for update")
+        whitelist_pos = folded.find("target patch contains unsupported field")
+        pending_pos = folded.find("status = 'pending'")
+        loop_pos = folded.find("for v_row in")
+        task_pos = folded.find("update public.planning_task")
+        self.assertGreaterEqual(lock_pos, 0)
+        self.assertGreaterEqual(whitelist_pos, 0)
+        self.assertGreaterEqual(pending_pos, 0)
+        self.assertGreaterEqual(loop_pos, 0)
+        self.assertLess(lock_pos, whitelist_pos)
+        self.assertLess(whitelist_pos, pending_pos)
+        self.assertLess(pending_pos, loop_pos)
+        self.assertLess(loop_pos, task_pos)
+        self.assertIn("status = 'discarded'", folded)
+        self.assertIn("is_active = false", folded)
+        self.assertIn("task already inactive (concurrent change)", folded)
+        self.assertIn("using errcode = 'pc001'", folded)
+        # 白名单与未知字段拒绝不变
+        self.assertIn("target patch contains unsupported field", folded)
+        self.assertIn(
+            "'actual_start', 'actual_end', 'actual_minutes', 'updated_at'", folded)
+
+
 class PlanningRecomputeIdentityMigrationContractTests(unittest.TestCase):
     """重算请求消费身份契约（20260930010000，批次 6 收尾 A1）。
 

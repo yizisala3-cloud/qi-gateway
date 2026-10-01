@@ -903,9 +903,25 @@ def emulate_planning_insert_round_occurrence(db, params):
         occ_rows.append(row)
 
 
+def _discard_dt(value):
+    """fake 行 / RPC 参数里的时间值（ISO 字符串或 datetime）统一为 datetime。"""
+    if isinstance(value, str):
+        return datetime.fromisoformat(value)
+    return value
+
+
 def emulate_planning_discard_task(task_rows, occ_rows, params):
     """废弃整个任务：锁内关闭全部开放 occurrence + 停用任务（单事务语义）。
-    可选目标行事实补齐（actual 字段白名单）在同一语义内写入。"""
+
+    与 20261001010000 真库 SQL 同语义（不同步替身会掩盖新分支）：
+    * 可选 pending 目标行事实补齐（actual 字段白名单，原守卫原样）；
+    * 执行中（in_progress 且无 closed_at / handled_at）行在批量关闭前补齐
+      起止与耗时——目标行缺失的起止以补丁值补齐（已有事实让位，补入的
+      开始时间一并落库），其余行以 p_now 收口；耗时一律按最终采用的起止
+      重算（应用层 _minutes_between 契约），不接受 patch 携带的耗时；
+      倒置区间整体拒绝。真库锁扫描覆盖全部开放行并在锁内复核最新版本
+      （扫描后才开始 / 关闭的行各自归位），fake 单线程按最终状态等价仿真。
+    """
     task = next((r for r in task_rows if r.get("id") == params.get("p_task_id")), None)
     if task is None:
         raise RuntimeError("planning_discard_task: task not found")
@@ -924,6 +940,30 @@ def emulate_planning_discard_task(task_rows, occ_rows, params):
                 and all(target.get(key) is None for key in
                         ("actual_start", "actual_end", "closed_at", "handled_at"))):
             target.update(target_patch)
+    for row in occ_rows:
+        if (row.get("task_id") == task["id"]
+                and row.get("status") == "in_progress"
+                and row.get("closed_at") is None
+                and row.get("handled_at") is None):
+            start = row.get("actual_start")
+            end = row.get("actual_end")
+            if row.get("id") == params.get("p_target_id"):
+                if start is None and target_patch.get("actual_start") is not None:
+                    start = target_patch["actual_start"]
+                if end is None and target_patch.get("actual_end") is not None:
+                    end = target_patch["actual_end"]
+            if end is None:
+                end = now
+            start_dt = _discard_dt(start)
+            end_dt = _discard_dt(end)
+            if start_dt is not None and end_dt < start_dt:
+                raise RuntimeError(
+                    "planning_discard_task: actual_end must not precede actual_start")
+            row["actual_start"] = start
+            row["actual_end"] = end
+            row["actual_minutes"] = (
+                None if start_dt is None
+                else max(0, round((end_dt - start_dt).total_seconds() / 60)))
     for row in occ_rows:
         if (row.get("task_id") == task["id"]
                 and row.get("status") in ("pending", "in_progress", "deferred", "partial")):
