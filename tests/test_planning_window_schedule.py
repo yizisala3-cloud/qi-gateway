@@ -1416,6 +1416,81 @@ def test_hollow_start_without_duration_source_still_skipped():
             iso(_cst(20, 18)), iso(_cst(20, 18, 10)))
 
 
+# ── R8（#22）：开始阶段完成后，未开始的固定结束阶段自行检查剩余空间 ──
+# 复审 R8（2026-10-01）：整轮去重此前无条件跳过 phase=end；开始阶段关闭
+# 后退出开放行集合，无人替结束阶段上报剩余不足。全部经合法业务入口构造。
+
+def _r8_hollow_task(c, now):
+    """中空 daily 窗口 09:00–11:00（包络 30+60+30 = 零自由度 → 两阶段预锚定）。"""
+    return c.create("daily", now, is_hollow=True,
+                    hollow_start_minutes=30, hollow_wait_minutes=60,
+                    hollow_end_minutes=30,
+                    window_start_tod="09:00", window_end_tod="11:00")
+
+
+def _r8_phases(c):
+    start_row = next(r for r in c.rows if r["phase"] == "start")
+    end_row = next(r for r in c.rows if r["phase"] == "end")
+    return start_row, end_row
+
+
+def test_r8_closed_start_pending_end_reports_own_remaining_conflict():
+    # 08:00 创建 → 09:00 开始开始阶段、09:30 正常完成；10:40 结束阶段尚未
+    # 开始、剩余 20 分钟装不下 30 分钟 → 看板必须为结束阶段派生冲突
+    # （同槽普通固定单次能报，结束阶段此前不能）。
+    with Context() as c:
+        _r8_hollow_task(c, _cst(20, 8))
+        start_row, end_row = _r8_phases(c)
+        assert start_row["is_fixed"] and end_row["is_fixed"]
+        assert (end_row["est_start"], end_row["est_end"]) == (
+            iso(_cst(20, 10, 30)), iso(_cst(20, 11)))
+        planning.set_occurrence_status(start_row["id"], {"status": "in_progress"}, _cst(20, 9))
+        planning.set_occurrence_status(start_row["id"], {"status": "completed"}, _cst(20, 9, 30))
+        board = planning.today_board(_cst(20, 10, 40))
+        conflict = next(item for item in board["conflicts"]
+                        if item["occurrence_id"] == end_row["id"])
+        assert conflict["phase"] == "end"
+        assert conflict["constraint"] == "window_end"
+        assert "剩余空间不足" in conflict["reason"]
+        # 冲突是派生展示：结束阶段固定位置与历史事实不被改写。
+        refreshed = next(r for r in c.rows if r["id"] == end_row["id"])
+        assert (refreshed["est_start"], refreshed["est_end"]) == (
+            iso(_cst(20, 10, 30)), iso(_cst(20, 11)))
+
+
+def test_r8_both_phases_untouched_start_still_carries_envelope_once():
+    # 既有 R2 去重回归：两阶段都未触动时，整轮剩余不足仍由开始阶段按完整
+    # 包络上报一次，结束阶段不重复上报。
+    with Context() as c:
+        _r8_hollow_task(c, _cst(20, 10, 40))
+        start_row, end_row = _r8_phases(c)
+        board = planning.today_board(_cst(20, 10, 40))
+        assert any(item["occurrence_id"] == start_row["id"]
+                   and "包络" in item["reason"] for item in board["conflicts"])
+        assert all(item["occurrence_id"] != end_row["id"] for item in board["conflicts"])
+
+
+def test_r8_started_end_keeps_remaining_shortage_exemption():
+    # §18.1 对照：结束阶段真正开始后豁免剩余不足重判（不回归）。
+    with Context() as c:
+        _r8_hollow_task(c, _cst(20, 8))
+        start_row, end_row = _r8_phases(c)
+        planning.set_occurrence_status(start_row["id"], {"status": "in_progress"}, _cst(20, 9))
+        planning.set_occurrence_status(start_row["id"], {"status": "completed"}, _cst(20, 9, 30))
+        planning.set_occurrence_status(end_row["id"], {"status": "in_progress"}, _cst(20, 10))
+        assert planning.today_board(_cst(20, 10, 40))["conflicts"] == []
+
+
+def test_r8_remaining_still_enough_no_conflict():
+    # 对照：剩余空间足够（10:20 时剩余 40 分钟 ≥ 30 分钟）→ 无冲突。
+    with Context() as c:
+        _r8_hollow_task(c, _cst(20, 8))
+        start_row, end_row = _r8_phases(c)
+        planning.set_occurrence_status(start_row["id"], {"status": "in_progress"}, _cst(20, 9))
+        planning.set_occurrence_status(start_row["id"], {"status": "completed"}, _cst(20, 9, 30))
+        assert planning.today_board(_cst(20, 10, 20))["conflicts"] == []
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__]))

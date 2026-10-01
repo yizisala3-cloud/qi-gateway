@@ -1165,16 +1165,32 @@ def _round_deadline_passed(
     return now >= resolved.end_at  # 已到或越过（§12.1：当前时刻 ≥ 绝对截止）
 
 
+def _fixed_interval_anchor_due(row: dict[str, Any], now: datetime) -> bool:
+    """固定间隔首个轴点是否已到期（due ≤ now；§8.1 显式首次基准）。
+
+    首个轴点 = ``refresh_anchor_at``（默认锚点 = 创建时刻）。轴点未到时
+    首轮尚未成为「当前轮」：既不能提前结算游标（R7 审查修复——否则首个
+    事件被游标吞掉、第一次任务丢失），也不按创建时刻的窗口剩余编造当前
+    轮冲突反馈（轮次将在到期时按候选解析生成）。结算与创建反馈两个入口
+    共用本判定，不复制第二套轴点数学。
+    """
+    anchor = row.get("refresh_anchor_at")
+    if not anchor:
+        return False
+    return _parse_dt(anchor, "refresh_anchor_at") <= now
+
+
 def _first_round_settlement(
     row: dict[str, Any], now: datetime,
 ) -> tuple[bool, date | None]:
-    """创建时刻的首轮裁决（R1 / R3 / R6 审查修复）：一次性判定并给出结算。
+    """创建时刻的首轮裁决（R1 / R3 / R6 / R7 审查修复）：一次性判定并给出结算。
 
     返回 ``(skipped, settle_day)``：
 
-    * 当前轮不存在（weekly / monthly 的当前规划周期键不是规则日）→
-      ``(False, None)``——没有「当前轮」可跳过，也不为「次日起生效」在
-      非法日期强造轮次（R6）；daily 与 fixed_interval 的当前轮恒存在；
+    * 当前轮不存在（weekly / monthly 的当前规划周期键不是规则日，R6；
+      fixed_interval 的显式首次基准尚未到期，R7）→ ``(False, None)``——
+      没有「当前轮」可跳过，也不为「次日起生效」在非法日期强造轮次；
+      daily 与默认锚点（锚点 = 创建时刻）的 fixed_interval 当前轮恒存在；
     * 当前轮存在、最晚完成尚未到 → ``(False, None)``——首轮 DUE：生成
       资格保留，即时生成的暂时失败由后续维护按候选解析恢复，不因时间
       流逝被重判为跳过（R3-A）；
@@ -1182,10 +1198,11 @@ def _first_round_settlement(
       即结算：结算游标随任务行原子落库，生成侧只按游标跳过；模板编辑、
       暂停恢复、重复维护不得复活被跳过的首轮（R3-B）。
 
-    截止解析统一用当前轮的规划周期（R1）；结算日 = 被跳过首轮的事件日
-    （daily / weekly / monthly = 当前周期键，fixed_interval = 创建自然日
-    ——锚点事件 due = created_at，事件日即创建日），与固定轴枚举的
-    ``day`` 同一语义，不改变轮次键与固定轴。
+    截止解析统一用当前轮的规划周期（R1）；结算日 = 被跳过首轮的**事件日
+    **（daily / weekly / monthly = 当前周期键；fixed_interval = 首个轴点
+    ``refresh_anchor_at`` 的自然日，与固定轴枚举的 ``day`` 同一语义，R7
+    审查修复——不得把未到期事件或整段历史轴统一结算为创建自然日），不
+    改变轮次键与固定轴。
     """
     if row.get("refresh_mode") not in _ROUND_SKIP_REFRESH_MODES:
         return False, None
@@ -1193,6 +1210,8 @@ def _first_round_settlement(
     if template is None or template.end_tod is None:
         return False, None  # 无窗口 / 只有最早开始：没有最晚完成，不存在截止
     mode = row["refresh_mode"]
+    if mode == "fixed_interval" and not _fixed_interval_anchor_due(row, now):
+        return False, None  # 显式未来首次基准未到期：首轮尚未成为当前轮（R7）
     configured, transition, _ = _load_boundary_state(now)
     cycle_key = _current_cycle(now).key
     if mode in ("fixed_weekday", "fixed_monthday") and not _should_occur(row, cycle_key):
@@ -1200,7 +1219,8 @@ def _first_round_settlement(
     if not _round_deadline_passed(row, cycle_key, now, configured, transition):
         return False, None  # 首轮 DUE：保留生成资格（R3-A 恢复语义）
     settle_day = (
-        now.astimezone(_CST).date() if mode == "fixed_interval" else cycle_key)
+        _parse_dt(row["refresh_anchor_at"], "refresh_anchor_at").date()
+        if mode == "fixed_interval" else cycle_key)
     return True, settle_day
 
 
@@ -1215,8 +1235,11 @@ def _creation_window_outcome(
 
     * 重复待办：当前轮最晚完成已到或越过 → 首轮跳过并结算（任务保存、
       零实例、游标承载）；未截止但剩余空间不足 → 当前轮照常生成并呈现
-      排程冲突；当前周期无合法轮次（weekly / monthly 非规则日）→ 无跳过
-      反馈（R6）；
+      排程冲突；当前周期无合法轮次（weekly / monthly 非规则日，R10）或
+      固定间隔首个轴点尚未到期（R7）→ 无当前轮，跳过与冲突反馈均为否；
+    * after_completion（R9）：没有首轮跳过资格（跳过会让轮次链永远等不
+      到首个有效实例），但冲突反馈资格照常——按当前轮实际冻结窗口检查
+      剩余空间，与看板同一派生口径；
     * once：无窗口 / 只有最早开始不存在截止；有最晚完成时（创建校验已
       保证未过期）剩余空间不足 → 排程冲突。
     """
@@ -1228,15 +1251,29 @@ def _creation_window_outcome(
         resolved = resolve_window_on_date(
             template, _parse_date(row["target_date"], "target_date"))
         return False, not window_feasible(resolved, now, occupancy), None
-    if (row.get("refresh_mode") not in _ROUND_SKIP_REFRESH_MODES
-            or not isinstance(occupancy, int) or occupancy < 1):
+    mode = row.get("refresh_mode")
+    # 跳过资格（固定刷新型）与冲突反馈资格（固定刷新型 + 处理后刷新型）
+    # 分开（R9 审查修复）：after_completion 不跳过首轮，不代表它不需要
+    # 检查创建时冲突。
+    skip_eligible = mode in _ROUND_SKIP_REFRESH_MODES
+    if not skip_eligible and mode != "after_completion":
         return False, False, None
-    skipped, settle_day = _first_round_settlement(row, now)
-    if skipped:
-        return True, False, settle_day
+    if not isinstance(occupancy, int) or occupancy < 1:
+        return False, False, None
+    if mode == "fixed_interval" and not _fixed_interval_anchor_due(row, now):
+        return False, False, None  # 首个轴点未到期：尚无当前轮（R7）
+    configured, transition, _ = _load_boundary_state(now)
+    cycle_key = _current_cycle(now).key
+    if (mode in ("fixed_weekday", "fixed_monthday")
+            and not _should_occur(row, cycle_key)):
+        return False, False, None  # 非规则日没有当前轮（R6 / R10）
+    if skip_eligible:
+        skipped, settle_day = _first_round_settlement(row, now)
+        if skipped:
+            return True, False, settle_day
     # 未跳过时本轮冻结窗口 = 以当前时刻为参考的候选解析（与
     # _resolve_generation_window 同一归属与参考）；剩余装不下即排程冲突。
-    resolved = resolve_window(template, _current_cycle(now).key, now)
+    resolved = resolve_window(template, cycle_key, now)
     return False, not window_feasible(resolved, now, occupancy), None
 
 
@@ -2718,14 +2755,21 @@ def _frozen_slot_window_conflict(
     由 sweep 处理）——本判定只覆盖「尚未开始且仍开放、未触动」的固定锚点
     行，即本次放开创建拒绝后新出现的剩余不足人口；无最晚完成（only-
     earliest / 无窗口 / 旧 explicit 行）不存在剩余空间约束。中空按 §17.4
-    以完整包络在**开始阶段**上报一次，结束阶段不重复。
+    以完整包络在**开始阶段**上报一次，结束阶段不重复——但仅当开始阶段
+    仍在开放行集合中实际承担该检查（R8 审查修复）：开始阶段已完成 /
+    已关闭（退出开放集合）或已触动（§18.1 豁免、不承担）时无人代为上报，
+    尚未开始的结束阶段必须按自身所需时间自行检查剩余空间。
     """
     if not _is_untouched_open(occ):
         return None  # 执行中 / partial / 已开始 / 已延期：豁免剩余不足重判
     if not occ.get("is_fixed") and occ.get("fixed_source") is None:
         return None  # 非固定锚点实例由主循环 / 中空包络预判覆盖
     if occ.get("phase") == "end":
-        return None  # 中空整轮的剩余不足由开始阶段按包络上报一次
+        start_row = _hollow_sibling(occ, ordered, "start")
+        if start_row is not None and _is_untouched_open(start_row):
+            return None  # 开始阶段仍开放且未触动：整轮剩余不足由它按包络上报一次
+        # 开始阶段不在开放集合（已完成 / 已关闭）或已豁免重判：结束阶段
+        # 自行检查（R8），否则无人上报剩余不足。
     window = _occurrence_window(occ)
     if window is None or window.end_at is None:
         return None  # 只有最早开始 / 无窗口：没有最晚完成，无剩余空间约束
@@ -3512,6 +3556,15 @@ def _manual_estimate_patch(
             end = _parse_dt(occ["est_end"], "est_end") if occ.get("est_end") else None
     if start is None and end is not None:
         raise PlanningError("invalid_payload", "预估结束时间不能脱离开始时间", 400)
+    if start is not None and end is None and "est_end" in payload:
+        # 显式置空结束的半区间（#3）：与上一条互为镜像的中文业务拒绝——
+        # 省略 est_end 的请求不受影响（仍按预计耗时自动补终点）；不放开
+        # 半区间，也不把领域 ValueError 泄漏成英文技术错误。
+        raise PlanningError(
+            "invalid_payload",
+            "预估开始时间不能脱离结束时间：只修改开始时间时请省略结束时间，"
+            "由系统按预计耗时自动补齐", 400,
+        )
     if start is not None and end is not None and end <= start:
         raise PlanningError("invalid_payload", "预估结束时间必须晚于开始时间", 400)
     explicit_release = payload.get("is_fixed") is False

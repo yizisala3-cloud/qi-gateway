@@ -140,6 +140,42 @@ class PlanningApiContractTests(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertEqual(response.json()["error_code"], "invalid_transition")
 
+    def test_half_estimate_interval_patch_returns_chinese_reason(self):
+        # #3：显式 est_end=null 的半区间预估修改返回 400 中文业务原因
+        # （此前泄漏英文领域 ValueError「estimated time must be a complete
+        # interval」），且零写入。
+        with mock.patch.object(planning, "_now", lambda: NOW):
+            self.http.post(
+                "/admin/api/planning/tasks",
+                json={"content": "背单词", "task_type": "daily", "estimated_minutes": 30},
+                headers=self.auth,
+            )
+            planning.generate_due(NOW)
+            occ = self.client.rows["planning_occurrence"][0]
+            self.assertIsNotNone(occ["est_start"])
+            original = (occ["est_start"], occ["est_end"])
+            response = self.http.patch(
+                f"/admin/api/planning/occurrences/{occ['id']}",
+                json={"est_start": "2026-09-20T15:00:00+08:00", "est_end": None},
+                headers=self.auth,
+            )
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertEqual(body["error_code"], "invalid_payload")
+        self.assertNotIn("complete interval", body["error"])  # 不再泄漏英文领域文本
+        self.assertIn("预估", body["error"])
+        self.assertEqual((occ["est_start"], occ["est_end"]), original)  # 零写入
+        # 对照（既有语义不回归）：省略 est_end 仍按预计耗时自动补终点。
+        with mock.patch.object(planning, "_now", lambda: NOW):
+            ok = self.http.patch(
+                f"/admin/api/planning/occurrences/{occ['id']}",
+                json={"est_start": "2026-09-20T15:00:00+08:00"},
+                headers=self.auth,
+            )
+        self.assertEqual(ok.status_code, 200)
+        row = self.client.rows["planning_occurrence"][0]
+        self.assertEqual(row["est_end"], planning._iso(_cst(2026, 9, 20, 15, 30)))
+
     def test_manual_recompute_and_wait_state(self):
         with mock.patch.object(planning, "_now", lambda: NOW):
             state = self.http.get("/admin/api/planning/recompute", headers=self.auth).json()

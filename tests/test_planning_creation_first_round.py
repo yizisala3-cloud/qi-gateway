@@ -626,6 +626,129 @@ def test_r2_feasible_zero_freedom_conflicts_only_after_time_passes():
         assert planning.today_board(at(24, 10))["conflicts"]
 
 
+# ── 复审遗留 R7 / R9 / R10（#21 / #23 / #24；2026-10-02 修复轮） ────
+
+def test_r7_future_explicit_anchor_same_day_not_settled_early():
+    # R7（#21）：9/24 10:00 创建固定间隔 3 天、显式首次基准当天 16:00、
+    # 窗口 08:00–09:00。首个轴点尚未到期——不得按创建日窗口提前结算游标
+    # （此前响应 first_round_skipped=true、游标已写 9/24，16:00 首个事件
+    # 被游标吞掉，第一次任务丢失）；到期后按候选解析正常生成首个实例。
+    with Context() as c:
+        task = c.create("interval", at(24, 10), refresh_mode="fixed_interval",
+                        interval_days=3,
+                        refresh_anchor_at="2026-09-24T16:00:00+08:00",
+                        window_start_tod="08:00", window_end_tod="09:00")
+        assert task["first_round_skipped"] is False
+        assert task["schedule_conflict"] is False
+        assert c.rows == []
+        assert c.tasks[0].get("refresh_generated_through") is None
+        # 锚点未到期间的维护：不生成、不结算、游标保持为空。
+        assert planning.generate_due(at(24, 12))["created"] == 0
+        assert c.tasks[0].get("refresh_generated_through") is None
+        # 16:00 首个事件到期：首轮照常生成（当日窗口已过 → 候选解析为次日）。
+        assert planning.generate_due(at(24, 16))["created"] == 1
+        occ = c.rows[0]
+        assert occ["round_key"].startswith("fixed:2026-09-24:")
+        assert (occ["window_start_at"], occ["window_end_at"]) == (
+            planning._iso(at(25, 8)), planning._iso(at(25, 9)))
+        # 重复维护不重复生成。
+        assert planning.generate_due(at(24, 17))["created"] == 0
+        assert len(c.rows) == 1
+
+
+def test_r7_future_explicit_anchor_next_days_generates_when_due():
+    # R7 补充：显式首次基准在 9/27 16:00——创建时与随后两天都不结算、
+    # 不生成；9/27 16:00 到期生成首个实例。
+    with Context() as c:
+        task = c.create("interval", at(24, 10), refresh_mode="fixed_interval",
+                        interval_days=3,
+                        refresh_anchor_at="2026-09-27T16:00:00+08:00",
+                        window_start_tod="08:00", window_end_tod="09:00")
+        assert task["first_round_skipped"] is False
+        assert c.rows == []
+        assert c.tasks[0].get("refresh_generated_through") is None
+        assert planning.generate_due(at(25, 6))["created"] == 0
+        assert planning.generate_due(at(26, 6))["created"] == 0
+        assert c.tasks[0].get("refresh_generated_through") is None
+        assert planning.generate_due(at(27, 16))["created"] == 1
+        assert c.rows[0]["round_key"].startswith("fixed:2026-09-27:")
+        assert (c.rows[0]["window_start_at"], c.rows[0]["window_end_at"]) == (
+            planning._iso(at(28, 8)), planning._iso(at(28, 9)))
+
+
+def test_r7_past_anchor_settles_only_first_event_day():
+    # R7（结算日 = 首个轴点事件日，不把整段历史轴统一结算为创建日）：
+    # 9/24 10:00 创建固定间隔 1 天、显式锚点 9/23 08:00、窗口 08:00–09:00
+    # ——锚点事件（9/23）已到期且本轮窗口已过 → 首轮跳过（无实例）；9/24
+    # 轴点属非首轮迟到补生成，创建后的即时生成照常产出（旧实现把游标统一
+    # 结算为创建日 9/24，会把这一轮也吞掉）。
+    with Context() as c:
+        task = c.create("interval", at(24, 10), refresh_mode="fixed_interval",
+                        interval_days=1,
+                        refresh_anchor_at="2026-09-23T08:00:00+08:00",
+                        window_start_tod="08:00", window_end_tod="09:00")
+        assert task["first_round_skipped"] is True
+        assert len(c.rows) == 1
+        assert c.rows[0]["round_key"].startswith("fixed:2026-09-24:")
+        assert not any(row["round_key"].startswith("fixed:2026-09-23:")
+                       for row in c.rows)
+        assert (c.rows[0]["window_start_at"], c.rows[0]["window_end_at"]) == (
+            planning._iso(at(25, 8)), planning._iso(at(25, 9)))
+        # 重复维护不重复生成。
+        assert planning.generate_due(at(24, 11))["created"] == 0
+        assert len(c.rows) == 1
+
+
+def test_r9_after_completion_creation_reports_remaining_conflict():
+    # R9（#23）：10:00 创建处理后刷新（间隔 3 天）、窗口 09:00–11:00、
+    # 耗时 90 分钟——首轮照常生成（不跳过），创建响应必须与看板同源报告
+    # 剩余不足冲突（此前响应 schedule_conflict=false，前端只显示普通成功）。
+    with Context() as c:
+        task = c.create("interval", at(24, 10), refresh_mode="after_completion",
+                        interval_days=3, estimated_minutes=90,
+                        window_start_tod="09:00", window_end_tod="11:00")
+        assert task["first_round_skipped"] is False
+        assert task["schedule_conflict"] is True
+        assert len(c.rows) == 1  # 首轮照常生成，不因冲突反馈缺失
+        assert c.rows[0]["planned_minutes"] == 90  # 耗时不截短
+        board = planning.today_board(at(24, 10))
+        assert any(item["occurrence_id"] == c.rows[0]["id"]
+                   and "剩余空间不足" in item["reason"] for item in board["conflicts"])
+    # 对照：剩余空间足够（60 分钟恰好放进剩余窗口）→ 无冲突反馈。
+    with Context() as c:
+        task = c.create("interval", at(24, 10), refresh_mode="after_completion",
+                        interval_days=3, estimated_minutes=60,
+                        window_start_tod="09:00", window_end_tod="11:00")
+        assert task["schedule_conflict"] is False
+        assert task["first_round_skipped"] is False
+        assert len(c.rows) == 1
+
+
+@pytest.mark.parametrize("kind,extra", [
+    ("weekly", {"weekdays": [4]}),  # 只在周五（9/25）出现
+    ("monthly", {"month_days": [25]}),
+])
+def test_r10_non_rule_day_creation_reports_no_conflict(kind, extra):
+    # R10（#24）：周四 9/24 10:00 创建只在周五/25 日出现的任务，窗口
+    # 09:00–11:00、耗时 90 分钟——当天没有合法轮次，不得按周四剩余时间
+    # 编造「已创建但存在排程冲突」（此前响应冲突为 true、看板零冲突）。
+    with Context() as c:
+        task = c.create(kind, at(24, 10), estimated_minutes=90,
+                        window_start_tod="09:00", window_end_tod="11:00", **extra)
+        assert task["first_round_skipped"] is False
+        assert task["schedule_conflict"] is False
+        assert c.rows == []
+        # 下个合法轮次照常生成，窗口与排程正常、无冲突。
+        assert planning.generate_due(at(25, 6))["created"] == 1
+        assert planning.today_board(at(25, 7))["conflicts"] == []
+    # 对照：规则日当天剩余不足仍正确报告冲突（真正不可行不掩盖）。
+    with Context() as c:
+        task = c.create(kind, at(25, 10), estimated_minutes=90,
+                        window_start_tod="09:00", window_end_tod="11:00", **extra)
+        assert task["schedule_conflict"] is True
+        assert task["first_round_skipped"] is False
+
+
 def test_dated_once_regressions_preserved():
     # 已有有日期任务回归：日期下界、窗口自然日冻结、内部周期分离保持正确。
     with Context() as c:
