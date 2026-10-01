@@ -807,6 +807,54 @@ def test_recompute_sort_order_drift_skips_and_preserves_mark():
         assert row_a["est_start"] == iso(24, 14, 30)
 
 
+def test_recompute_hollow_round_sort_order_drift_skips_whole_round():
+    # #13 复现 A：两个中空待办按 A→B 算出排程；持久化阶段用户 save_order
+    # 把完整顺序改为 B→A → 中空 expected 快照此前不含 sort_order，旧结果
+    # （A 在前）仍全部写入且无 stale_skipped。修复后快照携带两阶段排序：
+    # 两轮旧结果整体放弃（updated=0、stale_skipped=4），原 est 不变；
+    # 下一次重算按 B→A 生成新时间。
+    with Context() as c:
+        c.create("daily", at(24, 10), estimated_minutes=30, **HOLLOW)
+        task_a = c.db.rows["planning_task"][0]
+        c.create("daily", at(24, 10), estimated_minutes=30, **HOLLOW)
+        task_b = c.db.rows["planning_task"][1]
+        rows_by = {(r["task_id"], r["phase"]): r for r in c.rows}
+        a_start, a_end = rows_by[(task_a["id"], "start")], rows_by[(task_a["id"], "end")]
+        b_start, b_end = rows_by[(task_b["id"], "start")], rows_by[(task_b["id"], "end")]
+        assert a_start["sort_order"] < b_start["sort_order"]  # 初始 A 在前
+        est_before = {r["id"]: (r["est_start"], r["est_end"])
+                      for r in (a_start, a_end, b_start, b_end)}
+
+        order_state = {"saved": False}
+        original_estimate = planning._estimate_patch
+
+        def patch_then_reorder(start, end, *, source, fixed_source=None):
+            result = original_estimate(start, end, source=source, fixed_source=fixed_source)
+            if not order_state["saved"]:
+                order_state["saved"] = True
+                # 用户并发：save_order 改为 B.start、B.end、A.start、A.end
+                planning.save_order(
+                    [b_start["id"], b_end["id"], a_start["id"], a_end["id"]],
+                    at(24, 12))
+            return result
+
+        planning._estimate_patch = patch_then_reorder
+        try:
+            result = planning.recompute_today(at(24, 14))
+        finally:
+            planning._estimate_patch = original_estimate
+        # 两轮旧结果全部放弃：不写半新半旧、不虚报 updated。
+        assert result["updated"] == 0
+        assert result.get("stale_skipped") == 4
+        for row in (a_start, a_end, b_start, b_end):
+            assert (row["est_start"], row["est_end"]) == est_before[row["id"]]
+        # 下一次重算按 B→A 正常生成：B 先于 A（B.end 等待收口后游标 17:00，
+        # A.start 从 17:00 起）。
+        planning.recompute_today(at(24, 15))
+        assert b_start["est_start"] == iso(24, 15)
+        assert a_start["est_start"] == iso(24, 17)
+
+
 def test_stale_recompute_does_not_clear_wait_mark():
     # M5 守卫：stale_skipped 的 recompute 不得清掉重算等待标记（含并发
     # save_order 产生的新请求）；干净结果才清。

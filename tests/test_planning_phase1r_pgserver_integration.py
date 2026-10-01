@@ -2416,14 +2416,14 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
                     ' "est_start": "2026-09-24T11:00:00+08:00",'
                     ' "est_end": "2026-09-24T11:30:00+08:00",'
                     ' "estimated_time_source": "automatic", "fixed_source": null,'
-                    ' "is_fixed": false, "schedule_managed": true},'
+                    ' "is_fixed": false, "schedule_managed": true, "sort_order": 10},'
                     ' {"id": %d, "status": "pending",'
                     ' "window_start_at": "2026-09-24T09:00:00+08:00",'
                     ' "window_end_at": "2026-09-24T12:00:00+08:00",'
                     ' "est_start": "2026-09-24T11:30:00+08:00",'
                     ' "est_end": "2026-09-24T12:00:00+08:00",'
                     ' "estimated_time_source": "automatic", "fixed_source": null,'
-                    ' "is_fixed": false, "schedule_managed": true}]'
+                    ' "is_fixed": false, "schedule_managed": true, "sort_order": 10}]'
                     % (start_id, end_id))
         self._query_expecting_concurrency_rejection(self.ROUND_PATCH_SQL_EXPECTED, (
             start_id, end_id,
@@ -2437,6 +2437,141 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
         ))
         self.assertEqual(self._occ_row(start_id), before_start)
         self.assertEqual(self._occ_row(end_id), before_end)
+
+    # -- #13（2026-10-02）：expected 契约收紧（迁移 20261002010000）──────
+    # expected 非 NULL 时必须是恰好两个元素的数组、每个元素为对象且携带
+    # 全部必填键（含两阶段 sort_order）、两个 id 恰为目标行与兄弟行各一次；
+    # sort_order 是 compute_schedule 的遍历输入，读取后改序 = 旧结果作废。
+
+    EXPECTED_REQUIRED_KEYS = ('id', 'status', 'window_start_at', 'window_end_at',
+                              'est_start', 'est_end', 'estimated_time_source',
+                              'fixed_source', 'is_fixed', 'schedule_managed',
+                              'sort_order')
+
+    def _expected_element_json(self, occ_id, *, sort=10, omit=()):
+        """构造一个 expected 快照元素；``omit`` 可剔除指定必填键。"""
+        fields = {
+            "id": str(occ_id),
+            "status": '"pending"',
+            "window_start_at": "null",
+            "window_end_at": "null",
+            "est_start": "null",
+            "est_end": "null",
+            "estimated_time_source": '"unassigned"',
+            "fixed_source": "null",
+            "is_fixed": "false",
+            "schedule_managed": "true",
+            "sort_order": str(sort),
+        }
+        for key in omit:
+            fields.pop(key)
+        return "{%s}" % ", ".join('"%s": %s' % (k, v) for k, v in fields.items())
+
+    def _conforming_expected(self, start_id, end_id, *, start_sort=10, end_sort=10):
+        """与 _hollow_pair 行现状一致的合规快照（status pending、无窗口、无 est）。"""
+        return "[%s, %s]" % (
+            self._expected_element_json(start_id, sort=start_sort),
+            self._expected_element_json(end_id, sort=end_sort))
+
+    def _patch_pair_json(self, start_id, end_id):
+        """一份合法的最小 est 补丁对（automatic 所有权元组完整）。"""
+        return (
+            '{"est_start": "2026-09-24T15:00:00+08:00",'
+            ' "est_end": "2026-09-24T15:30:00+08:00",'
+            ' "estimated_time_source": "automatic", "fixed_source": null,'
+            ' "is_fixed": false, "schedule_managed": true,'
+            ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+            '{"est_start": "2026-09-24T15:30:00+08:00",'
+            ' "est_end": "2026-09-24T16:00:00+08:00",'
+            ' "estimated_time_source": "automatic", "fixed_source": null,'
+            ' "is_fixed": false, "schedule_managed": true,'
+            ' "updated_at": "2026-09-28T11:00:00+08:00"}',
+        )
+
+    def test_round_patch_rpc_expected_with_sort_order_matches_writes(self):
+        # 合规快照（排序一致）：无漂移 → 两行正常写入（合法重算不回归）。
+        start_id, end_id = self._hollow_pair()
+        target_patch, sibling_patch = self._patch_pair_json(start_id, end_id)
+        self._query(self.ROUND_PATCH_SQL_EXPECTED, (
+            start_id, end_id, target_patch, sibling_patch,
+            self._conforming_expected(start_id, end_id),
+        ))
+        start_row = dict(zip(self._occ_columns(), self._occ_row(start_id)))
+        end_row = dict(zip(self._occ_columns(), self._occ_row(end_id)))
+        self.assertEqual(str(start_row["est_start"]), "2026-09-24 15:00:00+08:00")
+        self.assertEqual(str(end_row["est_end"]), "2026-09-24 16:00:00+08:00")
+
+    def test_round_patch_rpc_expected_rejects_sort_order_drift(self):
+        # 排序漂移（读取后 save_order 改序）：快照 sort_order ≠ 当前行 →
+        # 整体拒绝、零写入——此前 SQL 忽略该键，旧结果照写。
+        start_id, end_id = self._hollow_pair()
+        before_start, before_end = self._occ_row(start_id), self._occ_row(end_id)
+        target_patch, sibling_patch = self._patch_pair_json(start_id, end_id)
+        stale = self._conforming_expected(start_id, end_id,
+                                          start_sort=30, end_sort=31)
+        self._query_expecting_concurrency_rejection(self.ROUND_PATCH_SQL_EXPECTED, (
+            start_id, end_id, target_patch, sibling_patch, stale,
+        ))
+        self.assertEqual(self._occ_row(start_id), before_start)
+        self.assertEqual(self._occ_row(end_id), before_end)
+
+    def test_round_patch_rpc_expected_rejects_invalid_shapes(self):
+        # 形状契约：空数组 / 单元素 / 重复 id / 未知 id / 缺必填键 / 非对象
+        # 元素 / 非数组 —— 一律 PC001 拒绝、零写入。
+        start_id, end_id = self._hollow_pair()
+        before_start, before_end = self._occ_row(start_id), self._occ_row(end_id)
+        target_patch, sibling_patch = self._patch_pair_json(start_id, end_id)
+        element = self._expected_element_json(start_id)
+        cases = (
+            ("empty array", "[]"),
+            ("single element", "[%s]" % element),
+            ("duplicate id", "[%s, %s]" % (element, element)),
+            ("unknown id", "[%s, %s]" % (
+                element, self._expected_element_json(999999))),
+            ("missing required key", "[%s, %s]" % (
+                element, self._expected_element_json(end_id, omit=("sort_order",)))),
+            ("non-object element", "[1, 2]"),
+            ("non-array", element),
+        )
+        for name, payload in cases:
+            with self.subTest(case=name):
+                self._query_expecting_concurrency_rejection(
+                    self.ROUND_PATCH_SQL_EXPECTED, (
+                        start_id, end_id, target_patch, sibling_patch, payload,
+                    ))
+                self.assertEqual(self._occ_row(start_id), before_start)
+                self.assertEqual(self._occ_row(end_id), before_end)
+
+    def test_round_patch_rpc_expected_required_keys_complete(self):
+        # 必填键逐项钉住：快照缺任一必填键都必须拒绝（契约不因部分键缩水）。
+        start_id, end_id = self._hollow_pair()
+        before_start, before_end = self._occ_row(start_id), self._occ_row(end_id)
+        target_patch, sibling_patch = self._patch_pair_json(start_id, end_id)
+        for key in self.EXPECTED_REQUIRED_KEYS:
+            with self.subTest(missing=key):
+                payload = "[%s, %s]" % (
+                    self._expected_element_json(start_id, omit=(key,)),
+                    self._expected_element_json(end_id))
+                self._query_expecting_concurrency_rejection(
+                    self.ROUND_PATCH_SQL_EXPECTED, (
+                        start_id, end_id, target_patch, sibling_patch, payload,
+                    ))
+                self.assertEqual(self._occ_row(start_id), before_start)
+                self.assertEqual(self._occ_row(end_id), before_end)
+
+    def test_round_patch_rpc_single_signature_after_contract_migration(self):
+        # #15 纪律（迁移 20261002010000）：同签名 create or replace 不产生
+        # overload——目标函数恰一签名（5 参数，p_expected 在列）。
+        signatures = self._query(
+            "select pg_get_function_identity_arguments(p.oid)"
+            " from pg_proc p join pg_namespace n on n.oid = p.pronamespace"
+            " where n.nspname = 'public'"
+            " and p.proname = 'planning_patch_occurrence_round'"
+        )
+        self.assertEqual(len(signatures), 1)
+        self.assertIn("p_target_id", signatures[0][0])
+        self.assertIn("p_sibling_id", signatures[0][0])
+        self.assertIn("p_expected", signatures[0][0])
 
     def test_sweep_closes_hollow_round_in_one_statement(self):
         start_id, end_id = self._hollow_pair(

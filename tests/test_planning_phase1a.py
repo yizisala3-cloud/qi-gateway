@@ -690,6 +690,11 @@ ROUND_PATCH_SIBLING_FIELDS = frozenset({
     "estimated_time_source", "fixed_source", "schedule_managed", "is_fixed",
     "display_cycle_date", "display_reason", "updated_at",
 })
+ROUND_PATCH_EXPECTED_FIELDS = frozenset({
+    "id", "status", "window_start_at", "window_end_at", "est_start", "est_end",
+    "estimated_time_source", "fixed_source", "is_fixed", "schedule_managed",
+    "sort_order",
+})
 
 
 def emulate_planning_round_patch(rows, params):
@@ -717,8 +722,23 @@ def emulate_planning_round_patch(rows, params):
             or target.get("phase") == sibling.get("phase")):
         raise RuntimeError(
             "planning_patch_occurrence_round: rows are not a hollow start/end pair")
-    # expected snapshot 复核（最终验收修复问题 3）：重算输入漂移 → 拒绝
+    # expected snapshot 复核（最终验收修复问题 3；#13 契约收紧）：expected
+    # 非 NULL 时必须是恰好两个元素的数组、每个元素为对象且携带全部必填键
+    # （含 sort_order）、两个 id 恰为目标行与兄弟行各一次；漂移 → 拒绝。
     if params.get("p_expected") is not None:
+        expected = params["p_expected"]
+        if (not isinstance(expected, list) or len(expected) != 2
+                or any(not isinstance(e, dict) for e in expected)):
+            raise RuntimeError(
+                "planning_patch_occurrence_round: invalid expected snapshot")
+        if any(not ROUND_PATCH_EXPECTED_FIELDS <= set(e) for e in expected):
+            raise RuntimeError(
+                "planning_patch_occurrence_round: invalid expected snapshot")
+        ids = sorted(e.get("id") for e in expected)
+        if (ids != sorted((params.get("p_target_id"), params.get("p_sibling_id")))
+                or len(set(ids)) != 2):
+            raise RuntimeError(
+                "planning_patch_occurrence_round: invalid expected snapshot")
         for e in params["p_expected"]:
             row = next((r for r in rows if r.get("id") == e.get("id")), None)
             if row is None:

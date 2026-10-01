@@ -3072,6 +3072,7 @@ CONCURRENCY_ERRCODE = "PC001"
 _CONCURRENCY_REJECTION_MESSAGES = (
     "round is no longer editable",
     "schedule inputs drifted",
+    "invalid expected snapshot",
 )
 
 
@@ -3130,7 +3131,9 @@ def _conditional_schedulable_update(client, occ: dict[str, Any], patch: dict[str
 def _recompute_expected_snapshot(occ: dict[str, Any]) -> dict[str, Any]:
     """重算某行的 expected snapshot（最终验收修复问题 3）：compute_schedule
     实际读取并决定「可排 / 可覆盖 / 窗口」的输入字段——状态、生命周期
-    事实、所有权元组、冻结窗口与既有 est 预态。NULL 显式参与复核。"""
+    事实、所有权元组、冻结窗口、既有 est 预态与排序（#13：sort_order 是
+    遍历顺序输入，读取后 save_order 改序即旧结果作废，与单行条件 UPDATE
+    的内联等值守卫同源）。NULL 显式参与复核。"""
     return {
         "id": occ["id"],
         "status": "pending",
@@ -3142,6 +3145,7 @@ def _recompute_expected_snapshot(occ: dict[str, Any]) -> dict[str, Any]:
         "fixed_source": occ.get("fixed_source"),
         "is_fixed": bool(occ.get("is_fixed")),
         "schedule_managed": bool(occ.get("schedule_managed")),
+        "sort_order": occ["sort_order"],
     }
 
 

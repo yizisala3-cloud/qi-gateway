@@ -448,6 +448,128 @@ ONCE_IDENTITY_LOCKS_MIGRATION = (
     / "20260928030000_planning_once_identity_locks.sql"
 )
 
+ROUND_PATCH_EXPECTED_CONTRACT_MIGRATION = (
+    Path(__file__).resolve().parents[1]
+    / "supabase"
+    / "migrations"
+    / "20261002010000_planning_patch_round_expected_contract.sql"
+)
+
+
+class PlanningRoundPatchExpectedContractMigrationTests(unittest.TestCase):
+    """#13（2026-10-02）：round patch RPC expected 契约收紧迁移契约。
+
+    仅 create or replace 同签名函数（5 参数，无 overload、重放安全）；
+    不新增表列 / 触发器 / 数据回填。expected 非 NULL 时：恰两元素数组、
+    全必填键（含两阶段 sort_order）、两 id 恰为目标行与兄弟行各一次、
+    漂移比较覆盖 sort_order；拒绝统一 PC001。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = ROUND_PATCH_EXPECTED_CONTRACT_MIGRATION.read_text(encoding="utf-8")
+        cls.folded = cls.sql.casefold()
+
+    def _top_level_statements(self):
+        statements, buf = [], []
+        in_dollar = False
+        for line in self.sql.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("--"):
+                continue  # 头部说明注释不属于语句序列
+            if not in_dollar and stripped.casefold().startswith("create or replace function"):
+                buf.append(stripped)
+                in_dollar = True
+                continue
+            if in_dollar:
+                if stripped == "$$;":
+                    in_dollar = False
+                continue
+            if stripped:
+                buf.append(stripped)
+        return [item.casefold() for item in buf]
+
+    def test_migration_is_atomic_and_replay_safe(self):
+        folded = self.folded
+        self.assertIn("begin;", folded)
+        self.assertIn("commit;", folded)
+        self.assertIn(
+            "create or replace function public.planning_patch_occurrence_round(",
+            folded)
+
+    def test_same_signature_no_overload(self):
+        # 与 20260928020000 完全同签名：5 参数、p_expected 保持 default null。
+        folded = self.folded
+        self.assertIn("p_target_id bigint", folded)
+        self.assertIn("p_sibling_id bigint", folded)
+        self.assertIn("p_target_patch jsonb", folded)
+        self.assertIn("p_sibling_patch jsonb", folded)
+        self.assertIn("p_expected jsonb default null", folded)
+        self.assertNotIn("drop function", folded)
+
+    def test_no_schema_or_backfill_changes(self):
+        top = [item for item in self._top_level_statements()
+               if not item.startswith(("begin;", "commit;"))]
+        self.assertEqual(top, [
+            "create or replace function public.planning_patch_occurrence_round("])
+        for forbidden in (
+            "alter table", "add column", "create trigger", "create table",
+            "create index", "drop table",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.folded)
+        # 数据回填检查只针对顶层语句：函数体内的 UPDATE 是白名单逐列更新，
+        # 不是迁移回填（与 20260928020000 契约同口径）。
+        for item in top:
+            for forbidden in ("update ", "insert into", "delete from"):
+                with self.subTest(statement=item, forbidden=forbidden):
+                    self.assertFalse(item.startswith(forbidden))
+
+    def test_expected_shape_and_required_keys(self):
+        folded = self.folded
+        self.assertIn("invalid expected snapshot", folded)
+        self.assertIn("jsonb_typeof(p_expected) is distinct from 'array'", folded)
+        self.assertIn("jsonb_array_length(p_expected) <> 2", folded)
+        self.assertIn("jsonb_typeof(e.value) is distinct from 'object'", folded)
+        self.assertIn("'id', 'status', 'window_start_at', 'window_end_at',", folded)
+        self.assertIn("'fixed_source', 'is_fixed', 'schedule_managed', 'sort_order']",
+                      folded)
+
+    def test_expected_id_coverage_exact_pair(self):
+        # 两 id 恰为目标行与兄弟行各一次：总数与去重数双条件。
+        folded = self.folded
+        self.assertIn("(e.value->>'id')::bigint in (p_target_id, p_sibling_id)) <> 2",
+                      folded)
+        self.assertIn("count(distinct (e.value->>'id')::bigint)", folded)
+
+    def test_expected_drift_compares_sort_order(self):
+        # sort_order 进入漂移比较（遍历顺序输入；与单行条件 UPDATE 同源）。
+        folded = self.folded
+        self.assertIn(
+            "o.sort_order is distinct from (e.value->>'sort_order')::integer",
+            folded)
+        self.assertIn("schedule inputs drifted", folded)
+        self.assertEqual(folded.count("using errcode = 'pc001'"), 6)
+
+    def test_expected_null_edit_path_untouched(self):
+        # 人工编辑路径 expected = NULL：契约块整体跳过（if p_expected is not null）。
+        self.assertIn("if p_expected is not null then", self.folded)
+
+    def test_existing_guard_statements_preserved(self):
+        # 其余语句与 20260928020000 一致：白名单 / 行锁 / 身份 / 生命周期门 /
+        # 窗口一致性 / 两行白名单更新原样保留。
+        folded = self.folded
+        self.assertIn("target patch contains unsupported field", folded)
+        self.assertIn("sibling patch contains unsupported field", folded)
+        self.assertIn("only open statuses can be written", folded)
+        self.assertIn("order by id", folded)
+        self.assertIn("rows are not a hollow start/end pair", folded)
+        self.assertEqual(folded.count("round is no longer editable"), 2)
+        self.assertIn("hollow phases disagree on window", folded)
+        self.assertIn("where id = p_target_id;", folded)
+        self.assertIn("where id = p_sibling_id;", folded)
+        self.assertNotIn("security definer", folded)
+
 
 class PlanningOnceIdentityLocksMigrationContractTests(unittest.TestCase):
     """once 身份编辑 / 生成的跨进程任务行锁守护 RPC 契约（20260928030000）。
