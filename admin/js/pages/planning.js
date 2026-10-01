@@ -22,7 +22,7 @@ const STATUS_META = {
   partial: { label: '部分完成', tone: 'gold' },
   deferred: { label: '已延后', tone: 'slate' },
   discarded_this: { label: '此次废弃', tone: 'muted' },
-  discarded: { label: '已废弃', tone: 'red' },
+  discarded: { label: '已删除', tone: 'red' },
   timeout: { label: '已超时', tone: 'red' },
 };
 // 部分完成属于开放生命周期：实例仍在「进度中」，直到「已全部完成」才关闭
@@ -527,7 +527,7 @@ export default {
           ${(task.window_start_tod || task.window_end_tod) ? tag('时段', 'slate') : ''}
           ${task.is_fixed ? tag('固定', 'slate') : ''}
           ${task.alarm_start || task.alarm_end ? tag('闹钟', 'plum') : ''}
-          ${task.is_active ? '' : tag('已废弃', 'red')}
+          ${task.is_active ? '' : tag('已删除', 'red')}
         </div></div>
       </div>`).join('');
   },
@@ -651,7 +651,7 @@ export default {
       parts.push(btn('edit-time', '调整时段', 'edit'));
       parts.push(btn('spawn-remaining', '剩余另建待办', 'plus'));
       parts.push(btn('split', '拆分待办', 'layers'));
-      parts.push(btn('discard', '废弃', 'x', 'btn-danger-line'));
+      parts.push(btn('discard', '删除待办', 'x', 'btn-danger-line'));
     }
     if (occ.status === 'partial') {
       // 已全部完成：最终补完时间入账，处理后刷新型以此为下一轮基准
@@ -661,7 +661,7 @@ export default {
       // 超时实例不复活：重新安排 = 保留超时历史 + 新建单次待办
       parts.push(btn('reschedule-timeout', '重新安排', 'clock', 'btn-primary'));
       parts.push(btn('discard-this', '此次不执行'));
-      parts.push(btn('discard', '废弃', 'x', 'btn-danger-line'));
+      parts.push(btn('discard', '删除待办', 'x', 'btn-danger-line'));
     }
     if (CLOSED_STATUSES.includes(occ.status)) {
       // 已关闭历史不复活（过去不重写）：只允许补填实际时间
@@ -689,7 +689,7 @@ export default {
     }
     parts.push(`<button class="btn btn-secondary btn-sm" data-act="task-edit" data-id="${task.id}">${icon('edit')}编辑</button>`);
     if (task.is_active) {
-      parts.push(`<button class="btn btn-danger-line btn-sm" data-act="task-discard" data-id="${task.id}">${icon('x')}废弃任务</button>`);
+      parts.push(`<button class="btn btn-danger-line btn-sm" data-act="task-discard" data-id="${task.id}">${icon('x')}删除待办</button>`);
     } else if (task.request_state === 'superseded') {
       // H2/I6：被取代的重排请求为终态，不提供重新启用入口
       parts.push(`<span class="muted text-sm">已被取代的重排请求</span>`);
@@ -698,7 +698,7 @@ export default {
     }
     this.detail.render({
       title: esc(task.content),
-      badges: `<div class="tag-row">${tag(esc(TASK_TYPE_LABELS[task.task_type] || ''), 'gold')}${task.refresh_enabled === false && task.is_active ? tag('刷新已暂停', 'slate') : ''}${task.is_active ? '' : tag('已废弃', 'red')}</div>`,
+      badges: `<div class="tag-row">${tag(esc(TASK_TYPE_LABELS[task.task_type] || ''), 'gold')}${task.refresh_enabled === false && task.is_active ? tag('刷新已暂停', 'slate') : ''}${task.is_active ? '' : tag('已删除', 'red')}</div>`,
       html: `
         <div class="kv"><span class="k">重复规则</span><span class="v">${esc(taskTypeSummary(task))}</span></div>
         <div class="kv"><span class="k">可安排时段</span><span class="v">${(task.window_start_tod || task.window_end_tod)
@@ -893,7 +893,7 @@ export default {
         if (!(await confirm('确认「此次不执行」？只关闭这一次出现，不影响后续刷新。', { danger: false }))) return;
         await post('/status', { status: 'discarded_this' });
       } else if (act === 'discard') {
-        if (!(await confirm('确认废弃？该待办后续不再自动出现。'))) return;
+        if (!(await confirm('确认删除？该待办后续不再自动出现。'))) return;
         await post('/status', { status: 'discarded' });
       } else if (act === 'edit-time') return this.askEditTime(id);
       else if (act === 'backfill') return this.askBackfill(id);
@@ -932,13 +932,13 @@ export default {
         if (task) this.openTaskForm(task);
         return;
       } else if (act === 'discard') {
-        if (!(await confirm('废弃整个任务？后续不再刷新，当天未完成的实例也会关闭。'))) return;
+        if (!(await confirm('删除整个待办？后续不再刷新，当天未完成的实例也会关闭。'))) return;
         await gw(`/admin/api/planning/tasks/${id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ is_active: false }),
         });
-        toast('任务已废弃');
+        toast('待办已删除');
       } else if (act === 'enable') {
         await gw(`/admin/api/planning/tasks/${id}`, {
           method: 'PATCH',
@@ -947,7 +947,7 @@ export default {
         });
         toast('任务已重新启用');
       } else if (act === 'pause-refresh' || act === 'resume-refresh') {
-        // 暂停刷新 ≠ 废弃任务 / 此次不执行 / 完成：只写 refresh_enabled，
+        // 暂停刷新 ≠ 删除待办 / 此次不执行 / 完成：只写 refresh_enabled，
         // 任务定义、周期规则、当前实例与历史事实全部保持原样（需求 24）
         const resuming = act === 'resume-refresh';
         if (!resuming && !(await confirm(
