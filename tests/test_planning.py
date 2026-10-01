@@ -383,11 +383,12 @@ class TaskValidationTests(_Base):
         self.run_with(run)
 
     def test_type_required_fields(self):
+        # 2026-10-01（§32.45）：once 的 target_date 为可选项，不再属于类型
+        # 必填字段（无日期常驻语义见 test_planning_creation_first_round）。
         cases = [
             ({"task_type": "interval", "content": "x"}, "interval_days"),
             ({"task_type": "weekly", "content": "x", "weekdays": []}, "weekdays"),
             ({"task_type": "monthly", "content": "x", "month_days": []}, "month_days"),
-            ({"task_type": "once", "content": "x"}, "target_date"),
         ]
         for payload, field in cases:
             with self.subTest(task_type=payload["task_type"]):

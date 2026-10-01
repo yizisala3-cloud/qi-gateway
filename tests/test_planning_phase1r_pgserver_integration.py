@@ -2207,6 +2207,57 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
         with self.assertRaises(psycopg.errors.UniqueViolation):
             self._query(self.ONCE_INSERT_SQL, (task_id, "2026-09-24", None, None, row_json))
 
+    # -- 2026-10-01（#18 / §10 / §28.3 / §32.45）：单次日期可选的数据库契约 --
+
+    def test_once_null_target_date_base_row_and_guarded_null_save(self):
+        # 基表接受 NULL target_date；守护编辑 RPC 以显式 NULL 补丁保存
+        # （省略日期 → 落库 NULL），同值 NULL 幂等重放同样成功。
+        task_id = self._bare_once_task(None)
+        current = self._query("select target_date from public.planning_task where id = %s",
+                              (task_id,))[0][0]
+        self.assertIsNone(current)
+        self._query(self.ONCE_GUARD_SQL, (
+            task_id, '{"target_date": null, "updated_at": "2026-09-28T11:00:00+08:00"}',
+        ))
+        current = self._query("select target_date from public.planning_task where id = %s",
+                              (task_id,))[0][0]
+        self.assertIsNone(current)
+
+    def test_once_insert_rpc_null_target_date_is_null_safe(self):
+        # 生成侧定义一致性复核对 NULL 语义安全（IS DISTINCT FROM）：
+        # 无日期 once 携带 NULL expected 通过锁内复核并落库 round_key='once'。
+        task_id = self._bare_once_task(None)
+        self._query(self.ONCE_INSERT_SQL, (task_id, None, None, None,
+                                           self._once_row_json(task_id)))
+        row = self._query(
+            "select round_key, schedule_date, display_cycle_date"
+            " from public.planning_occurrence where task_id = %s",
+            (task_id,))[0]
+        self.assertEqual((row[0], str(row[1]), str(row[2])),
+                         ("once", "2026-09-24", "2026-09-24"))
+        # 重复插入仍被轮次唯一键拒绝（NULL 不削弱并发保护）。
+        with self.assertRaises(psycopg.errors.UniqueViolation):
+            self._query(self.ONCE_INSERT_SQL, (task_id, None, None, None,
+                                               self._once_row_json(task_id)))
+
+    def test_once_insert_rpc_null_target_date_still_detects_drift(self):
+        # NULL 语义不得弱化定义漂移守卫：expected NULL vs 任务行已有日期
+        # → 拒绝；expected 日期 vs 任务行 NULL → 同样拒绝。
+        task_id = self._bare_once_task(None)
+        with self.assertRaises(psycopg.errors.RaiseException):
+            self._query(self.ONCE_INSERT_SQL,
+                        (task_id, "2026-09-24", None, None, self._once_row_json(task_id)))
+        self.assertEqual(self._query(
+            "select count(*) from public.planning_occurrence where task_id = %s",
+            (task_id,))[0][0], 0)
+        dated = self._bare_once_task("2026-09-24")
+        with self.assertRaises(psycopg.errors.RaiseException):
+            self._query(self.ONCE_INSERT_SQL,
+                        (dated, None, None, None, self._once_row_json(dated)))
+        self.assertEqual(self._query(
+            "select count(*) from public.planning_occurrence where task_id = %s",
+            (dated,))[0][0], 0)
+
     def test_round_patch_rpc_status_field_cannot_lower_window_gate(self):
         # 问题 5：status='pending' + 窗口修改 + actual_start 事实存在 →
         # 严格门拒绝（status 不能降低保护）。

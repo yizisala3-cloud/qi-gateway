@@ -1087,12 +1087,18 @@ export default {
       return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
     };
     const hasWindow = !!(occ.window_start_at || occ.window_end_at);
+    // §28.3（2026-10-01）：无日期单次常驻显示、不设时间窗口——当前实例
+    // 编辑不能为它新增窗口端（后端权威拒绝，这里同步禁用输入并说明）。
+    const occTask = this.tasks.find((t) => t.id === occ.task_id);
+    const residentOnce = !!occTask && occTask.task_type === 'once' && !occTask.target_date;
+    const disabledAttr = residentOnce ? 'disabled' : '';
     const { root, close } = modal({
       title: '调整时段',
       body: `
         <p class="muted text-sm">调整当前这一轮的可安排时段（最早开始 / 最晚完成，两端可独立留空）。把时段收窄到恰好容纳预计耗时，就会把这条待办钉在该时间，不再被自动重算移动。</p>
-        <div class="field"><label>最早开始（可选）</label><input type="datetime-local" id="planning-adj-window-start" value="${toLocal(occ.window_start_at)}"></div>
-        <div class="field"><label>最晚完成（可选，越过即超时）</label><input type="datetime-local" id="planning-adj-window-end" value="${toLocal(occ.window_end_at)}"></div>
+        <div class="field"><label>最早开始（可选）</label><input type="datetime-local" id="planning-adj-window-start" value="${toLocal(occ.window_start_at)}" ${disabledAttr}></div>
+        <div class="field"><label>最晚完成（可选，越过即超时）</label><input type="datetime-local" id="planning-adj-window-end" value="${toLocal(occ.window_end_at)}" ${disabledAttr}></div>
+        ${residentOnce ? '<p class="muted text-sm">未指定日期的单次待办常驻显示、不设可安排时段：不能为它的当前实例新增时间窗口。</p>' : ''}
         ${hasWindow ? '<p class="muted text-sm">这一轮已带时段约束：两端都清空会取消既有约束，后端会拒绝；请保留至少一端。</p>' : ''}
         <div id="pf-adj-error" hidden></div>`,
       footer: `<button class="btn btn-secondary" data-cancel>取消</button>
@@ -1314,8 +1320,9 @@ export default {
             <input type="text" id="pf-month-days" value="${esc((value('month_days') || []).join(','))}"></div>
         </div>
         <div data-type-block="once" style="display:none">
-          <div class="field"><label>目标日期</label>
-            <div class="retro-time" data-retro-for="pf-target-date" data-retro-mode="date" data-retro-value="${esc(value('target_date'))}"></div></div>
+          <div class="field"><label>目标日期（可选）</label>
+            <div class="retro-time" data-retro-for="pf-target-date" data-retro-mode="date" data-retro-value="${esc(value('target_date'))}"></div>
+            <p class="muted text-sm" id="pf-resident-note" hidden>未填日期：单次待办常驻显示，不设最早开始／最晚完成，直到你主动处理。</p></div>
           <div id="pf-once-error" hidden></div>
         </div>
         <div class="field"><label>预估耗时（分钟，或 1h30m 简写）</label>
@@ -1328,7 +1335,9 @@ export default {
             <div class="window-field"><label>最晚完成（可选）</label>
               <div class="retro-time" data-retro-for="pf-window-end" data-retro-mode="time" data-retro-align="right" data-retro-value="${esc(value('window_end_tod'))}"></div>
             </div>
-          </div></div>
+          </div>
+          <button type="button" id="pf-clear-window" class="btn btn-secondary btn-sm" hidden>清空残留时段</button>
+        </div>
         <div id="pf-window-error" hidden></div>
         <div class="field"><label class="inline"><input type="checkbox" id="pf-hollow" ${value('is_hollow') ? 'checked' : ''}> 中空待办（开始/结束两个条目，中间可插入其他待办）</label></div>
         <div id="pf-hollow-block" style="display:none">
@@ -1376,9 +1385,63 @@ export default {
       });
       root.querySelector('#pf-hollow-block').style.display =
         root.querySelector('#pf-hollow').checked ? '' : 'none';
+      syncOnceWindow();
     };
+    // §30.6（2026-10-01）：单次目标日期可选；未填日期时最早开始／最晚完成
+    // 控件不可设置，并说明常驻语义（前后端都拒绝空日期 + 非空窗口组合）。
+    const residentNote = root.querySelector('#pf-resident-note');
+    const toggleRetro = (hostSelector, disabled, title) => {
+      const host = root.querySelector(hostSelector);
+      if (!host) return;
+      const input = host.querySelector('input');
+      const button = host.querySelector('button');
+      if (input) input.disabled = disabled;
+      if (button) {
+        button.disabled = disabled;
+        button.title = title;
+      }
+    };
+    const syncOnceWindow = () => {
+      if (!residentNote) return;
+      // §28.3 身份锁定优先：已生成 once 的日期与窗口模板已禁用并提示，
+      // 常驻联动不得重新启用（lockRetro 的禁用状态保持权威）。
+      if (onceLocked) return;
+      const type = typeSelect.value;
+      const dateValue = root.querySelector('#pf-target-date')?.value || '';
+      const resident = type === 'once' && !dateValue;
+      const startInput = root.querySelector('#pf-window-start');
+      const endInput = root.querySelector('#pf-window-end');
+      // R5 审查修复：空日期禁止「新增」窗口不变，但残留值必须留一条
+      // 明确可用的清空通路——禁用按钮同时拦住了进入选择器点「清除」，
+      // 残值既删不掉也提交不了。清空按钮仅在存在残值时可见，点击即
+      // user 明确确认（不默默丢弃、不提交隐藏残值）。
+      const residual = resident && !!((startInput?.value) || (endInput?.value));
+      residentNote.hidden = !resident;
+      residentNote.textContent = residual
+        ? '未填日期：单次待办常驻显示，不设最早开始／最晚完成。当前仍有残留时段值——请点击「清空残留时段」明确清除后再保存。'
+        : '未填日期：单次待办常驻显示，不设最早开始／最晚完成，直到你主动处理。';
+      const residentTitle = resident
+        ? '无日期单次常驻显示，不能设置可安排时段' : '';
+      toggleRetro('.retro-time[data-retro-for="pf-window-start"]', resident, residentTitle);
+      toggleRetro('.retro-time[data-retro-for="pf-window-end"]', resident, residentTitle);
+      const clearBtn = root.querySelector('#pf-clear-window');
+      if (clearBtn) clearBtn.hidden = !residual;
+    };
+    root.querySelector('#pf-clear-window')?.addEventListener('click', () => {
+      // user 明确清除残留时段：经复古选择器的编程清空接口（缺省回退直写
+      // value），两端一起清；清空后重新联动（隐藏按钮、更新提示）。
+      for (const selector of ['#pf-window-start', '#pf-window-end']) {
+        const input = root.querySelector(selector);
+        if (input?.value) {
+          if (typeof input._applyRetroValue === 'function') input._applyRetroValue('', true);
+          else input.value = '';
+        }
+      }
+      syncOnceWindow();
+    });
     typeSelect.addEventListener('change', syncBlocks);
     root.querySelector('#pf-hollow').addEventListener('change', syncBlocks);
+    root.querySelector('#pf-target-date')?.addEventListener('input', syncOnceWindow);
     syncBlocks();
 
     root.querySelector('[data-cancel]').onclick = close;
@@ -1394,10 +1457,15 @@ export default {
     const submitBtn = root.querySelector('[data-ok]');
     let submitting = false;
     let committed = false;
+    // 创建响应（first_round_skipped / schedule_conflict）必须声明在本
+    // handler 作用域——提交 try 块内的声明在块外读取会抛 ReferenceError
+    // 且被外层 catch 吞掉（R4 审查修复），两种新增提示都会失效。
+    let createdTask = null;
     submitBtn.onclick = async () => {
       if (committed || submitting) return;
       submitting = true;
       submitBtn.disabled = true;
+      createdTask = null;
       try {
         const type = typeSelect.value;
         const body = {
@@ -1431,6 +1499,12 @@ export default {
             .split(/[,，\s]+/).map((v) => Number(v)).filter((v) => Number.isInteger(v) && v > 0);
         }
         if (type === 'once') body.target_date = root.querySelector('#pf-target-date').value || null;
+        if (type === 'once' && !body.target_date
+            && (body.window_start_tod || body.window_end_tod)) {
+          // 前端先行校验（§30.6）：空日期与非空窗口不能同时保存——切换类型
+          // 时禁用控件的残留值也拦在这里；后端仍权威复核（零写入 400）。
+          throw new Error('未填目标日期的单次待办不能设置可安排时段：无日期单次常驻显示，不设最早开始或最晚完成');
+        }
         if (editing && task.task_type === 'once' && task.has_generated_occurrence) {
           // once 身份锁定的提交侧兜底（§28.3）：无论控件状态如何，target_date
           // / 未来窗口模板一律回传任务现值（幂等请求放行、实际变化后端拒绝）
@@ -1456,7 +1530,7 @@ export default {
             body: JSON.stringify(body),
           });
         } else {
-          await gw('/admin/api/planning/tasks', {
+          createdTask = await gw('/admin/api/planning/tasks', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -1485,7 +1559,17 @@ export default {
       committed = true;
       submitting = false;
       // 后处理逐项 best-effort：一步失败只影响该步，后续步骤照常执行
-      try { toast(editing ? '待办已保存' : '待办已创建'); } catch { /* 不误报失败 */ }
+      try {
+        toast(editing ? '待办已保存' : '待办已创建');
+        // §30.6 / §18.1（2026-10-01）：创建允许与排程可行性分离——区分
+        // 「本轮已截止、次日起生效」与「已创建但存在排程冲突」，两者都
+        // 不改变任务已保存的事实。
+        if (createdTask?.first_round_skipped) {
+          toast('本轮已过最晚完成，从次日起按重复规则生效');
+        } else if (createdTask?.schedule_conflict) {
+          toast('待办已创建，但可安排时段剩余空间不足，存在排程冲突');
+        }
+      } catch { /* 不误报失败 */ }
       try { close(); } catch { /* 旧表单保持终态（按钮已禁用 + committed 拦截） */ }
       try { await this.loadAll(); } catch { /* 刷新失败不改变已保存事实 */ }
     };

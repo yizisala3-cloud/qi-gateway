@@ -618,10 +618,14 @@ class PlanningNavigationContractTests(unittest.TestCase):
             r"const submitBtn = root\.querySelector\('\[data-ok\]'\);\s*"
             r"let submitting = false;\s*"
             r"let committed = false;\s*"
+            r"(?:\s*//[^\n]*\n)*\s*let createdTask = null;\s*"
             r"submitBtn\.onclick = async \(\) => \{(.*?)\n    \};",
             form, re.S)
         self.assertIsNotNone(match, "task form submit handler must hold a submitting lock")
         block = match.group(1)
+        # R4：创建响应变量必须声明在 handler 作用域（提交 try 块内的声明
+        # 在块外读取抛 ReferenceError 且被空 catch 吞掉，两种提示失效）。
+        self.assertNotIn("let createdTask", block)
         for marker in (
             "if (committed || submitting) return;",  # 终态优先：committed 后永不再次提交
             "submitting = true;",
@@ -647,8 +651,13 @@ class PlanningNavigationContractTests(unittest.TestCase):
         # 服务器保存成功 → 终态先行，随后后处理逐项 best-effort；终态段内
         # 不得出现任何解锁动作
         post_seg = block[block.index("committed = true;"):]
+        # 2026-10-01（§30.6 / §18.1）：创建反馈区分「首轮已截止跳过」与
+        # 「已创建但存在排程冲突」，与 toast 终态同段 best-effort。
         for step in (
-            "try { toast(editing ? '待办已保存' : '待办已创建'); } catch {",
+            "toast(editing ? '待办已保存' : '待办已创建');",
+            "createdTask?.first_round_skipped",
+            "createdTask?.schedule_conflict",
+            "本轮已过最晚完成，从次日起按重复规则生效",
             "try { close(); } catch {",
             "try { await this.loadAll(); } catch {",
         ):
@@ -976,6 +985,178 @@ class PlanningNavigationContractTests(unittest.TestCase):
         self.assertEqual(out["g_form2"]["closedForms"], 2)
         self.assertTrue(out["g_form2"]["identicalPayload"],
                         "second identical create must send an identical payload")
+
+    def test_task_form_creation_feedback_and_resident_clear_behaviour(self):
+        """R4 / R5 行为级验证（quickjs 真实执行 openTaskForm 与提交 handler）。
+
+        * R4：创建成功响应携带 first_round_skipped / schedule_conflict 时，
+          对应提示必须真实弹出（此前 createdTask 声明在提交 try 块内，块外
+          读取抛 ReferenceError 被空 catch 吞掉，两种提示都不显示）；普通
+          响应只有「待办已创建」。
+        * R5：once + 空日期 + 残留窗口值 → 「清空残留时段」按钮出现且可
+          点击，点击后两端值清空、按钮隐藏，提交成功且 payload 不携带
+          窗口字段（不默默提交残值，也不需要先重填日期再清窗口）。
+        * 终态约束不回退：成功后按钮保持禁用、表单关闭并刷新一次。
+        """
+        quickjs = _try_import_quickjs()
+        if quickjs is None:
+            self.skipTest("quickjs is not installed")
+        openform = re.search(r"  openTaskForm\(task\) \{(.*?)\n  \},", self.page, re.S)
+        self.assertIsNotNone(openform, "openTaskForm not found in planning.js")
+        harness = """
+            var __result = null, __error = null;
+            (async () => {
+              const out = {};
+              const makeForm = (initial) => {
+                const values = Object.assign({
+                  'pf-content': '审查探针', 'pf-estimated': '90',
+                  'pf-window-start': '09:00', 'pf-window-end': '11:00',
+                  'pf-type': 'daily', 'pf-target-date': '',
+                }, initial || {});
+                const g = { toasts: [], requests: [], closed: 0, loads: 0,
+                            retroHosts: {}, appliedRetro: [] };
+                const el = (sel) => {
+                  const id = sel.startsWith('#') ? sel.slice(1) : null;
+                  const base = {
+                    value: id && id in values ? values[id] : '',
+                    checked: false, disabled: false, hidden: true,
+                    style: {}, dataset: {}, title: '', innerHTML: '',
+                    textContent: '',
+                    _handlers: {},
+                    addEventListener(name, fn) { this._handlers[name] = fn; },
+                    scrollIntoView() {}, insertAdjacentHTML() {},
+                    querySelector(sel2) { return el(sel2); },
+                    querySelectorAll() { return []; },
+                  };
+                  return base;
+                };
+                const kids = {};
+                const resolveSel = (sel) => {
+                  const host = sel.match(/data-retro-for="([^"]+)"/);
+                  if (host) {
+                    const key = host[1];
+                    if (!g.retroHosts[key]) {
+                      const input = el('#' + key);
+                      const button = { disabled: false, title: '' };
+                      g.retroHosts[key] = { input: input, button: button,
+                                            querySelector(s2) {
+                                              return s2 === 'input' ? input : button;
+                                            } };
+                    }
+                    return g.retroHosts[key];
+                  }
+                  if (!kids[sel]) kids[sel] = el(sel);
+                  return kids[sel];
+                };
+                const root = { querySelector: resolveSel, querySelectorAll: () => [] };
+                const modal = () => ({ root: root, close: () => { g.closed += 1; } });
+                const gw = async (url, opts) => {
+                  g.requests.push({ url: url, method: opts.method,
+                                    body: JSON.parse(opts.body) });
+                  return g.response;
+                };
+                const toast = (msg) => { g.toasts.push(msg); };
+                const esc = (v) => String(v == null ? '' : v);
+                const self2 = { initRetroFields: () => {}, loadAll: async () => { g.loads += 1; },
+                                occurrences: [] };
+                const openForm = __OPENFORM_FACTORY__(modal, esc, () => '',
+                                                      ['daily', 'once'],
+                                                      { daily: '每日', once: '单次' },
+                                                      ['一','二','三','四','五','六','日'],
+                                                      gw, toast);
+                openForm.call(self2, initial && initial.__task ? initial.__task : null);
+                return { g: g, root: root, el: (sel) => resolveSel(sel) };
+              };
+
+              // R4-A：首轮跳过反馈必须真实弹出
+              {
+                const f = makeForm();
+                f.g.response = { first_round_skipped: true, schedule_conflict: false };
+                await f.el('[data-ok]').onclick();
+                out.r4_skip = { toasts: f.g.toasts.slice(), closed: f.g.closed,
+                                loads: f.g.loads,
+                                disabled: f.el('[data-ok]').disabled,
+                                requests: f.g.requests.length };
+              }
+              // R4-B：排程冲突反馈必须真实弹出
+              {
+                const f = makeForm();
+                f.g.response = { first_round_skipped: false, schedule_conflict: true };
+                await f.el('[data-ok]').onclick();
+                out.r4_conflict = { lastToast: f.g.toasts[f.g.toasts.length - 1],
+                                    toasts: f.g.toasts.slice() };
+              }
+              // R4-C：普通响应只有「待办已创建」
+              {
+                const f = makeForm();
+                f.g.response = {};
+                await f.el('[data-ok]').onclick();
+                out.r4_plain = { toasts: f.g.toasts.slice() };
+              }
+              // R5：once + 空日期 + 残留窗口值 → 明确清空后可保存
+              {
+                const f = makeForm();
+                f.el('#pf-type').value = 'once';
+                f.el('#pf-type')._handlers.change();
+                const clearBtn = f.el('#pf-clear-window');
+                out.r5_residual_visible = clearBtn.hidden === false;
+                clearBtn._handlers.click();
+                out.r5_after_clear = {
+                  startValue: f.el('#pf-window-start').value,
+                  endValue: f.el('#pf-window-end').value,
+                  clearHidden: clearBtn.hidden,
+                };
+                f.g.response = {};
+                await f.el('[data-ok]').onclick();
+                const body = f.g.requests[0] ? f.g.requests[0].body : null;
+                out.r5_submit = { toasts: f.g.toasts.slice(), body: body,
+                                  closed: f.g.closed };
+              }
+              // R5 对照：无残留时空日期提交不带窗口字段、清空按钮不出现
+              {
+                const f = makeForm({ 'pf-window-start': '', 'pf-window-end': '' });
+                f.el('#pf-type').value = 'once';
+                f.el('#pf-type')._handlers.change();
+                out.r5_clean = { clearHidden: f.el('#pf-clear-window').hidden };
+              }
+              return out;
+            })().then((v) => { __result = v; }).catch((e) => { __error = String(e); });
+        """.replace("__OPENFORM_FACTORY__",
+                    "(function (modal, esc, icon, TASK_TYPES, TASK_TYPE_LABELS, "
+                    "WEEKDAY_NAMES, gw, toast) { return function (task) {"
+                    + openform.group(1) + "} })")
+        ctx = quickjs.Context()
+        ctx.eval(harness)
+        for _ in range(10000):
+            if not ctx.execute_pending_job():
+                break
+        self.assertIsNone(ctx.eval("__error"), f"harness crashed: {ctx.eval('__error')}")
+        out = json.loads(ctx.eval("JSON.stringify(__result)"))
+
+        # R4：两种新增提示在真实 handler 执行下必须出现；终态保持
+        self.assertIn("待办已创建", out["r4_skip"]["toasts"])
+        self.assertIn("本轮已过最晚完成，从次日起按重复规则生效", out["r4_skip"]["toasts"])
+        self.assertEqual(out["r4_skip"]["closed"], 1)
+        self.assertEqual(out["r4_skip"]["loads"], 1)
+        self.assertTrue(out["r4_skip"]["disabled"])
+        self.assertEqual(out["r4_skip"]["requests"], 1)
+        self.assertIn("待办已创建", out["r4_conflict"]["toasts"])
+        self.assertIn("存在排程冲突", out["r4_conflict"]["lastToast"])
+        self.assertEqual(out["r4_plain"]["toasts"], ["待办已创建"])
+
+        # R5：残值清空通路真实可用；提交 payload 不携带窗口字段
+        self.assertTrue(out["r5_residual_visible"],
+                        "residual window values must surface the clear action")
+        self.assertEqual(out["r5_after_clear"]["startValue"], "")
+        self.assertEqual(out["r5_after_clear"]["endValue"], "")
+        self.assertTrue(out["r5_after_clear"]["clearHidden"])
+        self.assertIn("待办已创建", out["r5_submit"]["toasts"])
+        self.assertNotIn("不能设置可安排时段", " ".join(out["r5_submit"]["toasts"]))
+        self.assertIsNone(out["r5_submit"]["body"]["target_date"])
+        self.assertNotIn("window_start_tod", out["r5_submit"]["body"])
+        self.assertNotIn("window_end_tod", out["r5_submit"]["body"])
+        self.assertEqual(out["r5_submit"]["closed"], 1)
+        self.assertTrue(out["r5_clean"]["clearHidden"])
 
 
 class PlanningPayloadBackendAcceptanceTests(unittest.TestCase):

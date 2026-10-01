@@ -733,15 +733,19 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
         raw = payload.get("target_date")
         result["target_date"] = _parse_date(raw, "target_date").isoformat() if raw is not None else None
     if effective_type and not partial:
+        # 2026-10-01（§32.45）：单次目标日期为可选项——once 不再要求
+        # target_date；空日期表达「未指定日期、常驻显示」，不得自动补今天。
         requirements = {
             "interval": ("interval_days",),
             "weekly": ("weekdays",),
             "monthly": ("month_days",),
-            "once": ("target_date",),
         }
         for field in requirements.get(effective_type, ()):
             if result.get(field) is None:
                 raise PlanningError("invalid_payload", f"{field} is required for {effective_type} tasks")
+        if effective_type == "once":
+            # 省略与显式 NULL 等价：落库显式 NULL（不依赖列默认值、不补今天）。
+            result.setdefault("target_date", None)
 
     if "time_mode" in payload:
         mode = str(payload.get("time_mode") or "").strip().casefold()
@@ -1058,43 +1062,182 @@ def _validate_template_window_constraints(row: dict[str, Any], now: datetime) ->
 
 
 def _validate_window_creation(row: dict[str, Any], now: datetime) -> None:
-    """创建入口的窗口与产品边界校验（§10 / §12.1 / §30.6 / §32.40 / §32.41）。
+    """创建入口的窗口与产品边界校验（§10 / §12.1 / §30.6 / §32.40 / §32.41 / §32.45）。
 
-    * once 目标日期不得早于当前业务日期（Asia/Shanghai 当日，自然日比较）；
+    * once 目标日期为可选项（2026-10-01）：非空时不得早于当前业务日期
+      （Asia/Shanghai 当日，自然日比较）；空日期合法、不自动补今天；
       系统补生成路径不经过本入口，不受此限；
+    * 无日期 once 不能携带任何窗口端（§30.6：常驻语义、不设最早开始 /
+      最晚完成）；
     * 模板保存校验（占用跨度 + boundary 跨越）见
       :func:`_validate_template_window_constraints`（批次 6 起与规则编辑共用）；
-    * 指定日期 once 按严格自然日解析（不按生成时刻顺延），窗口在创建时
-      已经不可容纳占用跨度 → 直接拒绝（不顺延到下一候选）；only-earliest
-      保持「只有下界」语义，不凭空补截止；
-    * 未指定日期路径按当前周期候选解析后判断剩余空间（§12.1）。
+    * 创建允许与排程可行性分离（§12.1 / §32.45，2026-10-01）：
+      **once** 仅在其解析后的绝对最晚完成已到或越过（当前时刻 ≥ 截止）
+      时按时间过期拒绝——窗口起点已过、只填最早开始都不是过期；尚未
+      截止但剩余空间不足允许创建并呈现排程冲突（§18.1），不截短耗时；
+      **重复待办**不再受创建时当前剩余时间限制——已截止首轮在创建时刻
+      经 :func:`_first_round_settlement` 一次性结算（结算游标随任务行
+      落库，生成侧按游标跳过），剩余不足由排程冲突派生呈现。
     解析与可行性判断全部调用批次 1 领域函数，与生成冻结共用同一套数学。
     """
     if row.get("task_type") == "once":
-        today = _cst_date(now)
-        target = _parse_date(row.get("target_date"), "target_date")
-        if target < today:
-            raise PlanningError(
-                "invalid_payload",
-                f"目标日期不能早于当前业务日期（{today.isoformat()}）", 400,
-            )
+        if row.get("target_date") is not None:
+            today = _cst_date(now)
+            target = _parse_date(row["target_date"], "target_date")
+            if target < today:
+                raise PlanningError(
+                    "invalid_payload",
+                    f"目标日期不能早于当前业务日期（{today.isoformat()}）", 400,
+                )
+        if row.get("window_start_tod") or row.get("window_end_tod"):
+            _validate_once_date_window_pair(row)
     _validate_template_window_constraints(row, now)
     template = _task_window_template(row)
     if template is None:
         return
-    occupancy = _window_occupancy_minutes(row)
     if row["task_type"] == "once":
         # 指定日期 once：user 自然日期 + 时刻组合成固定绝对约束，不做
-        # 候选取舍（§32.41）；创建时已不可用即拒绝，绝不顺延。
+        # 候选取舍（§32.41）；仅最晚完成已到或越过时按时间过期拒绝，
+        # 绝不顺延（§12.1：2026-10-01 剩余不足不再代替「已过期」）。
         resolved = resolve_window_on_date(
             template, _parse_date(row["target_date"], "target_date"))
-    else:
-        resolved = resolve_window(template, _current_cycle(now).key, now)
-    if not window_feasible(resolved, now, occupancy):
+        if resolved.end_at is not None and now >= resolved.end_at:
+            raise PlanningError(
+                "invalid_payload",
+                f"单次待办的最晚完成（{resolved.end_at.astimezone(_CST).strftime('%m-%d %H:%M')}）"
+                "已到或已过，不能按已过期的时间创建", 400,
+            )
+
+
+def _validate_once_date_window_pair(merged: dict[str, Any]) -> None:
+    """无日期单次不设窗口（§30.6 / §28.3 / §32.45，2026-10-01）。
+
+    单次目标日期省略或为 NULL 时不得携带最早开始 / 最晚完成——空日期表达
+    「未指定日期、常驻显示」，不是「默认今天」；创建与编辑合并视图共用
+    本校验，违反即拒绝且零写入。
+    """
+    if merged.get("task_type") != "once" or merged.get("target_date"):
+        return
+    if merged.get("window_start_tod") or merged.get("window_end_tod"):
         raise PlanningError(
             "invalid_payload",
-            f"可安排时段剩余空间不足以容纳预计耗时 {occupancy} 分钟，请调整时段或耗时", 400,
+            "未指定日期的单次待办不能设置可安排时段：无日期单次常驻显示，"
+            "不设最早开始或最晚完成", 400,
         )
+
+
+# 2026-10-01 新建首轮裁决（§6.7 / §12.1 / §32.45）适用的固定刷新模式：
+# 任务创建时刻当前轮的最晚完成已到或越过时跳过该轮（不生成实例、不制造
+# 超时记录），从次日起按原重复规则生效。after_completion（处理后刷新型）
+# 没有日历轴、其轮次链依赖首个实例启动，跳过会使它永远等不到首个有效
+# 实例——因此不适用本裁决；once 属指定/常驻单次，不在此列。首轮裁决在
+# 创建时刻**一次性结算**（R3 审查修复）：跳过经生成游标随任务行落库，
+# 生成侧不再按当下时间重判——模板编辑、暂停恢复、重复维护不复活被跳过
+# 的首轮，即时生成的暂时失败也不被误判成跳过（首轮 DUE 保留恢复资格）。
+_ROUND_SKIP_REFRESH_MODES = ("daily", "fixed_interval", "fixed_weekday", "fixed_monthday")
+
+
+def _round_deadline_passed(
+    task: dict[str, Any], round_day: date, now: datetime,
+    configured: time, transition: BoundaryTransition | None,
+) -> bool:
+    """当前轮（按其规划周期解析的本轮窗口）最晚完成是否已到或越过。
+
+    ``round_day`` 必须是**当前轮的规划周期键**——本轮窗口以该周期起点为
+    参考解析（候选取舍只看是否已结束，等价于取该周期内的窗口出现），
+    与生成冻结（``_resolve_generation_window`` 按 born 周期解析）同一
+    归属，绝不把下一周期的窗口当成当前轮截止（R1 审查修复：fixed_interval
+    的到期事件自然日只是事件身份，不得用于截止解析）。当前时刻 ≥ 解析后
+    的绝对截止即已到或越过。无窗口或只有最早开始没有最晚完成，不存在
+    截止；早于每日刷新 boundary 的清晨窗口解析到该周期内的下一次出现，
+    正常生成不受影响。
+    """
+    if task.get("refresh_mode") not in _ROUND_SKIP_REFRESH_MODES:
+        return False
+    template = _task_window_template(task)
+    if template is None or template.end_tod is None:
+        return False  # 无窗口 / 只有最早开始：没有最晚完成，不存在截止
+    boundary = cycle_start_boundary(round_day, configured, transition)
+    cycle_start = PlanningCycle.for_key(round_day, boundary).start
+    resolved = resolve_window(template, round_day, cycle_start)
+    if resolved.end_at is None:
+        return False
+    return now >= resolved.end_at  # 已到或越过（§12.1：当前时刻 ≥ 绝对截止）
+
+
+def _first_round_settlement(
+    row: dict[str, Any], now: datetime,
+) -> tuple[bool, date | None]:
+    """创建时刻的首轮裁决（R1 / R3 / R6 审查修复）：一次性判定并给出结算。
+
+    返回 ``(skipped, settle_day)``：
+
+    * 当前轮不存在（weekly / monthly 的当前规划周期键不是规则日）→
+      ``(False, None)``——没有「当前轮」可跳过，也不为「次日起生效」在
+      非法日期强造轮次（R6）；daily 与 fixed_interval 的当前轮恒存在；
+    * 当前轮存在、最晚完成尚未到 → ``(False, None)``——首轮 DUE：生成
+      资格保留，即时生成的暂时失败由后续维护按候选解析恢复，不因时间
+      流逝被重判为跳过（R3-A）；
+    * 当前轮存在且最晚完成已到或越过 → ``(True, 首轮事件日)``——创建时
+      即结算：结算游标随任务行原子落库，生成侧只按游标跳过；模板编辑、
+      暂停恢复、重复维护不得复活被跳过的首轮（R3-B）。
+
+    截止解析统一用当前轮的规划周期（R1）；结算日 = 被跳过首轮的事件日
+    （daily / weekly / monthly = 当前周期键，fixed_interval = 创建自然日
+    ——锚点事件 due = created_at，事件日即创建日），与固定轴枚举的
+    ``day`` 同一语义，不改变轮次键与固定轴。
+    """
+    if row.get("refresh_mode") not in _ROUND_SKIP_REFRESH_MODES:
+        return False, None
+    template = _task_window_template(row)
+    if template is None or template.end_tod is None:
+        return False, None  # 无窗口 / 只有最早开始：没有最晚完成，不存在截止
+    mode = row["refresh_mode"]
+    configured, transition, _ = _load_boundary_state(now)
+    cycle_key = _current_cycle(now).key
+    if mode in ("fixed_weekday", "fixed_monthday") and not _should_occur(row, cycle_key):
+        return False, None  # 当前周期无合法轮次：无「当前轮」可跳过（R6）
+    if not _round_deadline_passed(row, cycle_key, now, configured, transition):
+        return False, None  # 首轮 DUE：保留生成资格（R3-A 恢复语义）
+    settle_day = (
+        now.astimezone(_CST).date() if mode == "fixed_interval" else cycle_key)
+    return True, settle_day
+
+
+def _creation_window_outcome(
+    row: dict[str, Any], now: datetime,
+) -> tuple[bool, bool, date | None]:
+    """创建反馈与首轮结算（§30.6 / §18.1 / §32.45，2026-10-01）。
+
+    返回 ``(first_round_skipped, schedule_conflict, settle_day)``：判定与
+    生成侧共享同一套周期归属（当前轮 = 当前规划周期），保证「创建响应
+    提示」「结算游标」「实际生成行为」一致，不伪造排程成功。
+
+    * 重复待办：当前轮最晚完成已到或越过 → 首轮跳过并结算（任务保存、
+      零实例、游标承载）；未截止但剩余空间不足 → 当前轮照常生成并呈现
+      排程冲突；当前周期无合法轮次（weekly / monthly 非规则日）→ 无跳过
+      反馈（R6）；
+    * once：无窗口 / 只有最早开始不存在截止；有最晚完成时（创建校验已
+      保证未过期）剩余空间不足 → 排程冲突。
+    """
+    template = _task_window_template(row)
+    if template is None or template.end_tod is None:
+        return False, False, None
+    occupancy = _window_occupancy_minutes(row)
+    if row.get("task_type") == "once":
+        resolved = resolve_window_on_date(
+            template, _parse_date(row["target_date"], "target_date"))
+        return False, not window_feasible(resolved, now, occupancy), None
+    if (row.get("refresh_mode") not in _ROUND_SKIP_REFRESH_MODES
+            or not isinstance(occupancy, int) or occupancy < 1):
+        return False, False, None
+    skipped, settle_day = _first_round_settlement(row, now)
+    if skipped:
+        return True, False, settle_day
+    # 未跳过时本轮冻结窗口 = 以当前时刻为参考的候选解析（与
+    # _resolve_generation_window 同一归属与参考）；剩余装不下即排程冲突。
+    resolved = resolve_window(template, _current_cycle(now).key, now)
+    return False, not window_feasible(resolved, now, occupancy), None
 
 
 def create_task(payload: Any, now: datetime | None = None) -> dict[str, Any]:
@@ -1105,12 +1248,23 @@ def create_task(payload: Any, now: datetime | None = None) -> dict[str, Any]:
     row["created_at"] = _iso(now)
     row["updated_at"] = _iso(now)
     row["is_fixed"] = bool(row.get("is_fixed"))
+    # 创建反馈 + 首轮结算（§30.6 / §18.1 / §32.45）：判定、提示与结算在
+    # 写入前一次完成；跳过经生成游标随任务行原子落库（R3 稳定裁决），
+    # 生成侧不再按当下时间重判。
+    first_round_skipped, schedule_conflict, settle_day = _creation_window_outcome(row, now)
+    if settle_day is not None:
+        row["refresh_generated_through"] = settle_day.isoformat()
     client = _require_client()
     response = client.table("planning_task").insert(row).execute()
     created = (response.data or [{}])[0]
     # 即时生成：新建的待办（含 interval 立即到期）不等后台循环，立刻出现在列表。
     _generate_due_quietly(client, now)
-    return serialize_task(created, now)
+    serialized = serialize_task(created, now)
+    # 创建反馈（§30.6 / §18.1）：区分「本轮已截止、次日起生效」与
+    # 「已创建但存在排程冲突」，两者都不改变任务已保存的事实。
+    serialized["first_round_skipped"] = first_round_skipped
+    serialized["schedule_conflict"] = schedule_conflict
+    return serialized
 
 
 def _prepare_refresh_definition(row: dict[str, Any], now: datetime, current: dict[str, Any] | None = None) -> None:
@@ -1357,8 +1511,6 @@ def _update_task(task_id: int, payload: Any, now: datetime | None = None) -> dic
         existing = _rows(client, "planning_occurrence", lambda q: q.eq("task_id", task_id).limit(1))
         if existing:
             raise PlanningError("round_identity_locked", "已有业务轮次时不能改变刷新模式、类型或首次基准", 409)
-    if "target_date" in row and row.get("target_date") is None:
-        raise PlanningError("invalid_payload", "target_date cannot be empty for once tasks")
     if task.get("time_mode") == "explicit" and row.get("time_mode") == "duration":
         # The former rule anchor is no longer part of the task definition.
         row["est_start_tod"] = None
@@ -1368,6 +1520,10 @@ def _update_task(task_id: int, payload: Any, now: datetime | None = None) -> dic
         _prepare_refresh_definition(row, now, task)
     merged = {**task, **row}
     _ensure_type_requirements(merged)
+    # 2026-10-01（§30.6 / §32.45）：编辑合并视图同样执行「无日期单次不设
+    # 窗口」——清除尚未生成单次的日期时，窗口也须由 user 明确清空后才能
+    # 保存，不能只清日期而残留窗口值。
+    _validate_once_date_window_pair(merged)
     if (task.get("time_mode") == "explicit" and merged.get("time_mode") == "duration"
             and not merged.get("estimated_minutes")):
         raise PlanningError("invalid_payload", "仅耗时待办必须提供有效预估耗时", 400)
@@ -1404,8 +1560,10 @@ def _update_task(task_id: int, payload: Any, now: datetime | None = None) -> dic
         _validate_template_window_constraints(merged, now)
     # 产品边界（§10/§30.6/§32.40）：编辑重定向 target_date 不得早于当前
     # 业务日期（Asia/Shanghai 当日，自然日比较）；仅当 target_date 实际
-    # 变化时校验（仅未生成 once 可达——已生成已被上方锁定拒绝）。
-    if ("target_date" in row and row.get("target_date") != task.get("target_date")
+    # 变化时校验（仅未生成 once 可达——已生成已被上方锁定拒绝）。空日期
+    # 本身合法（2026-10-01 日期可选），不进入日期下界比较。
+    if ("target_date" in row and row.get("target_date") is not None
+            and row.get("target_date") != task.get("target_date")
             and merged.get("task_type") == "once"):
         today = _cst_date(now)
         if _parse_date(row["target_date"], "target_date") < today:
@@ -1549,13 +1707,16 @@ def _update_task(task_id: int, payload: Any, now: datetime | None = None) -> dic
 
 
 def _ensure_type_requirements(task: dict[str, Any]) -> None:
-    """编辑合并后的完整任务定义必须仍满足其类型的必填字段。"""
+    """编辑合并后的完整任务定义必须仍满足其类型的必填字段。
+
+    2026-10-01（§32.45）：once 的 target_date 为可选项，不再属于必填；
+    无日期 once 的窗口组合约束由 :func:`_validate_once_date_window_pair`
+    在合并视图上单独执行。"""
     task_type = task.get("task_type")
     requirements = {
         "interval": ("interval_days",),
         "weekly": ("weekdays",),
         "monthly": ("month_days",),
-        "once": ("target_date",),
     }
     for field in requirements.get(task_type, ()):
         value = task.get(field)
@@ -1600,15 +1761,21 @@ def list_tasks(include_inactive: bool = True, now: datetime | None = None) -> li
 def _once_schedule_date(
     task: dict[str, Any], configured: time, transition: BoundaryTransition | None,
 ) -> date:
-    """指定日期 once 的内部规划周期归属（2026-09-27 分离裁决，§32.41）。
+    """once 的内部规划周期归属（2026-09-27 分离裁决，§32.41；2026-10-01 日期可选）。
 
-    * 双端窗口 / 只有最早开始 → 窗口起点绝对时刻所属规划周期；
-    * 只有最晚完成 → 该唯一指定时刻所属规划周期；
-    * 无窗口 → target_date（现行规则沿用）。
+    * 无日期 once（2026-10-01）：不解析目标日窗口，内部原始周期按创建
+      时刻确定（§6.3 / §10 常驻）——target_date 保持为空，不得把内部
+      周期日期回填成 user 指定日期；
+    * 指定日期：双端窗口 / 只有最早开始 → 窗口起点绝对时刻所属规划周期；
+      只有最晚完成 → 该唯一指定时刻所属规划周期；无窗口 → target_date
+      （现行规则沿用）。
 
     boundary 只参与此内部归属换算（时间早于 boundary 自然归属前一天），
     不得改写 target_date 或绝对窗口；结果允许早于 target_date。
     """
+    if not task.get("target_date"):
+        return planning_cycle_at(
+            _parse_dt(task["created_at"], "created_at"), configured, transition).key
     target = _parse_date(task["target_date"], "target_date")
     template = _task_window_template(task)
     if template is None or template.is_empty:
@@ -2119,8 +2286,20 @@ def _reconcile_task_rounds(
             first_cycle = planning_cycle_at(task_created, configured, transition).key
             if today >= first_cycle and (today == first_cycle or cycle.start >= task_created):
                 due = max(task_created, cycle.start) if today == first_cycle else cycle.start
-                created += _create_occurrences(client, task, today, now, due_at=due,
-                                               display_cycle_date=today)
+                # 首轮结算（创建时刻落库的游标，R3 审查修复）：today ==
+                # first_cycle 且游标已覆盖首轮周期 → 已结算跳过，模板编辑 /
+                # 暂停恢复 / 重复维护不复活；游标为空 = 首轮 DUE——即时生成
+                # 的暂时失败按候选解析恢复（R3-A），不因时间流逝被重判为
+                # 跳过。非首轮周期照常生成（§7.1.1）。
+                settled_through = task.get("refresh_generated_through")
+                first_round_settled = (
+                    today == first_cycle and settled_through is not None
+                    and _parse_date(settled_through, "refresh_generated_through")
+                    >= first_cycle
+                )
+                if not first_round_settled:
+                    created += _create_occurrences(client, task, today, now, due_at=due,
+                                                   display_cycle_date=today)
     elif mode == "none":
         if task["task_type"] == "once":
             # 日期分离裁决（§32.41）：指定日期 once 的 schedule_date 由严格
@@ -2174,9 +2353,16 @@ def _reconcile_task_rounds(
                         # A fixed-interval round is born in the cycle that generates
                         # it; calendar rounds keep their own cycle date as identity.
                         schedule = today if mode == "fixed_interval" else day
-                        created += _create_occurrences(client, task, schedule, now, due_at=due,
-                                                       display_cycle_date=today,
-                                                       fixed_expires_at=expires)
+                        # 首轮已截止的跳过在创建时刻一次性结算（游标随任务行
+                        # 落库，R3 审查修复）：本循环只按游标跳过（day <=
+                        # checked），不按当下时间重判——即时生成的暂时失败
+                        # 保留恢复资格（R3-A），模板编辑 / 暂停恢复 / 重复
+                        # 维护不复活被跳过的首轮（R3-B）。创建后各轮按候选
+                        # 解析冻结窗口（§6.7 正常轮次语义）。
+                        created += _create_occurrences(
+                            client, task, schedule, now, due_at=due,
+                            display_cycle_date=today,
+                            fixed_expires_at=expires)
                         cursor_update = client.table("planning_task").update({
                             "refresh_generated_through": day.isoformat(), "updated_at": _iso(now),
                         }).eq("id", task["id"])
@@ -2514,6 +2700,55 @@ def _hollow_sibling(
     )
 
 
+def _frozen_slot_window_conflict(
+    occ: dict[str, Any], task: dict[str, Any], now: datetime,
+    ordered: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """尚未开始的固定锚点实例在冻结窗口剩余空间不足时派生排程冲突
+    （R2 审查修复；§18.1 / §12.1）。
+
+    固定锚点实例（零自由度窗口预锚定的 rule 固定 / 人工钉住的 manual
+    固定）不参与重排，其 est 在生成或钉住时写入——时间流逝使冻结窗口
+    的剩余空间装不下完整占用跨度时，原创建 / 钉住时刻的可行性不再成立，
+    必须以派生冲突呈现，不得把过去时间包装成可执行的成功排程；固定位置
+    语义不变（est 不移动、耗时不变，冲突不落库）。
+
+    豁免（§18.1）：已开始执行（actual_start）、执行中 / partial、已带任何
+    生命周期事实（含 deferred）的实例不因剩余窗口缩小被重判冲突（超时另
+    由 sweep 处理）——本判定只覆盖「尚未开始且仍开放、未触动」的固定锚点
+    行，即本次放开创建拒绝后新出现的剩余不足人口；无最晚完成（only-
+    earliest / 无窗口 / 旧 explicit 行）不存在剩余空间约束。中空按 §17.4
+    以完整包络在**开始阶段**上报一次，结束阶段不重复。
+    """
+    if not _is_untouched_open(occ):
+        return None  # 执行中 / partial / 已开始 / 已延期：豁免剩余不足重判
+    if not occ.get("is_fixed") and occ.get("fixed_source") is None:
+        return None  # 非固定锚点实例由主循环 / 中空包络预判覆盖
+    if occ.get("phase") == "end":
+        return None  # 中空整轮的剩余不足由开始阶段按包络上报一次
+    window = _occurrence_window(occ)
+    if window is None or window.end_at is None:
+        return None  # 只有最早开始 / 无窗口：没有最晚完成，无剩余空间约束
+    if not _has_schedulable_duration_source(occ, task):
+        return None
+    if occ.get("phase") == "start":
+        start_duration = _duration_of(occ, task, "start")
+        end_row = _hollow_sibling(occ, ordered, "end")
+        envelope = (
+            _hollow_movable_envelope_duration(start_duration, task, end_row)
+            if end_row is not None else None)
+        span = envelope if envelope is not None else start_duration
+        quantity = (
+            f"中空完整包络 {_format_duration(span)}" if envelope is not None
+            else f"预计耗时 {_format_duration(span)}")
+    else:
+        span = _duration_of(occ, task)
+        quantity = f"预计耗时 {_format_duration(span)}"
+    if window_feasible(window, now, span):
+        return None
+    return _window_conflict(occ, window, quantity, after_avoidance=False)
+
+
 def _hollow_movable_envelope_duration(
     start_duration: timedelta, task: dict[str, Any], end_row: dict[str, Any],
 ) -> timedelta | None:
@@ -2654,6 +2889,15 @@ def compute_schedule(
     for occ in ordered:
         task = tasks.get(occ["task_id"], {})
         if not _freely_schedulable(occ, task):
+            # R2 审查修复（§18.1）：尚未开始且未触动的固定锚点实例（零自由
+            # 度预锚定 / 人工钉住）在冻结窗口剩余空间不足时同样派生排程
+            # 冲突——本次放开创建拒绝后，创建时合法的零自由度输入会随时间
+            # 流逝变成「剩余不足」，固定位置语义保留（est 不移动、不截短
+            # 耗时），冲突由读取时派生呈现。已开始 / 执行中 / partial /
+            # deferred 等已触动实例豁免重判（§18.1，超时另由 sweep）。
+            conflict = _frozen_slot_window_conflict(occ, task, now, ordered)
+            if conflict:
+                conflicts.append(conflict)
             slot = _slot_range(occ)
             if slot and slot[1] > cursor:
                 cursor = slot[1]
@@ -3451,6 +3695,15 @@ def _occurrence_window_edit(
                else current.get("window_end_at"))
     start = _parse_dt(start_raw, "window_start_at") if start_raw else None
     end = _parse_dt(end_raw, "window_end_at") if end_raw else None
+    # §28.3（2026-10-01）：无日期单次常驻显示、不设时间窗口——不能通过
+    # 当前实例编辑为无日期常驻实例新增窗口端，借编辑引入截止会改变常驻
+    # 语义；任务级模板对已生成 once 一律锁定，本守卫封住实例级旁路。
+    if (task.get("task_type") == "once" and not task.get("target_date")
+            and (start is not None or end is not None)):
+        raise PlanningError(
+            "invalid_payload",
+            "未指定日期的单次待办常驻显示、不设可安排时段：不能为它的当前实例新增时间窗口", 400,
+        )
     start_abs = start.astimezone(timezone.utc) if start else None
     end_abs = end.astimezone(timezone.utc) if end else None
     if start_abs and end_abs and end_abs <= start_abs:

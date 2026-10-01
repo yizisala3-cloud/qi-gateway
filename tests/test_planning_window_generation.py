@@ -53,22 +53,29 @@ def test_create_rejects_window_crossing_boundary_and_touch_is_legal():
         c.create("daily", at(24, 10), window_start_tod="00:00", window_end_tod="06:00")
 
 
-def test_create_rejects_insufficient_space_before_and_after_window_start():
+def test_create_allows_insufficient_space_and_reports_conflict():
+    # 2026-10-01（§12.1 / §32.45）：创建允许与排程可行性分离——重复待办
+    # 尚未截止但剩余空间不足 → 允许创建当前轮并呈现排程冲突；不截短耗时。
     with Context() as c:
         # 完整窗口 120 分钟 < 预计耗时 180 分钟。
-        with pytest.raises(planning.PlanningError) as error:
-            c.create("daily", at(24, 10), estimated_minutes=180,
-                     window_start_tod="18:00", window_end_tod="20:00")
-        assert "剩余空间不足" in str(error.value)
-        assert "180" in str(error.value)
-        # 已开始未结束：剩余 60 分钟 < 90 分钟 → 拒绝（不存在「整体推到明天」）。
-        with pytest.raises(planning.PlanningError) as error:
-            c.create("daily", at(24, 10), estimated_minutes=90,
-                     window_start_tod="09:00", window_end_tod="11:00")
-        assert "剩余空间不足" in str(error.value)
-        # 恰好容纳剩余空间 → 可创建。
-        c.create("daily", at(24, 10), estimated_minutes=60,
-                 window_start_tod="09:00", window_end_tod="11:00")
+        task = c.create("daily", at(24, 10), estimated_minutes=180,
+                        window_start_tod="18:00", window_end_tod="20:00")
+        assert task["schedule_conflict"] is True
+        assert task["first_round_skipped"] is False
+        assert len(c.rows) == 1
+        occ = c.rows[0]
+        # 窗口按本轮周期解析冻结，不因剩余不足顺延或截短。
+        assert (occ["window_start_at"], occ["window_end_at"]) == (iso(24, 18), iso(24, 20))
+        # 已开始未结束：剩余 60 分钟 < 90 分钟 → 同样允许创建 + 冲突。
+        task = c.create("daily", at(24, 10), content="每日2", task_type="daily",
+                        estimated_minutes=90,
+                        window_start_tod="09:00", window_end_tod="11:00")
+        assert task["schedule_conflict"] is True
+        # 恰好容纳剩余空间 → 可创建且无冲突。
+        task = c.create("daily", at(24, 10), content="每日3", task_type="daily",
+                        estimated_minutes=60,
+                        window_start_tod="09:00", window_end_tod="11:00")
+        assert task["schedule_conflict"] is False
 
 
 def test_create_accepts_single_sided_windows_independently():
@@ -78,17 +85,19 @@ def test_create_accepts_single_sided_windows_independently():
         c.create("daily", at(24, 10), window_start_tod=None, window_end_tod="22:00")
 
 
-def test_create_hollow_uses_full_envelope_for_feasibility():
-    # §17.4：窗口容纳 开始 + 等待 + 结束 的整个包络（120），不是两段之和。
+def test_create_hollow_uses_full_envelope_for_conflict():
+    # §17.4：包络（开始 + 等待 + 结束 = 120）超出窗口 90 分钟 → 允许创建、
+    # 报告排程冲突；不拒绝创建、不截短中空阶段、两阶段都生成。
     hollow = dict(is_hollow=True, hollow_start_content="准备", hollow_start_minutes=30,
                   hollow_wait_minutes=60, hollow_end_content="收尾", hollow_end_minutes=30)
     with Context() as c:
-        with pytest.raises(planning.PlanningError) as error:
-            c.create("daily", at(24, 10), window_start_tod="08:00", window_end_tod="09:30",
-                     **hollow)
-        assert "剩余空间不足" in str(error.value)
-        c.create("daily", at(24, 10), window_start_tod="08:00", window_end_tod="10:00",
-                 **hollow)
+        task = c.create("daily", at(24, 8), window_start_tod="08:00", window_end_tod="09:30",
+                        **hollow)
+        assert task["schedule_conflict"] is True
+        assert task["first_round_skipped"] is False
+        assert len(c.rows) == 2
+        c.create("daily", at(24, 8), content="每日中空2", task_type="daily",
+                 window_start_tod="08:00", window_end_tod="10:00", **hollow)
 
 
 def test_create_once_allows_today_and_future_target_only():
@@ -167,15 +176,38 @@ def test_once_future_target_freezes_window_on_target_date():
 
 
 def test_once_window_already_ended_rejected_at_creation():
-    # 指定日期路径不顺延（§32.41）：创建时自然日窗口已结束且无法容纳耗时
-    # → 400 拒绝，绝不滚到下一候选。
+    # 2026-10-01（§12.1 / §32.45）：指定日期路径不顺延（§32.41）；创建时
+    # 绝对最晚完成已到或越过 → 按时间过期拒绝（不再报「剩余空间不足」），
+    # 任务与实例零写入。
     with Context() as c:
         with pytest.raises(planning.PlanningError) as error:
             c.create("once", at(24, 10), target_date="2026-09-24",
                      window_start_tod="03:00", window_end_tod="05:00")
         assert error.value.status_code == 400
-        assert "剩余空间不足" in str(error.value)
+        assert "已到或已过" in str(error.value)
         assert c.rows == []
+        c.db.rows["planning_task"].clear()
+        # 截止恰等于当前时刻（已到）→ 同样拒绝。
+        with pytest.raises(planning.PlanningError) as error:
+            c.create("once", at(24, 10), target_date="2026-09-24", window_end_tod="10:00")
+        assert "已到或已过" in str(error.value)
+        # 截止未到、剩余不足 → 允许创建并报告冲突（§18.1）。
+        task = c.create("once", at(24, 10), target_date="2026-09-24",
+                        window_start_tod="09:00", window_end_tod="11:00",
+                        estimated_minutes=90)
+        assert task["schedule_conflict"] is True
+        assert task["first_round_skipped"] is False
+        assert len(c.rows) == 1
+
+
+def test_once_only_earliest_past_start_not_rejected_as_expired():
+    # 场景 D（§12.1 / §32.45）：只有最早开始（已过）不构成过期——没有
+    # 最晚完成就没有截止，照常创建并冻结下界。
+    with Context() as c:
+        c.create("once", at(24, 10), target_date="2026-09-24", window_start_tod="03:00")
+        occ = c.rows[0]
+        assert occ["window_start_at"] == iso(24, 3)
+        assert occ["window_end_at"] is None
 
 
 def test_once_morning_window_attributed_to_previous_cycle():
