@@ -437,9 +437,10 @@ def test_actual_minutes_fresh_flow_computes_consistently():
 # ── 最终验收修复：recompute 并发 / hollow 半提交 / once 跨进程 / minutes NULL ──
 
 def test_recompute_skips_row_completed_after_read():
-    # 问题 1：A 读取 pending 并完成排程计算 → B 并发完成（状态 + 事实）
-    # → A 的条件 UPDATE 未命中 → 静默放弃该行（不覆盖事实、不报业务错）；
-    # 干净行照常排程。
+    # 问题 1（#6 收紧后）：A 读取 pending 并完成排程计算 → B 并发完成
+    # （状态 + 事实）→ 该行是本次计算的参与行，快照漂移 = 整次计算输入
+    # 失效 → 整批放弃（updated=0、stale_skipped=全部待写行，§19.1 不留
+    # 「干净行新排程 + 脏行旧状态」的混合状态）；已完成实例事实不被覆盖。
     with Context() as c:
         c.create("daily", at(24, 10), estimated_minutes=30)
         dirty = c.rows[0]
@@ -461,14 +462,79 @@ def test_recompute_skips_row_completed_after_read():
             result = planning.recompute_today(at(24, 13))
         finally:
             planning._estimate_patch = original_estimate
-        assert result["updated"] == 1  # 只有干净行写入
+        assert result["updated"] == 0
+        assert result.get("stale_skipped") == 2  # 整批放弃
         # 已完成实例保持完成状态与全部事实，est 未被覆盖
         assert dirty["status"] == "completed"
         assert dirty["est_start"] == iso(24, 10)
         assert dirty["actual_start"] == iso(24, 10, 30)
         assert dirty["actual_end"] == iso(24, 11)
-        # 干净行按计算结果写入（游标含被放弃行的原占位）
-        assert clean["est_start"] == iso(24, 13, 30)
+        # 干净行同样保持旧排程（创建时已被排到 10:30——不再单独写入，
+        # 「干净行新排程 + 脏行旧状态」的混合状态即缺陷）
+        assert clean["est_start"] == iso(24, 10, 30)
+
+
+def test_recompute_batch_failure_leaves_no_partial_schedule():
+    # #6 缺口 A：跨任务中途写失败 → 整批回滚——两行都保持旧排程，不存在
+    # 「第一行新排程、第二行旧排程」的混合状态（此前逐行提交，第 2 行失败
+    # 时第 1 行已落库）；基础设施失败如实向上传播（不伪装成并发跳过）。
+    with Context() as c:
+        c.create("daily", at(24, 10), estimated_minutes=30)
+        row_a = c.rows[0]
+        c.create("daily", at(24, 10), estimated_minutes=30)
+        row_b = c.rows[1]
+        est_before = (row_a["est_start"], row_b["est_start"])
+        original_rpc = c.db.rpc
+
+        def failing_rpc(name, params=None):
+            if name == "planning_apply_recompute_batch":
+                raise RuntimeError("simulated mid-batch write failure")
+            return original_rpc(name, params)
+
+        with mock.patch.object(c.db, "rpc", side_effect=failing_rpc):
+            with pytest.raises(RuntimeError):
+                planning.recompute_today(at(24, 13))
+        assert (row_a["est_start"], row_b["est_start"]) == est_before
+        # 故障恢复后重算完整成功（两行一次写入）。
+        result = planning.recompute_today(at(24, 13))
+        assert result["updated"] == 2
+        assert (row_a["est_start"], row_b["est_start"]) == (
+            iso(24, 13), iso(24, 13, 30))
+
+
+def test_recompute_batch_abandons_on_non_written_row_drift():
+    # #6 缺口 B：expected 快照覆盖全部参与计算行——未写行（固定槽）读取后
+    # 漂移同样使整次计算输入失效 → 整批放弃、待写行不落库（此前只守卫
+    # 待写行自身，B 照常落库）。
+    with Context() as c:
+        # B（先建）：可移动行，08:30 重算会改写其 est（08:00 → 08:30）。
+        c.create("daily", at(24, 8), estimated_minutes=30)
+        movable = c.rows[0]
+        # A（后建）：120 分钟零自由度窗口 10:00–12:00（固定槽，不参与重排、
+        # 不会被写）。
+        c.create("daily", at(24, 8), estimated_minutes=120,
+                 window_start_tod="10:00", window_end_tod="12:00")
+        fixed_row = c.rows[1]
+        assert fixed_row["is_fixed"] is True
+        est_before = movable["est_start"]
+        original_estimate = planning._estimate_patch
+
+        def patch_then_drift_fixed_slot(start, end, *, source, fixed_source=None):
+            result = original_estimate(start, end, source=source, fixed_source=fixed_source)
+            # 用户并发收窄固定槽窗口（未写行漂移）
+            fixed_row["window_end_at"] = iso(24, 10)
+            return result
+
+        planning._estimate_patch = patch_then_drift_fixed_slot
+        try:
+            result = planning.recompute_today(at(24, 8, 30))
+        finally:
+            planning._estimate_patch = original_estimate
+        assert result["updated"] == 0
+        assert result.get("stale_skipped") == 1
+        assert movable["est_start"] == est_before  # 待写行不落库
+        # 用户的窗口修改照常成立（冲突由下一次重算派生呈现）。
+        assert fixed_row["window_end_at"] == iso(24, 10)
 
 
 def test_recompute_hollow_round_is_atomic():
@@ -485,7 +551,9 @@ def test_recompute_hollow_round_is_atomic():
         original_query = p1a._Query.execute
 
         def spy_rpc(self):
-            if self.fn == "planning_patch_occurrence_round":
+            # #6：重算写集合经单次批量 RPC（planning_apply_recompute_batch）
+            # 提交——不再逐行 UPDATE、不再逐轮 round patch。
+            if self.fn == "planning_apply_recompute_batch":
                 calls.append(dict(self.params))
             return original_rpc(self)
 
@@ -502,13 +570,14 @@ def test_recompute_hollow_round_is_atomic():
             p1a._RpcCall.execute = original_rpc
             p1a._Query.execute = original_query
         assert len(calls) == 1 and "__update__" not in calls[0], calls
+        assert calls[0]["p_rounds"], "中空两阶段经批量 RPC 的 rounds 段提交"
         assert start["est_start"] == iso(24, 9) and end["est_start"] == iso(24, 10, 30)
         # 注入失败：两阶段整体回滚（保持本次重算前的值，无 A 新 B 旧）
         pre_failure = (start["est_start"], end["est_start"])
         calls.clear()
 
         def failing_rpc(self):
-            if self.fn == "planning_patch_occurrence_round":
+            if self.fn == "planning_apply_recompute_batch":
                 raise RuntimeError("simulated phase failure")
             return original_rpc(self)
 

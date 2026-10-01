@@ -462,6 +462,117 @@ SPLIT_ATOMIC_MIGRATION = (
     / "20261002030000_planning_split_occurrence_rpc.sql"
 )
 
+RECOMPUTE_BATCH_MIGRATION = (
+    Path(__file__).resolve().parents[1]
+    / "supabase"
+    / "migrations"
+    / "20261002040000_planning_recompute_batch_rpc.sql"
+)
+
+
+class PlanningRecomputeBatchMigrationContractTests(unittest.TestCase):
+    """#6（2026-10-02）：重算整批事务与完整输入复核 RPC 迁移契约。
+
+    新函数（此前无签名，无 overload 风险）；仅 create or replace；不新增
+    表列 / 触发器 / 数据回填。全量 expected 快照（#13 同必填键契约）→
+    稳定 id 升序锁 → 全量漂移复核（含行消失）→ singles 键硬白名单 →
+    rounds 逐轮复用 planning_patch_occurrence_round；任一漂移 / 失败
+    PC001 整批回滚。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = RECOMPUTE_BATCH_MIGRATION.read_text(encoding="utf-8")
+        cls.folded = cls.sql.casefold()
+
+    def _top_level_statements(self):
+        statements, buf = [], []
+        in_dollar = False
+        for line in self.sql.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("--"):
+                continue  # 头部说明注释不属于语句序列
+            if not in_dollar and stripped.casefold().startswith("create or replace function"):
+                buf.append(stripped)
+                in_dollar = True
+                continue
+            if in_dollar:
+                if stripped == "$$;":
+                    in_dollar = False
+                continue
+            if stripped:
+                buf.append(stripped)
+        return [item.casefold() for item in buf]
+
+    def test_migration_is_atomic_and_replay_safe(self):
+        folded = self.folded
+        self.assertIn("begin;", folded)
+        self.assertIn("commit;", folded)
+        self.assertIn(
+            "create or replace function public.planning_apply_recompute_batch(",
+            folded)
+
+    def test_signature_three_jsonb_params(self):
+        folded = self.folded
+        self.assertIn("p_expected jsonb", folded)
+        self.assertIn("p_singles jsonb", folded)
+        self.assertIn("p_rounds jsonb", folded)
+        self.assertNotIn("drop function", folded)
+
+    def test_only_function_replacement_no_schema_changes(self):
+        top = [item for item in self._top_level_statements()
+               if not item.startswith(("begin;", "commit;"))]
+        self.assertEqual(top, [
+            "create or replace function public.planning_apply_recompute_batch("])
+        for forbidden in (
+            "alter table", "add column", "create trigger", "create table",
+            "create index", "drop table",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.folded)
+
+    def test_expected_covers_all_participating_rows(self):
+        # 缺口 B：expected 必填键与 #13 同源（含 sort_order）；行消失与
+        # 任一漂移都构成整批放弃（count 比对 + 漂移存在性检查）。
+        folded = self.folded
+        self.assertIn("'fixed_source', 'is_fixed', 'schedule_managed', 'sort_order']",
+                      folded)
+        self.assertIn("v_count <> jsonb_array_length(p_expected)", folded)
+        self.assertIn("o.sort_order is distinct from (e.value->>'sort_order')::integer",
+                      folded)
+        self.assertEqual(folded.count(
+            "schedule inputs drifted (stale recompute result)"), 2)
+
+    def test_stable_lock_order_and_write_subset_guard(self):
+        # 锁序纪律：全部参与行按 id 升序加锁；singles / rounds 的待写 id
+        # 必须已在 expected 集合内（未参与复核的行不得写）。
+        folded = self.folded
+        self.assertIn("order by id", folded)
+        self.assertEqual(folded.count("for update"), 1)
+        self.assertIn("invalid single write", folded)
+        self.assertIn("invalid round write", folded)
+        self.assertIn(
+            "(x.value->>'id')::bigint = (e.value->>'id')::bigint", folded)
+
+    def test_singles_whitelist_and_rounds_reuse_patch_rpc(self):
+        # singles 键硬白名单（est / 所有权 / nominal_start / updated_at），
+        # patch 缺键 = 保持现值；rounds 逐轮复用 planning_patch_occurrence_
+        # round（expected 传 NULL——批级已全量复核）。
+        folded = self.folded
+        self.assertIn(
+            "k not in ('id', 'est_start', 'est_end', 'nominal_start',", folded)
+        self.assertIn("'schedule_managed', 'is_fixed', 'updated_at'))", folded)
+        self.assertIn("perform public.planning_patch_occurrence_round(", folded)
+        self.assertIn("v_entry->'target_patch',", folded)
+        self.assertIn("v_entry->'sibling_patch',", folded)
+        self.assertIn("null);", folded)
+        self.assertNotIn("format(", folded)
+        self.assertNotIn("security definer", folded)
+
+    def test_pc001_whole_batch_rejection(self):
+        # 漂移 / 行消失统一 PC001（乐观并发拒绝族）——应用层整批放弃。
+        self.assertEqual(self.folded.count("using errcode = 'pc001'"), 2)
+
 
 class PlanningSplitAtomicMigrationContractTests(unittest.TestCase):
     """#1（2026-10-02）：拆分单事务原子化 RPC 迁移契约。

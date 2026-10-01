@@ -3101,43 +3101,17 @@ def _conditional_lifecycle_update(client, occ: dict[str, Any], patch: dict[str, 
     return bool(result.data)
 
 
-def _conditional_schedulable_update(client, occ: dict[str, Any], patch: dict[str, Any]) -> bool:
-    """重算写入的条件 UPDATE（最终修复问题 1）：生命周期事实集合内联 WHERE
-    ——Python 判定可排程与真正写入之间的并发完成 / 开始 / 关闭使条件未命中
-    → 0 行命中 → 放弃该次排程结果（不覆盖已有事实、不报业务错误——并发
-    变化属于正常失败）。返回是否实际写入。
-    最终验收修复（问题 3）：expected snapshot——compute_schedule 实际读取
-    的排程输入（所有权元组 / 冻结窗口 / 既有 est 预态）在写入时必须仍与
-    读取时一致（NULL 旧值同样参与判断）；并发的手动安排 / 窗口调整 / 固定
-    使任一依据漂移 → 放弃旧排程结果（静默，正常失败）。"""
-    query = client.table("planning_occurrence").update(patch).eq("id", occ["id"])
-    query = query.eq("status", "pending")
-    for field in LIFECYCLE_FACT_FIELDS:
-        query = query.is_(field, None)
-    # 最终 Debug（问题 3）：sort_order 是 compute_schedule 的遍历顺序输入
-    # ——读取后用户 save_order 改序即漂移，旧顺序排程结果必须放弃。
-    query = query.eq("sort_order", occ["sort_order"])
-    for field in ("is_fixed", "schedule_managed", "estimated_time_source",
-                  "fixed_source", "window_start_at", "window_end_at",
-                  "est_start", "est_end"):
-        value = occ.get(field)
-        if value is None:
-            query = query.is_(field, None)
-        else:
-            query = query.eq(field, value)
-    result = query.execute()
-    return bool(result.data)
-
-
 def _recompute_expected_snapshot(occ: dict[str, Any]) -> dict[str, Any]:
-    """重算某行的 expected snapshot（最终验收修复问题 3）：compute_schedule
-    实际读取并决定「可排 / 可覆盖 / 窗口」的输入字段——状态、生命周期
-    事实、所有权元组、冻结窗口、既有 est 预态与排序（#13：sort_order 是
-    遍历顺序输入，读取后 save_order 改序即旧结果作废，与单行条件 UPDATE
-    的内联等值守卫同源）。NULL 显式参与复核。"""
+    """重算某行的 expected snapshot（最终验收修复问题 3；#6 扩为全部参与
+    计算行）：compute_schedule 实际读取并决定「可排 / 可覆盖 / 窗口」的
+    输入字段——状态（含 in_progress / partial 等冻结槽的真实开放状态，#6
+    前硬编码 pending 会误判参与行漂移）、生命周期事实、所有权元组、冻结
+    窗口、既有 est 预态与排序（#13：sort_order 是遍历顺序输入，读取后
+    save_order 改序即旧结果作废，与单行条件 UPDATE 的内联等值守卫同源）。
+    NULL 显式参与复核。"""
     return {
         "id": occ["id"],
-        "status": "pending",
+        "status": occ.get("status"),
         "window_start_at": occ.get("window_start_at"),
         "window_end_at": occ.get("window_end_at"),
         "est_start": occ.get("est_start"),
@@ -3214,6 +3188,10 @@ def recompute_today(now: datetime | None = None) -> dict[str, Any]:
     读取后实例被并发完成 / 开始 / 关闭时放弃该行排程结果（静默跳过）。
     最终修复（问题 2）：中空同轮两阶段同时被重排时经原子 RPC 一次提交
     （锁内复核 + 任意失败整体回滚），不存在「A 新时间、B 旧时间」半提交。
+    #6（2026-10-02，迁移 20261002040000）：普通行与中空轮的全部写集合在
+    **同一事务**内一次提交，expected 快照覆盖全部参与计算行（不只待写行）
+    ——任一行漂移整批放弃（updated=0、stale_skipped=待写行数、等待标记
+    保留），不留「部分行新排程、部分行旧排程」的混合状态。
     """
     now = now or _now()
     today = _current_cycle(now).key
@@ -3253,41 +3231,54 @@ def recompute_today(now: datetime | None = None) -> dict[str, Any]:
         else:
             singles.append((occ, patch))
     stale_skipped = 0
-    for occ, patch in singles:
-        if _conditional_schedulable_update(client, occ, patch):
-            updated += 1
-        else:
-            stale_skipped += 1
-    for entries in rounds.values():
-        if len(entries) >= 2:
-            (target, target_patch), (sibling, sibling_patch) = entries[0], entries[1]
-            # expected snapshot（最终验收修复问题 3）：两阶段各自的读取快照
-            # 随 RPC 进入锁内复核——窗口 / 所有权 / est 预态漂移 = 旧计算作废。
-            expected = [_recompute_expected_snapshot(row) for row, _ in entries]
-            try:
-                _atomic_round_write(client, target, target_patch, sibling,
-                                    sibling_patch, expected=expected)
-            except ConcurrencyRejected as exc:
-                # 仅已知的乐观并发拒绝（锁内生命周期门 / 快照漂移）可静默
-                # 放弃该轮排程结果；数据库故障 / 契约错误必须向上传播
-                #（最终修复问题 6：不吞基础设施失败）。
-                log.info("planning 中空轮次重算因并发状态变化放弃: %s", exc)
-                stale_skipped += len(entries)
-                continue
-            updated += len(entries)
-        else:
-            occ, patch = entries[0]
-            if _conditional_schedulable_update(client, occ, patch):
-                updated += 1
+    updated = 0
+    if pending_rows:
+        # 整批事务 + 完整计算输入复核（#6，迁移 20261002040000 RPC）：
+        # * expected 快照覆盖**全部参与计算行**（不只待写行）——固定槽、其它
+        #   行状态 / 排序、成员集合任一在读取后漂移 = 整次计算输入失效；
+        # * 普通行与中空轮补丁在同一事务内应用（中空轮复用
+        #   planning_patch_occurrence_round 的白名单 / 严格门 / 窗口一致性）；
+        # * 任一漂移或失败 → PC001 整批放弃：updated=0、stale_skipped=待写
+        #   行数、重算等待标记保留，下一次重算按最新输入重新执行（§19.1：
+        #   不留「部分行新排程、部分行旧排程」的混合状态）；
+        # * 基础设施失败如实向上传播，不伪装成功（最终修复问题 6）。
+        expected = [_recompute_expected_snapshot(row) for row in open_rows]
+        singles_payload: list[dict[str, Any]] = []
+        rounds_payload: list[dict[str, Any]] = []
+        for occ, patch in singles:
+            singles_payload.append({"id": occ["id"], **patch})
+        for entries in rounds.values():
+            if len(entries) >= 2:
+                (target, target_patch), (sibling, sibling_patch) = entries[0], entries[1]
+                rounds_payload.append({
+                    "target_id": target["id"], "sibling_id": sibling["id"],
+                    "target_patch": target_patch, "sibling_patch": sibling_patch,
+                })
             else:
-                stale_skipped += 1
+                occ, patch = entries[0]
+                singles_payload.append({"id": occ["id"], **patch})
+        try:
+            response = client.rpc("planning_apply_recompute_batch", {
+                "p_expected": expected,
+                "p_singles": singles_payload,
+                "p_rounds": rounds_payload,
+            }).execute()
+        except PlanningError:
+            raise
+        except Exception as exc:
+            if _is_rpc_concurrency_rejection(exc):
+                log.info("planning 重算因并发状态变化整批放弃: %s", exc)
+                stale_skipped = len(pending_rows)
+            else:
+                raise
+        else:
+            updated = len(response.data or [])
     log.info("planning 重算完成: updated=%s stale_skipped=%s date=%s",
              updated, stale_skipped, today.isoformat())
     result = {"updated": updated, "at": _iso(now), "conflicts": []}
     if stale_skipped:
-        # 最终 Debug（问题 3）：存在因快照漂移（含 sort_order）被放弃的行
-        # ——本次结果不完整，调用方不得据此清掉重算等待标记；下一次重算
-        # 按最新输入重新执行。
+        # 最终 Debug（问题 3）：本次结果不完整，调用方不得据此清掉重算等待
+        # 标记；下一次重算按最新输入重新执行。
         result["stale_skipped"] = stale_skipped
     return result
 

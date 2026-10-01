@@ -1077,6 +1077,86 @@ def emulate_planning_split_occurrence(db, params):
     return created_ids
 
 
+RECOMPUTE_SINGLE_FIELDS = frozenset({
+    "id", "est_start", "est_end", "nominal_start", "estimated_time_source",
+    "fixed_source", "schedule_managed", "is_fixed", "updated_at",
+})
+RECOMPUTE_ROUND_FIELDS = frozenset({
+    "target_id", "sibling_id", "target_patch", "sibling_patch",
+})
+
+
+def emulate_planning_recompute_batch(db, params):
+    """#6（2026-10-02）：重算整批事务的 fake 仿真——与 20261002040000
+    真库 SQL 同语义（不同步替身会掩盖整批回滚缺陷）：
+    * expected 快照（全部参与计算行）形状与必填键（#13 同契约，含
+      sort_order），任一行缺失或漂移 → RuntimeError（应用层映射并发拒绝，
+      整批放弃）；
+    * singles / rounds 键硬白名单，待写行 id 必须已在 expected 集合内；
+    * singles 补丁按键应用（缺键 = 保持现值）；
+    * rounds 逐轮复用 emulate_planning_round_patch（expected 传 None——
+      全量复核已在批级完成）。
+    """
+    occ_rows = db.rows["planning_occurrence"]
+    expected = params.get("p_expected")
+    singles = params.get("p_singles") or []
+    rounds = params.get("p_rounds") or []
+    if (not isinstance(expected, list) or not expected
+            or any(not isinstance(e, dict)
+                   or not ROUND_PATCH_EXPECTED_FIELDS <= set(e) for e in expected)):
+        raise RuntimeError(
+            "planning_apply_recompute_batch: invalid expected snapshot")
+    if (not isinstance(singles, list) or not isinstance(rounds, list)
+            or any(not isinstance(e, dict)
+                   or not {"id", "updated_at"} <= set(e)
+                   or set(e) - RECOMPUTE_SINGLE_FIELDS for e in singles)
+            or any(not isinstance(e, dict)
+                   or not RECOMPUTE_ROUND_FIELDS <= set(e)
+                   or set(e) - RECOMPUTE_ROUND_FIELDS for e in rounds)):
+        raise RuntimeError(
+            "planning_apply_recompute_batch: invalid batch payload")
+    expected_ids = {e.get("id") for e in expected}
+    if any(e.get("id") not in expected_ids for e in singles):
+        raise RuntimeError(
+            "planning_apply_recompute_batch: invalid single write")
+    if any(e.get("target_id") not in expected_ids
+           or e.get("sibling_id") not in expected_ids for e in rounds):
+        raise RuntimeError(
+            "planning_apply_recompute_batch: invalid round write")
+    rows_by_id = {row.get("id"): row for row in occ_rows}
+    for e in expected:
+        row = rows_by_id.get(e.get("id"))
+        if row is None:
+            raise RuntimeError(
+                "planning_apply_recompute_batch: schedule inputs drifted "
+                "(stale recompute result)")
+        for key, value in e.items():
+            if key == "id":
+                continue
+            if row.get(key) != value:
+                raise RuntimeError(
+                    "planning_apply_recompute_batch: schedule inputs drifted "
+                    "(stale recompute result)")
+    written = []
+    for entry in singles:
+        row = rows_by_id[entry["id"]]
+        for key, value in entry.items():
+            if key == "id":
+                continue
+            row[key] = value
+        written.append(entry["id"])
+    for entry in rounds:
+        emulate_planning_round_patch(occ_rows, {
+            "p_target_id": entry["target_id"],
+            "p_sibling_id": entry["sibling_id"],
+            "p_target_patch": entry["target_patch"],
+            "p_sibling_patch": entry["sibling_patch"],
+            "p_expected": None,
+        })
+        written.extend([entry["target_id"], entry["sibling_id"]])
+    return written
+
+
 def emulate_planning_request_recompute(state_rows, params):
     """批次 6 A1：登记重算请求——数据库原子消费身份的 fake 仿真。
 
@@ -1253,6 +1333,9 @@ class _RpcCall:
             return SimpleNamespace(data=[])
         if self.fn == "planning_split_occurrence":
             data = emulate_planning_split_occurrence(self.db, self.params)
+            return SimpleNamespace(data=data)
+        if self.fn == "planning_apply_recompute_batch":
+            data = emulate_planning_recompute_batch(self.db, self.params)
             return SimpleNamespace(data=data)
         if self.fn == "planning_request_recompute":
             emulate_planning_request_recompute(

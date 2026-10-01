@@ -3524,6 +3524,153 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
                     "select count(*) from public.planning_task"
                     " where task_type = 'once'")[0][0], once_before)
 
+    # -- 清单 #6（2026-10-02）：重算整批事务与完整输入复核 ───────────────
+
+    RECOMPUTE_BATCH_SQL = ("select public.planning_apply_recompute_batch"
+                           "(%s::jsonb, %s::jsonb, %s::jsonb)")
+
+    def _batch_expected_element(self, occ_id, *, status="pending", sort_order=10,
+                                est_start=None, est_end=None,
+                                estimated_time_source="unassigned"):
+        return json.dumps({
+            "id": occ_id, "status": status,
+            "window_start_at": None, "window_end_at": None,
+            "est_start": est_start, "est_end": est_end,
+            "estimated_time_source": estimated_time_source,
+            "fixed_source": None, "is_fixed": False,
+            "schedule_managed": True, "sort_order": sort_order,
+        })
+
+    def _batch_single_json(self, occ_id, est_start, est_end, updated_at):
+        return json.dumps({
+            "id": occ_id, "est_start": est_start, "est_end": est_end,
+            "estimated_time_source": "automatic", "fixed_source": None,
+            "schedule_managed": True, "is_fixed": False,
+            "updated_at": updated_at,
+        })
+
+    def test_recompute_batch_applies_singles_in_one_transaction(self):
+        # 主路径：expected 覆盖全部参与行（含未写行），两个普通行补丁一次
+        # 事务写入，返回实际写入 id。
+        task_a = self._daily_task_row(content="甲")
+        task_b = self._daily_task_row(content="乙")
+        occ_a = self._pending_occ_on(task_a, round_key="cycle:2026-09-24")
+        occ_b = self._pending_occ_on(task_b, round_key="cycle:2026-09-24")
+        expected = "[%s, %s]" % (
+            self._batch_expected_element(occ_a, sort_order=10),
+            self._batch_expected_element(occ_b, sort_order=10))
+        singles = "[%s, %s]" % (
+            self._batch_single_json(occ_a, "2026-09-24T13:00:00+08:00",
+                                    "2026-09-24T13:30:00+08:00",
+                                    "2026-09-24T13:00:00+08:00"),
+            self._batch_single_json(occ_b, "2026-09-24T13:30:00+08:00",
+                                    "2026-09-24T14:00:00+08:00",
+                                    "2026-09-24T13:00:00+08:00"))
+        written = self._query(self.RECOMPUTE_BATCH_SQL, (expected, singles, "[]"))[0][0]
+        self.assertEqual(sorted(written), sorted([occ_a, occ_b]))
+        for occ_id, start in ((occ_a, "13:00"), (occ_b, "13:30")):
+            row = dict(zip(self._occ_columns(), self._occ_row(occ_id)))
+            self.assertEqual(str(row["est_start"]), "2026-09-24 %s:00+08:00" % start)
+            self.assertEqual(row["estimated_time_source"], "automatic")
+
+    def test_recompute_batch_abandons_on_unwritten_row_drift(self):
+        # 缺口 B：expected 覆盖全部参与行——未写行（第三个）sort_order 漂移
+        # → 整批 PC001 放弃，两个待写行都不落库（§19.1 无混合状态）。
+        task_a = self._daily_task_row(content="甲")
+        task_b = self._daily_task_row(content="乙")
+        task_c = self._daily_task_row(content="丙")
+        occ_a = self._pending_occ_on(task_a, round_key="cycle:2026-09-24")
+        occ_b = self._pending_occ_on(task_b, round_key="cycle:2026-09-24")
+        occ_c = self._pending_occ_on(task_c, round_key="cycle:2026-09-24")
+        expected = "[%s, %s, %s]" % (
+            self._batch_expected_element(occ_a, sort_order=10),
+            self._batch_expected_element(occ_b, sort_order=10),
+            self._batch_expected_element(occ_c, sort_order=999))  # 漂移
+        singles = "[%s, %s]" % (
+            self._batch_single_json(occ_a, "2026-09-24T13:00:00+08:00",
+                                    "2026-09-24T13:30:00+08:00",
+                                    "2026-09-24T13:00:00+08:00"),
+            self._batch_single_json(occ_b, "2026-09-24T13:30:00+08:00",
+                                    "2026-09-24T14:00:00+08:00",
+                                    "2026-09-24T13:00:00+08:00"))
+        self._query_expecting_concurrency_rejection(self.RECOMPUTE_BATCH_SQL, (
+            expected, singles, "[]"))
+        for occ_id in (occ_a, occ_b):
+            row = dict(zip(self._occ_columns(), self._occ_row(occ_id)))
+            self.assertIsNone(row["est_start"])
+
+    def test_recompute_batch_rolls_back_singles_on_late_round_failure(self):
+        # 缺口 A：rounds 段（写后）失败（rows 不是中空配对）→ 已执行的
+        # singles 全部回滚——真库事务回滚证据。
+        task_a = self._daily_task_row(content="甲")
+        task_b = self._daily_task_row(content="乙")
+        task_c = self._daily_task_row(content="丙")
+        occ_a = self._pending_occ_on(task_a, round_key="cycle:2026-09-24")
+        occ_b = self._pending_occ_on(task_b, round_key="cycle:2026-09-24")
+        occ_c = self._pending_occ_on(task_c, round_key="cycle:2026-09-24")
+        expected = "[%s, %s, %s]" % (
+            self._batch_expected_element(occ_a, sort_order=10),
+            self._batch_expected_element(occ_b, sort_order=10),
+            self._batch_expected_element(occ_c, sort_order=10))
+        singles = "[%s]" % self._batch_single_json(
+            occ_a, "2026-09-24T13:00:00+08:00", "2026-09-24T13:30:00+08:00",
+            "2026-09-24T13:00:00+08:00")
+        rounds = json.dumps([{
+            "target_id": occ_b, "sibling_id": occ_c,
+            "target_patch": {"est_start": "2026-09-24T14:00:00+08:00",
+                             "updated_at": "2026-09-24T13:00:00+08:00"},
+            "sibling_patch": {"est_start": "2026-09-24T14:30:00+08:00",
+                              "updated_at": "2026-09-24T13:00:00+08:00"},
+        }])
+        with self.assertRaises(psycopg.errors.RaiseException) as caught:
+            self._query(self.RECOMPUTE_BATCH_SQL, (expected, singles, rounds))
+        self.assertIn("not a hollow start/end pair", str(caught.exception))
+        row_a = dict(zip(self._occ_columns(), self._occ_row(occ_a)))
+        self.assertIsNone(row_a["est_start"])  # singles 已回滚
+        row_b = dict(zip(self._occ_columns(), self._occ_row(occ_b)))
+        self.assertIsNone(row_b["est_start"])
+
+    def test_recompute_batch_applies_hollow_round_via_patch_rpc(self):
+        # rounds 段逐轮复用 planning_patch_occurrence_round：两阶段一次写入，
+        # 传 NULL 跳过其内部 expected（批级已全量复核）。
+        start_id, end_id = self._hollow_pair()
+        expected = "[%s, %s]" % (
+            self._batch_expected_element(start_id, sort_order=10),
+            self._batch_expected_element(end_id, sort_order=10))
+        rounds = json.dumps([{
+            "target_id": start_id, "sibling_id": end_id,
+            "target_patch": {"est_start": "2026-09-24T15:00:00+08:00",
+                             "est_end": "2026-09-24T15:30:00+08:00",
+                             "estimated_time_source": "automatic",
+                             "fixed_source": None, "schedule_managed": True,
+                             "is_fixed": False,
+                             "updated_at": "2026-09-24T15:00:00+08:00"},
+            "sibling_patch": {"est_start": "2026-09-24T16:30:00+08:00",
+                              "est_end": "2026-09-24T17:00:00+08:00",
+                              "estimated_time_source": "automatic",
+                              "fixed_source": None, "schedule_managed": True,
+                              "is_fixed": False,
+                              "updated_at": "2026-09-24T15:00:00+08:00"},
+        }])
+        written = self._query(self.RECOMPUTE_BATCH_SQL, (expected, "[]", rounds))[0][0]
+        self.assertEqual(sorted(written), sorted([start_id, end_id]))
+        start_row = dict(zip(self._occ_columns(), self._occ_row(start_id)))
+        end_row = dict(zip(self._occ_columns(), self._occ_row(end_id)))
+        self.assertEqual(str(start_row["est_start"]), "2026-09-24 15:00:00+08:00")
+        self.assertEqual(str(end_row["est_start"]), "2026-09-24 16:30:00+08:00")
+
+    def test_recompute_batch_single_signature(self):
+        # #15 纪律：新函数恰一签名（3 个 jsonb 参数）。
+        signatures = self._query(
+            "select pg_get_function_identity_arguments(p.oid)"
+            " from pg_proc p join pg_namespace n on n.oid = p.pronamespace"
+            " where n.nspname = 'public'"
+            " and p.proname = 'planning_apply_recompute_batch'"
+        )
+        self.assertEqual(len(signatures), 1)
+        self.assertEqual(signatures[0][0],
+                         "p_expected jsonb, p_singles jsonb, p_rounds jsonb")
+
     def test_split_rpc_single_signature(self):
         # #15 纪律：新函数恰一签名（6 参数）。
         signatures = self._query(
