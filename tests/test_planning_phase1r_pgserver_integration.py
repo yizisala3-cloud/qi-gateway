@@ -3375,6 +3375,168 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
         self.assertEqual(row["window_start_at"], "2026-09-24T09:00:00+08:00")
         self.assertFalse(self._business_fetch("planning_task", task_id)["is_active"])
 
+    # -- 清单 #1（2026-10-02）：拆分单事务原子化（迁移 20261002030000）──
+
+    SPLIT_RPC_SQL = ("select public.planning_split_occurrence"
+                     "(%s, %s, %s, %s, %s::jsonb, %s)")
+
+    def _split_parts_json(self, count=3):
+        return json.dumps([
+            {"content": "拆分项 %d" % (index + 1), "estimated_minutes": 30}
+            for index in range(count)])
+
+    def _after_completion_task(self, *, active=True):
+        task_id = self._query(
+            """
+            insert into public.planning_task (
+                content, task_type, time_mode, estimated_minutes, is_active,
+                refresh_mode, refresh_enabled, interval_days,
+                created_at, updated_at
+            ) values (
+                '处理后', 'interval', 'duration', 30, %s,
+                'after_completion', true, 3,
+                '2026-09-23T07:00:00+08:00', '2026-09-23T07:00:00+08:00'
+            ) returning id
+            """,
+            (active,),
+        )[0][0]
+        return task_id
+
+    def _after_completion_round_key(self):
+        # after_completion 轮次键 = handled:<日期>:<32 位十六进制摘要>
+        # （身份触发器拒绝 cycle:/once 等与刷新模式不匹配的键）。
+        return "handled:2026-09-24:" + "a" * 32
+
+    def test_split_rpc_closes_round_creates_tasks_and_advances_baseline(self):
+        # 原子拆分主路径：条件关闭（discarded_this + handled_at）、3 个 once
+        # 任务、after_completion 基准按关闭后的轮次行推进——一次 RPC 完成。
+        task_id = self._after_completion_task()
+        round_key = self._after_completion_round_key()
+        occ_id = self._pending_occ_on(task_id, round_key=round_key)
+        created = self._query(self.SPLIT_RPC_SQL, (
+            task_id, round_key, "2026-09-24",
+            "2026-09-24T10:00:00+08:00", self._split_parts_json(3), 3,
+        ))[0][0]
+        self.assertEqual(len(created), 3)
+        occ = dict(zip(self._occ_columns(), self._occ_row(occ_id)))
+        self.assertEqual(occ["status"], "discarded_this")
+        self.assertEqual(str(occ["handled_at"]), "2026-09-24 10:00:00+08:00")
+        self.assertEqual(str(occ["closed_at"]), "2026-09-24 10:00:00+08:00")
+        rows = self._query(
+            "select content, task_type, estimated_minutes, target_date,"
+            " refresh_mode, is_active from public.planning_task"
+            " where id = any(%s) order by id", (list(created),))
+        self.assertEqual(len(rows), 3)
+        for index, row in enumerate(rows):
+            self.assertEqual(row[0], "拆分项 %d" % (index + 1))
+            self.assertEqual(row[1], "once")
+            self.assertEqual(row[2], 30)
+            self.assertEqual(str(row[3]), "2026-09-24")
+            self.assertEqual(row[4], "none")
+            self.assertTrue(row[5])
+        task = self._query(
+            "select last_handled_at, refresh_next_due_at from public.planning_task"
+            " where id = %s", (task_id,))[0]
+        self.assertEqual(str(task[0]), "2026-09-24 10:00:00+08:00")
+        self.assertEqual(str(task[1]), "2026-09-27 10:00:00+08:00")
+
+    def test_split_rpc_rolls_back_everything_on_late_failure(self):
+        # 原子性证明：基准推进段（写后）失败 → 已执行的关闭与任务创建
+        # 全部回滚——原轮保持开放、零任务（此前关闭先落库 + 部分任务）。
+        task_id = self._after_completion_task(active=False)
+        round_key = self._after_completion_round_key()
+        occ_id = self._pending_occ_on(task_id, round_key=round_key)
+        once_before = self._query(
+            "select count(*) from public.planning_task"
+            " where task_type = 'once'")[0][0]
+        # 基准推进段失败 = PC001：psycopg 将自定义 SQLSTATE 映射为
+        # ProgrammingError（见 _query_expecting_concurrency_rejection）。
+        self._query_expecting_concurrency_rejection(self.SPLIT_RPC_SQL, (
+            task_id, round_key, "2026-09-24",
+            "2026-09-24T10:00:00+08:00", self._split_parts_json(3), 3,
+        ))
+        occ = dict(zip(self._occ_columns(), self._occ_row(occ_id)))
+        self.assertEqual(occ["status"], "pending")
+        self.assertIsNone(occ["handled_at"])
+        self.assertEqual(self._query(
+            "select count(*) from public.planning_task where task_type = 'once'",
+        )[0][0], once_before)
+
+    def test_split_rpc_second_call_rejected_no_second_group(self):
+        # 重复拆分：第一次成功后，第二次（同轮）PC001 拒绝、零第二组任务。
+        task_id = self._after_completion_task()
+        round_key = self._after_completion_round_key()
+        occ_id = self._pending_occ_on(task_id, round_key=round_key)
+        once_before = self._query(
+            "select count(*) from public.planning_task"
+            " where task_type = 'once'")[0][0]
+        self._query(self.SPLIT_RPC_SQL, (
+            task_id, round_key, "2026-09-24",
+            "2026-09-24T10:00:00+08:00", self._split_parts_json(2), 3,
+        ))
+        self._query_expecting_concurrency_rejection(self.SPLIT_RPC_SQL, (
+            task_id, round_key, "2026-09-24",
+            "2026-09-24T10:30:00+08:00", self._split_parts_json(2), 3,
+        ))
+        self.assertEqual(self._query(
+            "select count(*) from public.planning_task where task_type = 'once'",
+        )[0][0], once_before + 2)
+        # 基准不被第二次（失败的）请求改写：仍是第一次的处理时间。
+        task = self._query(
+            "select last_handled_at from public.planning_task where id = %s",
+            (task_id,))[0]
+        self.assertEqual(str(task[0]), "2026-09-24 10:00:00+08:00")
+        self.assertEqual(self._query(
+            "select count(*) from public.planning_occurrence where id = %s",
+            (occ_id,))[0][0], 1)
+
+    def test_split_rpc_parts_shape_rejected_zero_write(self):
+        # parts 形状契约（写前校验，违规零写入）：空数组 / 11 项 / 多余键 /
+        # 空内容 / 耗时越界。形状拒绝未携带 errcode（P0001）。
+        task_id = self._after_completion_task()
+        round_key = self._after_completion_round_key()
+        occ_id = self._pending_occ_on(task_id, round_key=round_key)
+        once_before = self._query(
+            "select count(*) from public.planning_task"
+            " where task_type = 'once'")[0][0]
+        cases = (
+            ("empty", "[]"),
+            ("eleven", json.dumps([{"content": "x", "estimated_minutes": 30}
+                                   for _ in range(11)])),
+            ("extra key",
+             '[{"content": "x", "estimated_minutes": 30, "note": "n"}]'),
+            ("blank content", '[{"content": "  ", "estimated_minutes": 30}]'),
+            ("minutes too large",
+             '[{"content": "x", "estimated_minutes": 1441}]'),
+            ("minutes zero", '[{"content": "x", "estimated_minutes": 0}]'),
+        )
+        for name, parts in cases:
+            with self.subTest(case=name):
+                with self.assertRaises(psycopg.errors.RaiseException):
+                    self._query(self.SPLIT_RPC_SQL, (
+                        task_id, round_key,
+                        "2026-09-24",
+                        "2026-09-24T10:00:00+08:00", parts, None,
+                    ))
+                occ = dict(zip(self._occ_columns(), self._occ_row(occ_id)))
+                self.assertEqual(occ["status"], "pending")
+                self.assertEqual(self._query(
+                    "select count(*) from public.planning_task"
+                    " where task_type = 'once'")[0][0], once_before)
+
+    def test_split_rpc_single_signature(self):
+        # #15 纪律：新函数恰一签名（6 参数）。
+        signatures = self._query(
+            "select pg_get_function_identity_arguments(p.oid)"
+            " from pg_proc p join pg_namespace n on n.oid = p.pronamespace"
+            " where n.nspname = 'public'"
+            " and p.proname = 'planning_split_occurrence'"
+        )
+        self.assertEqual(len(signatures), 1)
+        for fragment in ("p_task_id", "p_round_key", "p_target_date",
+                         "p_now", "p_parts", "p_after_completion_days"):
+            self.assertIn(fragment, signatures[0][0])
+
     def test_discard_wins_then_round_edit_rejected_pc001(self):
         # 反向结果对照：持锁方先释放 → 删除获胜完整落库；其后的同轮编辑
         # 按既定并发契约 PC001 拒绝（轮已关闭，零写入）。

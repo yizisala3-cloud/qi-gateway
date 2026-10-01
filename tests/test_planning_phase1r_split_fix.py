@@ -16,6 +16,8 @@
 from datetime import timedelta
 from unittest import mock
 
+import pytest
+
 from gateway import planning
 from test_planning_phase1b import Context, at
 
@@ -270,3 +272,66 @@ def test_split_creates_tasks_on_current_cycle_and_recompute_mark():
         assert len(result["created_task_ids"]) == 1
         # 拆出的单次待办立即生成实例（不等后台循环）
         assert any(row["task_id"] == once["id"] for row in c.rows)
+
+# ── #1（2026-10-02）：拆分单事务原子化 ────────────────────────────────
+
+
+def test_split_rpc_failure_leaves_no_partial_state():
+    # #1：关闭原轮、创建任务与基准推进在同一事务内（迁移 20261002030000
+    # RPC）——任一失败整体回滚：原轮保持开放、零任务创建，失败如实上报
+    # 503，重试可完整重放（此前关闭先落库、中途 INSERT 失败留下「原轮已
+    # 关闭 + 部分任务」的不可重试半状态）。
+    with Context() as c:
+        c.create("daily", at(24, 7), estimated_minutes=30)
+        round_row = c.rows[0]
+        original_rpc = c.db.rpc
+
+        def failing_rpc(name, params=None):
+            if name == "planning_split_occurrence":
+                raise RuntimeError("simulated mid-transaction failure")
+            return original_rpc(name, params)
+
+        with mock.patch.object(c.db, "rpc", side_effect=failing_rpc):
+            with pytest.raises(planning.PlanningError) as error:
+                planning.split_occurrence(
+                    round_row["id"],
+                    {"parts": [{"content": "整理书桌"}, {"content": "拖地"}]},
+                    at(24, 10))
+        assert error.value.status_code == 503
+        # 零净写入：原轮仍开放、无任何 once 任务、无 handled_at 事实。
+        refreshed = next(row for row in c.rows if row["id"] == round_row["id"])
+        assert refreshed["status"] == "pending"
+        assert refreshed.get("handled_at") is None
+        assert refreshed.get("closed_at") is None
+        assert _once_tasks(c) == []
+        # 重试（故障恢复后）完整成功。
+        result = planning.split_occurrence(
+            round_row["id"],
+            {"parts": [{"content": "整理书桌"}, {"content": "拖地"}]},
+            at(24, 11))
+        assert len(result["created_task_ids"]) == 2
+        refreshed = next(row for row in c.rows if row["id"] == round_row["id"])
+        assert refreshed["status"] == "discarded_this"
+        assert refreshed["handled_at"] == at(24, 11).isoformat()
+        assert len(_once_tasks(c)) == 2
+
+
+def test_split_after_completion_rpc_failure_keeps_baseline_untouched():
+    # 基准推进也在同一事务内：RPC 失败时 task 行基准字段不得被提前推进。
+    with Context() as c:
+        c.create("interval", at(24), refresh_mode="after_completion", interval_days=3)
+        round_row = c.rows[0]
+        original_rpc = c.db.rpc
+
+        def failing_rpc(name, params=None):
+            if name == "planning_split_occurrence":
+                raise RuntimeError("simulated mid-transaction failure")
+            return original_rpc(name, params)
+
+        with mock.patch.object(c.db, "rpc", side_effect=failing_rpc):
+            with pytest.raises(planning.PlanningError):
+                planning.split_occurrence(
+                    round_row["id"], {"parts": [{"content": "整理书桌"}]}, at(24, 10))
+        task_row = c.db.rows["planning_task"][0]
+        assert task_row.get("last_handled_at") is None
+        assert task_row.get("refresh_next_due_at") is None

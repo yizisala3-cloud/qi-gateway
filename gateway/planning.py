@@ -3073,6 +3073,7 @@ _CONCURRENCY_REJECTION_MESSAGES = (
     "round is no longer editable",
     "schedule inputs drifted",
     "invalid expected snapshot",
+    "round already closed",
 )
 
 
@@ -4870,9 +4871,13 @@ def split_occurrence(occurrence_id: int, payload: Any, now: datetime | None = No
     （discarded_this + handled_at 拆分处理时间），处理后刷新型从该处理
     时间推进下一轮，固定刷新型时间轴不变，原任务定义继续正常存在。已有
     partial 说明 / 时间与实际执行事实原样保留（不为记录"已拆分为 N 个
-    待办"覆盖用户事实）。只允许开放实例拆分；收口是带开放状态条件的原子
-    更新（同轮中空两阶段一起关闭）——已关闭实例（含被并发拆分收口的）
-    拒绝再次拆分，重复请求不会产生第二组拆分任务。
+    待办"覆盖用户事实）。只允许开放实例拆分；已关闭实例（含被并发拆分
+    收口的）拒绝再次拆分，重复请求不会产生第二组拆分任务。
+
+    #1（2026-10-02，迁移 20261002030000）：关闭原轮、创建 1～10 个单次
+    待办与 after_completion 基准推进在同一数据库事务内原子完成——任一
+    失败整体回滚（原轮保持开放、零任务创建，重试可完整重放），不再留下
+    「原轮已关闭 + 部分任务」的不可重试半状态。
     """
     now = now or _now()
     if not isinstance(payload, dict):
@@ -4902,57 +4907,46 @@ def split_occurrence(occurrence_id: int, payload: Any, now: datetime | None = No
     if not task:
         raise PlanningError("not_found", "planning task not found", 404)
 
-    # 先收口当前轮（带开放状态条件的原子更新；同轮中空两阶段一起关闭，
-    # 不留半关闭轮次）。并发重复拆分的后到者在同一语句上 0 行命中，不会
-    # 创建第二组拆分任务（B2 业务兜底，前端防双击之外的第二层保护）。
-    closed = client.table("planning_occurrence").update({
-        "status": "discarded_this",
-        "closed_at": _iso(now),
-        "handled_at": _iso(now),
-        "updated_at": _iso(now),
-    }).eq("task_id", occ["task_id"]).eq("round_key", occ["round_key"]).in_(
-        "status", list(OPEN_STATUSES),
-    ).execute()
-    if not closed.data:
-        raise PlanningError(
-            "invalid_transition", "该待办已被并发操作关闭，不能再次拆分", 409,
-        )
-
-    created_ids = []
-    for part in normalized:
-        response = client.table("planning_task").insert({
-            "content": part["content"],
-            "task_type": "once",
-            "time_mode": "duration",
-            "estimated_minutes": part["estimated_minutes"],
-            "target_date": _current_cycle(now).key.isoformat(),
-            "refresh_mode": "none",
-            "is_active": True,
-            "created_at": _iso(now),
-            "updated_at": _iso(now),
-        }).execute()
-        created = (response.data or [{}])[0]
-        created_ids.append(created.get("id"))
-
-    # 拆分处理时间即本轮处理事实：处理后刷新型据此推进下一轮（固定刷新型
-    # 时间轴不动）；task 行基准即便写入失败，_after_completion_due 也能从
-    # 轮次行的 handled_at 自愈推进。
+    # 原子拆分（#1，迁移 20261002030000 RPC）：条件关闭、1～10 个单次待办
+    # 创建与 after_completion 基准推进在**同一数据库事务**内完成，任一失败
+    # 整体回滚——原轮保持开放、零任务创建，重试可完整重放。此前关闭先落库、
+    # 中途 INSERT 失败会留下「原轮已关闭 + 部分任务」的不可重试半状态。
+    # 锁内基准推进（语句 6）与旧「关闭后读行再写」同语义：全部轮次行均有
+    # handled_at 时按 max(handled_at) 推进，基准缺失时 _after_completion_due
+    # 仍可从轮次行自愈。
+    after_completion_days = None
     if (task["task_type"] == "interval"
             and task.get("refresh_mode") == "after_completion"
             and task.get("is_active")):
-        round_rows = _rows(
-            client, "planning_occurrence",
-            lambda q: q.eq("task_id", task["id"]).eq("round_key", occ["round_key"]),
-        )
         interval = task.get("interval_days")
-        if (round_rows and all(row.get("handled_at") for row in round_rows)
-                and isinstance(interval, int) and 1 <= interval <= 365):
-            handled = max(_parse_dt(row["handled_at"], "handled_at") for row in round_rows)
-            client.table("planning_task").update({
-                "last_handled_at": _iso(handled),
-                "refresh_next_due_at": _iso(handled + timedelta(days=interval)),
-                "updated_at": _iso(now),
-            }).eq("id", task["id"]).execute()
+        if isinstance(interval, int) and 1 <= interval <= 365:
+            after_completion_days = interval
+    try:
+        response = client.rpc("planning_split_occurrence", {
+            "p_task_id": task["id"],
+            "p_round_key": occ["round_key"],
+            "p_target_date": _current_cycle(now).key.isoformat(),
+            "p_now": _iso(now),
+            "p_parts": [
+                {"content": part["content"],
+                 "estimated_minutes": part["estimated_minutes"]}
+                for part in normalized
+            ],
+            "p_after_completion_days": after_completion_days,
+        }).execute()
+    except PlanningError:
+        raise
+    except Exception as exc:
+        if _is_rpc_concurrency_rejection(exc):
+            # 0 行命中（已关闭 / 已拆分收口 / 已超时）：并发重复拆分请求
+            # 不产生第二组拆分任务（B2 业务兜底，语义与原条件关闭一致）。
+            raise PlanningError(
+                "invalid_transition", "该待办已被并发操作关闭，不能再次拆分", 409,
+            ) from exc
+        raise PlanningError(
+            "database_unavailable", "拆分暂时无法完成，请稍后重试", 503,
+        ) from exc
+    created_ids = [int(item) for item in (response.data or [])]
 
     request_recompute("split", now)
     # 即时生成：拆分出的当日单次待办立刻出现在列表里。

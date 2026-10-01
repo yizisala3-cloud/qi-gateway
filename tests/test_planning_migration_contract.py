@@ -455,6 +455,138 @@ DISCARD_LOCK_ORDER_MIGRATION = (
     / "20261002020000_planning_discard_task_lock_order.sql"
 )
 
+SPLIT_ATOMIC_MIGRATION = (
+    Path(__file__).resolve().parents[1]
+    / "supabase"
+    / "migrations"
+    / "20261002030000_planning_split_occurrence_rpc.sql"
+)
+
+
+class PlanningSplitAtomicMigrationContractTests(unittest.TestCase):
+    """#1（2026-10-02）：拆分单事务原子化 RPC 迁移契约。
+
+    新函数（此前无签名，无 overload 风险）；仅 create or replace；不新增
+    表列 / 触发器 / 数据回填。校验先行（parts 形状写前校验）→ 条件关闭 →
+    1～10 个 once 创建 → after_completion 基准锁内推进，任一失败整体回滚；
+    锁序：任务行 → 同轮开放行 id 升序（与 round patch 一致）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = SPLIT_ATOMIC_MIGRATION.read_text(encoding="utf-8")
+        cls.folded = cls.sql.casefold()
+
+    def _top_level_statements(self):
+        statements, buf = [], []
+        in_dollar = False
+        for line in self.sql.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("--"):
+                continue  # 头部说明注释不属于语句序列
+            if not in_dollar and stripped.casefold().startswith("create or replace function"):
+                buf.append(stripped)
+                in_dollar = True
+                continue
+            if in_dollar:
+                if stripped == "$$;":
+                    in_dollar = False
+                continue
+            if stripped:
+                buf.append(stripped)
+        return [item.casefold() for item in buf]
+
+    def test_migration_is_atomic_and_replay_safe(self):
+        folded = self.folded
+        self.assertIn("begin;", folded)
+        self.assertIn("commit;", folded)
+        self.assertIn(
+            "create or replace function public.planning_split_occurrence(", folded)
+
+    def test_signature_six_params(self):
+        folded = self.folded
+        for fragment in (
+            "p_task_id bigint", "p_round_key text", "p_target_date date",
+            "p_now timestamptz", "p_parts jsonb",
+            "p_after_completion_days integer default null",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, folded)
+
+    def test_only_function_replacement_no_schema_changes(self):
+        top = [item for item in self._top_level_statements()
+               if not item.startswith(("begin;", "commit;"))]
+        self.assertEqual(top, [
+            "create or replace function public.planning_split_occurrence("])
+        for forbidden in (
+            "alter table", "add column", "create trigger", "create table",
+            "create index", "drop table", "drop function",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.folded)
+
+    def test_validation_precedes_close_and_inserts(self):
+        # 校验先行：parts 形状校验（语句 2）先于条件关闭（语句 4）与任务
+        # INSERT（语句 5）；耗时 / 内容边界与应用层同源。
+        folded = self.folded
+        parts_shape = folded.index("parts must be an array of 1-10 items")
+        part_item = folded.index("invalid part item")
+        close = folded.index("update public.planning_occurrence")
+        insert = folded.index("insert into public.planning_task")
+        self.assertLess(parts_shape, close)
+        self.assertLess(part_item, close)
+        self.assertLess(close, insert)
+        self.assertIn("char_length(e.value->>'content') > 500", folded)
+        self.assertIn("(e.value->>'estimated_minutes')::int < 1", folded)
+        self.assertIn("(e.value->>'estimated_minutes')::int > 1440", folded)
+        self.assertIn("p_after_completion_days < 1 or p_after_completion_days > 365", folded)
+
+    def test_lock_order_task_then_round_rows_ascending(self):
+        # 锁序纪律（#20 同源）：任务行 for update 先于同轮开放行扫描；
+        # 同轮开放行按 id 升序加锁（与 round patch 的 id 升序一致）。
+        folded = self.folded
+        task_lock = folded.index("from public.planning_task")
+        round_scan = folded.index("where task_id = p_task_id")
+        self.assertLess(task_lock, round_scan)
+        self.assertEqual(folded.count("for update"), 2)  # 任务行 + 同轮开放行
+        self.assertIn("order by id", folded)
+
+    def test_conditional_close_with_pc001_rejection(self):
+        # 条件关闭（开放状态集合内命中）+ 0 行命中 PC001 并发拒绝；关闭
+        # 语句不触及 partial_* / actual_* 列（用户事实不被覆盖）。
+        folded = self.folded
+        self.assertIn("status in ('pending', 'in_progress', 'deferred', 'partial')", folded)
+        self.assertIn("set status = 'discarded_this', closed_at = p_now,", folded)
+        self.assertIn("handled_at = p_now, updated_at = p_now", folded)
+        self.assertIn("round already closed (concurrent change)", folded)
+        self.assertIn("using errcode = 'pc001'", folded)
+        close_block = folded[
+            folded.index("update public.planning_occurrence"):
+            folded.index("if not found then")
+        ]
+        self.assertNotIn("partial_note", close_block)
+        self.assertNotIn("partial_at", close_block)
+        self.assertNotIn("actual_start", close_block)
+
+    def test_baseline_recomputed_from_rows_in_lock(self):
+        # after_completion 基准锁内按轮次行重算（max(handled_at) + 全部行
+        # 均有 handled_at），不使用请求携带值；任务停用时 PC001。
+        folded = self.folded
+        self.assertIn("select max(handled_at)", folded)
+        self.assertIn("and handled_at is null", folded)
+        self.assertIn("make_interval(days => p_after_completion_days)", folded)
+        self.assertIn("task already inactive (concurrent change)", folded)
+
+    def test_parts_keys_hard_whitelist(self):
+        # parts 元素恰含 content 与 estimated_minutes（多余键拒绝），插入列
+        # 白名单显式（无动态 SQL）。
+        folded = self.folded
+        self.assertIn("k not in ('content', 'estimated_minutes')", folded)
+        self.assertIn("not e.value ?& array['content', 'estimated_minutes']", folded)
+        self.assertIn("insert into public.planning_task (", folded)
+        self.assertNotIn("format(", folded)
+        self.assertNotIn("security definer", folded)
+
 
 class PlanningDiscardLockOrderMigrationContractTests(unittest.TestCase):
     """#20（2026-10-02）：删除与中空编辑反向锁序死锁修复迁移契约。

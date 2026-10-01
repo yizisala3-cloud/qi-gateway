@@ -993,6 +993,90 @@ def emulate_planning_discard_task(task_rows, occ_rows, params):
     task["is_active"] = False
 
 
+SPLIT_PART_FIELDS = frozenset({"content", "estimated_minutes"})
+
+
+def emulate_planning_split_occurrence(db, params):
+    """#1（2026-10-02）：单事务原子拆分的 fake 仿真——与 20261002030000
+    真库 SQL 同语义（不同步替身会掩盖事务边界缺陷）：
+    * 任务行存在；parts 形状（1～10 个对象、恰含 content / estimated_minutes、
+      内容非空 ≤500、耗时 1–1440 整数）写前校验，违规零写入；
+    * 条件关闭当前轮（开放状态集合内命中，discarded_this + handled_at）——
+      0 行命中 = 已被并发操作关闭 / 已拆分收口 → RuntimeError（应用层映射
+      409），零任务创建；
+    * 1～10 个 once 任务创建（fake 单线程顺序追加 = 事务内语句）；
+    * after_completion 基准：锁内按关闭后的轮次行重算——全部行均有
+      handled_at 时按 max 推进（与应用层旧「关闭后读行再写」同语义）。
+    """
+    task = next((r for r in db.rows["planning_task"]
+                 if r.get("id") == params.get("p_task_id")), None)
+    if task is None:
+        raise RuntimeError("planning_split_occurrence: task not found")
+    parts = params.get("p_parts")
+    if (not isinstance(parts, list) or not 1 <= len(parts) <= 10
+            or any(
+                not isinstance(part, dict)
+                or set(part) - SPLIT_PART_FIELDS
+                or not SPLIT_PART_FIELDS <= set(part)
+                or not isinstance(part.get("content"), str)
+                or not part["content"].strip()
+                or len(part["content"]) > 500
+                or not isinstance(part.get("estimated_minutes"), int)
+                or isinstance(part.get("estimated_minutes"), bool)
+                or not 1 <= part["estimated_minutes"] <= 1440
+                for part in parts)):
+        raise RuntimeError("planning_split_occurrence: invalid part item")
+    days = params.get("p_after_completion_days")
+    if days is not None and (not isinstance(days, int)
+                             or isinstance(days, bool)
+                             or not 1 <= days <= 365):
+        raise RuntimeError("planning_split_occurrence: invalid after_completion interval")
+    open_states = ("pending", "in_progress", "deferred", "partial")
+    round_rows = [row for row in db.rows["planning_occurrence"]
+                  if row.get("task_id") == task["id"]
+                  and row.get("round_key") == params.get("p_round_key")
+                  and row.get("status") in open_states]
+    if not round_rows:
+        raise RuntimeError(
+            "planning_split_occurrence: round already closed (concurrent change)")
+    now = params.get("p_now")
+    for row in round_rows:
+        row["status"] = "discarded_this"
+        row["closed_at"] = now
+        row["handled_at"] = now
+        row["updated_at"] = now
+    created_ids = []
+    for part in parts:
+        new_task = {
+            "id": db.next_id("planning_task"),
+            "content": part["content"].strip(),
+            "task_type": "once",
+            "time_mode": "duration",
+            "estimated_minutes": part["estimated_minutes"],
+            "target_date": params.get("p_target_date"),
+            "refresh_mode": "none",
+            "is_active": True,
+            "created_at": now,
+            "updated_at": now,
+        }
+        db.rows["planning_task"].append(new_task)
+        created_ids.append(new_task["id"])
+    if days is not None:
+        round_all = [row for row in db.rows["planning_occurrence"]
+                     if row.get("task_id") == task["id"]
+                     and row.get("round_key") == params.get("p_round_key")]
+        if round_all and all(row.get("handled_at") for row in round_all):
+            handled = max(_discard_dt(row["handled_at"]) for row in round_all)
+            if task.get("is_active"):
+                task["last_handled_at"] = handled.isoformat()
+                task["refresh_next_due_at"] = (
+                    handled + timedelta(days=days)).isoformat()
+            else:
+                raise RuntimeError(
+                    "planning_split_occurrence: task already inactive (concurrent change)")
+    return created_ids
+
+
 def emulate_planning_request_recompute(state_rows, params):
     """批次 6 A1：登记重算请求——数据库原子消费身份的 fake 仿真。
 
@@ -1167,6 +1251,9 @@ class _RpcCall:
                 self.db.rows["planning_task"], self.db.rows["planning_occurrence"],
                 self.params)
             return SimpleNamespace(data=[])
+        if self.fn == "planning_split_occurrence":
+            data = emulate_planning_split_occurrence(self.db, self.params)
+            return SimpleNamespace(data=data)
         if self.fn == "planning_request_recompute":
             emulate_planning_request_recompute(
                 self.db.rows["planning_recompute_state"], self.params)

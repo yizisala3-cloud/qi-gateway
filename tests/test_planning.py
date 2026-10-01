@@ -230,6 +230,10 @@ class _Client:
                 self.rows["planning_task"], self.rows["planning_occurrence"],
                 dict(params or {}))
             return SimpleNamespace(execute=lambda: SimpleNamespace(data=[]))
+        if fn == "planning_split_occurrence":
+            from test_planning_phase1a import emulate_planning_split_occurrence
+            data = emulate_planning_split_occurrence(self, dict(params or {}))
+            return SimpleNamespace(execute=lambda: SimpleNamespace(data=data))
         if fn == "planning_request_recompute":
             from test_planning_phase1a import emulate_planning_request_recompute
             emulate_planning_request_recompute(
