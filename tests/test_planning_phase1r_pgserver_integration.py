@@ -3855,6 +3855,64 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
             "select count(*) from public.planning_task"
             " where task_type = 'once'")[0][0], once_after)
 
+    def test_actual_logged_seconds_column_shape(self):
+        # 清单 #19（2026-10-01 §12.3，迁移 20261002050000）：actual_logged_seconds
+        # 可空 bigint——NULL = 未手填；CHECK 拒绝 0 / 负数 / 超过 24 小时。
+        # 自建任务行：不占用首任务的 (task_id, round_key) 唯一键命名空间，
+        # 后续用例（如 discard 回滚）的 _fresh_occurrence 默认键不受影响。
+        own_task_id = self._query(TASK_SQL)[0][0]
+        occ_id = self._fresh_occurrence(task_id=own_task_id)
+        self.assertIsNone(self._query(
+            "select actual_logged_seconds from public.planning_occurrence"
+            " where id = %s", (occ_id,))[0][0])
+        self._query(
+            "update public.planning_occurrence set actual_logged_seconds = 3661"
+            " where id = %s", (occ_id,))
+        self.assertEqual(self._query(
+            "select actual_logged_seconds from public.planning_occurrence"
+            " where id = %s", (occ_id,))[0][0], 3661)
+        for bad in (0, -5, 86401):
+            with self.assertRaises(psycopg.errors.CheckViolation):
+                self._query(
+                    "update public.planning_occurrence"
+                    " set actual_logged_seconds = %s where id = %s",
+                    (bad, occ_id))
+        # 非法写入整体回滚：列值保持最近一次合法值（3661）。
+        self.assertEqual(self._query(
+            "select actual_logged_seconds from public.planning_occurrence"
+            " where id = %s", (occ_id,))[0][0], 3661)
+
+    def test_business_finish_writes_logged_seconds_and_keeps_auto_facts(self):
+        # #19 真实业务路径 + 真库：完成（finish）携带手填耗时文本 → 解析为
+        # 秒落独立列；真实起止与自动耗时照常计算，不被手填覆盖。
+        from gateway import planning
+        # 自建任务行：_fresh_occurrence 默认挂到首任务，与其他用例的
+        # (task_id, round_key) 唯一键冲突。
+        own_task_id = self._query(TASK_SQL)[0][0]
+        occ_id = self._fresh_occurrence(task_id=own_task_id)
+        # 开始执行：actual_start 事实先行（真实 UPDATE）。
+        self._query(
+            "update public.planning_occurrence set status = 'in_progress',"
+            " actual_start = '2026-09-24T08:00:00+08:00' where id = %s",
+            (occ_id,))
+        planning, client, stack = self._business_context()
+        stack.enter_context(mock.patch.object(
+            planning, "request_recompute", return_value=None))
+        with stack:
+            planning.set_occurrence_status(
+                occ_id,
+                {"status": "completed", "actual_logged_duration": "1h1m1s"},
+                datetime.fromisoformat("2026-09-24T08:35:00+08:00"))
+        row = self._business_fetch("planning_occurrence", occ_id)
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(row["actual_logged_seconds"], 3661)
+        # 自动事实不被手填覆盖：actual_end = 完成时刻，actual_minutes = 35。
+        self.assertEqual(row["actual_end"], "2026-09-24T08:35:00+08:00")
+        self.assertEqual(row["actual_minutes"], 35)
+        self.assertEqual(row["actual_minutes"], planning._compute_actual_minutes(row))
+        self.assertEqual(row["actual_start"], "2026-09-24T08:00:00+08:00")
+        self.assertTrue(client.table is not None)
+
     def test_discard_wins_then_round_edit_rejected_pc001(self):
         # 反向结果对照：持锁方先释放 → 删除获胜完整落库；其后的同轮编辑
         # 按既定并发契约 PC001 拒绝（轮已关闭，零写入）。

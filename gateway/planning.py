@@ -203,6 +203,44 @@ def parse_duration_shorthand(value: Any, field: str) -> int:
     return minutes
 
 
+def parse_logged_duration_seconds(value: Any, field: str = "actual_logged_duration") -> int | None:
+    """完成时手填的实际耗时（2026-10-01 确认，§12.3 / 清单 #19）。
+
+    输入为 user 原始文本：``h`` / ``m`` / ``s`` 后缀（**无后缀默认分钟**），
+    可组合（``1h1m1s``、``1h30m``、``45``）；**可留空**——None / 空白返回
+    None（未手填，不是错误）。返回秒粒度整数，不进位（预估耗时的
+    ``parse_duration_shorthand`` 秒进位分钟语义不适用本字段）。
+
+    手填值仅存独立字段（``actual_logged_seconds``），不覆盖自动计算的
+    ``actual_*`` 事实；非法输入（负数、0、超上限、乱后缀、非文本）以
+    中文原因拒绝。
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if not isinstance(value, str):
+        raise PlanningError(
+            "invalid_payload",
+            f"{field} 须为时长文本：纯数字按分钟，或 1h / 30m / 1h1m1s 组合",
+        )
+    text = value.strip().casefold().replace(" ", "")
+    if text.isdigit():
+        total = int(text) * 60
+    else:
+        match = _SHORTHAND_RE.match(text)
+        if not match or not any(match.groups()):
+            raise PlanningError(
+                "invalid_payload",
+                f"{field} 格式：纯数字按分钟，或 1h / 30m / 1h1m1s 组合",
+            )
+        hours, mins, secs = (int(g) if g else 0 for g in match.groups())
+        total = hours * 3600 + mins * 60 + secs
+    if total <= 0:
+        raise PlanningError("invalid_payload", f"{field} 不能为 0 或负数")
+    if total > 86400:
+        raise PlanningError("invalid_payload", f"{field} 不能超过 24 小时")
+    return total
+
+
 def _combine(for_date: date, tod: time) -> datetime:
     return datetime.combine(for_date, tod, tzinfo=_CST)
 
@@ -921,6 +959,9 @@ def serialize_occurrence(occ: dict[str, Any], task: dict[str, Any], now: datetim
         "handled_at": occ.get("handled_at"),
         "partial_at": occ.get("partial_at"),
         "actual_minutes": occ.get("actual_minutes"),
+        # 完成耗时手填（2026-10-01 确认，§12.3）：独立秒粒度字段，与自动
+        # actual_* 并存互不覆盖；NULL = 未手填（展示回退预估并标注预估）。
+        "actual_logged_seconds": occ.get("actual_logged_seconds"),
         # 有效耗时单一权威语义（N5）：显式区间优先，与排程同源；任务定义
         # 修改只影响未来轮次。
         "estimated_minutes": _effective_minutes(occ, task),
@@ -4529,6 +4570,11 @@ def set_occurrence_status(occurrence_id: int, payload: Any, now: datetime | None
         raise PlanningError("invalid_payload", f"status must be one of {', '.join(OCCURRENCE_STATUSES)}")
     if target == "timeout":
         raise PlanningError("invalid_payload", "timeout is assigned by the system only")
+    # 完成耗时手填（2026-10-01 确认，§12.3）：校验前置（写前完整校验纪律），
+    # 手填值存独立 actual_logged_seconds，不覆盖自动 actual_* 事实。
+    logged_seconds = parse_logged_duration_seconds(
+        payload.get("actual_logged_duration"), "actual_logged_duration",
+    ) if target == "completed" else None
 
     client = _require_client()
     occ = _fetch_occurrence(client, occurrence_id)
@@ -4656,6 +4702,15 @@ def set_occurrence_status(occurrence_id: int, payload: Any, now: datetime | None
             row["actual_start"] = _iso(_parse_dt(payload["actual_start"], "actual_start"))
         merged = {**occ, **row}
         row["actual_minutes"] = _compute_actual_minutes(merged)
+        if logged_seconds is not None:
+            if sibling_row is not None:
+                # 中空同轮两阶段写经 round RPC 硬白名单（无本字段）——手填
+                # 耗时与时间平移不提供同请求混合语义，显式中文拒绝、零写入。
+                raise PlanningError(
+                    "invalid_payload",
+                    "手填实际耗时不能与时间调整同请求提交：请先完成，再单独调整时间",
+                )
+            row["actual_logged_seconds"] = logged_seconds
     else:
         row["closed_at"] = None
         if payload.get("actual_start"):
@@ -4736,8 +4791,18 @@ def start_occurrence(occurrence_id: int, now: datetime | None = None) -> dict[st
     return set_occurrence_status(occurrence_id, {"status": "in_progress"}, now)
 
 
-def finish_occurrence(occurrence_id: int, now: datetime | None = None) -> dict[str, Any]:
-    return set_occurrence_status(occurrence_id, {"status": "completed"}, now)
+def finish_occurrence(occurrence_id: int, payload: Any = None,
+                      now: datetime | None = None) -> dict[str, Any]:
+    """完成当前实例（2026-10-01 确认 §12.3）：可选 ``payload`` 携带 user
+    手填实际耗时的原始文本（``actual_logged_duration``），由
+    set_occurrence_status 统一解析；既有 ``finish_occurrence(id, now)``
+    位置传参（第二参数为 datetime）保持兼容。"""
+    if isinstance(payload, datetime):
+        payload, now = None, payload
+    body: dict[str, Any] = {"status": "completed"}
+    if isinstance(payload, dict) and "actual_logged_duration" in payload:
+        body["actual_logged_duration"] = payload["actual_logged_duration"]
+    return set_occurrence_status(occurrence_id, body, now)
 
 
 def patch_occurrence(occurrence_id: int, payload: Any, now: datetime | None = None) -> dict[str, Any]:

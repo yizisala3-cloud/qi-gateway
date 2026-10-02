@@ -397,8 +397,8 @@ export default {
     if (occ.actual_start || occ.actual_end) {
       parts.push(`实际 ${fmtRange(occ.actual_start, occ.actual_end)}`);
     }
-    if (occ.actual_minutes != null) parts.push(`实际耗时 ${occ.actual_minutes}m`);
-    if (occ.estimated_minutes) parts.push(`预估耗时 ${occ.estimated_minutes}m`);
+    const duration = this.durationText(occ);
+    if (duration) parts.push(duration);
     // 可安排时段是 user 排程约束，与系统预估起止是两套独立语义，分开呈现
     const windowParts = [];
     if (occ.window_start_at) windowParts.push(`不早于 ${fmtClock(occ.window_start_at)}`);
@@ -406,6 +406,54 @@ export default {
     if (windowParts.length) parts.push(`时段 ${windowParts.join('，')}`);
     if (occ.partial_note) parts.push(`说明：${esc(occ.partial_note)}`);
     return parts.join(' · ');
+  },
+
+  /* ---------- 耗时展示口径（2026-10-01 确认，§12.3） ----------
+     已完成 / 已删除（含历史超时）记录：手填实际耗时优先并标注
+     「实际耗时」；未手填展示预估并标注「预估耗时」，自动计算的实际
+     经过时间不再是默认展示值。开放实例保持既有展示（自动实际耗时仅在
+     已有事实时出现）。 */
+  isClosedOcc(occ) {
+    return CLOSED_STATUSES.includes(occ.status) || occ.status === 'timeout';
+  },
+
+  formatLoggedDuration(seconds) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    const parts = [];
+    if (h) parts.push(`${h}h`);
+    if (m) parts.push(`${m}m`);
+    if (s || !parts.length) parts.push(`${s}s`);
+    return parts.join('');
+  },
+
+  durationText(occ) {
+    if (this.isClosedOcc(occ)) {
+      if (occ.actual_logged_seconds != null) {
+        return `实际耗时 ${this.formatLoggedDuration(occ.actual_logged_seconds)}`;
+      }
+      return occ.estimated_minutes ? `预估耗时 ${occ.estimated_minutes}m` : '';
+    }
+    const parts = [];
+    if (occ.actual_minutes != null) parts.push(`实际耗时 ${occ.actual_minutes}m`);
+    if (occ.estimated_minutes) parts.push(`预估耗时 ${occ.estimated_minutes}m`);
+    return parts.join(' · ');
+  },
+
+  durationDetailRows(occ) {
+    if (this.isClosedOcc(occ)) {
+      if (occ.actual_logged_seconds != null) {
+        return '<div class="kv"><span class="k">实际耗时</span><span class="v">'
+          + `${this.formatLoggedDuration(occ.actual_logged_seconds)}</span></div>`;
+      }
+      return '<div class="kv"><span class="k">预估耗时</span><span class="v">'
+        + `${occ.estimated_minutes ? occ.estimated_minutes + 'm' : '-'}</span></div>`;
+    }
+    return '<div class="kv"><span class="k">实际耗时</span><span class="v">'
+      + `${occ.actual_minutes != null ? occ.actual_minutes + 'm' : '-'}</span></div>`
+      + '<div class="kv"><span class="k">预估耗时</span><span class="v">'
+      + `${occ.estimated_minutes ? occ.estimated_minutes + 'm' : '-'}</span></div>`;
   },
 
   itemBadges(occ) {
@@ -585,8 +633,7 @@ export default {
           occ.window_end_at ? `最晚完成 ${fmtClock(occ.window_end_at)}` : '',
         ].filter(Boolean).join('，')}</span></div>` : ''}
         <div class="kv"><span class="k">实际时间</span><span class="v">${fmtRange(occ.actual_start, occ.actual_end)}</span></div>
-        <div class="kv"><span class="k">实际耗时</span><span class="v">${occ.actual_minutes != null ? occ.actual_minutes + 'm' : '-'}</span></div>
-        <div class="kv"><span class="k">预估耗时</span><span class="v">${occ.estimated_minutes ? occ.estimated_minutes + 'm' : '-'}</span></div>
+        ${this.durationDetailRows(occ)}
         ${occ.is_limited ? `<div class="kv"><span class="k">限时截止</span><span class="v">${fmtClock(occ.deadline_at)}</span></div>` : ''}
         ${occ.partial_note ? `<div class="kv kv-block"><span class="k">部分完成说明</span><span class="v">${esc(occ.partial_note)}</span></div>` : ''}
         ${occ.partial_at ? `<div class="kv"><span class="k">部分完成时间</span><span class="v">${fmtDue(occ.partial_at)}</span></div>` : ''}
@@ -875,6 +922,42 @@ export default {
     root.querySelector('[data-cancel]').onclick = close;
   },
 
+  /* 完成耗时手填（2026-10-01 确认，§12.3）：点「完成」/「结束」弹出实际
+     耗时输入框——h / m / s 后缀（无后缀默认分钟，可组合如 1h1m1s），
+     可留空（留空不是错误，展示回退预估并标注预估）。原始文本交给后端
+     权威解析，前端不做二次口径判断。 */
+  askCompleteDuration(id, post) {
+    const { root, close } = modal({
+      title: '完成待办',
+      body: `
+        <div class="field">
+          <label>实际耗时（可留空）</label>
+          <input type="text" data-actual-duration placeholder="如 45、1h30m、1h1m1s">
+          <p class="muted text-sm" style="margin:4px 0 0">无后缀按分钟计，可组合时/分/秒；留空则不记录手填耗时。</p>
+        </div>`,
+      footer: `<button class="btn btn-secondary" data-cancel>取消</button>
+               <button class="btn btn-primary" data-ok>完成</button>`,
+    });
+    root.querySelector('[data-cancel]').onclick = close;
+    root.querySelector('[data-ok]').onclick = async () => {
+      const submit = root.querySelector('[data-ok]');
+      if (submit.disabled) return;
+      submit.disabled = true;
+      const text = root.querySelector('[data-actual-duration]').value.trim();
+      const body = {};
+      if (text) body.actual_logged_duration = text;
+      try {
+        await post('/finish', body);
+        close();
+        toast('已完成');
+        await Promise.all([this.loadToday(), this.loadOccurrences()]);
+      } catch (error) {
+        submit.disabled = false;
+        toast(`操作失败：${error.message}`, 'err');
+      }
+    };
+  },
+
   async occurrenceAction(act, id) {
     const post = (path, body) => gw(`/admin/api/planning/occurrences/${id}${path}`, {
       method: 'POST',
@@ -883,7 +966,7 @@ export default {
     });
     try {
       if (act === 'start') await post('/start');
-      else if (act === 'finish' || act === 'complete') await post('/finish');
+      else if (act === 'finish' || act === 'complete') return this.askCompleteDuration(id, post);
       else if (act === 'partial') return this.askPartial(id);
       else if (act === 'defer') return this.askNewTime(id, 'deferred', '延后到什么时间？');
       else if (act === 'reschedule-timeout') return this.askRescheduleTimeout(id);

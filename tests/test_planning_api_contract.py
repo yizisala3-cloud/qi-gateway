@@ -213,5 +213,124 @@ class PlanningApiContractTests(unittest.TestCase):
         self.assertEqual(response.json()["error_code"], "invalid_transition")
 
 
+    def _seed_daily_round(self, clock):
+        """建每日任务并生成当前轮、开始执行；返回 occurrence id。"""
+        self.http.post(
+            "/admin/api/planning/tasks",
+            json={"content": "整理房间", "task_type": "daily", "estimated_minutes": 30},
+            headers=self.auth,
+        )
+        planning.generate_due(clock["now"])
+        occ = self.client.rows["planning_occurrence"][0]
+        planning.start_occurrence(occ["id"], clock["now"])
+        return occ["id"]
+
+    def test_finish_with_manual_logged_duration_stores_seconds_and_keeps_auto_facts(self):
+        # #19（2026-10-01 §12.3）：完成时手填 1h1m1s → 独立秒粒度字段落库；
+        # 真实起止与自动耗时（actual_minutes）照常记录、不被手填覆盖。
+        clock = {"now": NOW}
+        with mock.patch.object(planning, "_now", lambda: clock["now"]):
+            occ_id = self._seed_daily_round(clock)
+            clock["now"] = NOW + timedelta(minutes=35)
+            response = self.http.post(
+                f"/admin/api/planning/occurrences/{occ_id}/finish",
+                json={"actual_logged_duration": "1h1m1s"},
+                headers=self.auth,
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["actual_logged_seconds"], 3661)
+        self.assertEqual(body["status"], "completed")
+        row = self.client.rows["planning_occurrence"][0]
+        self.assertEqual(row["actual_logged_seconds"], 3661)
+        self.assertEqual(row["actual_minutes"], 35)
+        self.assertIsNotNone(row["actual_start"])
+        self.assertIsNotNone(row["actual_end"])
+
+    def test_finish_accepts_bare_minutes_and_blank_input(self):
+        # 无后缀「90」按 90 分钟（5400 秒）解析；留空 = 未手填（NULL）。
+        clock = {"now": NOW}
+        with mock.patch.object(planning, "_now", lambda: clock["now"]):
+            occ_id = self._seed_daily_round(clock)
+            response = self.http.post(
+                f"/admin/api/planning/occurrences/{occ_id}/finish",
+                json={"actual_logged_duration": "90"},
+                headers=self.auth,
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["actual_logged_seconds"], 5400)
+            row = self.client.rows["planning_occurrence"][0]
+            self.assertEqual(row["status"], "completed")
+            self.assertEqual(row["actual_logged_seconds"], 5400)
+
+        with mock.patch.object(planning, "_now", lambda: clock["now"]):
+            self.http.post(
+                "/admin/api/planning/tasks",
+                json={"content": "擦桌子", "task_type": "daily", "estimated_minutes": 10},
+                headers=self.auth,
+            )
+            planning.generate_due(clock["now"])
+            occ_id = self.client.rows["planning_occurrence"][-1]["id"]
+            response = self.http.post(
+                f"/admin/api/planning/occurrences/{occ_id}/finish",
+                json={"actual_logged_duration": "   "},
+                headers=self.auth,
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        row = self.client.rows["planning_occurrence"][-1]
+        self.assertIsNone(row.get("actual_logged_seconds"))
+        # 序列化始终携带该字段（前端按 NULL 走「预估耗时」标注口径）
+        self.assertIn("actual_logged_seconds", response.json())
+
+    def test_finish_without_body_keeps_legacy_contract(self):
+        # /finish 原本无 body 仍可用（body 可选端点契约）。
+        clock = {"now": NOW}
+        with mock.patch.object(planning, "_now", lambda: clock["now"]):
+            occ_id = self._seed_daily_round(clock)
+            response = self.http.post(
+                f"/admin/api/planning/occurrences/{occ_id}/finish",
+                headers=self.auth,
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.client.rows["planning_occurrence"][0]["status"], "completed")
+
+    def test_finish_rejects_invalid_logged_duration_with_chinese_reason(self):
+        clock = {"now": NOW}
+        with mock.patch.object(planning, "_now", lambda: clock["now"]):
+            occ_id = self._seed_daily_round(clock)
+            for bad, fragment in (
+                ("45x", "格式"),
+                ("-5m", "格式"),
+                ("0", "不能为 0 或负数"),
+                ("0m", "不能为 0 或负数"),
+                ("1441m", "不能超过 24 小时"),
+                ("1h1m1s1", "格式"),
+            ):
+                with self.subTest(bad=bad):
+                    response = self.http.post(
+                        f"/admin/api/planning/occurrences/{occ_id}/finish",
+                        json={"actual_logged_duration": bad},
+                        headers=self.auth,
+                    )
+                    self.assertEqual(response.status_code, 400, response.text)
+                    self.assertEqual(response.json()["error_code"], "invalid_payload")
+                    self.assertIn(fragment, response.json()["error"])
+            # 非文本（JSON 数字 / 布尔）同样以中文拒绝——文本语义（无后缀
+            # 默认分钟）只对字符串成立，数字单位有歧义。
+            for bad in (90, True):
+                with self.subTest(bad=bad):
+                    response = self.http.post(
+                        f"/admin/api/planning/occurrences/{occ_id}/finish",
+                        json={"actual_logged_duration": bad},
+                        headers=self.auth,
+                    )
+                    self.assertEqual(response.status_code, 400, response.text)
+                    self.assertIn("须为时长文本", response.json()["error"])
+            # 非法输入零写入：实例仍开放、无手填值。
+            row = self.client.rows["planning_occurrence"][0]
+            self.assertEqual(row["status"], "in_progress")
+            self.assertIsNone(row.get("actual_logged_seconds"))
+
+
 if __name__ == "__main__":
     unittest.main()

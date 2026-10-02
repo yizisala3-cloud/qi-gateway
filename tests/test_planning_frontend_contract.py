@@ -158,7 +158,7 @@ class PlanningPageContractTests(unittest.TestCase):
     def test_page_calls_occurrence_action_endpoints(self):
         for marker in (
             "post('/start')",
-            "post('/finish')",
+            "post('/finish'",
             "post('/status'",
             "`/admin/api/planning/occurrences/${id}/split`",
             "`/admin/api/planning/tasks/${id}/complete-early`",
@@ -174,6 +174,41 @@ class PlanningPageContractTests(unittest.TestCase):
         ):
             with self.subTest(status=status):
                 self.assertIn(f"'{status}'", self.page)
+
+    def test_finish_dialog_offers_optional_logged_duration(self):
+        # #19（2026-10-01 §12.3）：点「完成」弹出实际耗时输入框——h/m/s
+        # 后缀（无后缀默认分钟）、可组合、可留空；原始文本交后端解析。
+        for marker in (
+            "askCompleteDuration(id, post)",
+            "data-actual-duration",
+            "实际耗时（可留空）",
+            "如 45、1h30m、1h1m1s",
+            "留空则不记录手填耗时",
+            "actual_logged_duration",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.page)
+
+    def test_closed_records_duration_display_prefers_manual_then_labelled_estimate(self):
+        # #19 展示口径：已完成 / 已删除（含历史超时）记录手填 →「实际耗时」；
+        # 未手填 →「预估耗时」标注预估；开放实例保持既有展示。
+        for marker in (
+            "isClosedOcc(occ)",
+            "formatLoggedDuration(seconds)",
+            "durationText(occ)",
+            "durationDetailRows(occ)",
+            "this.durationDetailRows(occ)",
+            "actual_logged_seconds != null",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.page)
+        # 列表行（itemMeta）不再直接展示自动计算的 actual_minutes 冒充
+        # 实际耗时——closed/timeout 经 durationText 标注口径，itemMeta 本体
+        # 不含耗时判断（开放实例的既有展示收敛进 durationText）。
+        item_meta = re.search(r"  itemMeta\(occ\) \{(.*?)\n  \},", self.page, re.S)
+        self.assertIsNotNone(item_meta, "itemMeta must exist")
+        self.assertNotIn("actual_minutes", item_meta.group(1))
+        self.assertIn("this.durationText(occ)", item_meta.group(1))
 
     def test_reorder_mode_with_confirm_and_cancel(self):
         self.assertIn("enter-reorder", self.page)

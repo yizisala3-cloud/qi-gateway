@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import logging
 from typing import Any
 
@@ -67,6 +68,23 @@ async def _dispatch_json(
         return _error("unauthorized", 401, "unauthorized")
     try:
         payload = await request.json()
+    except Exception:
+        return _error("request body must be valid JSON", 400, "invalid_json")
+    return await _dispatch(request, fn, *args, payload, created=created)
+
+
+async def _dispatch_json_optional(
+    request: Request, fn, *args, created: bool = False,
+) -> JSONResponse:
+    """带可选 JSON body 的端点：无 body / 空 body 视为 ``{}``（既有契约——
+    ``/finish`` 原本无 body 仍可用）；body 存在但非法 JSON 才拒绝。"""
+    if not _authorized(request):
+        return _error("unauthorized", 401, "unauthorized")
+    raw = await request.body()
+    if not raw or not raw.strip():
+        return await _dispatch(request, fn, *args, {}, created=created)
+    try:
+        payload = json.loads(raw)
     except Exception:
         return _error("request body must be valid JSON", 400, "invalid_json")
     return await _dispatch(request, fn, *args, payload, created=created)
@@ -177,7 +195,11 @@ async def occurrence_start(request: Request) -> JSONResponse:
 
 
 async def occurrence_finish(request: Request) -> JSONResponse:
-    return await _dispatch(request, planning.finish_occurrence, request.path_params["occurrence_id"])
+    # 完成耗时手填（2026-10-01 确认 §12.3）：body 可选，支持
+    # actual_logged_duration（原始 h/m/s 文本，后端权威解析为秒）。
+    return await _dispatch_json_optional(
+        request, planning.finish_occurrence, request.path_params["occurrence_id"],
+    )
 
 
 async def occurrence_split(request: Request) -> JSONResponse:

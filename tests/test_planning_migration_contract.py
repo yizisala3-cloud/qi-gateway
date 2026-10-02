@@ -42,6 +42,13 @@ BOUNDARY_WINDOW_GUARD_MIGRATION = (
     / "20260930030000_planning_boundary_window_guard.sql"
 )
 
+LOGGED_SECONDS_MIGRATION = (
+    Path(__file__).resolve().parents[1]
+    / "supabase"
+    / "migrations"
+    / "20261002050000_planning_actual_logged_seconds.sql"
+)
+
 
 class PlanningMigrationContractTests(unittest.TestCase):
     @classmethod
@@ -1515,6 +1522,46 @@ class PlanningBoundaryWindowGuardMigrationContractTests(unittest.TestCase):
             self.folded)
         self.assertIn(
             "create trigger planning_boundary_window_guard", self.folded)
+
+
+class PlanningLoggedSecondsMigrationContractTests(unittest.TestCase):
+    """完成耗时手填迁移契约（20261002050000，清单 #19，2026-10-01 确认）。
+
+    手填耗时为独立秒粒度可空列，与 actual_* 自动事实并存互不覆盖；
+    只加列与形状 CHECK，不触碰既有列 / 触发器 / RPC。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = LOGGED_SECONDS_MIGRATION.read_text(encoding="utf-8")
+        cls.folded = cls.sql.casefold()
+
+    def test_migration_is_atomic(self):
+        self.assertIn("begin;", self.folded) or None
+        self.assertIn("commit;", self.folded)
+
+    def test_adds_single_nullable_logged_column(self):
+        self.assertIn(
+            "add column if not exists actual_logged_seconds bigint", self.folded)
+        altered = {line.strip().casefold().split()[2]
+                   for line in self.sql.splitlines()
+                   if line.strip().casefold().startswith("alter table public.")}
+        self.assertEqual(altered, {"public.planning_occurrence"})
+
+    def test_shape_check_rejects_non_positive_and_over_24h(self):
+        self.assertIn("planning_occurrence_actual_logged_shape", self.folded)
+        self.assertIn("actual_logged_seconds > 0", self.folded)
+        self.assertIn("actual_logged_seconds <= 86400", self.folded)
+
+    def test_no_triggers_functions_or_rpc_and_replay_safe(self):
+        self.assertNotIn("create trigger", self.folded)
+        self.assertNotIn("create or replace function", self.folded)
+        self.assertNotIn("drop ", self.folded)
+        self.assertIn("add column if not exists", self.folded)
+        self.assertIn("comment on column", self.folded)
+        # 独立事实字段：不写入 / 不回填任何行
+        self.assertNotIn("update ", self.folded)
+        self.assertNotIn("insert into", self.folded)
 
 
 if __name__ == "__main__":

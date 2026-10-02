@@ -458,6 +458,31 @@ class TaskValidationTests(_Base):
         with self.assertRaises(PlanningError):
             planning.parse_duration_shorthand("abc", "t")
 
+    def test_logged_duration_seconds_parsing(self):
+        # #19（2026-10-01 §12.3）：完成时手填实际耗时——无后缀默认分钟，
+        # 可组合 h/m/s，秒粒度不进位；可留空（None）；非法中文拒绝。
+        parse = planning.parse_logged_duration_seconds
+        self.assertIsNone(parse(None))
+        self.assertIsNone(parse(""))
+        self.assertIsNone(parse("   "))
+        self.assertEqual(parse("45"), 2700)          # 无后缀 = 分钟
+        self.assertEqual(parse("90"), 5400)
+        self.assertEqual(parse("1h1m1s"), 3661)      # 秒粒度不进位
+        self.assertEqual(parse("1h30m"), 5400)
+        self.assertEqual(parse("45s"), 45)
+        self.assertEqual(parse("  1H30M  "), 5400)   # 大小写 / 空白宽容
+        for bad in ("45x", "-5m", "1h1m1s1", "abc"):
+            with self.assertRaises(PlanningError):
+                parse(bad)
+        for zero in ("0", "0m", "0s"):
+            with self.assertRaises(PlanningError):
+                parse(zero)
+        with self.assertRaises(PlanningError):
+            parse("1441m")                            # 超 24 小时
+        self.assertEqual(parse("1440m"), 86400)       # 上界内合法
+        with self.assertRaises(PlanningError):        # 非文本（数字单位歧义）
+            parse(90)
+
     def test_hollow_requires_phase_fields(self):
         def run(client):
             with self.assertRaises(PlanningError):
