@@ -3320,19 +3320,21 @@ def request_recompute(reason: str, now: datetime | None = None) -> None:
 
 
 def _request_recompute_quietly(reason: str, now: datetime) -> None:
-    """停用 / 废弃成功后的排程请求登记（批次 6 收尾 BUG B）。
+    """主业务提交成功后的排程请求登记（post-commit side effect）。
 
-    主业务结果（任务已停用、开放实例已关闭）在 RPC 事务内提交成功后，
-    ``request_recompute`` 属 post-commit side effect：登记失败不得伪装成
-    停用失败（用户已看到废弃成功），但也不得静默假装后续工作完成——记
-    警告日志保留可观测性，失败时由用户手动重算 / 后续维护循环兜底
-    （与 ``_generate_due_quietly`` 同一 quiet 语义）。
+    覆盖两类入口：任务停用 / 废弃（批次 6 收尾 BUG B）与拆分待办
+    （复审 R3，清单 #27）。两者的主业务结果（任务已停用、开放实例已
+    关闭、新单次待办已创建）在 RPC 事务内提交成功后，
+    ``request_recompute`` 登记失败不得伪装成主业务失败（用户已看到
+    成功），但也不得静默假装后续工作完成——记警告日志保留可观测性，
+    失败时由用户手动重算 / 后续维护循环兜底（与 ``_generate_due_quietly``
+    同一 quiet 语义）。
     """
     try:
         request_recompute(reason, now)
     except Exception as exc:
         log.warning(
-            "planning 停用后重算请求登记失败（等待手动重算或后续触发兜底）: reason=%s error=%s",
+            "planning 主业务提交后重算请求登记失败（等待手动重算或后续触发兜底）: reason=%s error=%s",
             reason, type(exc).__name__,
         )
 
@@ -4946,7 +4948,11 @@ def split_occurrence(occurrence_id: int, payload: Any, now: datetime | None = No
         ) from exc
     created_ids = [int(item) for item in (response.data or [])]
 
-    request_recompute("split", now)
+    # 复审 R3（清单 #27）：主事务已完整提交（原轮收口 + 任务创建 + 基准
+    # 推进）之后，重算请求登记属于 post-commit side effect——登记失败不得
+    # 把完整成功误报为 500、也不得短路下面的即时生成（与停用路径同一
+    # quiet 语义；失败由用户手动重算 / 后续维护循环兜底）。
+    _request_recompute_quietly("split", now)
     # 即时生成：拆分出的当日单次待办立刻出现在列表里。
     _generate_due_quietly(client, now)
     return {"created_task_ids": created_ids, "split_from": occurrence_id}

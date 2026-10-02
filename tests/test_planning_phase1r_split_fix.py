@@ -335,3 +335,30 @@ def test_split_after_completion_rpc_failure_keeps_baseline_untouched():
         task_row = c.db.rows["planning_task"][0]
         assert task_row.get("last_handled_at") is None
         assert task_row.get("refresh_next_due_at") is None
+
+
+# ── #27（2026-10-02）：主事务提交成功后的登记失败不误报 ────────────────
+
+
+def test_split_recompute_registration_failure_keeps_success_result():
+    # 复审 R3：拆分 RPC 已完整提交（原轮收口 + once 任务 + 基准推进）后，
+    # request_recompute 登记失败属于 post-commit side effect——不得向上传播
+    # 把完整成功误报为 500，也不得短路即时生成；created_task_ids 如实返回。
+    with Context() as c:
+        c.create("interval", at(24), refresh_mode="after_completion", interval_days=3)
+        round_row = c.rows[0]
+        with mock.patch.object(planning, "request_recompute",
+                               side_effect=RuntimeError("registration unavailable")):
+            result = planning.split_occurrence(
+                round_row["id"], {"parts": [{"content": "整理书桌"}]}, at(24, 10))
+        assert result["created_task_ids"]
+        closed = next(row for row in c.rows if row["id"] == round_row["id"])
+        assert closed["status"] == "discarded_this"
+        assert closed["handled_at"] == at(24, 10).isoformat()
+        once = _once_tasks(c)
+        assert len(once) == 1
+        # 登记失败不阻断即时生成：拆出的单次待办实例已生成（不等后台循环）。
+        assert any(row["task_id"] == once[0]["id"] for row in c.rows)
+        task_row = c.db.rows["planning_task"][0]
+        assert task_row["last_handled_at"] == at(24, 10).isoformat()
+        assert task_row["refresh_next_due_at"] == at(27, 10).isoformat()

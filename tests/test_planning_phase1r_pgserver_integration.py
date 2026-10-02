@@ -3755,6 +3755,106 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
                          "p_now", "p_parts", "p_after_completion_days"):
             self.assertIn(fragment, signatures[0][0])
 
+    def test_split_api_registration_failure_after_commit_returns_success(self):
+        # 清单 #27（复审 R3，真实 API + 真实拆分 RPC）：主事务已完整提交
+        # （原轮收口 + once 任务 + 基准推进）后，request_recompute 登记失败
+        # 属 post-commit side effect——不得把完整成功误报为 500；API 返回
+        # 201 + created_task_ids，即时生成不被短路；重试按「已关闭」422
+        # 拒绝且无第二组任务。
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        from gateway import planning
+        from gateway.config import cfg
+        from gateway.planning_api import planning_api_routes
+
+        task_id = self._after_completion_task()
+        round_key = self._after_completion_round_key()
+        occ_id = self._pending_occ_on(task_id, round_key=round_key)
+
+        class SplitOnlyClient:
+            # 拆分主路径触达的 client 面：rpc() 一个入口；SQL 真实执行。
+            def __init__(self, conn):
+                self._conn = conn
+
+            def rpc(self, name, params):
+                assert name == "planning_split_occurrence"
+
+                def execute():
+                    # PostgREST 对返回 jsonb 数组的函数给出「数组本身」；
+                    # psycopg fetchall 是 [(数组,)]，此处取第一行的数组。
+                    with self._conn.cursor() as cur:
+                        cur.execute(
+                            "select public.planning_split_occurrence"
+                            "(%s, %s, %s, %s, %s::jsonb, %s)",
+                            (params["p_task_id"], params["p_round_key"],
+                             params["p_target_date"], params["p_now"],
+                             json.dumps(params["p_parts"]),
+                             params["p_after_completion_days"]))
+                        return SimpleNamespace(data=cur.fetchall()[0][0])
+
+                return SimpleNamespace(execute=execute)
+
+        now = datetime.fromisoformat("2026-09-24T13:00:00+08:00")
+        once_before = self._query(
+            "select count(*) from public.planning_task"
+            " where task_type = 'once'")[0][0]
+        payload = {"parts": [{"content": "部分一"}, {"content": "部分二"}]}
+        headers = {"Authorization": "Bearer pg-suite-token"}
+        stack = contextlib.ExitStack()
+        with stack:
+            stack.enter_context(mock.patch.object(
+                planning, "_require_client",
+                return_value=SplitOnlyClient(self.conn)))
+            stack.enter_context(mock.patch.object(
+                planning, "_fetch_task",
+                side_effect=lambda c, k: self._business_fetch("planning_task", k)))
+            stack.enter_context(mock.patch.object(
+                planning, "_fetch_occurrence",
+                side_effect=lambda c, k: self._business_fetch("planning_occurrence", k)))
+            stack.enter_context(mock.patch.object(
+                planning.db, "load_app_setting", return_value=None))
+            stack.enter_context(mock.patch.object(
+                planning, "_now", return_value=now))
+            stack.enter_context(mock.patch.object(
+                planning, "request_recompute",
+                side_effect=RuntimeError("registration unavailable")))
+            generation = stack.enter_context(mock.patch.object(
+                planning, "_generate_due_quietly"))
+            stack.enter_context(mock.patch.object(cfg, "GATEWAY_TOKEN", "pg-suite-token"))
+            http = TestClient(Starlette(routes=planning_api_routes),
+                              raise_server_exceptions=False)
+            response = http.post(
+                f"/admin/api/planning/occurrences/{occ_id}/split",
+                json=payload, headers=headers)
+            retry = http.post(
+                f"/admin/api/planning/occurrences/{occ_id}/split",
+                json=payload, headers=headers)
+
+        self.assertEqual(response.status_code, 201, repr(response.json()))
+        body = response.json()
+        self.assertEqual(len(body["created_task_ids"]), 2)
+        self.assertEqual(body["split_from"], occ_id)
+        self.assertTrue(generation.called,
+                        "登记失败不得短路即时生成")
+        row = self._business_fetch("planning_occurrence", occ_id)
+        self.assertEqual(row["status"], "discarded_this")
+        self.assertEqual(row["handled_at"], "2026-09-24T13:00:00+08:00")
+        once_after = self._query(
+            "select count(*) from public.planning_task"
+            " where task_type = 'once'")[0][0]
+        self.assertEqual(once_after, once_before + 2)
+        task = self._query(
+            "select last_handled_at, refresh_next_due_at"
+            " from public.planning_task where id = %s", (task_id,))[0]
+        self.assertEqual(str(task[0]), "2026-09-24 13:00:00+08:00")
+        self.assertEqual(str(task[1]), "2026-09-27 13:00:00+08:00")
+        # 已完整提交后的重试：不再拆第二次（422 拒绝，无第二组任务）。
+        self.assertEqual(retry.status_code, 422, repr(retry.json()))
+        self.assertEqual(self._query(
+            "select count(*) from public.planning_task"
+            " where task_type = 'once'")[0][0], once_after)
+
     def test_discard_wins_then_round_edit_rejected_pc001(self):
         # 反向结果对照：持锁方先释放 → 删除获胜完整落库；其后的同轮编辑
         # 按既定并发契约 PC001 拒绝（轮已关闭，零写入）。
