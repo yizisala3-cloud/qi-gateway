@@ -1,5 +1,5 @@
 // ui.js - shared retro UI components: icons, tags, modal, toast, detail panel
-export const ASSET_VERSION = '20261002-planning-modules1';
+export const ASSET_VERSION = '20261002-frontend-controls1';
 
 /* ---------- SVG icons (stroke, no emoji) ---------- */
 const ICON_PATHS = {
@@ -129,18 +129,104 @@ export function toast(msg, type = 'ok') {
 }
 
 /* ---------- modal ---------- */
-export function modal({ title, body, footer, wide = false, draggable = false }) {
+const modalStack = [];
+let modalId = 0;
+const focusableSelector = 'a[href],button,input:not([type="hidden"]),select,textarea,[tabindex]';
+
+function visibleFocusables(scope) {
+  return [...scope.querySelectorAll(focusableSelector)].filter(el =>
+    !el.disabled && !el.matches?.(':disabled') && el.tabIndex >= 0
+      && !el.closest('[hidden],[inert]') && el.getClientRects().length);
+}
+
+export function modal({ title, body, footer, wide = false, draggable = false, onClose = null }) {
+  const opener = document.activeElement;
+  const titleId = `retro-modal-title-${++modalId}`;
   const mask = document.createElement('div');
   mask.className = 'modal-mask';
   mask.innerHTML = `
-    <div class="modal ${wide ? 'modal-wide' : ''}" role="dialog" aria-label="${esc(title)}">
-      <div class="modal-head"><h3>${title}</h3><button class="modal-close" aria-label="关闭">${icon('x')}</button></div>
+    <div class="modal ${wide ? 'modal-wide' : ''}" role="dialog" aria-modal="true" aria-labelledby="${titleId}" tabindex="-1">
+      <div class="modal-head"><h3 id="${titleId}">${title}</h3><button type="button" class="modal-close" aria-label="关闭" data-tooltip="关闭">${icon('x')}</button></div>
       <div class="modal-body">${body}</div>
       ${footer ? `<div class="modal-foot">${footer}</div>` : ''}
     </div>`;
   document.body.appendChild(mask);
   const root = mask.querySelector('.modal');
-  const close = () => mask.remove();
+  let closed = false;
+  const entry = { root, mask };
+  modalStack.push(entry);
+  const isTop = () => modalStack.at(-1) === entry;
+  const overlays = () => [...document.querySelectorAll('[data-retro-overlay]')]
+    .filter(pop => root.contains(pop._forInput));
+  const containsFocus = el => root.contains(el) || overlays().some(pop => pop.contains(el));
+  const focusFirst = () => {
+    const preferred = root.querySelector('[autofocus],[data-initial-focus],[data-cancel]');
+    const target = preferred && !preferred.disabled && preferred.getClientRects().length
+      ? preferred : visibleFocusables(root)[0] || root;
+    target.focus({ preventScroll: true });
+  };
+  const keydown = e => {
+    if (!isTop() || e.defaultPrevented) return;
+    if (e.key === 'Escape') {
+      // Owned selectors consume Escape first, including their hour/minute panel.
+      if (overlays().length) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      close();
+    } else if (e.key === 'Tab') {
+      const active = document.activeElement;
+      const pop = overlays().find(panel => panel.contains(active));
+      let origin = active;
+      if (pop?.getAttribute('role') === 'listbox') {
+        // A dropdown is one form stop: Tab leaves from its trigger's position.
+        origin = pop._forInput?._retroField?.button || active;
+        pop._retroClose();
+      } else if (pop && active.closest('[role="listbox"]')) {
+        origin = active.closest('.rtp-unit')?.querySelector('.rtp-select-btn') || active;
+        pop._closeSubpanel?.();
+      }
+      const owned = overlays();
+      const stops = visibleFocusables(root).flatMap(el => [el,
+        ...owned.filter(panel => panel.dataset.retroOwner === el.id).flatMap(visibleFocusables)]);
+      const current = stops.indexOf(origin);
+      const next = e.shiftKey
+        ? (current <= 0 ? stops.length - 1 : current - 1)
+        : (current < 0 || current === stops.length - 1 ? 0 : current + 1);
+      e.preventDefault();
+      e.stopPropagation();
+      (stops[next] || root).focus({ preventScroll: true });
+    }
+  };
+  const focusin = e => { if (isTop() && !containsFocus(e.target)) focusFirst(); };
+  const close = (result = false) => {
+    if (closed) return;
+    closed = true;
+    root.querySelectorAll('.retro-select-value,.retro-time-value').forEach(input => input._retroField?.destroy());
+    document.removeEventListener('keydown', keydown, true);
+    document.removeEventListener('focusin', focusin);
+    removalObserver.disconnect();
+    const index = modalStack.indexOf(entry);
+    if (index >= 0) modalStack.splice(index, 1);
+    mask.remove();
+    const parent = modalStack.at(-1);
+    if (opener?.isConnected && opener !== document.body && !opener.disabled && !opener.matches?.(':disabled')
+      && !opener.closest('[hidden],[inert]') && opener.getClientRects().length
+      && (!parent || parent.root.contains(opener))) {
+      opener.focus({ preventScroll: true });
+    } else if (parent) {
+      (visibleFocusables(parent.root)[0] || parent.root).focus({ preventScroll: true });
+    } else {
+      const fallback = document.getElementById('page-title');
+      if (fallback) { fallback.tabIndex = -1; fallback.focus({ preventScroll: true }); }
+    }
+    onClose?.(result === true);
+  };
+  // A caller removing the host directly still settles confirmations and releases listeners.
+  const removalObserver = new MutationObserver(() => { if (!mask.isConnected) close(); });
+  removalObserver.observe(document.body, { childList: true, subtree: true });
+  document.addEventListener('keydown', keydown, true);
+  document.addEventListener('focusin', focusin);
+  queueMicrotask(() => { if (!closed && isTop()) focusFirst(); });
   mask.querySelector('.modal-close').onclick = close;
   mask.addEventListener('click', e => { if (e.target === mask) close(); });
   if (draggable) {
@@ -172,10 +258,80 @@ export function confirm(msg, { title = '请确认', okText = '确认', cancelTex
       body: `<p class="confirm-text">${msg}</p>`,
       footer: `<button class="btn btn-secondary" data-cancel>${cancelText}</button>
                <button class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-ok>${okText}</button>`,
+      onClose: resolve,
     });
-    root.querySelector('[data-cancel]').onclick = () => { close(); resolve(false); };
-    root.querySelector('[data-ok]').onclick = () => { close(); resolve(true); };
+    root.querySelector('[data-cancel]').onclick = () => close();
+    root.querySelector('[data-ok]').onclick = () => close(true);
   });
+}
+
+/* ---------- shared paper tooltip (delegated; dynamic fields need no listeners) ---------- */
+let tooltipDispose = null;
+export function initTooltips() {
+  if (tooltipDispose) return tooltipDispose;
+  const tip = document.createElement('div');
+  tip.className = 'retro-tooltip';
+  tip.id = 'retro-tooltip';
+  tip.setAttribute('role', 'tooltip');
+  tip.hidden = true;
+  document.body.appendChild(tip);
+  let anchor = null;
+  const hide = () => {
+    if (anchor) {
+      const ids = (anchor.getAttribute('aria-describedby') || '').split(/\s+/).filter(id => id && id !== tip.id);
+      if (ids.length) anchor.setAttribute('aria-describedby', ids.join(' '));
+      else anchor.removeAttribute('aria-describedby');
+    }
+    anchor = null;
+    tip.hidden = true;
+  };
+  const show = el => {
+    hide();
+    if (!el?.dataset.tooltip || !el.isConnected) return;
+    anchor = el;
+    tip.textContent = el.dataset.tooltip;
+    tip.hidden = false;
+    const ids = new Set((el.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean));
+    ids.add(tip.id);
+    el.setAttribute('aria-describedby', [...ids].join(' '));
+    const rect = el.getBoundingClientRect();
+    const size = tip.getBoundingClientRect();
+    tip.style.left = `${Math.max(8, Math.min(rect.left + (rect.width - size.width) / 2, window.innerWidth - size.width - 8))}px`;
+    const below = rect.bottom + 7;
+    tip.style.top = `${Math.max(8, Math.min(below + size.height <= window.innerHeight - 8 ? below : rect.top - size.height - 7, window.innerHeight - size.height - 8))}px`;
+  };
+  const enter = e => { const el = e.target.closest?.('[data-tooltip]'); if (el !== anchor) show(el); };
+  const leave = e => {
+    if (anchor && !anchor.contains(e.relatedTarget)) {
+      if (anchor.contains(document.activeElement)) return;
+      hide();
+    }
+  };
+  const focusout = () => hide();
+  const keydown = e => { if (e.key === 'Escape') hide(); };
+  const removalObserver = new MutationObserver(() => { if (anchor && !anchor.isConnected) hide(); });
+  removalObserver.observe(document.body, { childList: true, subtree: true });
+  document.addEventListener('pointerover', enter);
+  document.addEventListener('pointerout', leave);
+  document.addEventListener('focusin', enter);
+  document.addEventListener('focusout', focusout);
+  document.addEventListener('keydown', keydown);
+  window.addEventListener('resize', hide);
+  window.addEventListener('scroll', hide, true);
+  tooltipDispose = () => {
+    hide();
+    removalObserver.disconnect();
+    document.removeEventListener('pointerover', enter);
+    document.removeEventListener('pointerout', leave);
+    document.removeEventListener('focusin', enter);
+    document.removeEventListener('focusout', focusout);
+    document.removeEventListener('keydown', keydown);
+    window.removeEventListener('resize', hide);
+    window.removeEventListener('scroll', hide, true);
+    tip.remove();
+    tooltipDispose = null;
+  };
+  return tooltipDispose;
 }
 
 /* ---------- event delegation ---------- */
@@ -197,12 +353,12 @@ export function createDetailPanel(host) {
           <h3 class="detail-title"></h3>
           <div class="detail-badges tag-row"></div>
         </div>
-        <button class="icon-btn detail-collapse" title="收起详情栏">${icon('chevron-right')}</button>
+        <button type="button" class="icon-btn detail-collapse" aria-label="收起详情栏" data-tooltip="收起详情栏">${icon('chevron-right')}</button>
       </div>
       <div class="detail-body"></div>
       <div class="detail-foot"></div>
     </aside>
-    <button class="detail-rail" title="展开详情栏">${icon('chevron-left')}<span>详情</span></button>
+    <button type="button" class="detail-rail" aria-label="展开详情栏" data-tooltip="展开详情栏">${icon('chevron-left')}<span>详情</span></button>
     <div class="detail-backdrop"></div>`);
 
   const panel = host.querySelector('.detail-panel');

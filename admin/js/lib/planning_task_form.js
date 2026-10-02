@@ -1,7 +1,7 @@
 // Task creation/edit form. Local submitting/committed state belongs to one opened form.
-import { gw } from '../api.js?v=20261002-planning-modules1';
-import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261002-planning-modules1';
-import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES } from './planning_display.js?v=20261002-planning-modules1';
+import { gw } from '../api.js?v=20261002-frontend-controls1';
+import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261002-frontend-controls1';
+import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES } from './planning_display.js?v=20261002-frontend-controls1';
 
 export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
   const editing = !!task?.id;
@@ -23,7 +23,7 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
     body: `
       <div class="field"><label>内容</label>
         <input type="text" id="pf-content" value="${esc(value('content'))}" placeholder="例如：背单词"></div>
-      <div class="field"><label>类型</label>
+      <div class="field"><label for="pf-type">类型</label>
         <div class="retro-select" data-retro-select="pf-type" data-retro-value="${esc(value('task_type', 'daily'))}"></div></div>
       <div data-type-block="interval" style="display:none">
         <div class="field"><label>刷新方式</label>
@@ -43,23 +43,24 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
           <input type="text" id="pf-month-days" value="${esc((value('month_days') || []).join(','))}"></div>
       </div>
       <div data-type-block="once" style="display:none">
-        <div class="field"><label>目标日期（可选）</label>
-          <div class="retro-time" data-retro-for="pf-target-date" data-retro-mode="date" data-retro-value="${esc(value('target_date'))}"></div>
-          <p class="muted text-sm" id="pf-resident-note" hidden>未填日期：单次待办常驻显示，不设最早开始／最晚完成，直到你主动处理。</p></div>
+        <div class="field"><label for="pf-target-date">目标日期（可选）</label>
+          <div class="retro-time" data-retro-for="pf-target-date" data-retro-mode="date" data-retro-value="${esc(value('target_date'))}" aria-describedby="${onceLocked ? 'pf-locked-note' : ''}"></div>
+          <p class="field-hint" id="pf-resident-note" hidden>未填日期：单次待办常驻显示，不设最早开始／最晚完成，直到你主动处理。</p></div>
         <div id="pf-once-error" hidden></div>
       </div>
       <div class="field"><label>预估耗时（分钟，或 1h30m 简写）</label>
         <input type="text" id="pf-estimated" value="${esc(value('estimated_minutes', ''))}"></div>
       <div class="field"><label>可安排时段</label>
         <div class="window-fields">
-          <div class="window-field"><label>最早开始（可选）</label>
-            <div class="retro-time" data-retro-for="pf-window-start" data-retro-mode="time" data-retro-align="right" data-retro-value="${esc(value('window_start_tod'))}"></div>
+          <div class="window-field"><label for="pf-window-start">最早开始（可选）</label>
+            <div class="retro-time" data-retro-for="pf-window-start" data-retro-mode="time" data-retro-align="right" data-retro-value="${esc(value('window_start_tod'))}" aria-describedby="${onceLocked ? 'pf-locked-note' : ''}"></div>
           </div>
-          <div class="window-field"><label>最晚完成（可选）</label>
-            <div class="retro-time" data-retro-for="pf-window-end" data-retro-mode="time" data-retro-align="right" data-retro-value="${esc(value('window_end_tod'))}"></div>
+          <div class="window-field"><label for="pf-window-end">最晚完成（可选）</label>
+            <div class="retro-time" data-retro-for="pf-window-end" data-retro-mode="time" data-retro-align="right" data-retro-value="${esc(value('window_end_tod'))}" aria-describedby="${onceLocked ? 'pf-locked-note' : ''}"></div>
           </div>
         </div>
         <button type="button" id="pf-clear-window" class="btn btn-secondary btn-sm" hidden>清空残留时段</button>
+        ${onceLocked ? '<p class="field-hint" id="pf-locked-note">该单次待办已生成当前实例：任务日期与未来窗口模板已锁定，调整这一次请在该待办详情栏使用「调整时段」。</p>' : ''}
       </div>
       <div id="pf-window-error" hidden></div>
       <div class="field"><label class="inline"><input type="checkbox" id="pf-hollow" ${value('is_hollow') ? 'checked' : ''}> 中空待办（开始/结束两个条目，中间可插入其他待办）</label></div>
@@ -88,18 +89,15 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
       if (!host) return;
       const input = host.querySelector('input');
       const button = host.querySelector('button');
-      if (input) input.disabled = true;
-      if (button) {
-        button.disabled = true;
-        button.title = '该单次待办已生成当前实例：请在该待办详情栏使用「调整时段」';
+      if (input?._retroField) input._retroField.setDisabled(true);
+      else {
+        if (input) input.disabled = true;
+        if (button) button.disabled = true;
       }
     };
     lockRetro('.retro-time[data-retro-for="pf-target-date"]');
     lockRetro('.retro-time[data-retro-for="pf-window-start"]');
     lockRetro('.retro-time[data-retro-for="pf-window-end"]');
-    const lockNote = root.querySelector('[data-type-block="once"]');
-    if (lockNote) lockNote.insertAdjacentHTML('beforeend',
-      '<p class="muted text-sm">该单次待办已生成当前实例：任务日期与未来窗口模板已锁定，调整这一次请在该待办详情栏使用「调整时段」。</p>');
   }
   const syncBlocks = () => {
     const type = typeSelect.value;
@@ -113,15 +111,15 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
   // §30.6（2026-10-01）：单次目标日期可选；未填日期时最早开始／最晚完成
   // 控件不可设置，并说明常驻语义（前后端都拒绝空日期 + 非空窗口组合）。
   const residentNote = root.querySelector('#pf-resident-note');
-  const toggleRetro = (hostSelector, disabled, title) => {
+  const toggleRetro = (hostSelector, disabled) => {
     const host = root.querySelector(hostSelector);
     if (!host) return;
     const input = host.querySelector('input');
     const button = host.querySelector('button');
-    if (input) input.disabled = disabled;
-    if (button) {
-      button.disabled = disabled;
-      button.title = title;
+    if (input?._retroField) input._retroField.setDisabled(disabled);
+    else {
+      if (input) input.disabled = disabled;
+      if (button) button.disabled = disabled;
     }
   };
   const syncOnceWindow = () => {
@@ -143,10 +141,17 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
     residentNote.textContent = residual
       ? '未填日期：单次待办常驻显示，不设最早开始／最晚完成。当前仍有残留时段值——请点击「清空残留时段」明确清除后再保存。'
       : '未填日期：单次待办常驻显示，不设最早开始／最晚完成，直到你主动处理。';
-    const residentTitle = resident
-      ? '无日期单次常驻显示，不能设置可安排时段' : '';
-    toggleRetro('.retro-time[data-retro-for="pf-window-start"]', resident, residentTitle);
-    toggleRetro('.retro-time[data-retro-for="pf-window-end"]', resident, residentTitle);
+    // 常驻原因只在适用时进入可访问描述，保留共享字段自身的错误关联。
+    for (const selector of ['#pf-target-date', '#pf-window-start', '#pf-window-end']) {
+      const button = root.querySelector(selector)?._retroField?.button;
+      if (!button) continue;
+      const ids = (button.getAttribute('aria-describedby') || '').split(/\s+/)
+        .filter((id) => id && id !== 'pf-resident-note');
+      if (resident) ids.push('pf-resident-note');
+      button.setAttribute('aria-describedby', ids.join(' '));
+    }
+    toggleRetro('.retro-time[data-retro-for="pf-window-start"]', resident);
+    toggleRetro('.retro-time[data-retro-for="pf-window-end"]', resident);
     const clearBtn = root.querySelector('#pf-clear-window');
     if (clearBtn) clearBtn.hidden = !residual;
   };

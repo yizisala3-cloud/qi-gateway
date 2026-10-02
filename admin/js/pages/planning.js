@@ -1,23 +1,23 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
 // 数据按需加载：今日看板 30 秒轮询，全部待办首次切到该页签时才拉取。
-import { gw } from '../api.js?v=20261002-planning-modules1';
+import { gw } from '../api.js?v=20261002-frontend-controls1';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, esc,
   createDetailPanel,
-} from '../ui.js?v=20261002-planning-modules1';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261002-planning-modules1';
-import { createRetroSelectField } from '../lib/retro_select.js?v=20261002-planning-modules1';
+} from '../ui.js?v=20261002-frontend-controls1';
+import { initRetroTimeFields } from '../lib/retro_time.js?v=20261002-frontend-controls1';
+import { createRetroSelectField, initRetroSelectFields } from '../lib/retro_select.js?v=20261002-frontend-controls1';
 import {
   TASK_TYPE_LABELS, TASK_TYPES, STATUS_META, CLOSED_STATUSES,
   fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty,
   itemMeta, isClosedOcc, formatLoggedDuration, durationText, durationDetailRows,
   itemBadges, itemHtml,
-} from '../lib/planning_display.js?v=20261002-planning-modules1';
-import { openTaskForm } from '../lib/planning_task_form.js?v=20261002-planning-modules1';
-import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261002-planning-modules1';
-import { createPlanningSort } from '../lib/planning_sort.js?v=20261002-planning-modules1';
-import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261002-planning-modules1';
+} from '../lib/planning_display.js?v=20261002-frontend-controls1';
+import { openTaskForm } from '../lib/planning_task_form.js?v=20261002-frontend-controls1';
+import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261002-frontend-controls1';
+import { createPlanningSort } from '../lib/planning_sort.js?v=20261002-frontend-controls1';
+import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261002-frontend-controls1';
 
 // 部分完成属于开放生命周期：实例仍在「进度中」，直到「已全部完成」才关闭
 const OPEN_STATUSES = ['pending', 'in_progress', 'deferred', 'partial'];
@@ -117,19 +117,19 @@ export default {
                 <span class="plan-region-sub">所有任务定义与出现记录，可筛选、编辑、提前完成</span>
               </div>
               <div class="toolbar" style="margin-bottom:6px">
-                <label class="inline">类型
+                <label class="inline" for="planning-filter-type">类型
                   <select id="planning-filter-type">
                     <option value="">全部</option>
                     ${TASK_TYPES.map((t) => `<option value="${t}">${TASK_TYPE_LABELS[t]}</option>`).join('')}
                   </select>
                 </label>
-                <label class="inline">状态
+                <label class="inline" for="planning-filter-status">状态
                   <select id="planning-filter-status">
                     <option value="">全部</option>
                     ${Object.entries(STATUS_META).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join('')}
                   </select>
                 </label>
-                <label class="inline">原始规划周期
+                <label class="inline" for="planning-filter-date">原始规划周期
                   <span class="retro-time retro-time-inline" data-retro-for="planning-filter-date" data-retro-mode="date"></span>
                 </label>
                 <button class="btn btn-quiet btn-sm" data-act="clear-filters">清除筛选</button>
@@ -178,6 +178,14 @@ export default {
     root.addEventListener('click', (e) => this.handleItemClick(e));
     this.bindDetailActions();
     this.initRetroFields(root);
+    // 缓存页面重挂载时，筛选状态与可见标签一起恢复；此时尚未绑定业务事件。
+    for (const [suffix, value] of Object.entries({
+      type: this.filters.task_type, status: this.filters.status, date: this.filters.schedule_date,
+    })) {
+      const input = root.querySelector(`#planning-filter-${suffix}`);
+      if (input._applyRetroValue) input._applyRetroValue(value, true);
+      else input.value = value;
+    }
 
     delegate(root, {
       'new-task': () => this.openTaskForm(null),
@@ -218,6 +226,9 @@ export default {
 
   switchTab(tab) {
     if (!tab || tab === this.activeTab || !this.root) return;
+    this.root.querySelectorAll('.retro-select input, .retro-time input').forEach((input) => {
+      input._retroField?.close();
+    });
     if (this.reorderMode) {
       // 排列模式只在「当前待办」页签内有效，切走即退出并还原列表
       this.exitReorder();
@@ -252,15 +263,10 @@ export default {
 
   /** 把 .retro-time 宿主初始化为复古选择器（mode：datetime/date/time）。 */
   initRetroFields(scope, selectOptionsById = {}) {
-    scope.querySelectorAll('.retro-time[data-retro-for]').forEach((host) => {
-      createRetroTimeField(host, {
-        id: host.dataset.retroFor,
-        value: host.dataset.retroValue || '',
-        mode: host.dataset.retroMode || 'datetime',
-        align: host.dataset.retroAlign || 'left',
-      });
-    });
+    initRetroTimeFields(scope);
+    initRetroSelectFields(scope);
     scope.querySelectorAll('.retro-select[data-retro-select]').forEach((host) => {
+      if (host._retroField) return;
       createRetroSelectField(host, {
         id: host.dataset.retroSelect,
         value: host.dataset.retroValue || '',
@@ -605,7 +611,7 @@ export default {
       const earlyHint = task.refresh_mode === 'after_completion'
         ? '提前完成：记录本次完成，并从现在重新计算下一次刷新时间'
         : '提前完成：记录本次额外完成，不影响后续固定刷新';
-      parts.push(`<button class="btn btn-primary btn-sm" data-act="task-early" data-id="${task.id}" title="${esc(earlyHint)}">${icon('check')}提前完成</button>`);
+      parts.push(`<button class="btn btn-primary btn-sm" data-act="task-early" data-id="${task.id}" data-tooltip="${esc(earlyHint)}" aria-label="提前完成">${icon('check')}提前完成</button>`);
     }
     // 暂停刷新 = 只阻止未来周期轮次生成（需求 24）：任务、规则、当前实例、
     // 历史事实与固定时间轴都不动；refresh_enabled 缺失视为开启（与后端一致）
@@ -853,11 +859,11 @@ export default {
 
   clearFilters() {
     this.filters = { task_type: '', status: '', schedule_date: '' };
-    this.root.querySelector('#planning-filter-type').value = '';
-    this.root.querySelector('#planning-filter-status').value = '';
-    const dateInput = this.root.querySelector('#planning-filter-date');
-    if (dateInput._applyRetroValue) dateInput._applyRetroValue('', true);  // 静默清空，避免触发 input 再拉一次
-    else dateInput.value = '';
+    for (const suffix of ['type', 'status', 'date']) {
+      const input = this.root.querySelector(`#planning-filter-${suffix}`);
+      if (input._applyRetroValue) input._applyRetroValue('', true);  // 静默同步标签，避免重复拉取
+      else input.value = '';
+    }
     this.loadOccurrences();
   },
 

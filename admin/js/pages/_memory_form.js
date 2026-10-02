@@ -1,12 +1,14 @@
 // pages/_memory_form.js - 手工新增 / 完整编辑 / 修改类型 共用动态表单
 // 六类连续感结构全部由本模块的中文动态表单生成，用户永不直接编辑 JSON；
 // 普通标签与召回标签是两套独立控件；召回向量和 content_hash 均由服务端维护。
-import { gw, esc } from '../api.js?v=20260927-planning10';
-import { modal, confirm, toast, icon } from '../ui.js?v=20260927-planning10';
+import { gw, esc } from '../api.js?v=20261002-frontend-controls1';
+import { modal, confirm, toast, icon } from '../ui.js?v=20261002-frontend-controls1';
+import { initRetroSelectFields } from '../lib/retro_select.js?v=20261002-frontend-controls1';
+import { initRetroTimeFields } from '../lib/retro_time.js?v=20261002-frontend-controls1';
 import {
-  toDatetimeLocal, fromDatetimeLocal, nowShanghaiLocalInput, stableJson,
-  buildEditPatch, isSameMinute, mergeContinuityForSubmit, continuityEquals,
-} from './_memory_patch.js?v=20260927-planning10';
+  toDatetimeLocal, fromDatetimeLocal,
+  buildEditPatch, mergeContinuityForSubmit, continuityEquals,
+} from './_memory_patch.js?v=20261002-frontend-controls1';
 
 /* ---------- 枚举与字段定义 ---------- */
 
@@ -167,7 +169,7 @@ function parseArrayInput(text) {
 }
 
 function fieldLabel(field) {
-  const reqMark = field.req ? '<span class="req-mark" title="必填">*</span>' : '';
+  const reqMark = field.req ? '<span class="req-mark">（必填）</span>' : '';
   return `${esc(field.label)}${reqMark}`;
 }
 
@@ -234,22 +236,23 @@ function renderContinuitySection(type, data, threadState) {
     if (f.cond && !f.cond(threadState)) return '';
     const value = data ? data[f.k] : undefined;
     const id = `cf-${f.k}`;
+    const required = f.req === true || (f.req === 'closed' && CLOSED_THREAD_STATES.includes(threadState));
     let control = '';
     if (f.kind === 'select') {
-      control = `<select id="${id}">
+      control = `<select id="${id}" ${required ? 'required' : ''}>
         <option value="">请选择</option>
         ${(f.opts || []).map((o) => `<option value="${o.value}" ${value === o.value ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}
       </select>`;
     } else if (f.kind === 'thread_state') {
       // 选中态来自独立的 threadState 参数，而不是 continuity_data。
-      control = `<select id="${id}">
+      control = `<select id="${id}" ${required ? 'required' : ''}>
         <option value="">请选择</option>
         ${THREAD_STATES.map((o) => `<option value="${o.value}" ${threadState === o.value ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}
       </select>`;
     } else if (f.kind === 'array') {
       control = `<input type="text" id="${id}" value="${esc(Array.isArray(value) ? value.join('，') : '')}">`;
     } else if (f.kind === 'time') {
-      control = `<div class="retro-time" data-retro-for="${id}" data-retro-value="${esc(toDatetimeLocal(value))}"></div>`;
+      control = `<div class="retro-time" data-retro-for="${id}" data-retro-required="${required}" data-retro-value="${esc(toDatetimeLocal(value))}"></div>`;
     } else if (f.kind === 'int') {
       control = `<input type="number" id="${id}" step="1" min="0" value="${value === undefined || value === null ? '' : Number(value)}">`;
     } else {
@@ -337,7 +340,7 @@ function validateContinuity(type, data, threadState) {
 function commonSectionHtml(mode, memory) {
   const sourceOptions = SOURCE_TYPE_OPTIONS.map((o) => {
     const selected = memory && memory.source_type === o.value ? 'selected' : '';
-    return `<option value="${o.value}" ${selected} title="${esc(o.desc)}">${esc(o.label)} · ${esc(o.desc)}</option>`;
+    return `<option value="${o.value}" ${selected}>${esc(o.label)} · ${esc(o.desc)}</option>`;
   }).join('');
   const memoryTime = memory ? toDatetimeLocal(memory.memory_time) : '';
   const precision = memory ? (memory.time_precision || '') : '';
@@ -346,7 +349,7 @@ function commonSectionHtml(mode, memory) {
       <div class="form-section-title">通用信息</div>
       <div class="field"><label>标题<span class="field-hint-inline">（可空，最多 100 字）</span></label>
         <input type="text" id="mf-title" maxlength="100" value="${esc(memory ? memory.title || '' : '')}"></div>
-      <div class="field"><label>正文<span class="req-mark" title="必填">*</span><span class="char-count" id="mf-content-count"></span></label>
+      <div class="field"><label>正文<span class="req-mark">（必填）</span><span class="char-count" id="mf-content-count"></span></label>
         <textarea id="mf-content" rows="6" maxlength="3000">${esc(memory ? memory.content || '' : '')}</textarea>
         <div class="field-hint">5 到 3000 个字符；修改正文后服务端会重新计算内容哈希并按现有规则处理向量</div></div>
       <div class="field"><label>标签<span class="field-hint-inline">（普通标签，回车添加，可空）</span></label>
@@ -404,8 +407,8 @@ function typeSectionHtml(mode, memory) {
   return `
     <div class="form-section">
       <div class="form-section-title">${mode === 'change' ? '新的连续感类型' : '连续感类型'}</div>
-      <div class="field"><label>类型<span class="req-mark" title="必填">*</span></label>
-        <select id="mf-type">
+      <div class="field"><label>类型<span class="req-mark">（必填）</span></label>
+        <select id="mf-type" required>
           <option value="">请选择类型</option>
           ${Object.entries(CONTINUITY_TYPES).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}
         </select>
@@ -413,227 +416,6 @@ function typeSectionHtml(mode, memory) {
       </div>
       <div id="mf-continuity"></div>
     </div>`;
-}
-
-/* ---------- 复古时间选择器（纸张卡片 + 金线日历，替换原生 datetime 弹窗） ---------- */
-
-let activeRetroTimePop = null;
-
-function closeRetroTimePop() {
-  if (activeRetroTimePop) {
-    const pop = activeRetroTimePop;
-    activeRetroTimePop = null;
-    if (pop._cleanup) pop._cleanup();
-    pop.remove();
-  }
-}
-
-function fmtRetroTimeDisplay(localValue) {
-  const m = String(localValue || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
-  if (!m) return '';
-  return `${m[1]}年${m[2]}月${m[3]}日 ${m[4]}:${m[5]}`;
-}
-
-/** 在 host 内挂载复古时间字段：隐藏 input 保留原 id/value 契约，展示层为纸色按钮。 */
-function createRetroTimeField(host, { id, value }) {
-  host.classList.add('retro-time');
-  host.innerHTML = `
-    <input type="hidden" id="${esc(id)}" class="retro-time-value">
-    <button type="button" class="retro-time-field" aria-haspopup="dialog">
-      <span class="retro-time-text"></span>
-      ${icon('clock')}
-    </button>`;
-  const input = host.querySelector('.retro-time-value');
-  const textEl = host.querySelector('.retro-time-text');
-  const apply = (localValue, silent) => {
-    input.value = localValue || '';
-    const shown = fmtRetroTimeDisplay(localValue);
-    textEl.textContent = shown;
-    textEl.classList.toggle('is-empty', !shown);
-    if (!silent) input.dispatchEvent(new Event('input', { bubbles: true }));
-  };
-  apply(value, true);
-  host.querySelector('.retro-time-field').addEventListener('click', () => {
-    if (activeRetroTimePop && activeRetroTimePop._forInput === input) {
-      closeRetroTimePop();
-      return;
-    }
-    closeRetroTimePop();
-    openRetroTimePop(host.querySelector('.retro-time-field'), input, apply);
-  });
-  return input;
-}
-
-function openRetroTimePop(anchor, input, apply) {
-  const current = String(input.value || '');
-  const m = current.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
-  const state = m
-    ? { year: Number(m[1]), month: Number(m[2]), day: Number(m[3]),
-        hour: m[4], minute: m[5] }
-    : (() => {
-        const now = nowShanghaiLocalInput().match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
-        return { year: Number(now[1]), month: Number(now[2]), day: null,
-                 hour: now[4], minute: now[5] };
-      })();
-
-  const pop = document.createElement('div');
-  pop.className = 'retro-time-pop';
-  pop._forInput = input;
-  pop.innerHTML = `
-    <div class="retro-time-head">
-      <div class="retro-time-nav">
-        <button type="button" data-nav="year-" title="上一年">${icon('chevron-left')}${icon('chevron-left')}</button>
-        <button type="button" data-nav="month-" title="上一月">${icon('chevron-left')}</button>
-      </div>
-      <span class="retro-time-title"></span>
-      <div class="retro-time-nav">
-        <button type="button" data-nav="month+" title="下一月">${icon('chevron-right')}</button>
-        <button type="button" data-nav="year+" title="下一年">${icon('chevron-right')}${icon('chevron-right')}</button>
-      </div>
-    </div>
-    <div class="retro-time-week">
-      <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span>
-    </div>
-    <div class="retro-time-grid"></div>
-    <div class="retro-time-time">
-      <select class="rtp-hour" title="小时"></select>
-      <span class="rtp-colon">:</span>
-      <select class="rtp-minute" title="分钟"></select>
-    </div>
-    <div class="retro-time-foot">
-      <button type="button" class="btn btn-quiet btn-sm" data-act="clear">清除</button>
-      <span class="rtp-foot-right">
-        <button type="button" class="btn btn-quiet btn-sm" data-act="now">此刻</button>
-        <button type="button" class="btn btn-primary btn-sm" data-act="ok">确定</button>
-      </span>
-    </div>`;
-  document.body.appendChild(pop);
-  activeRetroTimePop = pop;
-
-  const pad2 = (n) => String(n).padStart(2, '0');
-  const titleEl = pop.querySelector('.retro-time-title');
-  const grid = pop.querySelector('.retro-time-grid');
-  const hourSel = pop.querySelector('.rtp-hour');
-  const minuteSel = pop.querySelector('.rtp-minute');
-  for (let h = 0; h < 24; h++) hourSel.add(new Option(pad2(h), pad2(h)));
-  for (let min = 0; min < 60; min++) minuteSel.add(new Option(pad2(min), pad2(min)));
-
-  const renderGrid = () => {
-    titleEl.textContent = `${state.year}年${state.month}月`;
-    grid.innerHTML = '';
-    const first = new Date(Date.UTC(state.year, state.month - 1, 1));
-    // 周一为一周之首：getUTCDay() 周日=0 → 位移 (day+6)%7
-    const lead = (first.getUTCDay() + 6) % 7;
-    for (let i = 0; i < lead; i++) grid.insertAdjacentHTML('beforeend', '<span></span>');
-    const daysInMonth = new Date(Date.UTC(state.year, state.month, 0)).getUTCDate();
-    const todayStr = nowShanghaiLocalInput().slice(0, 10);
-    for (let d = 1; d <= daysInMonth; d++) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.textContent = String(d);
-      const dateStr = `${state.year}-${pad2(state.month)}-${pad2(d)}`;
-      if (state.day === d) btn.classList.add('is-selected');
-      if (dateStr === todayStr) btn.classList.add('is-today');
-      btn.addEventListener('click', () => {
-        state.day = d;
-        grid.querySelectorAll('.is-selected').forEach((el) => el.classList.remove('is-selected'));
-        btn.classList.add('is-selected');
-      });
-      grid.appendChild(btn);
-    }
-  };
-  const syncTime = () => {
-    hourSel.value = state.hour;
-    minuteSel.value = state.minute;
-  };
-  renderGrid();
-  syncTime();
-
-  pop.querySelectorAll('[data-nav]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const step = btn.dataset.nav;
-      if (step === 'month-') { state.month -= 1; if (state.month < 1) { state.month = 12; state.year -= 1; } }
-      if (step === 'month+') { state.month += 1; if (state.month > 12) { state.month = 1; state.year += 1; } }
-      if (step === 'year-') state.year -= 1;
-      if (step === 'year+') state.year += 1;
-      state.day = null;
-      renderGrid();
-    });
-  });
-  hourSel.addEventListener('change', () => { state.hour = hourSel.value; });
-  minuteSel.addEventListener('change', () => { state.minute = minuteSel.value; });
-
-  pop.querySelector('[data-act="clear"]').addEventListener('click', () => {
-    state.day = null;
-    apply('');
-    closeRetroTimePop();
-  });
-  pop.querySelector('[data-act="now"]').addEventListener('click', () => {
-    const now = nowShanghaiLocalInput().match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
-    state.year = Number(now[1]); state.month = Number(now[2]); state.day = Number(now[3]);
-    state.hour = now[4]; state.minute = now[5];
-    renderGrid(); syncTime();
-  });
-  pop.querySelector('[data-act="ok"]').addEventListener('click', () => {
-    if (!state.day) {
-      apply('');
-      closeRetroTimePop();
-      return;
-    }
-    apply(`${state.year}-${pad2(state.month)}-${pad2(state.day)}T${state.hour}:${state.minute}`);
-    closeRetroTimePop();
-  });
-
-  // 定位：先把字段滚入视口，再放字段正下方；下方放不下翻到上方，
-  // 最终双向夹紧到视口内（字段被表单滚动移出视口时也不会漂出屏幕）。
-  anchor.scrollIntoView({ block: 'nearest' });
-  const rect = anchor.getBoundingClientRect();
-  const popRect = pop.getBoundingClientRect();
-  let left = rect.left;
-  let top = rect.bottom + 6;
-  if (top + popRect.height > window.innerHeight - 8) {
-    top = rect.top - popRect.height - 6;
-  }
-  top = Math.min(Math.max(top, 8), Math.max(8, window.innerHeight - popRect.height - 8));
-  left = Math.min(Math.max(left, 8), Math.max(8, window.innerWidth - popRect.width - 8));
-  pop.style.left = `${left}px`;
-  pop.style.top = `${top}px`;
-
-  const onOutside = (e) => {
-    if (!pop.contains(e.target) && !anchor.contains(e.target)) closeRetroTimePop();
-  };
-  const onKey = (e) => { if (e.key === 'Escape') closeRetroTimePop(); };
-  // 视口变化后固定定位不再贴合字段，直接关闭，避免弹层漂移出屏；
-  // 打开瞬间的 scrollIntoView 自身引发的滚动豁免 300ms，否则弹层刚开即关。
-  const openedAt = Date.now();
-  const onViewportChange = () => {
-    if (Date.now() - openedAt < 300) return;
-    closeRetroTimePop();
-  };
-  const cleanup = () => {
-    document.removeEventListener('mousedown', onOutside);
-    document.removeEventListener('keydown', onKey);
-    window.removeEventListener('resize', onViewportChange);
-    window.removeEventListener('scroll', onViewportChange, true);
-  };
-  setTimeout(() => {
-    document.addEventListener('mousedown', onOutside);
-    document.addEventListener('keydown', onKey);
-    window.addEventListener('resize', onViewportChange);
-    window.addEventListener('scroll', onViewportChange, true);
-  });
-  pop._cleanup = cleanup;
-
-  // 外层表单关闭时，modal 是被其父节点（document.body）整体移除的——
-  // modal 自身内部没有 childList 变化，监听 modal 无法发现关闭。
-  // 这里观察 body 的直接子级变动：modal mask 被移除必然触发一次回调，
-  // 届时宿主按钮已离开文档，立即回收弹层与其全局监听。
-  const rootObserver = new MutationObserver(() => {
-    if (!document.contains(anchor)) closeRetroTimePop();
-  });
-  rootObserver.observe(document.body, { childList: true });
-  const prevCleanup = pop._cleanup;
-  pop._cleanup = () => { prevCleanup(); rootObserver.disconnect(); };
 }
 
 function buildContinuityDataFromMemory(memory) {
@@ -678,6 +460,9 @@ export async function openMemoryForm({ mode = 'create', memory = null, onSaved =
   });
 
   const rootEl = root;
+  // 原位挂载后再取得原 id 的隐藏值字段，避免把监听绑到已替换的 select。
+  initRetroSelectFields(rootEl);
+  initRetroTimeFields(rootEl);
   const typeSelect = rootEl.querySelector('#mf-type');
   const continuityHost = rootEl.querySelector('#mf-continuity');
   const contentEl = rootEl.querySelector('#mf-content');
@@ -688,15 +473,6 @@ export async function openMemoryForm({ mode = 'create', memory = null, onSaved =
   const cancelBtn = rootEl.querySelector('[data-cancel]');
   cancelBtn.onclick = close;
 
-  // 复古时间选择器：宿主 div → 隐藏 input（保留原 id 与 .value 契约）。
-  // 必须先于 rerenderContinuity 定义：其内部会在生成 cf-* 宿主后立即初始化。
-  const initRetroTime = (host) => {
-    createRetroTimeField(host, {
-      id: host.dataset.retroFor,
-      value: host.dataset.retroValue || '',
-    });
-  };
-
   const isThreadStateField = () => continuityHost.querySelector('#cf-thread_state');
 
   const rerenderContinuity = (type, preset) => {
@@ -706,7 +482,8 @@ export async function openMemoryForm({ mode = 'create', memory = null, onSaved =
     }
     const intro = `<p class="muted text-sm" style="margin:0 0 10px">${esc(TYPE_INTRO[type])}</p>`;
     continuityHost.innerHTML = intro + renderContinuitySection(type, preset ? preset.data : null, preset ? preset.threadState : null);
-    continuityHost.querySelectorAll('.retro-time[data-retro-for]').forEach(initRetroTime);
+    initRetroSelectFields(continuityHost);
+    initRetroTimeFields(continuityHost);
     const stateSelect = isThreadStateField();
     if (stateSelect) {
       stateSelect.addEventListener('change', () => {
@@ -720,7 +497,7 @@ export async function openMemoryForm({ mode = 'create', memory = null, onSaved =
   const initialType = mode === 'edit' ? memory.continuity_type || '' : '';
   if (mode === 'edit' && memory.continuity_type) {
     rerenderContinuity(initialType, buildContinuityDataFromMemory(memory));
-    if (typeSelect) typeSelect.value = initialType;
+    if (typeSelect) typeSelect._applyRetroValue(initialType, true);
   } else {
     rerenderContinuity('');
   }
@@ -730,8 +507,6 @@ export async function openMemoryForm({ mode = 'create', memory = null, onSaved =
       rerenderContinuity(type, type === initialType ? buildContinuityDataFromMemory(memory) : null);
     });
   }
-
-  rootEl.querySelectorAll('.retro-time[data-retro-for]').forEach(initRetroTime);
 
   const updateCount = () => {
     contentCount.textContent = `${contentEl.value.length}/3000`;
@@ -744,7 +519,7 @@ export async function openMemoryForm({ mode = 'create', memory = null, onSaved =
   if (timeInput && precisionSelect) {
     timeInput.addEventListener('input', () => {
       if (!timeInput.value && ['minute', 'hour', 'day'].includes(precisionSelect.value)) {
-        precisionSelect.value = '';
+        precisionSelect._applyRetroValue('', true);
       }
     });
   }

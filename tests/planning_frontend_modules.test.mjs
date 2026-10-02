@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 
 const workspace = process.argv[2];
 const group = process.argv[3];
-const version = '20261002-planning-modules1';
+const version = (await readFile(join(workspace, 'admin/js/ui.js'), 'utf8')).match(/ASSET_VERSION = '([^']+)'/)[1];
 const masks = [];
 const toastMessages = [];
 const intervals = new Map();
@@ -25,6 +25,9 @@ class Element {
     this.hidden = false;
     this.style = {};
     this.dataset = {};
+    this.attributes = new Map();
+    this.tabIndex = 0;
+    this.isConnected = true;
     this.children = [];
     this.nodes = new Map();
     this.lists = new Map();
@@ -42,7 +45,11 @@ class Element {
     });
   }
   querySelector(selector) {
-    if (!this.nodes.has(selector)) this.nodes.set(selector, new Element());
+    if (!this.nodes.has(selector)) {
+      const node = new Element();
+      node.parentElement = this;
+      this.nodes.set(selector, node);
+    }
     return this.nodes.get(selector);
   }
   querySelectorAll(selector) { return this.lists.get(selector) || []; }
@@ -57,7 +64,14 @@ class Element {
   removeEventListener(name, fn) { this.listeners.get(name)?.delete(fn); }
   insertAdjacentHTML() {}
   scrollIntoView() {}
-  remove() { this.removed = true; }
+  setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  getAttribute(name) { return this.attributes.get(name) ?? null; }
+  removeAttribute(name) { this.attributes.delete(name); }
+  closest() { return null; }
+  contains(node) { return node === this || [...this.nodes.values()].some(child => child.contains(node)); }
+  focus() { document.activeElement = this; }
+  getClientRects() { return this.hidden || this.removed ? [] : [this.getBoundingClientRect()]; }
+  remove() { this.removed = true; this.isConnected = false; }
   setPointerCapture(id) { this.captured = id; }
   getBoundingClientRect() { return { top: 0, height: 40 }; }
 }
@@ -74,7 +88,14 @@ class NotificationFixture {
   constructor(title, options) { this.title = title; this.options = options; }
 }
 
-globalThis.document = { body: new Element(), createElement: () => new Element() };
+globalThis.document = new Element();
+document.body = new Element();
+document.activeElement = document.body;
+document.createElement = () => new Element();
+document.getElementById = () => null;
+// These fixtures test API retry/state behavior; real observer/focus interactions
+// are exercised by frontend_controls.browser.cjs in an actual browser.
+globalThis.MutationObserver = class { observe() {} disconnect() {} };
 globalThis.window = {
   location: { origin: 'http://planning.test' },
   Notification: NotificationFixture,
