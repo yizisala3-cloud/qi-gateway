@@ -1101,7 +1101,12 @@ def emulate_planning_recompute_batch(db, params):
       条件（#25：状态 pending + 生命周期事实全空 + 可重排所有权元组，
       未命中 → RuntimeError 整批放弃）；
     * rounds 逐轮复用 emulate_planning_round_patch（expected 传 None——
-      全量复核已在批级完成）。
+      全量复核已在批级完成）；
+    * 事务边界（复审 26.10.2.15.01 R1）：任一后续 single / round 失败，
+      本次调用内已执行的修改**整体撤回**——调用前已提交的 actual_start 等
+      事实不在本次写集合内、原样保留，本次新增的字段一并移除；恢复就地
+      作用于原 row 字典（外部持有的引用不得指向半修改对象），原异常向上
+      传播。成功路径照常返回写集。
     """
     occ_rows = db.rows["planning_occurrence"]
     expected = params.get("p_expected")
@@ -1144,33 +1149,54 @@ def emulate_planning_recompute_batch(db, params):
                     "planning_apply_recompute_batch: schedule inputs drifted "
                     "(stale recompute result)")
     written = []
-    for entry in singles:
-        row = rows_by_id[entry["id"]]
-        # #25：写入前重核同一可排程条件（迁移语句 5 的 WHERE 同形）。
-        if (row.get("status") != "pending"
-                or any(row.get(field) for field in planning.LIFECYCLE_FACT_FIELDS)
-                or row.get("is_fixed")
-                or row.get("schedule_managed") is not True
-                or row.get("fixed_source") is not None
-                or row.get("estimated_time_source")
-                not in ("unassigned", "automatic", "rule")):
-            raise RuntimeError(
-                "planning_apply_recompute_batch: schedule inputs drifted "
-                "(stale recompute result)")
-        for key, value in entry.items():
-            if key == "id":
-                continue
-            row[key] = value
-        written.append(entry["id"])
-    for entry in rounds:
-        emulate_planning_round_patch(occ_rows, {
-            "p_target_id": entry["target_id"],
-            "p_sibling_id": entry["sibling_id"],
-            "p_target_patch": entry["target_patch"],
-            "p_sibling_patch": entry["sibling_patch"],
-            "p_expected": None,
-        })
-        written.extend([entry["target_id"], entry["sibling_id"]])
+    # 写集合事务恢复：首次触及某行前快照其调用前完整状态（浅拷贝含「字段
+    # 不存在」形状）；失败时 clear + update 就地还原——字段值回原值、本次
+    # 新增字段被移除、字典对象身份不变。未触及行（含调用前已提交的并发
+    # 事实）不动。
+    pre_call: dict[int, dict] = {}
+
+    def _remember(row_id) -> None:
+        if row_id not in pre_call:
+            pre_call[row_id] = dict(rows_by_id[row_id])
+
+    try:
+        for entry in singles:
+            row = rows_by_id[entry["id"]]
+            # #25：写入前重核同一可排程条件（迁移语句 5 的 WHERE 同形）。
+            if (row.get("status") != "pending"
+                    or any(row.get(field)
+                           for field in planning.LIFECYCLE_FACT_FIELDS)
+                    or row.get("is_fixed")
+                    or row.get("schedule_managed") is not True
+                    or row.get("fixed_source") is not None
+                    or row.get("estimated_time_source")
+                    not in ("unassigned", "automatic", "rule")):
+                raise RuntimeError(
+                    "planning_apply_recompute_batch: schedule inputs drifted "
+                    "(stale recompute result)")
+            _remember(entry["id"])
+            for key, value in entry.items():
+                if key == "id":
+                    continue
+                row[key] = value
+            written.append(entry["id"])
+        for entry in rounds:
+            _remember(entry["target_id"])
+            _remember(entry["sibling_id"])
+            emulate_planning_round_patch(occ_rows, {
+                "p_target_id": entry["target_id"],
+                "p_sibling_id": entry["sibling_id"],
+                "p_target_patch": entry["target_patch"],
+                "p_sibling_patch": entry["sibling_patch"],
+                "p_expected": None,
+            })
+            written.extend([entry["target_id"], entry["sibling_id"]])
+    except BaseException:
+        for row_id, snapshot in pre_call.items():
+            row = rows_by_id[row_id]
+            row.clear()
+            row.update(snapshot)
+        raise
     return written
 
 

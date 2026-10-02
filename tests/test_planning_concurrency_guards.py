@@ -566,6 +566,131 @@ def test_recompute_abandons_when_written_row_gains_actual_start():
         assert not planning._freely_schedulable(occ, {})
 
 
+def _batch_payload(rows, *, extra_single_fields=None):
+    """按生产同形构造 truthful expected 与 singles（直接调批量 RPC 仿真）。"""
+    expected = [planning._recompute_expected_snapshot(row) for row in rows]
+    singles = []
+    for row in rows:
+        patch = planning._estimate_patch(at(24, 13), at(24, 13, 30),
+                                         source="automatic")
+        patch["updated_at"] = iso(24, 13)
+        if extra_single_fields:
+            patch.update(extra_single_fields)
+        singles.append({"id": row["id"], **patch})
+    return expected, singles
+
+
+def test_recompute_batch_fake_rolls_back_on_late_single_guard():
+    # 复审 26.10.2.15.01 R1（P3）：expected 如实覆盖两行，第二行 pending 但
+    # 已携带 actual_start（不可排程）；singles 依次请求修改两行——第一行
+    # 先被修改、第二行被写侧可排程守卫拒绝时，fake 必须整体撤回（真库
+    # PC001 整体回滚：第一行保持 08:00），调用前已提交的 actual_start 保留，
+    # 本次新增字段（nominal_start）一并移除；恢复就地作用于测试持有的
+    # 同一 row 字典引用，完整行状态与调用前一致。
+    with Context() as c:
+        c.create("daily", at(24, 8), estimated_minutes=30)
+        c.create("daily", at(24, 8), estimated_minutes=30)
+        row_a, row_b = c.rows[0], c.rows[1]
+        planning.patch_occurrence(
+            row_b["id"], {"actual_start": iso(24, 8, 45)}, at(24, 8, 45))
+        # 生产在行缺 nominal_start 时由补丁新增（重算入口同形）——删去以构造
+        # 「本次新增字段」，回滚必须把它一并移除。
+        row_a.pop("nominal_start", None)
+        expected, singles = _batch_payload(c.rows, extra_single_fields={
+            "nominal_start": iso(24, 13)})
+        assert "nominal_start" not in row_a
+        before_a, before_b = dict(row_a), dict(row_b)
+        with pytest.raises(RuntimeError) as error:
+            c.db.rpc("planning_apply_recompute_batch", {
+                "p_expected": expected, "p_singles": singles,
+                "p_rounds": [],
+            }).execute()
+        assert "schedule inputs drifted" in str(error.value)
+        # 完整行状态逐字段恢复（第二行的并发事实不在本次写集合内，保留）；
+        # 通过原先持有的引用断言——替身若换成新对象即在此暴露。
+        assert c.rows[0] is row_a and c.rows[1] is row_b
+        assert row_a == before_a
+        assert "nominal_start" not in row_a  # 本次新增字段被移除
+        assert row_b == before_b
+        assert row_b["actual_start"] == iso(24, 8, 45)
+
+
+def test_recompute_batch_fake_rolls_back_singles_when_round_rejected():
+    # 同上 R1 的 rounds 段：singles 已修改第一行，后面的 round 因中空阶段
+    # 携带生命周期事实被严格门拒绝——已执行的 singles 同样必须整体撤回。
+    with Context() as c:
+        c.create("daily", at(24, 8), estimated_minutes=30)
+        c.create("daily", at(24, 7), estimated_minutes=30, **HOLLOW)
+        row_a = c.rows[0]
+        start, end = _hollow_round(c)
+        planning.patch_occurrence(
+            start["id"], {"actual_start": iso(24, 8, 45)}, at(24, 8, 45))
+        # 同上：行缺 nominal_start、由本次 singles 补丁新增，回滚须移除。
+        row_a.pop("nominal_start", None)
+        expected = [planning._recompute_expected_snapshot(row) for row in c.rows]
+        patch = planning._estimate_patch(at(24, 13), at(24, 13, 30),
+                                         source="automatic")
+        patch["updated_at"] = iso(24, 13)
+        patch["nominal_start"] = iso(24, 13)
+        singles = [{"id": row_a["id"], **patch}]
+        rounds = [{
+            "target_id": start["id"], "sibling_id": end["id"],
+            "target_patch": {"est_start": iso(24, 14), "est_end": iso(24, 14, 30),
+                             "updated_at": iso(24, 13)},
+            "sibling_patch": {"est_start": iso(24, 15), "est_end": iso(24, 15, 30),
+                              "updated_at": iso(24, 13)},
+        }]
+        before_a, before_start, before_end = dict(row_a), dict(start), dict(end)
+        with pytest.raises(RuntimeError) as error:
+            c.db.rpc("planning_apply_recompute_batch", {
+                "p_expected": expected, "p_singles": singles,
+                "p_rounds": rounds,
+            }).execute()
+        assert "no longer editable" in str(error.value)
+        assert c.rows[0] is row_a
+        assert row_a == before_a
+        assert "nominal_start" not in row_a
+        assert start == before_start and end == before_end
+
+
+def test_recompute_batch_fake_success_keeps_all_writes():
+    # 成功路径不受回滚包装影响：singles 与 rounds 全部写入并正常返回写集，
+    # 不发生任何恢复。
+    with Context() as c:
+        c.create("daily", at(24, 8), estimated_minutes=30)
+        c.create("daily", at(24, 8), estimated_minutes=30)
+        c.create("daily", at(24, 7), estimated_minutes=30, **HOLLOW)
+        row_a, row_b = c.rows[0], c.rows[1]
+        start, end = _hollow_round(c)
+        expected = [planning._recompute_expected_snapshot(row) for row in c.rows]
+        patch = planning._estimate_patch(at(24, 13), at(24, 13, 30),
+                                         source="automatic")
+        patch["updated_at"] = iso(24, 13)
+        singles = [{"id": row_a["id"], **patch},
+                   {"id": row_b["id"], **patch}]
+        rounds = [{
+            "target_id": start["id"], "sibling_id": end["id"],
+            "target_patch": {"est_start": iso(24, 14), "est_end": iso(24, 14, 30),
+                             "estimated_time_source": "automatic",
+                             "fixed_source": None, "schedule_managed": True,
+                             "is_fixed": False, "updated_at": iso(24, 13)},
+            "sibling_patch": {"est_start": iso(24, 15), "est_end": iso(24, 15, 30),
+                              "estimated_time_source": "automatic",
+                              "fixed_source": None, "schedule_managed": True,
+                              "is_fixed": False, "updated_at": iso(24, 13)},
+        }]
+        result = c.db.rpc("planning_apply_recompute_batch", {
+            "p_expected": expected, "p_singles": singles,
+            "p_rounds": rounds,
+        }).execute()
+        assert sorted(result.data) == sorted(
+            [row_a["id"], row_b["id"], start["id"], end["id"]])
+        assert row_a["est_start"] == iso(24, 13)
+        assert row_b["est_start"] == iso(24, 13)
+        assert start["est_start"] == iso(24, 14)
+        assert end["est_start"] == iso(24, 15)
+
+
 def test_recompute_hollow_round_is_atomic():
     # 问题 2：中空同轮两阶段同时被重排 → 单次 RPC；注入失败 → 两阶段保持
     # 旧时间（无 A 新 B 旧半提交）。
