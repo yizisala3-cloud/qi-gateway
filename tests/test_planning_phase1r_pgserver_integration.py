@@ -3121,22 +3121,22 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
         _fetch_occurrence）与提交后重算副作用；RPC 与状态 UPDATE 不替身，
         真实执行当前迁移链 SQL。每线程经 tls 解析自己的 client / 连接，
         支撑多连接并发测试。"""
-        from gateway import planning
+        from gateway import planning, planning_recompute, planning_runtime, planning_tasks
         stack.enter_context(mock.patch.object(
-            planning, "_require_client", side_effect=lambda: tls.client))
+            planning_runtime, "_require_client", side_effect=lambda: tls.client))
         stack.enter_context(mock.patch.object(
-            planning, "_fetch_task",
+            planning_runtime, "_fetch_task",
             side_effect=lambda c, k: self._business_fetch(
                 "planning_task", k, conn=tls.conn)))
         stack.enter_context(mock.patch.object(
-            planning, "_fetch_occurrence",
+            planning_runtime, "_fetch_occurrence",
             side_effect=lambda c, k: self._business_fetch(
                 "planning_occurrence", k, conn=tls.conn)))
         stack.enter_context(mock.patch.object(
-            planning, "_request_recompute_quietly", return_value=None))
+            planning_recompute, "_request_recompute_quietly", return_value=None))
 
     def _business_context(self, before_rpc=None):
-        from gateway import planning
+        from gateway import planning, planning_recompute, planning_runtime, planning_tasks
         client = _LocalDiscardClient(self.conn, before_rpc=before_rpc)
         stack = contextlib.ExitStack()
         self._enter_business_patches(
@@ -3272,7 +3272,7 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
         作为「被暂停的同轮编辑」真实执行 round patch（first, second）并
         提交。
         """
-        from gateway import planning
+        from gateway import planning, planning_recompute, planning_runtime, planning_tasks
         first, second = self._hollow_pair()
         target_id = None if target_phase is None else (
             first if target_phase == "start" else second)
@@ -3764,7 +3764,7 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
 
-        from gateway import planning
+        from gateway import planning, planning_recompute, planning_runtime, planning_tasks
         from gateway.config import cfg
         from gateway.planning_api import planning_api_routes
 
@@ -3804,23 +3804,23 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
         stack = contextlib.ExitStack()
         with stack:
             stack.enter_context(mock.patch.object(
-                planning, "_require_client",
+                planning_runtime, "_require_client",
                 return_value=SplitOnlyClient(self.conn)))
             stack.enter_context(mock.patch.object(
-                planning, "_fetch_task",
+                planning_runtime, "_fetch_task",
                 side_effect=lambda c, k: self._business_fetch("planning_task", k)))
             stack.enter_context(mock.patch.object(
-                planning, "_fetch_occurrence",
+                planning_runtime, "_fetch_occurrence",
                 side_effect=lambda c, k: self._business_fetch("planning_occurrence", k)))
             stack.enter_context(mock.patch.object(
                 planning.db, "load_app_setting", return_value=None))
             stack.enter_context(mock.patch.object(
-                planning, "_now", return_value=now))
+                planning_runtime, "_now", return_value=now))
             stack.enter_context(mock.patch.object(
-                planning, "request_recompute",
+                planning_recompute, "request_recompute",
                 side_effect=RuntimeError("registration unavailable")))
             generation = stack.enter_context(mock.patch.object(
-                planning, "_generate_due_quietly"))
+                planning_tasks, "_generate_due_quietly"))
             stack.enter_context(mock.patch.object(cfg, "GATEWAY_TOKEN", "pg-suite-token"))
             http = TestClient(Starlette(routes=planning_api_routes),
                               raise_server_exceptions=False)
@@ -3885,7 +3885,7 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
     def test_business_finish_writes_logged_seconds_and_keeps_auto_facts(self):
         # #19 真实业务路径 + 真库：完成（finish）携带手填耗时文本 → 解析为
         # 秒落独立列；真实起止与自动耗时照常计算，不被手填覆盖。
-        from gateway import planning
+        from gateway import planning, planning_recompute, planning_runtime, planning_tasks
         # 自建任务行：_fresh_occurrence 默认挂到首任务，与其他用例的
         # (task_id, round_key) 唯一键冲突。
         own_task_id = self._query(TASK_SQL)[0][0]
@@ -3897,7 +3897,7 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
             (occ_id,))
         planning, client, stack = self._business_context()
         stack.enter_context(mock.patch.object(
-            planning, "request_recompute", return_value=None))
+            planning_recompute, "request_recompute", return_value=None))
         with stack:
             planning.set_occurrence_status(
                 occ_id,
@@ -3916,7 +3916,7 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
     def test_discard_wins_then_round_edit_rejected_pc001(self):
         # 反向结果对照：持锁方先释放 → 删除获胜完整落库；其后的同轮编辑
         # 按既定并发契约 PC001 拒绝（轮已关闭，零写入）。
-        from gateway import planning
+        from gateway import planning, planning_recompute, planning_runtime, planning_tasks
         first, second = self._hollow_pair()
         task_id = self._business_fetch("planning_occurrence", first)["task_id"]
         holder = psycopg.connect(self.server.get_uri(), autocommit=False)

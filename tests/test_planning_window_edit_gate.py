@@ -8,8 +8,8 @@
 import pytest
 
 from gateway import planning
-from test_planning_phase1b import Context, at
-from test_planning_window_edit import HOLLOW, _fields, iso
+from tests.support.planning_context import Context, at
+from tests.support.planning_fixtures import HOLLOW, _fields, iso
 
 
 def test_gate_matrix_rejects_started_partial_terminal_states():

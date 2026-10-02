@@ -28,6 +28,12 @@ CYCLE_SETTINGS = ROOT / "admin" / "js" / "lib" / "cycle_settings.js"
 CONFIG_PAGE = ROOT / "admin" / "js" / "pages" / "config.js"
 ROUTES = ROOT / "admin" / "js" / "routes.js"
 UI = ROOT / "admin" / "js" / "ui.js"
+DISPLAY = ROOT / 'admin/js/lib/planning_display.js'
+TASK_FORM = ROOT / 'admin/js/lib/planning_task_form.js'
+DIALOGS = ROOT / 'admin/js/lib/planning_dialogs.js'
+SORT = ROOT / 'admin/js/lib/planning_sort.js'
+REMINDER = ROOT / 'admin/js/lib/planning_reminder.js'
+PLANNING_MODULES = (DISPLAY, TASK_FORM, DIALOGS, SORT, REMINDER)
 STYLE = ROOT / "admin" / "css" / "style.css"
 CREDITS = ROOT / "admin" / "assets" / "audio" / "CREDITS.md"
 
@@ -38,11 +44,12 @@ EMOJI_PATTERN = re.compile(
 LEGACY_NAV_KEYS = ("memories", "digest", "emotion", "persona", "config", "logs")
 
 
-def _task_form_source(page):
-    """提取 openTaskForm 函数体（openCycleSettings 也有同名 submitBtn 逻辑，
-    全局搜索会误取；表单区契约均以本函数圈定区域）。"""
-    match = re.search(r"  openTaskForm\(task\) \{(.*?)\n  \},", page, re.S)
-    assert match is not None, "openTaskForm must exist"
+def _task_form_source(form):
+    """Read the complete form body from its dedicated implementation module."""
+    match = re.search(
+        r"export function openTaskForm\(task, \{ occurrences, initRetroFields, onSaved \}\) \{(.*)\n\}",
+        form, re.S)
+    assert match is not None, "openTaskForm implementation must exist"
     return match.group(1)
 
 
@@ -58,6 +65,12 @@ class PlanningPageContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.page = PLANNING.read_text(encoding="utf-8")
+        cls.display = DISPLAY.read_text(encoding="utf-8")
+        cls.form = TASK_FORM.read_text(encoding="utf-8")
+        cls.dialogs = DIALOGS.read_text(encoding="utf-8")
+        cls.sorter = SORT.read_text(encoding="utf-8")
+        cls.reminder = REMINDER.read_text(encoding="utf-8")
+        cls.sources = "\n".join((cls.page, cls.display, cls.form, cls.dialogs, cls.sorter, cls.reminder))
 
     def test_four_regions_exist(self):
         for region_id in (
@@ -124,10 +137,10 @@ class PlanningPageContractTests(unittest.TestCase):
 
     def test_reorder_only_available_in_today_tab(self):
         # BUG-16e：排列模式只在「当前待办」页签可用，其它页签点击给 toast
-        self.assertIn("this.activeTab !== 'today'", self.page)
-        self.assertIn("调整顺序只在「当前待办」页签可用", self.page)
+        self.assertIn("getActiveTab() !== 'today'", (self.page + self.sorter))
+        self.assertIn("调整顺序只在「当前待办」页签可用", (self.page + self.sorter))
         # 排列中切走页签自动退出排列
-        self.assertIn("排列模式只在「当前待办」页签内有效，切走即退出并还原列表", self.page)
+        self.assertIn("排列模式只在「当前待办」页签内有效，切走即退出并还原列表", (self.page + self.sorter))
 
     def test_all_section_has_filters_and_two_lists(self):
         for marker in (
@@ -153,7 +166,7 @@ class PlanningPageContractTests(unittest.TestCase):
             "gw('/admin/api/planning/reorder'",
         ):
             with self.subTest(call=call):
-                self.assertIn(call, self.page)
+                self.assertIn(call, (self.page + self.sorter))
 
     def test_page_calls_occurrence_action_endpoints(self):
         for marker in (
@@ -165,7 +178,7 @@ class PlanningPageContractTests(unittest.TestCase):
             "`/admin/api/planning/tasks/${task.id}`",
         ):
             with self.subTest(marker=marker):
-                self.assertIn(marker, self.page)
+                self.assertIn(marker, (self.page + self.form + self.dialogs))
 
     def test_six_statuses_are_handled(self):
         for status in (
@@ -173,7 +186,7 @@ class PlanningPageContractTests(unittest.TestCase):
             "deferred", "discarded_this", "discarded", "timeout",
         ):
             with self.subTest(status=status):
-                self.assertIn(f"'{status}'", self.page)
+                self.assertIn(f"'{status}'", (self.page + self.display))
 
     def test_finish_dialog_offers_optional_logged_duration(self):
         # #19（2026-10-01 §12.3）：点「完成」弹出实际耗时输入框——h/m/s
@@ -187,7 +200,7 @@ class PlanningPageContractTests(unittest.TestCase):
             "actual_logged_duration",
         ):
             with self.subTest(marker=marker):
-                self.assertIn(marker, self.page)
+                self.assertIn(marker, self.dialogs)
 
     def test_closed_records_duration_display_prefers_manual_then_labelled_estimate(self):
         # #19 展示口径：已完成 / 已删除（含历史超时）记录手填 →「实际耗时」；
@@ -201,39 +214,39 @@ class PlanningPageContractTests(unittest.TestCase):
             "actual_logged_seconds != null",
         ):
             with self.subTest(marker=marker):
-                self.assertIn(marker, self.page)
+                self.assertIn(marker, (self.display + self.page))
         # 列表行（itemMeta）不再直接展示自动计算的 actual_minutes 冒充
         # 实际耗时——closed/timeout 经 durationText 标注口径，itemMeta 本体
         # 不含耗时判断（开放实例的既有展示收敛进 durationText）。
-        item_meta = re.search(r"  itemMeta\(occ\) \{(.*?)\n  \},", self.page, re.S)
+        item_meta = re.search(r"export function itemMeta\(occ\) \{(.*?)\n\}", self.display, re.S)
         self.assertIsNotNone(item_meta, "itemMeta must exist")
         self.assertNotIn("actual_minutes", item_meta.group(1))
-        self.assertIn("this.durationText(occ)", item_meta.group(1))
+        self.assertIn("durationText(occ)", item_meta.group(1))
 
     def test_reorder_mode_with_confirm_and_cancel(self):
-        self.assertIn("enter-reorder", self.page)
-        self.assertIn("confirm-reorder", self.page)
-        self.assertIn("cancel-reorder", self.page)
-        self.assertIn("is-dragging", self.page)
-        self.assertIn("setPointerCapture", self.page)
+        self.assertIn("enter-reorder", (self.page + self.sorter))
+        self.assertIn("confirm-reorder", (self.page + self.sorter))
+        self.assertIn("cancel-reorder", (self.page + self.sorter))
+        self.assertIn("is-dragging", (self.page + self.sorter))
+        self.assertIn("setPointerCapture", (self.page + self.sorter))
 
     def test_browser_alarm_and_timer_implementation(self):
-        self.assertIn("Notification", self.page)
-        self.assertIn("/admin/assets/audio/alarm-clock.mp3", self.page)
-        self.assertIn("/admin/assets/audio/timer-done.ogg", self.page)
-        self.assertIn("loop", self.page)
-        self.assertIn("只在页面内响铃", self.page)
-        self.assertIn("30 * 1000", self.page)
+        self.assertIn("Notification", (self.reminder + self.page))
+        self.assertIn("/admin/assets/audio/alarm-clock.mp3", (self.reminder + self.page))
+        self.assertIn("/admin/assets/audio/timer-done.ogg", (self.reminder + self.page))
+        self.assertIn("loop", (self.reminder + self.page))
+        self.assertIn("只在页面内响铃", (self.reminder + self.page))
+        self.assertIn("30 * 1000", (self.reminder + self.page))
 
     def test_backfill_can_clear_actual_times(self):
         # BUG-6：补填弹窗始终提交两个字段，留空 → null 即清除
-        self.assertIn("留空即清除该时间", self.page)
-        self.assertNotIn("请至少填写一个时间", self.page)
+        self.assertIn("留空即清除该时间", self.dialogs)
+        self.assertNotIn("请至少填写一个时间", self.dialogs)
 
     def test_split_parts_have_individual_durations(self):
         # BUG-7：每部分有独立耗时输入，支持简写，不再写死 30m
-        self.assertIn("data-part-minutes", self.page)
-        self.assertIn("data-part-row", self.page)
+        self.assertIn("data-part-minutes", self.dialogs)
+        self.assertIn("data-part-row", self.dialogs)
 
     def test_partial_status_offers_full_complete_action(self):
         # Phase 1R：部分完成保持开放，详情提供「已全部完成」收口
@@ -244,21 +257,21 @@ class PlanningPageContractTests(unittest.TestCase):
 
     def test_audio_unlock_on_first_pointerdown(self):
         # BUG-9：首次手势静音解锁音频；播放被拦时给出提示
-        self.assertIn("unlockAudio", self.page)
-        self.assertIn("pointerdown", self.page)
-        self.assertIn("浏览器拦截了自动响铃，点一下页面即可恢复", self.page)
+        self.assertIn("unlockAudio", self.reminder)
+        self.assertIn("pointerdown", self.reminder)
+        self.assertIn("浏览器拦截了自动响铃，点一下页面即可恢复", self.reminder)
 
     def test_reorder_conflict_recovers_gracefully(self):
         # BUG-10：排列期间列表变化导致确认被拒时，自动刷新并退出排列
-        self.assertIn("order must include every open occurrence", self.page)
-        self.assertIn("待办列表有变化，请重新进入排列", self.page)
+        self.assertIn("order must include every open occurrence", self.sorter)
+        self.assertIn("待办列表有变化，请重新进入排列", self.sorter)
 
     def test_manual_recompute_button(self):
         self.assertIn("重新计算时间", self.page)
         self.assertIn("等待自动重算", self.page)
 
     def test_no_emoji_icons(self):
-        self.assertIsNone(EMOJI_PATTERN.search(self.page))
+        self.assertIsNone(EMOJI_PATTERN.search(self.sources))
 
     def test_detail_alarm_controls_patch_task(self):
         # BUG-11：详情栏「提醒」行可操作（闹钟勾选 + 计时器文本框 + 保存提醒），
@@ -283,10 +296,10 @@ class PlanningPageContractTests(unittest.TestCase):
 
     def test_status_display_labels_renamed(self):
         # BUG-12：pending/in_progress 显示名与分区名撞车 →「未开始 / 执行中」
-        self.assertIn("pending: { label: '未开始'", self.page)
-        self.assertIn("in_progress: { label: '执行中'", self.page)
-        self.assertNotIn("pending: { label: '待处理'", self.page)
-        self.assertNotIn("in_progress: { label: '进行中'", self.page)
+        self.assertIn("pending: { label: '未开始'", self.display)
+        self.assertIn("in_progress: { label: '执行中'", self.display)
+        self.assertNotIn("pending: { label: '待处理'", self.display)
+        self.assertNotIn("in_progress: { label: '进行中'", self.display)
 
     def test_today_empty_states_are_compact(self):
         # BUG-13：三分区空态改为一行式小空态（小图标 + 纯文字，高度受限）
@@ -304,20 +317,20 @@ class PlanningPageContractTests(unittest.TestCase):
         # 2026-10-01 起：周期设置刷新时间与 boundary 冲突调整项已随弹窗
         # 移至 lib/cycle_settings.js（配置页承载入口），planning 仅剩
         # 可安排时段双端（time ×2）与筛选/目标日期（date ×2）。
-        self.assertNotIn('type="time"', self.page)
-        self.assertNotIn('type="date"', self.page)
-        self.assertIn("lib/retro_time.js", self.page)
-        self.assertIn("createRetroTimeField", self.page)
-        self.assertEqual(self.page.count('data-retro-mode="time"'), 2)
-        self.assertEqual(self.page.count('data-retro-mode="date"'), 2)
+        self.assertNotIn('type="time"', (self.page + self.form))
+        self.assertNotIn('type="date"', (self.page + self.form))
+        self.assertIn("lib/retro_time.js", (self.page + self.form))
+        self.assertIn("createRetroTimeField", (self.page + self.form))
+        self.assertEqual((self.page + self.form).count('data-retro-mode="time"'), 2)
+        self.assertEqual((self.page + self.form).count('data-retro-mode="date"'), 2)
         for field_id in (
             "pf-window-start", "pf-window-end",
             "pf-target-date", "planning-filter-date",
         ):
             with self.subTest(field=field_id):
-                self.assertIn(f'data-retro-for="{field_id}', self.page)
+                self.assertIn(f'data-retro-for="{field_id}', (self.page + self.form))
         # 可安排时段双端右对齐弹层（时钟图标一侧）
-        self.assertEqual(self.page.count('data-retro-align="right"'), 2)
+        self.assertEqual((self.page + self.form).count('data-retro-align="right"'), 2)
         # 周期设置弹窗（lib）：boundary + 冲突调整项双端
         cycle_lib = CYCLE_SETTINGS.read_text(encoding="utf-8")
         self.assertEqual(cycle_lib.count('data-retro-mode="time"'), 3)
@@ -360,8 +373,8 @@ class PlanningPageContractTests(unittest.TestCase):
             "submit.disabled = false;",         # 失败恢复按钮
         ):
             with self.subTest(marker=marker):
-                self.assertIn(marker, self.page)
-        self.assertNotIn("至少填写两部分", self.page)
+                self.assertIn(marker, self.dialogs)
+        self.assertNotIn("至少填写两部分", self.dialogs)
 
     def test_adjust_window_sends_both_ends_with_clear_semantics(self):
         # 批次 8：详情栏「编辑时间」→「调整时段」——编辑当前实例冻结窗口
@@ -376,10 +389,10 @@ class PlanningPageContractTests(unittest.TestCase):
             "把时段收窄到恰好容纳预计耗时，就会把这条待办钉在该时间",
         ):
             with self.subTest(marker=marker):
-                self.assertIn(marker, self.page)
+                self.assertIn(marker, self.dialogs)
         # 旧 est 手动编辑入口退役
-        self.assertNotIn("title: '编辑预估时间',", self.page)
-        self.assertNotIn("planning-edit-start", self.page)
+        self.assertNotIn("title: '编辑预估时间',", self.dialogs)
+        self.assertNotIn("planning-edit-start", self.dialogs)
 
     def test_hollow_task_hides_early_complete_button(self):
         # 中空待办提前完成必然 409：按任务形态隐藏不适用入口
@@ -387,8 +400,8 @@ class PlanningPageContractTests(unittest.TestCase):
 
     def test_reorder_toast_respects_auto_recompute_switch(self):
         # 自动重算关闭时不得提示「等待自动重算」（需求 16.3）
-        self.assertIn("this.board?.recompute?.enabled === false", self.page)
-        self.assertIn("自动重算已关闭", self.page)
+        self.assertIn("getBoard()?.recompute?.enabled === false", self.sorter)
+        self.assertIn("自动重算已关闭", self.sorter)
 
     def test_task_form_sends_window_clear_values(self):
         # 批次 8：可安排时段取代显式起止 / 限时 / 固定开关。编辑模式显式
@@ -401,12 +414,10 @@ class PlanningPageContractTests(unittest.TestCase):
             "if (windowEnd) body.window_end_tod = windowEnd;",
         ):
             with self.subTest(marker=marker):
-                self.assertIn(marker, self.page)
+                self.assertIn(marker, self.form)
 
     def _task_form_source(self):
-        match = re.search(r"  openTaskForm\(task\) \{(.*?)\n  \},", self.page, re.S)
-        self.assertIsNotNone(match, "openTaskForm must exist")
-        return match.group(1)
+        return _task_form_source(self.form)
 
     def test_task_form_stops_submitting_legacy_fields(self):
         # C13：前端停止提交 est_start_tod / est_end_tod / deadline_tod /
@@ -542,14 +553,14 @@ class PlanningPageContractTests(unittest.TestCase):
         for marker in (
             "windowParts.push(`不早于 ${fmtClock(occ.window_start_at)}`);",
             "windowParts.push(`最晚完成 ${fmtClock(occ.window_end_at)}`);",
-            "this.conflictOccIds?.has(occ.id)",
+            "conflictOccIds?.has(occ.id)",
             "this.conflictById?.get(occ.id)",
             '<span class="k">可安排时段</span>',
             "task.window_start_tod || task.window_end_tod",
         ):
             with self.subTest(marker=marker):
-                self.assertIn(marker, self.page)
-        self.assertNotIn("if (occ.is_limited) badges.push(tag('限时', 'red'));", self.page)
+                self.assertIn(marker, (self.page + self.display))
+        self.assertNotIn("if (occ.is_limited) badges.push(tag('限时', 'red'));", (self.page + self.display))
 
     def test_poll_does_not_overwrite_unsaved_detail_input(self):
         # 30 秒轮询：详情栏有未保存输入时跳过重绘，不覆盖用户正在编辑的内容
@@ -599,6 +610,12 @@ class PlanningNavigationContractTests(unittest.TestCase):
         cls.routes = ROUTES.read_text(encoding="utf-8")
         cls.ui = UI.read_text(encoding="utf-8")
         cls.page = PLANNING.read_text(encoding="utf-8")
+        cls.display = DISPLAY.read_text(encoding="utf-8")
+        cls.form = TASK_FORM.read_text(encoding="utf-8")
+        cls.dialogs = DIALOGS.read_text(encoding="utf-8")
+        cls.sorter = SORT.read_text(encoding="utf-8")
+        cls.reminder = REMINDER.read_text(encoding="utf-8")
+        cls.sources = "\n".join((cls.page, cls.display, cls.form, cls.dialogs, cls.sorter, cls.reminder))
 
     def test_planning_is_first_nav_item(self):
         first_item = re.search(r"items:\s*\[\s*\{([^}]*)\}", self.routes).group(1)
@@ -615,7 +632,10 @@ class PlanningNavigationContractTests(unittest.TestCase):
 
     def test_asset_version_chain_is_consistent(self):
         version = re.search(r"ASSET_VERSION = '([^']+)'", self.ui).group(1)
-        version_refs = re.findall(r"\?v=([0-9a-z-]+)", self.routes + self.page)
+        version_sources = self.routes + self.page + "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (*PLANNING_MODULES, RETRO_TIME, RETRO_SELECT, CYCLE_SETTINGS))
+        version_refs = re.findall(r"\?v=([0-9a-z-]+)", version_sources)
         # routes.js 不带版本串；planning.js 的 import 版本必须与 ui.js 一致
         self.assertTrue(version_refs, "planning.js should pin import versions")
         for ref in version_refs:
@@ -630,13 +650,13 @@ class PlanningNavigationContractTests(unittest.TestCase):
         if quickjs is None:
             self.skipTest("quickjs is not installed")
         import re as _re
-        for path in (PLANNING, RETRO_TIME, RETRO_SELECT, CYCLE_SETTINGS, CONFIG_PAGE):
+        for path in (PLANNING, *PLANNING_MODULES, RETRO_TIME, RETRO_SELECT, CYCLE_SETTINGS, CONFIG_PAGE):
             src = path.read_text(encoding="utf-8")
             src = _re.sub(r"import\s[^;]*?;", "", src, flags=_re.S)
             src = src.replace("export default {", "const __page__ = {")
             src = _re.sub(r"\bexport\s+(?=(async\s+)?(function|const|let|class|var)\b)", "", src)
             check = quickjs.Context().eval(
-                "(function(src){ try { new globalThis.Function(src)(); return 'ok'; }"
+                "(function(src){ try { new globalThis.Function(src); return 'ok'; }"
                 " catch (e) { return e.name + ': ' + e.message; } })"
             )
             with self.subTest(file=path.name):
@@ -648,13 +668,13 @@ class PlanningNavigationContractTests(unittest.TestCase):
         # disabled（按钮聚焦后按 Enter/空格仍触发 click）。两阶段语义：
         # 提交/API 阶段失败 → 解锁可重试；服务器保存成功 → committed 终态，
         # 此后 toast/close/loadAll 后处理失败不得解锁、不得误报「保存失败」。
-        form = _task_form_source(self.page)
+        form = _task_form_source(self.form)
         match = re.search(
             r"const submitBtn = root\.querySelector\('\[data-ok\]'\);\s*"
             r"let submitting = false;\s*"
             r"let committed = false;\s*"
             r"(?:\s*//[^\n]*\n)*\s*let createdTask = null;\s*"
-            r"submitBtn\.onclick = async \(\) => \{(.*?)\n    \};",
+            r"submitBtn\.onclick = async \(\) => \{(.*?)\n  \};",
             form, re.S)
         self.assertIsNotNone(match, "task form submit handler must hold a submitting lock")
         block = match.group(1)
@@ -694,7 +714,7 @@ class PlanningNavigationContractTests(unittest.TestCase):
             "createdTask?.schedule_conflict",
             "本轮已过最晚完成，从次日起按重复规则生效",
             "try { close(); } catch {",
-            "try { await this.loadAll(); } catch {",
+            "try { await onSaved(); } catch {",
         ):
             with self.subTest(post_step=step):
                 self.assertIn(step, post_seg)
@@ -715,10 +735,9 @@ class PlanningNavigationContractTests(unittest.TestCase):
             self.skipTest("quickjs is not installed")
         # 提交 handler 必须取自 openTaskForm 块内（openCycleSettings 也有
         # 同名 submitBtn.onclick，全局搜索会误取）
-        form = _task_form_source(self.page)
-        handler = re.search(r"submitBtn\.onclick = (async \(\) => \{.*?\n    \});", form, re.S).group(1)
-        openform = re.search(r"  openTaskForm\(task\) \{(.*?)\n  \},", self.page, re.S)
-        self.assertIsNotNone(openform, "openTaskForm not found in planning.js")
+        form = _task_form_source(self.form)
+        handler = re.search(r"submitBtn\.onclick = (async \(\) => \{.*?\n  \});", form, re.S).group(1)
+        openform_body = _task_form_source(self.form)
         harness = """
             var __result = null, __error = null;
             (async () => {
@@ -760,7 +779,8 @@ class PlanningNavigationContractTests(unittest.TestCase):
                 };
                 const typeSelect = { value: 'daily' };
                 const submitBtn = { disabled: false };
-                let submitting = false, committed = false;
+                let submitting = false, committed = false, createdTask = null;
+                const onSaved = globalThis.loadAll;
                 // handler 源码在此拼接：闭包必须覆盖本场景的锁与终态变量
                 const onclick = __HANDLER__;
                 const lastToast = () => (s.toasts.length ? s.toasts[s.toasts.length - 1] : '');
@@ -943,7 +963,10 @@ class PlanningNavigationContractTests(unittest.TestCase):
             "__OPENFORM_FACTORY__",
             "(function (modal, esc, icon, TASK_TYPES, TASK_TYPE_LABELS, "
             "WEEKDAY_NAMES, gw, toast) { return function (task) {"
-            + openform.group(1) + "} })")
+             " const occurrences = this.occurrences;"
+             " const initRetroFields = (...args) => this.initRetroFields(...args);"
+             " const onSaved = () => this.loadAll();"
+            + openform_body + "} })")
         ctx = quickjs.Context()
         ctx.eval(harness)
         for _ in range(10000):
@@ -1036,8 +1059,7 @@ class PlanningNavigationContractTests(unittest.TestCase):
         quickjs = _try_import_quickjs()
         if quickjs is None:
             self.skipTest("quickjs is not installed")
-        openform = re.search(r"  openTaskForm\(task\) \{(.*?)\n  \},", self.page, re.S)
-        self.assertIsNotNone(openform, "openTaskForm not found in planning.js")
+        openform_body = _task_form_source(self.form)
         harness = """
             var __result = null, __error = null;
             (async () => {
@@ -1159,7 +1181,10 @@ class PlanningNavigationContractTests(unittest.TestCase):
         """.replace("__OPENFORM_FACTORY__",
                     "(function (modal, esc, icon, TASK_TYPES, TASK_TYPE_LABELS, "
                     "WEEKDAY_NAMES, gw, toast) { return function (task) {"
-                    + openform.group(1) + "} })")
+             " const occurrences = this.occurrences;"
+             " const initRetroFields = (...args) => this.initRetroFields(...args);"
+             " const onSaved = () => this.loadAll();"
+                    + openform_body + "} })")
         ctx = quickjs.Context()
         ctx.eval(harness)
         for _ in range(10000):
@@ -1203,11 +1228,11 @@ class PlanningPayloadBackendAcceptanceTests(unittest.TestCase):
     """
 
     def _context(self):
-        from test_planning_phase1b import Context
+        from tests.support.planning_context import Context
         return Context()
 
     def test_create_four_window_combos_are_accepted(self):
-        from test_planning_phase1b import at
+        from tests.support.planning_context import at
         # 无窗口
         with self._context() as c:
             task = c.create("daily", at(24, 10), estimated_minutes=30)
@@ -1233,7 +1258,7 @@ class PlanningPayloadBackendAcceptanceTests(unittest.TestCase):
             assert (row.get("window_start_tod"), row.get("window_end_tod")) == ("09:00", "12:00")
 
     def test_create_30min_window_schedules_inside_window(self):
-        from test_planning_phase1b import at
+        from tests.support.planning_context import at
         with self._context() as c:
             # 08:00 创建、窗口 09:00–12:00：est = 窗口起点的连续 30 分钟
             #（09:00–09:30），绝不是占满 09:00–12:00 整段
@@ -1246,7 +1271,7 @@ class PlanningPayloadBackendAcceptanceTests(unittest.TestCase):
             assert occ["est_end"] == occ["window_start_at"].replace("T09:00", "T09:30")
 
     def test_edit_template_patch_with_window_fields_is_accepted(self):
-        from test_planning_phase1b import at
+        from tests.support.planning_context import at
         with self._context() as c:
             task = c.create("daily", at(24, 10), estimated_minutes=30)
             planning.update_task(
@@ -1257,7 +1282,7 @@ class PlanningPayloadBackendAcceptanceTests(unittest.TestCase):
             assert (row.get("window_start_tod"), row.get("window_end_tod")) == ("10:00", None)
 
     def test_current_occurrence_window_edit_is_accepted(self):
-        from test_planning_phase1b import at
+        from tests.support.planning_context import at
         with self._context() as c:
             c.create("daily", at(24, 10), estimated_minutes=30)
             occ = c.rows[0]
@@ -1271,7 +1296,7 @@ class PlanningPayloadBackendAcceptanceTests(unittest.TestCase):
 
     def test_backend_rejects_legacy_fields_frontend_no_longer_sends(self):
         from gateway import planning as planning_module
-        from test_planning_phase1b import at
+        from tests.support.planning_context import at
         with self._context() as c:
             task = c.create("daily", at(24, 10), estimated_minutes=30)
             for legacy in (

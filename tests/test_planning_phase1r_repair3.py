@@ -10,8 +10,8 @@
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
-from gateway import planning
-from test_planning_phase1b import Context, at
+from gateway import planning, planning_generation, planning_runtime
+from tests.support.planning_context import Context, at
 
 
 CST = timezone(timedelta(hours=8))
@@ -30,7 +30,7 @@ def test_h1_late_retry_recovers_persisted_request():
         c.create("daily", at(23))
         occ = _timeout_occ(c)
         with mock.patch.object(
-            planning, "_create_occurrences", side_effect=RuntimeError("down"),
+            planning_generation, "_create_occurrences", side_effect=RuntimeError("down"),
         ):
             try:
                 planning.reschedule_timeout_as_new(
@@ -57,7 +57,7 @@ def test_h1_late_retry_recovers_after_background_heal():
         c.create("daily", at(23))
         occ = _timeout_occ(c)
         with mock.patch.object(
-            planning, "_create_occurrences", side_effect=RuntimeError("down"),
+            planning_generation, "_create_occurrences", side_effect=RuntimeError("down"),
         ):
             try:
                 planning.reschedule_timeout_as_new(
@@ -118,7 +118,7 @@ def test_h3_takeover_prevents_ghost_after_background_maintenance():
         c.create("daily", at(23))
         occ = _timeout_occ(c)
         with mock.patch.object(
-            planning, "_create_occurrences", side_effect=RuntimeError("down"),
+            planning_generation, "_create_occurrences", side_effect=RuntimeError("down"),
         ):
             try:
                 planning.reschedule_timeout_as_new(
@@ -189,7 +189,7 @@ def test_h3_same_key_retry_recovers_rather_than_supersede():
         c.create("daily", at(23))
         occ = _timeout_occ(c)
         with mock.patch.object(
-            planning, "_create_occurrences", side_effect=RuntimeError("down"),
+            planning_generation, "_create_occurrences", side_effect=RuntimeError("down"),
         ):
             try:
                 planning.reschedule_timeout_as_new(
@@ -216,7 +216,7 @@ def test_h3_old_key_replay_reports_superseded_and_never_revives():
         c.create("daily", at(23))
         occ = _timeout_occ(c)
         with mock.patch.object(
-            planning, "_create_occurrences", side_effect=RuntimeError("down"),
+            planning_generation, "_create_occurrences", side_effect=RuntimeError("down"),
         ):
             try:
                 planning.reschedule_timeout_as_new(
@@ -370,7 +370,7 @@ def test_m6_true_failure_injection_then_idempotent_repair():
         c.create("interval", at(24), refresh_mode="after_completion", interval_days=3)
         state = {"fail_updates": True}
         failed = False
-        with mock.patch.object(planning, "get_client", return_value=_FailOnceClient(c.db, state)):
+        with mock.patch.object(planning_runtime, "get_client", return_value=_FailOnceClient(c.db, state)):
             # 基准更新失败以原始异常上抛（API 层映射 500）——请求失败
             try:
                 planning.complete_task_early(1, at(24, 8), idempotency_key="m6-fix")

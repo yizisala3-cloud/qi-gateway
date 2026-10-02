@@ -15,8 +15,8 @@ from datetime import datetime, timezone, timedelta
 import pytest
 
 from gateway import planning
-from test_planning import _setup
-from test_planning_phase1b import Context, at
+from tests.support.planning_context import setup_core as _setup
+from tests.support.planning_context import Context, at
 
 CST = timezone(timedelta(hours=8))
 
@@ -29,51 +29,7 @@ def iso(dt):
     return planning._iso(dt)
 
 
-def cycle_of(now):
-    return planning._current_cycle(now).key.isoformat()
-
-
-def seed_task(client, task_id, *, estimated_minutes=30, **kw):
-    client.rows["planning_task"].append({
-        "id": task_id, "content": kw.get("content", "任务"),
-        "task_type": kw.get("task_type", "daily"), "refresh_mode": "daily",
-        "refresh_enabled": True, "time_mode": "duration",
-        "estimated_minutes": estimated_minutes,
-        "window_start_tod": kw.get("window_start_tod"),
-        "window_end_tod": kw.get("window_end_tod"),
-        "est_start_tod": None, "est_end_tod": None, "is_fixed": False,
-        "deadline_tod": None, "deadline_end_tod": None,
-        "is_hollow": kw.get("is_hollow", False),
-        "hollow_start_minutes": kw.get("hollow_start_minutes"),
-        "hollow_wait_minutes": kw.get("hollow_wait_minutes"),
-        "hollow_end_minutes": kw.get("hollow_end_minutes"),
-        "is_active": True, "cursor_date": None, "next_due": None,
-    })
-
-
-def seed_occ(client, occ_id, task_id, *, now, sort_order=10, status="pending",
-             phase=None, round_key=None, phase_group=None, planned_minutes=30,
-             planned_wait_minutes=None, window_start_at=None, window_end_at=None,
-             est_start=None, est_end=None, is_fixed=False,
-             estimated_time_source="unassigned", fixed_source=None,
-             schedule_managed=True):
-    cycle = cycle_of(now)
-    client.rows["planning_occurrence"].append({
-        "id": occ_id, "task_id": task_id, "for_date": cycle,
-        "round_key": round_key or f"cycle:{cycle}", "schedule_date": cycle,
-        "display_cycle_date": cycle, "display_reason": "initial",
-        "phase": phase, "phase_group": phase_group,
-        "est_start": est_start, "est_end": est_end, "nominal_start": None,
-        "actual_start": None, "actual_end": None, "status": status,
-        "planned_minutes": planned_minutes,
-        "planned_wait_minutes": planned_wait_minutes,
-        "sort_order": sort_order, "is_fixed": is_fixed, "is_limited": False,
-        "estimated_time_source": estimated_time_source,
-        "fixed_source": fixed_source, "schedule_managed": schedule_managed,
-        "window_start_at": window_start_at, "window_end_at": window_end_at,
-        "source": "schedule", "closed_at": None,
-    })
-    return client.rows["planning_occurrence"][-1]
+from tests.support.planning_fixtures import cycle_of, seed_task, seed_occ
 
 
 def assert_single_conflict(result, occ_id, *, phase=None, constraint="window_end"):

@@ -17,9 +17,9 @@ current 与 absorbed 中同时消失，丢失键迟到重放被当成全新修�
 
 from unittest import mock
 
-from gateway import planning
-from test_planning_phase1b import Context, at
-from test_planning_phase1r_repair5 import (
+from gateway import planning, planning_reschedule
+from tests.support.planning_context import Context, at
+from tests.support.planning_fixtures import (
     _once_occs,
     _once_tasks,
     _timeout_occ,
@@ -42,7 +42,7 @@ def test_f1_taken_over_creator_cannot_land_stale_anchor():
     with Context() as c:
         c.create("daily", at(23))
         occ = _timeout_occ(c)
-        real_guard = planning._reschedule_still_pending
+        real_guard = planning_reschedule._reschedule_still_pending
         ran = {"b": False}
 
         def interleaved_guard(client, task_row):
@@ -59,7 +59,7 @@ def test_f1_taken_over_creator_cannot_land_stale_anchor():
                 live["request_state"] = "pending"
             return real_guard(client, task_row)
 
-        with mock.patch.object(planning, "_reschedule_still_pending", side_effect=interleaved_guard):
+        with mock.patch.object(planning_reschedule, "_reschedule_still_pending", side_effect=interleaved_guard):
             result_a = planning.reschedule_timeout_as_new(
                 occ["id"], {"est_start": at(25, 19).isoformat()}, at(25, 15),
                 idempotency_key="kA",

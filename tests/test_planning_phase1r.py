@@ -13,7 +13,7 @@ from datetime import timedelta
 from unittest import mock
 
 from gateway import planning
-from test_planning_phase1b import Context, at
+from tests.support.planning_context import Context, at
 
 
 class RecalcContext(Context):

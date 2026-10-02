@@ -14,7 +14,7 @@ import pytest
 from datetime import datetime
 
 from gateway import planning
-from test_planning_phase1b import Context, at
+from tests.support.planning_context import Context, at
 
 
 # ── HIGH #1：HH:MM:SS 往返（真实 PostgREST time 列形状） ────────────
@@ -249,7 +249,10 @@ def test_ui1_list_tasks_marks_generated_once():
 def test_query_filter_chain_never_appends_select():
     import re
     from pathlib import Path
-    source = (Path(__file__).resolve().parents[1] / "gateway" / "planning.py").read_text(
-        encoding="utf-8")
+    gateway = Path(__file__).resolve().parents[1] / "gateway"
+    source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(gateway.glob("planning*.py"))
+    )
     leaked = re.findall(r"\.in_\([^)]*\)\s*\.\s*select\(", source)
     assert leaked == [], f"postgrest in_→select 链序回归（supabase 2.15.1 不兼容）: {leaked}"

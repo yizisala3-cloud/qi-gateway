@@ -21,55 +21,10 @@ from unittest import mock
 import pytest
 
 from gateway import planning
-from test_planning_phase1a import _Database
 
 
-CST = timezone(timedelta(hours=8))
+from tests.support.planning_context import CST, CreationContext as Context, at
 
-
-def at(day, hour=7, minute=0, month=9):
-    return datetime(2026, month, day, hour, minute, tzinfo=CST)
-
-
-class Context:
-    def __init__(self):
-        self.db = _Database()
-        self.settings = {}
-        self.patches = [
-            mock.patch.object(planning, "get_client", return_value=self.db),
-            mock.patch.object(planning.db, "load_app_setting", side_effect=self.settings.get),
-            mock.patch.object(planning.db, "save_app_setting", side_effect=self.save),
-            mock.patch.object(planning, "request_recompute"),
-        ]
-
-    def save(self, key, value):
-        self.settings[key] = value
-        return True
-
-    def __enter__(self):
-        for patch in self.patches:
-            patch.start()
-        return self
-
-    def __exit__(self, *_):
-        for patch in reversed(self.patches):
-            patch.stop()
-
-    @property
-    def rows(self):
-        return self.db.rows["planning_occurrence"]
-
-    @property
-    def tasks(self):
-        return self.db.rows["planning_task"]
-
-    def create(self, kind, now=at(24), **kwargs):
-        return planning.create_task({
-            "content": kind, "task_type": kind, "estimated_minutes": 30, **kwargs,
-        }, now)
-
-
-# ── #17 场景 A：本轮已截止 → 保存任务、零实例、次日起生效 ──────────
 
 def test_scenario_a_daily_deadline_passed_skips_current_round():
     # 10:00 创建每日 08:00–09:00：任务保存成功、当前轮零实例；次日正常

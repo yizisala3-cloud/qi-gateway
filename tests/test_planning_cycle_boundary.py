@@ -11,8 +11,8 @@ from unittest import mock
 
 import pytest
 
-from gateway import planning
-from test_planning_phase1b import Context, at
+from gateway import planning, planning_runtime
+from tests.support.planning_context import Context, at
 
 BOUNDARY_KEY = planning.PLANNING_BOUNDARY_STATE_KEY
 
@@ -443,7 +443,7 @@ def test_cycle_api_returns_409_with_conflict_details():
                  window_start_tod="10:00", window_end_tod="14:00")
         tokens = [
             mock.patch.object(cfg, "GATEWAY_TOKEN", "b7-test"),
-            mock.patch.object(planning, "get_client", return_value=c.db),
+            mock.patch.object(planning_runtime, "get_client", return_value=c.db),
         ]
 
         @contextlib.contextmanager

@@ -13,40 +13,12 @@
 
 import pytest
 
-from gateway import planning
+from gateway import planning, planning_recompute
 from gateway.planning_domain import BUSINESS_TIMEZONE
-from test_planning_phase1b import Context, at
+from tests.support.planning_context import Context, at
 
 
-HOLLOW = dict(is_hollow=True, hollow_start_content="准备", hollow_start_minutes=30,
-              hollow_wait_minutes=60, hollow_end_content="收尾", hollow_end_minutes=30)
-
-
-def datetime_tz(day, hour, minute=0):
-    from datetime import datetime
-    return datetime(2026, 9, day, hour, minute, tzinfo=BUSINESS_TIMEZONE)
-
-
-def iso(day, hour, minute=0):
-    return planning._iso(datetime_tz(day, hour, minute))
-
-
-def iso_dt(y, m, d, hour, minute=0):
-    from datetime import datetime
-    return planning._iso(datetime(y, m, d, hour, minute, tzinfo=BUSINESS_TIMEZONE))
-
-
-def _fields(occ):
-    """已生成 occurrence 的冻结事实快照（身份 + 窗口 + fixed 生命周期 + est）。
-
-    ``display_cycle_date`` 不在内：合法顺延使其前进（§6.3），不属于冻结事实；
-    冻结不变量针对窗口、身份与 fixed 生命周期事实（§28.1、不变量 36）。"""
-    return {key: occ.get(key) for key in (
-        "id", "task_id", "round_key", "schedule_date",
-        "window_start_at", "window_end_at", "fixed_due_at", "fixed_expires_at",
-        "planned_minutes", "status", "est_start", "est_end",
-        "estimated_time_source", "fixed_source", "is_fixed",
-    )}
+from tests.support.planning_fixtures import HOLLOW, datetime_tz, iso, iso_dt, _fields
 
 
 # ── A. 任务模板窗口编辑：只影响未来轮次（§18.3 / §28.1） ──────────
@@ -309,7 +281,7 @@ def test_occurrence_window_pan_updates_window_and_reschedules():
         assert stored.get("window_start_tod") is None and stored.get("window_end_tod") is None
         # est 未被本编辑改写；由下一次重算在新窗口内重新派生
         assert occ["est_start"] == iso(24, 10)
-        assert planning.request_recompute.called  # 约束变化 → 请求自动重算
+        assert planning_recompute.request_recompute.called  # 约束变化 → 请求自动重算
         planning.recompute_today(at(24, 11, 5))
         assert (occ["est_start"], occ["est_end"]) == (iso(24, 18), iso(24, 18, 30))
 

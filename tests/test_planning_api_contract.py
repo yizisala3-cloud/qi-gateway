@@ -14,10 +14,11 @@ from unittest import mock
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
-from gateway import planning
+from gateway import planning, planning_runtime
 from gateway.config import cfg
 from gateway.planning_api import planning_api_routes
-from tests.test_planning import CST, _Client, _cst
+from tests.support.planning_context import CST, cst as _cst
+from tests.support.planning_db import CoreClient as _Client
 
 GATEWAY_TOKEN = "gateway-token-test"
 
@@ -49,7 +50,7 @@ class PlanningApiContractTests(unittest.TestCase):
 
         patches = [
             mock.patch.object(cfg, "GATEWAY_TOKEN", GATEWAY_TOKEN),
-            mock.patch.object(planning, "get_client", lambda: self.client),
+            mock.patch.object(planning_runtime, "get_client", lambda: self.client),
             mock.patch.object(planning.db, "load_app_setting", fake_load),
             mock.patch.object(planning.db, "save_app_setting", fake_save),
         ]
@@ -105,7 +106,7 @@ class PlanningApiContractTests(unittest.TestCase):
         self.assertEqual(response.json()["error_code"], "not_found")
 
     def test_today_board_shape(self):
-        with mock.patch.object(planning, "_now", lambda: NOW):
+        with mock.patch.object(planning_runtime, "_now", lambda: NOW):
             self.http.post(
                 "/admin/api/planning/tasks",
                 json={"content": "背单词", "task_type": "daily", "estimated_minutes": 30},
@@ -123,7 +124,7 @@ class PlanningApiContractTests(unittest.TestCase):
         self.assertIn("recompute", body)
 
     def test_status_transition_rules_surface_as_422(self):
-        with mock.patch.object(planning, "_now", lambda: NOW):
+        with mock.patch.object(planning_runtime, "_now", lambda: NOW):
             created = self.http.post(
                 "/admin/api/planning/tasks",
                 json={"content": "背单词", "task_type": "daily", "estimated_minutes": 30},
@@ -144,7 +145,7 @@ class PlanningApiContractTests(unittest.TestCase):
         # #3：显式 est_end=null 的半区间预估修改返回 400 中文业务原因
         # （此前泄漏英文领域 ValueError「estimated time must be a complete
         # interval」），且零写入。
-        with mock.patch.object(planning, "_now", lambda: NOW):
+        with mock.patch.object(planning_runtime, "_now", lambda: NOW):
             self.http.post(
                 "/admin/api/planning/tasks",
                 json={"content": "背单词", "task_type": "daily", "estimated_minutes": 30},
@@ -166,7 +167,7 @@ class PlanningApiContractTests(unittest.TestCase):
         self.assertIn("预估", body["error"])
         self.assertEqual((occ["est_start"], occ["est_end"]), original)  # 零写入
         # 对照（既有语义不回归）：省略 est_end 仍按预计耗时自动补终点。
-        with mock.patch.object(planning, "_now", lambda: NOW):
+        with mock.patch.object(planning_runtime, "_now", lambda: NOW):
             ok = self.http.patch(
                 f"/admin/api/planning/occurrences/{occ['id']}",
                 json={"est_start": "2026-09-20T15:00:00+08:00"},
@@ -177,7 +178,7 @@ class PlanningApiContractTests(unittest.TestCase):
         self.assertEqual(row["est_end"], planning._iso(_cst(2026, 9, 20, 15, 30)))
 
     def test_manual_recompute_and_wait_state(self):
-        with mock.patch.object(planning, "_now", lambda: NOW):
+        with mock.patch.object(planning_runtime, "_now", lambda: NOW):
             state = self.http.get("/admin/api/planning/recompute", headers=self.auth).json()
             self.assertFalse(state["pending"])
             response = self.http.post("/admin/api/planning/recompute", headers=self.auth)
@@ -198,7 +199,7 @@ class PlanningApiContractTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_complete_early_only_for_refreshable_tasks(self):
-        with mock.patch.object(planning, "_now", lambda: NOW):
+        with mock.patch.object(planning_runtime, "_now", lambda: NOW):
             created = self.http.post(
                 "/admin/api/planning/tasks",
                 json={"content": "背单词", "task_type": "daily", "estimated_minutes": 30},
@@ -229,7 +230,7 @@ class PlanningApiContractTests(unittest.TestCase):
         # #19（2026-10-01 §12.3）：完成时手填 1h1m1s → 独立秒粒度字段落库；
         # 真实起止与自动耗时（actual_minutes）照常记录、不被手填覆盖。
         clock = {"now": NOW}
-        with mock.patch.object(planning, "_now", lambda: clock["now"]):
+        with mock.patch.object(planning_runtime, "_now", lambda: clock["now"]):
             occ_id = self._seed_daily_round(clock)
             clock["now"] = NOW + timedelta(minutes=35)
             response = self.http.post(
@@ -250,7 +251,7 @@ class PlanningApiContractTests(unittest.TestCase):
     def test_finish_accepts_bare_minutes_and_blank_input(self):
         # 无后缀「90」按 90 分钟（5400 秒）解析；留空 = 未手填（NULL）。
         clock = {"now": NOW}
-        with mock.patch.object(planning, "_now", lambda: clock["now"]):
+        with mock.patch.object(planning_runtime, "_now", lambda: clock["now"]):
             occ_id = self._seed_daily_round(clock)
             response = self.http.post(
                 f"/admin/api/planning/occurrences/{occ_id}/finish",
@@ -263,7 +264,7 @@ class PlanningApiContractTests(unittest.TestCase):
             self.assertEqual(row["status"], "completed")
             self.assertEqual(row["actual_logged_seconds"], 5400)
 
-        with mock.patch.object(planning, "_now", lambda: clock["now"]):
+        with mock.patch.object(planning_runtime, "_now", lambda: clock["now"]):
             self.http.post(
                 "/admin/api/planning/tasks",
                 json={"content": "擦桌子", "task_type": "daily", "estimated_minutes": 10},
@@ -285,7 +286,7 @@ class PlanningApiContractTests(unittest.TestCase):
     def test_finish_without_body_keeps_legacy_contract(self):
         # /finish 原本无 body 仍可用（body 可选端点契约）。
         clock = {"now": NOW}
-        with mock.patch.object(planning, "_now", lambda: clock["now"]):
+        with mock.patch.object(planning_runtime, "_now", lambda: clock["now"]):
             occ_id = self._seed_daily_round(clock)
             response = self.http.post(
                 f"/admin/api/planning/occurrences/{occ_id}/finish",
@@ -296,7 +297,7 @@ class PlanningApiContractTests(unittest.TestCase):
 
     def test_finish_rejects_invalid_logged_duration_with_chinese_reason(self):
         clock = {"now": NOW}
-        with mock.patch.object(planning, "_now", lambda: clock["now"]):
+        with mock.patch.object(planning_runtime, "_now", lambda: clock["now"]):
             occ_id = self._seed_daily_round(clock)
             for bad, fragment in (
                 ("45x", "格式"),

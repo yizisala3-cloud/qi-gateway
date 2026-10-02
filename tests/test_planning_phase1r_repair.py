@@ -14,8 +14,8 @@ from unittest import mock
 
 import pytest
 
-from gateway import planning
-from test_planning_phase1b import Context, at
+from gateway import planning, planning_generation, planning_occurrences
+from tests.support.planning_context import Context, at
 
 
 CST = timezone(timedelta(hours=8))
@@ -174,7 +174,7 @@ def test_timeout_reschedule_generation_failure_is_not_silent_success():
         occ = c.rows[0]
         occ["status"] = "timeout"
         with mock.patch.object(
-            planning, "_create_occurrences", side_effect=RuntimeError("generation down"),
+            planning_generation, "_create_occurrences", side_effect=RuntimeError("generation down"),
         ):
             try:
                 planning.reschedule_timeout_as_new(
@@ -207,7 +207,7 @@ def test_timeout_reschedule_recovery_survives_repeated_generation_failures():
         occ = c.rows[0]
         occ["status"] = "timeout"
         with mock.patch.object(
-            planning, "_create_occurrences", side_effect=RuntimeError("down"),
+            planning_generation, "_create_occurrences", side_effect=RuntimeError("down"),
         ):
             for _ in range(2):
                 try:
@@ -268,7 +268,7 @@ def test_task_duration_edit_does_not_reinterpret_generated_instances():
         assert dur == 30
         # 未来新实例使用 120
         fresh_task = next(row for row in c.db.rows["planning_task"] if row["id"] == task["id"])
-        planning._create_occurrences(c.db, fresh_task, date(2026, 9, 24), at(24))
+        planning_generation._create_occurrences(c.db, fresh_task, date(2026, 9, 24), at(24))
         future = next(row for row in c.rows if row["schedule_date"] == "2026-09-24")
         assert future["planned_minutes"] == 120
         planning.recompute_today(at(24, 7))
@@ -287,7 +287,7 @@ def test_api_and_display_use_instance_duration_snapshot():
         serialized = planning.serialize_occurrence(occ, task_row, at(23, 10))
         assert serialized["estimated_minutes"] == 30
         # 新实例展示 120
-        fresh = planning._create_occurrences(c.db, task_row, date(2026, 9, 24), at(24))
+        fresh = planning_generation._create_occurrences(c.db, task_row, date(2026, 9, 24), at(24))
         assert fresh == 1
         fresh_occ = next(row for row in c.rows if row["schedule_date"] == "2026-09-24")
         assert planning.serialize_occurrence(
@@ -300,10 +300,10 @@ def test_closed_history_correction_to_discarded_is_row_only():
     with Context() as c:
         c.create("daily", at(23))
         first = c.rows[0]  # 9/23 轮（已完成历史）
-        planning.set_occurrence_status(first["id"], {"status": "completed"}, at(23, 15))
+        planning_occurrences.set_occurrence_status(first["id"], {"status": "completed"}, at(23, 15))
         planning.generate_due(at(25))
         second = next(row for row in c.rows if row["schedule_date"] == "2026-09-25")
-        planning.set_occurrence_status(first["id"], {"status": "discarded"}, at(24, 9))
+        planning_occurrences.set_occurrence_status(first["id"], {"status": "discarded"}, at(24, 9))
         assert c.db.rows["planning_task"][0]["is_active"] is True
         assert second["status"] == "pending"
         # 任务未来仍按规则刷新
@@ -316,12 +316,12 @@ def test_closed_correction_completed_discarded_both_directions():
     with Context() as c:
         c.create("daily", at(23))
         occ = c.rows[0]
-        planning.set_occurrence_status(occ["id"], {"status": "completed"}, at(23, 15))
-        planning.set_occurrence_status(occ["id"], {"status": "discarded"}, at(24, 9))
+        planning_occurrences.set_occurrence_status(occ["id"], {"status": "completed"}, at(23, 15))
+        planning_occurrences.set_occurrence_status(occ["id"], {"status": "discarded"}, at(24, 9))
         assert occ["status"] == "discarded"
         assert occ.get("handled_at") == at(23, 15).isoformat()
         assert occ["closed_at"] == at(23, 15).isoformat()
-        planning.set_occurrence_status(occ["id"], {"status": "completed"}, at(25, 9))
+        planning_occurrences.set_occurrence_status(occ["id"], {"status": "completed"}, at(25, 9))
         assert occ["status"] == "completed"
         assert occ["handled_at"] == at(23, 15).isoformat()
         assert occ["closed_at"] == at(23, 15).isoformat()
@@ -334,10 +334,10 @@ def test_correction_from_unhandled_discard_records_handling_at_correction_time()
     with Context() as c:
         c.create("interval", at(24), refresh_mode="after_completion", interval_days=3)
         occ = c.rows[0]
-        planning.set_occurrence_status(occ["id"], {"status": "discarded"}, at(24, 9))
+        planning_occurrences.set_occurrence_status(occ["id"], {"status": "discarded"}, at(24, 9))
         assert occ.get("handled_at") is None
         assert c.db.rows["planning_task"][0]["is_active"] is False
-        planning.set_occurrence_status(occ["id"], {"status": "completed"}, at(26, 10))
+        planning_occurrences.set_occurrence_status(occ["id"], {"status": "completed"}, at(26, 10))
         assert occ["handled_at"] == at(26, 10).isoformat()
         task_row = c.db.rows["planning_task"][0]
         assert task_row["is_active"] is False
@@ -352,7 +352,7 @@ def test_early_completion_failure_does_not_touch_unrelated_tasks():
         b_before = len([row for row in c.rows if row["task_id"] == 2])
         def failing(*args, **kwargs):
             raise RuntimeError("injected A write failure")
-        with mock.patch.object(planning, "set_occurrence_status", side_effect=failing):
+        with mock.patch.object(planning_occurrences, "set_occurrence_status", side_effect=failing):
             try:
                 planning.complete_task_early(1, at(25, 10), idempotency_key="a-1")
             except RuntimeError:

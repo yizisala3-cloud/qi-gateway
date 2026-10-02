@@ -15,9 +15,9 @@ C-1（复审唯一 C 类 finding）：adopt 并发修改时间时 `request_absor
 from datetime import timedelta
 from unittest import mock
 
-from gateway import planning
-from test_planning_phase1b import Context, at
-from test_planning_phase1r_repair5 import (
+from gateway import planning, planning_reschedule, planning_runtime
+from tests.support.planning_context import Context, at
+from tests.support.planning_fixtures import (
     _after_completion_task,
     _once_occs,
     _once_tasks,
@@ -41,7 +41,7 @@ def _interleave_second_request_before_first_cas(occ, second_payload, second_key,
     跑完（读到的是同一份现状），再把 B 执行前的快照返回给 A，使 A 的
     CAS 建立在过期身份上（真实数据库中该 CAS 必然 0 行命中）。
     """
-    real_fetch = planning._fetch_task
+    real_fetch = planning_runtime._fetch_task
     state = {"stage": "top", "b_ran": False}
 
     def hooked_fetch(client, task_id):
@@ -78,7 +78,7 @@ def test_c1a_concurrent_double_modify_keeps_both_keys_tracked():
         hooked = _interleave_second_request_before_first_cas(
             occ, {"est_start": at(25, 20).isoformat()}, "kB",
         )
-        with mock.patch.object(planning, "_fetch_task", side_effect=hooked):
+        with mock.patch.object(planning_runtime, "_fetch_task", side_effect=hooked):
             result_a = planning.reschedule_timeout_as_new(
                 occ["id"], {"est_start": at(25, 19).isoformat()}, at(25, 15),
                 idempotency_key="kA",
@@ -110,7 +110,7 @@ def test_c1b_lost_key_late_replays_converge_to_current():
         hooked = _interleave_second_request_before_first_cas(
             occ, {"est_start": at(25, 20).isoformat()}, "kB",
         )
-        with mock.patch.object(planning, "_fetch_task", side_effect=hooked):
+        with mock.patch.object(planning_runtime, "_fetch_task", side_effect=hooked):
             planning.reschedule_timeout_as_new(
                 occ["id"], {"est_start": at(25, 19).isoformat()}, at(25, 15),
                 idempotency_key="kA",
@@ -148,7 +148,7 @@ def test_c1c_replay_after_occurrence_closed_creates_no_ghost():
         hooked = _interleave_second_request_before_first_cas(
             occ, {"est_start": at(25, 20).isoformat()}, "kB",
         )
-        with mock.patch.object(planning, "_fetch_task", side_effect=hooked):
+        with mock.patch.object(planning_runtime, "_fetch_task", side_effect=hooked):
             planning.reschedule_timeout_as_new(
                 occ["id"], {"est_start": at(25, 19).isoformat()}, at(25, 15),
                 idempotency_key="kA",
@@ -194,7 +194,7 @@ def test_c1d_cas_failure_preserves_newer_user_facts():
             occ, {"est_start": at(25, 20).isoformat()}, "kB",
             extra_hook=user_saves_partial,
         )
-        with mock.patch.object(planning, "_fetch_task", side_effect=hooked):
+        with mock.patch.object(planning_runtime, "_fetch_task", side_effect=hooked):
             result_a = planning.reschedule_timeout_as_new(
                 occ["id"], {"est_start": at(25, 19).isoformat()}, at(25, 15),
                 idempotency_key="kA",
@@ -226,7 +226,7 @@ def test_c1e_winner_crash_window_completed_by_same_key_retry():
             raise RuntimeError("crash between CAS and anchor")
 
         with mock.patch.object(
-            planning, "_finalize_reschedule_occurrence", side_effect=crash_after_cas,
+            planning_reschedule, "_finalize_reschedule_occurrence", side_effect=crash_after_cas,
         ):
             try:
                 planning.reschedule_timeout_as_new(
@@ -261,7 +261,7 @@ def test_c1f_adopt_never_touches_closed_occurrence_est():
             idempotency_key="k1",
         )
         occ_id = _once_occs(c)[0]["id"]
-        real_fetch = planning._fetch_task
+        real_fetch = planning_runtime._fetch_task
         state = {"stage": "top", "closed": False}
 
         def hooked_fetch(client, task_id):
@@ -277,7 +277,7 @@ def test_c1f_adopt_never_touches_closed_occurrence_est():
                 return snapshot
             return row
 
-        with mock.patch.object(planning, "_fetch_task", side_effect=hooked_fetch):
+        with mock.patch.object(planning_runtime, "_fetch_task", side_effect=hooked_fetch):
             result = planning.reschedule_timeout_as_new(
                 occ["id"], {"est_start": at(25, 19).isoformat()}, at(25, 15),
                 idempotency_key="k2",
@@ -341,7 +341,7 @@ def test_first_fact_failure_still_does_not_open_window():
     with Context() as c:
         _after_completion_task(c)
         planning.set_occurrence_status(c.rows[0]["id"], {"status": "completed"}, at(24, 7))
-        with mock.patch.object(planning, "get_client", return_value=None):
+        with mock.patch.object(planning_runtime, "get_client", return_value=None):
             try:
                 planning.complete_task_early(1, at(24, 8), idempotency_key="k1")
             except planning.PlanningError as error:

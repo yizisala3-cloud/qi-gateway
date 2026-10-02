@@ -19,10 +19,10 @@ from unittest import mock
 
 import pytest
 
-from gateway import planning
-from test_planning import _setup
-from test_planning_phase1b import Context, at
-from test_planning_window_schedule import seed_occ, seed_task
+from gateway import planning, planning_common, planning_generation, planning_recompute
+from tests.support.planning_context import setup_core as _setup
+from tests.support.planning_context import Context, at
+from tests.support.planning_fixtures import seed_occ, seed_task
 
 CST = timezone(timedelta(hours=8))
 
@@ -445,7 +445,7 @@ def test_scheduling_conflict_keeps_status_open_until_window_end():
         seed_task(client, 1, estimated_minutes=60)
         row = seed_occ(client, 1, 1, now=now, planned_minutes=60,
                        window_start_at=iso(20, 3), window_end_at=iso(20, 5))
-        result = planning.recompute_today(now)
+        result = planning_recompute.recompute_today(now)
         assert len(result["conflicts"]) == 1  # 排程冲突（窗口内装不下）
         assert row["status"] == "pending"
         # now 仍未越过窗口终点：sweep 不打标
@@ -606,7 +606,7 @@ def test_windowless_open_rows_cannot_fill_sweep_page():
                        for i in range(1, 1001)])
         _bulk_rows(c, [{"id": 1001, "status": "pending",
                         "window_end_at": planning._iso(ats(24, 12))}])
-        with mock.patch.object(planning, "SWEEP_PAGE_SIZE", 2):
+        with mock.patch.object(planning_common, "SWEEP_PAGE_SIZE", 2):
             result = planning.sweep_timeouts(ats(24, 13))
         assert result["timed_out"] == 1
         due_row = c.db.rows["planning_occurrence"][1000]
@@ -623,13 +623,13 @@ def test_all_due_rows_across_pages_all_time_out():
     with Context() as c:
         _bulk_rows(c, [{"id": i, "status": "pending", "window_end_at": frozen_end}
                        for i in range(1, 1003)])
-        with mock.patch.object(planning, "SWEEP_PAGE_SIZE", 1000):
+        with mock.patch.object(planning_common, "SWEEP_PAGE_SIZE", 1000):
             result = planning.sweep_timeouts(ats(24, 13))
         assert result["timed_out"] == 1002
         rows = c.db.rows["planning_occurrence"]
         assert all(row["status"] == "timeout" for row in rows)
         assert all(row["closed_at"] == frozen_end for row in rows)
-        with mock.patch.object(planning, "SWEEP_PAGE_SIZE", 1000):
+        with mock.patch.object(planning_common, "SWEEP_PAGE_SIZE", 1000):
             assert planning.sweep_timeouts(ats(24, 14))["timed_out"] == 0
         assert all(row["updated_at"] == planning._iso(ats(24, 13)) for row in rows)
 
@@ -641,7 +641,7 @@ def test_multi_page_sweep_never_skips_rows_after_first_page_update():
         _bulk_rows(c, [{"id": i, "status": "pending",
                         "window_end_at": planning._iso(ats(24, 12))}
                        for i in range(1, 8)])
-        with mock.patch.object(planning, "SWEEP_PAGE_SIZE", 3):
+        with mock.patch.object(planning_common, "SWEEP_PAGE_SIZE", 3):
             result = planning.sweep_timeouts(ats(24, 13))
         assert result["timed_out"] == 7
         assert all(row["status"] == "timeout"
@@ -1064,7 +1064,7 @@ def test_cleanup_only_failure_propagates_and_blocks_completion():
         c.create("interval", at(23, 6), refresh_mode="fixed_interval", interval_days=3)
         stale = c.rows[0]
         assert stale["fixed_expires_at"] == planning._iso(at(26, 6))
-        real_expire = planning._expire_fixed_rounds
+        real_expire = planning_generation._expire_fixed_rounds
         calls = {"n": 0}
 
         def flaky_expire(client, task, now):
@@ -1073,7 +1073,7 @@ def test_cleanup_only_failure_propagates_and_blocks_completion():
                 raise RuntimeError("cleanup boom")
             return real_expire(client, task, now)
 
-        with mock.patch.object(planning, "_expire_fixed_rounds", side_effect=flaky_expire):
+        with mock.patch.object(planning_generation, "_expire_fixed_rounds", side_effect=flaky_expire):
             with pytest.raises(RuntimeError):
                 planning.complete_task_early(stale["task_id"], at(29, 7),
                                              idempotency_key="cleanup-fail")
@@ -1094,7 +1094,7 @@ def test_cleanup_only_failure_observable_via_generate_due():
     with Context() as c:
         c.create("interval", at(23, 6), refresh_mode="fixed_interval", interval_days=3)
         stale = c.rows[0]
-        real_expire = planning._expire_fixed_rounds
+        real_expire = planning_generation._expire_fixed_rounds
         calls = {"n": 0}
 
         def flaky_expire(client, task, now):
@@ -1103,7 +1103,7 @@ def test_cleanup_only_failure_observable_via_generate_due():
                 raise RuntimeError("cleanup boom")
             return real_expire(client, task, now)
 
-        with mock.patch.object(planning, "_expire_fixed_rounds", side_effect=flaky_expire):
+        with mock.patch.object(planning_generation, "_expire_fixed_rounds", side_effect=flaky_expire):
             result = planning.generate_due(at(29, 7))
         assert [e["task_id"] for e in result["errors"]] == [stale["task_id"]]
         assert result["errors"][0]["error"] == "RuntimeError"
@@ -1119,7 +1119,7 @@ def test_double_failure_keeps_generation_exception_primary(caplog):
     with Context() as c:
         c.create("interval", at(21, 7), refresh_mode="fixed_interval", interval_days=3)
         stale = c.rows[0]
-        real_expire = planning._expire_fixed_rounds
+        real_expire = planning_generation._expire_fixed_rounds
         calls = {"n": 0}
 
         def flaky_expire(client, task, now):
@@ -1129,7 +1129,7 @@ def test_double_failure_keeps_generation_exception_primary(caplog):
             return real_expire(client, task, now)
 
         restore = _fail_fixed_round_inserts(c, stale["task_id"])
-        with mock.patch.object(planning, "_expire_fixed_rounds", side_effect=flaky_expire):
+        with mock.patch.object(planning_generation, "_expire_fixed_rounds", side_effect=flaky_expire):
             with caplog.at_level(logging.ERROR, logger="gateway.planning"):
                 result = planning.generate_due(at(24, 23))
         restore()
@@ -1200,7 +1200,7 @@ def test_error_triggered_recompute_safe_without_new_rows(caplog):
         c.create("daily", at(24, 10), estimated_minutes=30)
         normal = c.rows[-1]
         with mock.patch.object(
-                planning, "_expire_fixed_rounds",
+                planning_generation, "_expire_fixed_rounds",
                 side_effect=RuntimeError("cleanup boom")):
             with caplog.at_level(logging.ERROR, logger="gateway.planning"):
                 result = planning.run_maintenance(at(29, 7))
@@ -1308,7 +1308,7 @@ def test_complete_task_early_recovery_recompute_safe_without_new_rows():
         planning.set_occurrence_status(stale["id"], {"status": "in_progress"}, at(22, 8))
         est_before = stale["est_start"]
         with mock.patch.object(
-                planning, "_expire_fixed_rounds",
+                planning_generation, "_expire_fixed_rounds",
                 side_effect=RuntimeError("cleanup boom")):
             with pytest.raises(RuntimeError):
                 planning.complete_task_early(stale["task_id"], at(24, 8),
@@ -1329,7 +1329,7 @@ def test_complete_task_early_double_failure_keeps_reconcile_exception_primary(ca
         c.create("interval", at(21, 7), refresh_mode="fixed_interval", interval_days=3)
         stale = c.rows[0]
         restore = _fail_task_cursor_updates(c, stale["task_id"])
-        with mock.patch.object(planning, "recompute_today",
+        with mock.patch.object(planning_recompute, "recompute_today",
                                side_effect=ValueError("recompute boom")):
             with caplog.at_level(logging.ERROR, logger="gateway.planning"):
                 with pytest.raises(RuntimeError) as caught:

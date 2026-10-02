@@ -22,13 +22,13 @@ from datetime import date
 import pytest
 from unittest import mock
 
-from gateway import planning
-from test_planning_phase1b import Context, at
-from test_planning_window_edit import HOLLOW, _fields, iso
+from gateway import planning, planning_common, planning_occurrences, planning_recompute, planning_tasks
+from tests.support.planning_context import Context, at
+from tests.support.planning_fixtures import HOLLOW, _fields, iso
 
 # Context 会 mock planning.request_recompute；模块导入时（任何 patch 生效前）
 # 捕获真实现，供 BUG A / BUG B 测试还原真实登记行为。
-_REAL_REQUEST_RECOMPUTE = planning.request_recompute
+_REAL_REQUEST_RECOMPUTE = planning_recompute.request_recompute
 
 
 def _hollow_round(c):
@@ -52,14 +52,14 @@ def test_hollow_window_edit_rejected_after_concurrent_completion():
         c.create("daily", at(24, 7), estimated_minutes=30, **HOLLOW)
         start, end = _hollow_round(c)
         before_e = _fields(end)
-        original_edit = planning._occurrence_window_edit
+        original_edit = planning_occurrences._occurrence_window_edit
 
         def edit_then_concurrent_complete(client, occ, task, payload, now):
             result = original_edit(client, occ, task, payload, now)
             _complete_row(start)  # B：并发请求在 RPC 执行前完成该行
             return result
 
-        planning._occurrence_window_edit = edit_then_concurrent_complete
+        planning_occurrences._occurrence_window_edit = edit_then_concurrent_complete
         try:
             with pytest.raises(planning.PlanningError) as error:
                 planning.patch_occurrence(
@@ -67,7 +67,7 @@ def test_hollow_window_edit_rejected_after_concurrent_completion():
                     {"window_start_at": iso(24, 12), "window_end_at": iso(24, 16)},
                     at(24, 11))
         finally:
-            planning._occurrence_window_edit = original_edit
+            planning_occurrences._occurrence_window_edit = original_edit
         assert error.value.status_code == 409
         assert "并发" in str(error.value)
         # B 的并发完成保留；A 的窗口编辑零写入（两行窗口均为空）
@@ -83,20 +83,20 @@ def test_single_row_window_update_guarded_against_concurrent_completion():
     with Context() as c:
         c.create("daily", at(24, 10), estimated_minutes=30)
         occ = c.rows[0]
-        original_edit = planning._occurrence_window_edit
+        original_edit = planning_occurrences._occurrence_window_edit
 
         def edit_then_concurrent_complete(client, occ_ref, task, payload, now):
             result = original_edit(client, occ_ref, task, payload, now)
             _complete_row(occ)  # B：并发完成
             return result
 
-        planning._occurrence_window_edit = edit_then_concurrent_complete
+        planning_occurrences._occurrence_window_edit = edit_then_concurrent_complete
         try:
             with pytest.raises(planning.PlanningError) as error:
                 planning.patch_occurrence(
                     occ["id"], {"window_start_at": iso(24, 18)}, at(24, 11))
         finally:
-            planning._occurrence_window_edit = original_edit
+            planning_occurrences._occurrence_window_edit = original_edit
         assert error.value.status_code == 409
         # B 的并发完成保留；A 的窗口编辑零写入
         assert occ["status"] == "completed"
@@ -111,7 +111,7 @@ def test_hollow_defer_uses_round_rpc_atomically():
     with Context() as c:
         c.create("daily", at(24, 7), estimated_minutes=30, **HOLLOW)
         start, end = _hollow_round(c)
-        planning.recompute_today(at(24, 7, 30))
+        planning_recompute.recompute_today(at(24, 7, 30))
         assert start["est_start"] == iso(24, 7, 30)
         calls = []
         import test_planning_phase1a as p1a
@@ -156,7 +156,7 @@ def test_hollow_defer_failure_rolls_back_both_phases():
     with Context() as c:
         c.create("daily", at(24, 7), estimated_minutes=30, **HOLLOW)
         start, end = _hollow_round(c)
-        planning.recompute_today(at(24, 7, 30))
+        planning_recompute.recompute_today(at(24, 7, 30))
         before_s, before_e = _fields(start), _fields(end)
         import test_planning_phase1a as p1a
         original_rpc = p1a._Database.rpc
@@ -183,7 +183,7 @@ def test_hollow_defer_from_in_progress_still_allowed():
     with Context() as c:
         c.create("daily", at(24, 7), estimated_minutes=30, **HOLLOW)
         start, end = _hollow_round(c)
-        planning.recompute_today(at(24, 7, 30))
+        planning_recompute.recompute_today(at(24, 7, 30))
         planning.set_occurrence_status(
             start["id"], {"status": "in_progress"}, at(24, 7, 45))
         planning.set_occurrence_status(
@@ -197,7 +197,7 @@ def test_status_transition_is_conditionally_guarded():
     with Context() as c:
         c.create("daily", at(24, 10), estimated_minutes=30)
         occ = c.rows[0]
-        original_reschedule = planning._reschedule_occurrence
+        original_reschedule = planning_occurrences._reschedule_occurrence
 
         def reschedule_then_concurrent_start(occ_ref, task, new_start, now):
             result = original_reschedule(occ_ref, task, new_start, now)
@@ -205,14 +205,14 @@ def test_status_transition_is_conditionally_guarded():
             occ["actual_start"] = iso(24, 10, 45)
             return result
 
-        planning._reschedule_occurrence = reschedule_then_concurrent_start
+        planning_occurrences._reschedule_occurrence = reschedule_then_concurrent_start
         try:
             with pytest.raises(planning.PlanningError) as error:
                 planning.set_occurrence_status(
                     occ["id"], {"status": "deferred", "est_start": iso(24, 18)},
                     at(24, 11))
         finally:
-            planning._reschedule_occurrence = original_reschedule
+            planning_occurrences._reschedule_occurrence = original_reschedule
         assert error.value.status_code == 409
         # B 的并发开始保留；A 的延后（状态 + 时间修改）零写入（原 est 保持）
         assert occ["status"] == "in_progress"
@@ -230,7 +230,7 @@ def test_once_edit_and_generation_are_mutually_exclusive():
                         window_start_tod="18:00", window_end_tod="22:00")
         assert c.rows == []  # 内部周期未到，尚未生成
         generation_done = threading.Event()
-        original_validate = planning._validate_template_window_constraints
+        original_validate = planning_tasks._validate_template_window_constraints
 
         def validate_during_edit(row, now):
             original_validate(row, now)
@@ -245,7 +245,7 @@ def test_once_edit_and_generation_are_mutually_exclusive():
             assert thread.is_alive(), (
                 "generation must be blocked while once edit holds the task lock")
 
-        planning._validate_template_window_constraints = validate_during_edit
+        planning_tasks._validate_template_window_constraints = validate_during_edit
         try:
             planning.update_task(
                 task["id"],
@@ -253,7 +253,7 @@ def test_once_edit_and_generation_are_mutually_exclusive():
                  "window_start_tod": "14:00", "window_end_tod": "18:00"},
                 at(24, 11))
         finally:
-            planning._validate_template_window_constraints = original_validate
+            planning_tasks._validate_template_window_constraints = original_validate
         assert generation_done.wait(timeout=2)
         # 一致性：唯一实例从编辑后的新日期生成，任务与实例不背离
         assert len(c.rows) == 1
@@ -369,7 +369,7 @@ def test_recompute_skips_fact_bearing_pending_rows():
         clean = c.rows[1]
         dirty_end["actual_end"] = iso(24, 12)
         est_before = dirty_end["est_start"]
-        planning.recompute_today(at(24, 13))
+        planning_recompute.recompute_today(at(24, 13))
         assert clean["est_start"] == iso(24, 13)
         assert dirty_end["est_start"] == est_before  # 脏行不参与重算（est 保持）
     with Context() as c:
@@ -379,7 +379,7 @@ def test_recompute_skips_fact_bearing_pending_rows():
         clean = c.rows[1]
         dirty_partial["partial_at"] = iso(24, 12)
         est_before = dirty_partial["est_start"]
-        planning.recompute_today(at(24, 13))
+        planning_recompute.recompute_today(at(24, 13))
         assert clean["est_start"] == iso(24, 13)
         assert dirty_partial["est_start"] == est_before
     with Context() as c:
@@ -390,7 +390,7 @@ def test_recompute_skips_fact_bearing_pending_rows():
         assert occ["partial_at"] is not None
         planning.set_occurrence_status(occ["id"], {"status": "pending"}, at(24, 10, 45))
         est_before = occ["est_start"]
-        planning.recompute_today(at(24, 13))
+        planning_recompute.recompute_today(at(24, 13))
         assert occ["est_start"] == est_before  # partial_at 事实保留 → 不重排
 
 
@@ -404,19 +404,19 @@ def test_actual_minutes_stale_read_rejected():
         occ = c.rows[0]
         planning.set_occurrence_status(occ["id"], {"status": "in_progress"}, at(24, 10, 30))
         assert occ["actual_start"] == iso(24, 10, 30)
-        original_compute = planning._compute_actual_minutes
+        original_compute = planning_common._compute_actual_minutes
 
         def compute_after_concurrent_start(merged):
             occ["actual_start"] = iso(24, 11)  # B：并发修改开始时刻
             return original_compute(merged)
 
-        planning._compute_actual_minutes = compute_after_concurrent_start
+        planning_common._compute_actual_minutes = compute_after_concurrent_start
         try:
             with pytest.raises(planning.PlanningError) as error:
                 planning.patch_occurrence(
                     occ["id"], {"actual_end": iso(24, 11, 30)}, at(24, 12))
         finally:
-            planning._compute_actual_minutes = original_compute
+            planning_common._compute_actual_minutes = original_compute
         assert error.value.status_code == 409
         # 零写入：B 的值保持，A 的 end / minutes 未落库
         assert occ["actual_start"] == iso(24, 11)
@@ -446,7 +446,7 @@ def test_recompute_skips_row_completed_after_read():
         dirty = c.rows[0]
         c.create("daily", at(24, 10), estimated_minutes=30)
         clean = c.rows[1]
-        original_estimate = planning._estimate_patch
+        original_estimate = planning_common._estimate_patch
 
         def patch_then_concurrent_complete(start, end, *, source, fixed_source=None):
             result = original_estimate(start, end, source=source, fixed_source=fixed_source)
@@ -457,11 +457,11 @@ def test_recompute_skips_row_completed_after_read():
             dirty["closed_at"] = iso(24, 11, 5)
             return result
 
-        planning._estimate_patch = patch_then_concurrent_complete
+        planning_common._estimate_patch = patch_then_concurrent_complete
         try:
-            result = planning.recompute_today(at(24, 13))
+            result = planning_recompute.recompute_today(at(24, 13))
         finally:
-            planning._estimate_patch = original_estimate
+            planning_common._estimate_patch = original_estimate
         assert result["updated"] == 0
         assert result.get("stale_skipped") == 2  # 整批放弃
         # 已完成实例保持完成状态与全部事实，est 未被覆盖
@@ -493,10 +493,10 @@ def test_recompute_batch_failure_leaves_no_partial_schedule():
 
         with mock.patch.object(c.db, "rpc", side_effect=failing_rpc):
             with pytest.raises(RuntimeError):
-                planning.recompute_today(at(24, 13))
+                planning_recompute.recompute_today(at(24, 13))
         assert (row_a["est_start"], row_b["est_start"]) == est_before
         # 故障恢复后重算完整成功（两行一次写入）。
-        result = planning.recompute_today(at(24, 13))
+        result = planning_recompute.recompute_today(at(24, 13))
         assert result["updated"] == 2
         assert (row_a["est_start"], row_b["est_start"]) == (
             iso(24, 13), iso(24, 13, 30))
@@ -517,7 +517,7 @@ def test_recompute_batch_abandons_on_non_written_row_drift():
         fixed_row = c.rows[1]
         assert fixed_row["is_fixed"] is True
         est_before = movable["est_start"]
-        original_estimate = planning._estimate_patch
+        original_estimate = planning_common._estimate_patch
 
         def patch_then_drift_fixed_slot(start, end, *, source, fixed_source=None):
             result = original_estimate(start, end, source=source, fixed_source=fixed_source)
@@ -525,11 +525,11 @@ def test_recompute_batch_abandons_on_non_written_row_drift():
             fixed_row["window_end_at"] = iso(24, 10)
             return result
 
-        planning._estimate_patch = patch_then_drift_fixed_slot
+        planning_common._estimate_patch = patch_then_drift_fixed_slot
         try:
-            result = planning.recompute_today(at(24, 8, 30))
+            result = planning_recompute.recompute_today(at(24, 8, 30))
         finally:
-            planning._estimate_patch = original_estimate
+            planning_common._estimate_patch = original_estimate
         assert result["updated"] == 0
         assert result.get("stale_skipped") == 1
         assert movable["est_start"] == est_before  # 待写行不落库
@@ -557,7 +557,7 @@ def test_recompute_abandons_when_written_row_gains_actual_start():
 
         with mock.patch.object(c.db, "rpc",
                                side_effect=record_actual_start_then_rpc):
-            result = planning.recompute_today(at(24, 13))
+            result = planning_recompute.recompute_today(at(24, 13))
         assert result["updated"] == 0
         assert result.get("stale_skipped") == 1
         assert occ["est_start"] == est_before  # 旧排程结果不落库
@@ -571,7 +571,7 @@ def _batch_payload(rows, *, extra_single_fields=None):
     expected = [planning._recompute_expected_snapshot(row) for row in rows]
     singles = []
     for row in rows:
-        patch = planning._estimate_patch(at(24, 13), at(24, 13, 30),
+        patch = planning_common._estimate_patch(at(24, 13), at(24, 13, 30),
                                          source="automatic")
         patch["updated_at"] = iso(24, 13)
         if extra_single_fields:
@@ -628,7 +628,7 @@ def test_recompute_batch_fake_rolls_back_singles_when_round_rejected():
         # 同上：行缺 nominal_start、由本次 singles 补丁新增，回滚须移除。
         row_a.pop("nominal_start", None)
         expected = [planning._recompute_expected_snapshot(row) for row in c.rows]
-        patch = planning._estimate_patch(at(24, 13), at(24, 13, 30),
+        patch = planning_common._estimate_patch(at(24, 13), at(24, 13, 30),
                                          source="automatic")
         patch["updated_at"] = iso(24, 13)
         patch["nominal_start"] = iso(24, 13)
@@ -663,7 +663,7 @@ def test_recompute_batch_fake_success_keeps_all_writes():
         row_a, row_b = c.rows[0], c.rows[1]
         start, end = _hollow_round(c)
         expected = [planning._recompute_expected_snapshot(row) for row in c.rows]
-        patch = planning._estimate_patch(at(24, 13), at(24, 13, 30),
+        patch = planning_common._estimate_patch(at(24, 13), at(24, 13, 30),
                                          source="automatic")
         patch["updated_at"] = iso(24, 13)
         singles = [{"id": row_a["id"], **patch},
@@ -697,7 +697,7 @@ def test_recompute_hollow_round_is_atomic():
     with Context() as c:
         c.create("daily", at(24, 7), estimated_minutes=30, **HOLLOW)
         start, end = _hollow_round(c)
-        planning.recompute_today(at(24, 7, 30))
+        planning_recompute.recompute_today(at(24, 7, 30))
         old_start_est, old_end_est = start["est_start"], end["est_start"]
         calls = []
         import test_planning_phase1a as p1a
@@ -719,7 +719,7 @@ def test_recompute_hollow_round_is_atomic():
         p1a._RpcCall.execute = spy_rpc
         p1a._Query.execute = spy_query
         try:
-            planning.recompute_today(at(24, 9))
+            planning_recompute.recompute_today(at(24, 9))
         finally:
             p1a._RpcCall.execute = original_rpc
             p1a._Query.execute = original_query
@@ -740,7 +740,7 @@ def test_recompute_hollow_round_is_atomic():
             # 基础设施失败必须向上传播（不伪装成并发跳过——最终修复问题 6）；
             # 两阶段保持本次重算前的值（无 A 新 B 旧）。
             with pytest.raises(RuntimeError):
-                planning.recompute_today(at(24, 11))
+                planning_recompute.recompute_today(at(24, 11))
         finally:
             p1a._RpcCall.execute = original_rpc
         assert (start["est_start"], end["est_start"]) == pre_failure
@@ -791,20 +791,20 @@ def test_actual_minutes_null_old_value_participates_in_guard():
         occ = c.rows[0]
         # 构造 pending + actual_end 事实（actual_start=NULL 的读取场景）
         occ["actual_end"] = iso(24, 12)
-        original_compute = planning._compute_actual_minutes
+        original_compute = planning_common._compute_actual_minutes
 
         def compute_after_concurrent_start(merged):
             occ["actual_start"] = iso(24, 10, 30)  # B：并发写入开始时刻
             return original_compute(merged)
 
-        planning._compute_actual_minutes = compute_after_concurrent_start
+        planning_common._compute_actual_minutes = compute_after_concurrent_start
         try:
             with pytest.raises(planning.PlanningError) as error:
                 # A 修正 actual_end：minutes 读派生输入 actual_start=NULL
                 planning.patch_occurrence(
                     occ["id"], {"actual_end": iso(24, 12, 30)}, at(24, 13))
         finally:
-            planning._compute_actual_minutes = original_compute
+            planning_common._compute_actual_minutes = original_compute
         assert error.value.status_code == 409
         # B 的写入保持；A 未产生错误 minutes（start=09:30, end, minutes 不一致不可能落库）
         assert occ["actual_start"] == iso(24, 10, 30)
@@ -817,7 +817,7 @@ def test_rpc_window_edit_cannot_use_status_to_lower_gate():
     with Context() as c:
         c.create("daily", at(24, 7), estimated_minutes=30, **HOLLOW)
         start, end = _hollow_round(c)
-        planning.recompute_today(at(24, 7, 30))
+        planning_recompute.recompute_today(at(24, 7, 30))
         planning.set_occurrence_status(start["id"], {"status": "in_progress"}, at(24, 7, 45))
         assert start["actual_start"]
         before_s, before_e = _fields(start), _fields(end)
@@ -843,7 +843,7 @@ def test_recompute_skips_row_with_ownership_drift():
         c.create("daily", at(24, 10), estimated_minutes=30)
         occ = c.rows[0]
         assert occ["estimated_time_source"] == "automatic"
-        original_estimate = planning._estimate_patch
+        original_estimate = planning_common._estimate_patch
 
         def patch_then_manual_takeover(start, end, *, source, fixed_source=None):
             result = original_estimate(start, end, source=source, fixed_source=fixed_source)
@@ -855,11 +855,11 @@ def test_recompute_skips_row_with_ownership_drift():
             occ["schedule_managed"] = False
             return result
 
-        planning._estimate_patch = patch_then_manual_takeover
+        planning_common._estimate_patch = patch_then_manual_takeover
         try:
-            result = planning.recompute_today(at(24, 13))
+            result = planning_recompute.recompute_today(at(24, 13))
         finally:
-            planning._estimate_patch = original_estimate
+            planning_common._estimate_patch = original_estimate
         # 手动 19:00 不被旧自动结果覆盖
         assert (occ["est_start"], occ["est_end"]) == (iso(24, 19), iso(24, 19, 30))
         assert occ["estimated_time_source"] == "manual"
@@ -874,7 +874,7 @@ def test_recompute_skips_row_with_ownership_drift_single_row():
         c.create("daily", at(24, 10), estimated_minutes=30)
         occ = c.rows[0]
         assert occ["estimated_time_source"] == "automatic"
-        original_estimate = planning._estimate_patch
+        original_estimate = planning_common._estimate_patch
 
         def patch_then_pin_in_place(start, end, *, source, fixed_source=None):
             result = original_estimate(start, end, source=source, fixed_source=fixed_source)
@@ -885,11 +885,11 @@ def test_recompute_skips_row_with_ownership_drift_single_row():
             occ["schedule_managed"] = False
             return result
 
-        planning._estimate_patch = patch_then_pin_in_place
+        planning_common._estimate_patch = patch_then_pin_in_place
         try:
-            result = planning.recompute_today(at(24, 13))
+            result = planning_recompute.recompute_today(at(24, 13))
         finally:
-            planning._estimate_patch = original_estimate
+            planning_common._estimate_patch = original_estimate
         # manual 锚点保持（不被自动重算改回 automatic）
         assert occ["estimated_time_source"] == "manual"
         assert occ["fixed_source"] == "manual"
@@ -904,7 +904,7 @@ def test_recompute_skips_row_with_window_drift():
                  window_start_tod="18:00", window_end_tod="22:00")
         occ = c.rows[0]
         assert occ["est_start"] == iso(24, 18)  # 创建重算：placed 在窗口起点
-        original_estimate = planning._estimate_patch
+        original_estimate = planning_common._estimate_patch
 
         def patch_then_window_narrow(start, end, *, source, fixed_source=None):
             result = original_estimate(start, end, source=source, fixed_source=fixed_source)
@@ -913,11 +913,11 @@ def test_recompute_skips_row_with_window_drift():
             occ["window_end_at"] = iso(24, 17)
             return result
 
-        planning._estimate_patch = patch_then_window_narrow
+        planning_common._estimate_patch = patch_then_window_narrow
         try:
-            planning.recompute_today(at(24, 18, 30))
+            planning_recompute.recompute_today(at(24, 18, 30))
         finally:
-            planning._estimate_patch = original_estimate
+            planning_common._estimate_patch = original_estimate
         # est 保持 18:00（18:30 的旧结果被放弃）；窗口保持用户收窄值
         assert occ["est_start"] == iso(24, 18)
         assert occ["window_start_at"] == iso(24, 15)
@@ -997,7 +997,7 @@ def test_recompute_sort_order_drift_skips_and_preserves_mark():
         state_row = c.db.rows["planning_recompute_state"][0]
 
         order_state = {"saved": False}
-        original_estimate = planning._estimate_patch
+        original_estimate = planning_common._estimate_patch
 
         def patch_then_reorder(start, end, *, source, fixed_source=None):
             result = original_estimate(start, end, source=source, fixed_source=fixed_source)
@@ -1012,11 +1012,11 @@ def test_recompute_sort_order_drift_skips_and_preserves_mark():
             return result
 
         est_before = {"a": row_a["est_start"], "b": row_b["est_start"]}
-        planning._estimate_patch = patch_then_reorder
+        planning_common._estimate_patch = patch_then_reorder
         try:
-            result = planning.recompute_today(at(24, 13))
+            result = planning_recompute.recompute_today(at(24, 13))
         finally:
-            planning._estimate_patch = original_estimate
+            planning_common._estimate_patch = original_estimate
         assert result["updated"] == 0
         assert result.get("stale_skipped") == 2
         # 旧结果不得落库（est 保持读取时的值）
@@ -1025,7 +1025,7 @@ def test_recompute_sort_order_drift_skips_and_preserves_mark():
         # 新重算请求仍然保留（未被 stale recompute 清掉）
         assert state_row["requested_at"] == planning._iso(at(24, 12))
         # 下一次 recompute 按 B→A 正常生成：B 先于 A
-        planning.recompute_today(at(24, 14))
+        planning_recompute.recompute_today(at(24, 14))
         assert row_b["est_start"] == iso(24, 14)
         assert row_a["est_start"] == iso(24, 14, 30)
 
@@ -1049,7 +1049,7 @@ def test_recompute_hollow_round_sort_order_drift_skips_whole_round():
                       for r in (a_start, a_end, b_start, b_end)}
 
         order_state = {"saved": False}
-        original_estimate = planning._estimate_patch
+        original_estimate = planning_common._estimate_patch
 
         def patch_then_reorder(start, end, *, source, fixed_source=None):
             result = original_estimate(start, end, source=source, fixed_source=fixed_source)
@@ -1061,11 +1061,11 @@ def test_recompute_hollow_round_sort_order_drift_skips_whole_round():
                     at(24, 12))
             return result
 
-        planning._estimate_patch = patch_then_reorder
+        planning_common._estimate_patch = patch_then_reorder
         try:
-            result = planning.recompute_today(at(24, 14))
+            result = planning_recompute.recompute_today(at(24, 14))
         finally:
-            planning._estimate_patch = original_estimate
+            planning_common._estimate_patch = original_estimate
         # 两轮旧结果全部放弃：不写半新半旧、不虚报 updated。
         assert result["updated"] == 0
         assert result.get("stale_skipped") == 4
@@ -1073,7 +1073,7 @@ def test_recompute_hollow_round_sort_order_drift_skips_whole_round():
             assert (row["est_start"], row["est_end"]) == est_before[row["id"]]
         # 下一次重算按 B→A 正常生成：B 先于 A（B.end 等待收口后游标 17:00，
         # A.start 从 17:00 起）。
-        planning.recompute_today(at(24, 15))
+        planning_recompute.recompute_today(at(24, 15))
         assert b_start["est_start"] == iso(24, 15)
         assert a_start["est_start"] == iso(24, 17)
 
@@ -1090,7 +1090,7 @@ def test_stale_recompute_does_not_clear_wait_mark():
             return {"updated": 0, "at": planning._iso(at(24, 13)),
                     "conflicts": [], "stale_skipped": 1}
 
-        with mock.patch.object(planning, "recompute_today", stale_recompute):
+        with mock.patch.object(planning_recompute, "recompute_today", stale_recompute):
             # now = requested_at + 30 分钟等待（默认 RECOMPUTE_WAIT），进入
             # 自动重算分支
             planning.run_maintenance(at(24, 13))
@@ -1100,7 +1100,7 @@ def test_stale_recompute_does_not_clear_wait_mark():
         def clean_recompute(now=None):
             return {"updated": 0, "at": planning._iso(at(24, 14)), "conflicts": []}
 
-        with mock.patch.object(planning, "recompute_today", clean_recompute):
+        with mock.patch.object(planning_recompute, "recompute_today", clean_recompute):
             planning.run_maintenance(at(24, 14))
         assert state_row["requested_at"] is None
 
@@ -1179,7 +1179,7 @@ def test_sweep_skips_row_with_window_drift():
         c.create("daily", at(24, 10), estimated_minutes=30,
                  window_start_tod="09:00", window_end_tod="12:00")
         occ = c.rows[0]
-        original = planning._parse_dt
+        original = planning_common._parse_dt
 
         def parse_then_extend(value, field):
             result = original(value, field)
@@ -1188,11 +1188,11 @@ def test_sweep_skips_row_with_window_drift():
                 occ["window_end_at"] = iso(24, 18)
             return result
 
-        planning._parse_dt = parse_then_extend
+        planning_common._parse_dt = parse_then_extend
         try:
             result = planning.sweep_timeouts(at(24, 12, 30))
         finally:
-            planning._parse_dt = original
+            planning_common._parse_dt = original
         assert result["timed_out"] == 0
         # 实例仍开放、窗口保持 18:00、closed_at 未写入
         assert occ["status"] == "pending"
@@ -1205,7 +1205,7 @@ def test_sweep_skips_row_with_new_lifecycle_fact():
         c.create("daily", at(24, 10), estimated_minutes=30,
                  window_end_tod="12:00")
         occ = c.rows[0]
-        original = planning._parse_dt
+        original = planning_common._parse_dt
 
         def parse_then_start(value, field):
             result = original(value, field)
@@ -1213,11 +1213,11 @@ def test_sweep_skips_row_with_new_lifecycle_fact():
                 occ["actual_start"] = iso(24, 11)
             return result
 
-        planning._parse_dt = parse_then_start
+        planning_common._parse_dt = parse_then_start
         try:
             result = planning.sweep_timeouts(at(24, 12, 30))
         finally:
-            planning._parse_dt = original
+            planning_common._parse_dt = original
         assert result["timed_out"] == 0
         assert occ["status"] == "pending"
         assert occ["actual_start"] == iso(24, 11)
@@ -1389,7 +1389,7 @@ def test_maintenance_recompute_keeps_new_request_written_during_execution():
         state_row = c.db.rows["planning_recompute_state"][0]
         _register_recompute(c, "reorder", at(24, 12))
 
-        original = planning.recompute_today
+        original = planning_recompute.recompute_today
 
         def recompute_then_new_request(now=None):
             result = original(now)
@@ -1397,14 +1397,14 @@ def test_maintenance_recompute_keeps_new_request_written_during_execution():
             _register_recompute(c, "reorder_mid", at(24, 12, 59))
             return result
 
-        with mock.patch.object(planning, "recompute_today", recompute_then_new_request):
+        with mock.patch.object(planning_recompute, "recompute_today", recompute_then_new_request):
             results = planning.run_maintenance(at(24, 13))
         assert results["auto_recompute"]["conflicts"] == []
         # A 正常完成，但 B（12:59）不被 A 清除
         assert state_row["requested_at"] == planning._iso(at(24, 12, 59))
         assert state_row["reason"] == "reorder_mid"
         # 下一轮 maintenance 消费 B：等待期满（31 分钟 ≥ 30）正常执行并清除
-        with mock.patch.object(planning, "recompute_today", original):
+        with mock.patch.object(planning_recompute, "recompute_today", original):
             planning.run_maintenance(at(24, 13, 30))
         assert state_row["requested_at"] is None
 
@@ -1416,18 +1416,18 @@ def test_manual_recompute_keeps_new_request_written_during_execution():
         state_row = c.db.rows["planning_recompute_state"][0]
         _register_recompute(c, "status_change", at(24, 12))
 
-        original = planning.recompute_today
+        original = planning_recompute.recompute_today
 
         def recompute_then_new_request(now=None):
             result = original(now)
             _register_recompute(c, "reorder", at(24, 12, 59))
             return result
 
-        with mock.patch.object(planning, "recompute_today", recompute_then_new_request):
+        with mock.patch.object(planning_recompute, "recompute_today", recompute_then_new_request):
             result = planning.trigger_recompute(at(24, 13))
         assert result["conflicts"] == []
         assert state_row["requested_at"] == planning._iso(at(24, 12, 59))
-        with mock.patch.object(planning, "recompute_today", original):
+        with mock.patch.object(planning_recompute, "recompute_today", original):
             planning.run_maintenance(at(24, 13, 30))
         assert state_row["requested_at"] is None
 
@@ -1471,7 +1471,7 @@ def test_recompute_identity_same_timestamp_interleave_manual_and_maintenance():
         c.create("daily", at(24, 10), estimated_minutes=30)
         state_row = c.db.rows["planning_recompute_state"][0]
         token_a = _register_recompute(c, "reorder", at(24, 12))
-        original = planning.recompute_today
+        original = planning_recompute.recompute_today
 
         def recompute_then_same_time_request(now=None):
             result = original(now)
@@ -1479,13 +1479,13 @@ def test_recompute_identity_same_timestamp_interleave_manual_and_maintenance():
             _register_recompute(c, "status_change", at(24, 12))
             return result
 
-        with mock.patch.object(planning, "recompute_today", recompute_then_same_time_request):
+        with mock.patch.object(planning_recompute, "recompute_today", recompute_then_same_time_request):
             planning.trigger_recompute(at(24, 13))
         # B 保留（同 T 也不被 A 的清除吞掉）
         assert state_row["requested_at"] == planning._iso(at(24, 12))
         assert state_row["request_token"] != token_a
         # 下一轮 maintenance 消费 B（等待期满）→ 清除
-        with mock.patch.object(planning, "recompute_today", original):
+        with mock.patch.object(planning_recompute, "recompute_today", original):
             planning.run_maintenance(at(24, 13, 1))
         assert state_row["requested_at"] is None
         assert state_row["request_token"] is None
@@ -1514,7 +1514,7 @@ def _record_recompute(c):
         calls.append((reason, planning._iso(now) if now else None))
         _REAL_REQUEST_RECOMPUTE(reason, now)
 
-    planning.request_recompute = recording_request
+    planning_recompute.request_recompute = recording_request
     return calls
 
 
@@ -1571,7 +1571,7 @@ def test_recompute_after_discard_uses_released_slot():
         for _ in range(3):
             c.create("daily", at(24, 8), estimated_minutes=60)
         rows = list(c.rows)
-        planning.recompute_today(at(24, 8, 30))
+        planning_recompute.recompute_today(at(24, 8, 30))
         assert [r["est_start"] for r in rows] == [
             iso(24, 8, 30), iso(24, 9, 30), iso(24, 10, 30)]
         _record_recompute(c)
@@ -1595,7 +1595,7 @@ def test_discard_succeeds_when_recompute_enqueue_fails(caplog):
         def failing_request(reason, now=None):
             raise RuntimeError("simulated enqueue failure")
 
-        planning.request_recompute = failing_request
+        planning_recompute.request_recompute = failing_request
         with caplog.at_level("WARNING", logger="gateway.planning"):
             result = planning.update_task(task_id, {"is_active": False}, at(24, 12))
         assert result["is_active"] is False

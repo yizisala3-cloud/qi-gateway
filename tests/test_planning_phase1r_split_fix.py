@@ -18,8 +18,8 @@ from unittest import mock
 
 import pytest
 
-from gateway import planning
-from test_planning_phase1b import Context, at
+from gateway import planning, planning_recompute, planning_runtime
+from tests.support.planning_context import Context, at
 
 
 def _once_tasks(c):
@@ -216,7 +216,7 @@ def test_split_concurrent_second_request_wins_nothing():
     with Context() as c:
         c.create("daily", at(23))
         round_row = c.rows[0]
-        real_fetch = planning._fetch_occurrence
+        real_fetch = planning_runtime._fetch_occurrence
         state = {"first_done": False}
 
         def interleaved_fetch(client, occurrence_id):
@@ -228,7 +228,7 @@ def test_split_concurrent_second_request_wins_nothing():
                     occurrence_id, {"parts": [{"content": "整理书桌"}]}, at(24, 10))
             return row  # 第二个请求基于过期读取继续
 
-        with mock.patch.object(planning, "_fetch_occurrence", side_effect=interleaved_fetch):
+        with mock.patch.object(planning_runtime, "_fetch_occurrence", side_effect=interleaved_fetch):
             try:
                 planning.split_occurrence(
                     round_row["id"], {"parts": [{"content": "再拆"}]}, at(24, 10, 30))
@@ -347,7 +347,7 @@ def test_split_recompute_registration_failure_keeps_success_result():
     with Context() as c:
         c.create("interval", at(24), refresh_mode="after_completion", interval_days=3)
         round_row = c.rows[0]
-        with mock.patch.object(planning, "request_recompute",
+        with mock.patch.object(planning_recompute, "request_recompute",
                                side_effect=RuntimeError("registration unavailable")):
             result = planning.split_occurrence(
                 round_row["id"], {"parts": [{"content": "整理书桌"}]}, at(24, 10))

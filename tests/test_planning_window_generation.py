@@ -13,7 +13,7 @@ import pytest
 from gateway import planning
 from gateway.planning_domain import BUSINESS_TIMEZONE
 from gateway.planning_window import resolve_window
-from test_planning_phase1b import Context, at
+from tests.support.planning_context import Context, at
 
 
 def cst(day, hour, minute=0):

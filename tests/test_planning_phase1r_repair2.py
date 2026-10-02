@@ -11,8 +11,8 @@ from unittest import mock
 
 import pytest
 
-from gateway import planning
-from test_planning_phase1b import Context, at
+from gateway import planning, planning_generation
+from tests.support.planning_context import Context, at
 
 
 CST = timezone(timedelta(hours=8))
@@ -30,7 +30,7 @@ def test_n1_recovery_restores_user_time_after_background_recompute():
     with Context() as c:
         c.create("daily", at(23))
         occ = _timeout_occ(c)
-        real_create = planning._create_occurrences
+        real_create = planning_generation._create_occurrences
         calls = {"n": 0}
 
         def fail_first(*args, **kwargs):
@@ -39,7 +39,7 @@ def test_n1_recovery_restores_user_time_after_background_recompute():
                 raise RuntimeError("gen down")
             return real_create(*args, **kwargs)
 
-        with mock.patch.object(planning, "_create_occurrences", side_effect=fail_first):
+        with mock.patch.object(planning_generation, "_create_occurrences", side_effect=fail_first):
             try:
                 planning.reschedule_timeout_as_new(
                     occ["id"], {"est_start": at(25, 18).isoformat()}, at(25, 15),
@@ -99,7 +99,7 @@ def test_n2_conflict_rejected_even_before_occurrence_exists():
         c.create("daily", at(23))
         occ = _timeout_occ(c)
         with mock.patch.object(
-            planning, "_create_occurrences", side_effect=RuntimeError("down"),
+            planning_generation, "_create_occurrences", side_effect=RuntimeError("down"),
         ):
             try:
                 planning.reschedule_timeout_as_new(
@@ -131,7 +131,7 @@ def test_n3_zero_creation_converges_to_existing_success():
         c.create("daily", at(23))
         occ = _timeout_occ(c)
 
-        real_create = planning._create_occurrences
+        real_create = planning_generation._create_occurrences
         calls = {"n": 0}
 
         def zero_then_real(*args, **kwargs):
@@ -140,7 +140,7 @@ def test_n3_zero_creation_converges_to_existing_success():
                 return 0  # 模拟并发对方已建实例，本方插入命中轮次唯一
             return real_create(*args, **kwargs)
 
-        with mock.patch.object(planning, "_create_occurrences", side_effect=zero_then_real):
+        with mock.patch.object(planning_generation, "_create_occurrences", side_effect=zero_then_real):
             result = planning.reschedule_timeout_as_new(
                 occ["id"], {"est_start": at(25, 16).isoformat()}, at(25, 15),
                 idempotency_key="k1",
@@ -162,13 +162,13 @@ def test_n3_concurrent_both_sides_converge_to_one_result():
         occ = _timeout_occ(c)
         state = {"task_inserted": False, "b_done": False}
 
-        real_insert = planning._create_occurrences
+        real_insert = planning_generation._create_occurrences
 
         def b_recovers_then_a_zero(*args, **kwargs):
             # 第一次调用 = 请求 A 建实例前，先让请求 B 完整跑一遍（恢复路径）
             if not state["task_inserted"]:
                 state["task_inserted"] = True
-                with mock.patch.object(planning, "_create_occurrences", side_effect=real_insert):
+                with mock.patch.object(planning_generation, "_create_occurrences", side_effect=real_insert):
                     planning.reschedule_timeout_as_new(
                         occ["id"], {"est_start": at(25, 16).isoformat()}, at(25, 15, 10),
                         idempotency_key="k1",
@@ -177,7 +177,7 @@ def test_n3_concurrent_both_sides_converge_to_one_result():
                 return 0  # A 的插入命中轮次唯一 → 0
             return real_insert(*args, **kwargs)
 
-        with mock.patch.object(planning, "_create_occurrences", side_effect=b_recovers_then_a_zero):
+        with mock.patch.object(planning_generation, "_create_occurrences", side_effect=b_recovers_then_a_zero):
             result_a = planning.reschedule_timeout_as_new(
                 occ["id"], {"est_start": at(25, 16).isoformat()}, at(25, 15),
                 idempotency_key="k1",

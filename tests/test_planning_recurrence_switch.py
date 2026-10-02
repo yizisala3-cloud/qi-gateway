@@ -12,9 +12,9 @@ from datetime import datetime
 
 import pytest
 
-from gateway import planning
+from gateway import planning, planning_generation
 from gateway.planning_domain import BUSINESS_TIMEZONE
-from test_planning_phase1b import Context, at
+from tests.support.planning_context import Context, at
 
 
 def octo(day, hour, minute=0):
@@ -318,20 +318,20 @@ def test_recurrence_and_window_combined_switch_single_closeout():
         assert len(c.rows) == 2
         closeouts = []
         import test_planning_phase1a as p1a
-        original_reconcile = planning._reconcile_task_rounds
+        original_reconcile = planning_generation._reconcile_task_rounds
 
         def counting_reconcile(client, task_arg, cycle, now, *args, **kwargs):
             closeouts.append(dict(task_arg))
             return original_reconcile(client, task_arg, cycle, now, *args, **kwargs)
 
-        planning._reconcile_task_rounds = counting_reconcile
+        planning_generation._reconcile_task_rounds = counting_reconcile
         try:
             planning.update_task(
                 task["id"],
                 {"interval_days": 5,
                  "window_start_tod": "14:00", "window_end_tod": "18:00"}, at(28, 11))
         finally:
-            planning._reconcile_task_rounds = original_reconcile
+            planning_generation._reconcile_task_rounds = original_reconcile
         stored = c.db.rows["planning_task"][0]
         assert stored["interval_days"] == 5
         assert (stored["window_start_tod"], stored["window_end_tod"]) == ("14:00", "18:00")

@@ -15,26 +15,14 @@
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
-from gateway import planning
-from test_planning_phase1b import Context, at
+from gateway import planning, planning_generation, planning_reschedule, planning_runtime
+from tests.support.planning_context import Context, at
 
 
 CST = timezone(timedelta(hours=8))
 
 
-def _timeout_occ(c):
-    occ = c.rows[0]
-    occ["status"] = "timeout"
-    return occ
-
-
-def _once_tasks(c):
-    return [row for row in c.db.rows["planning_task"] if row["task_type"] == "once"]
-
-
-def _once_occs(c):
-    once_ids = {row["id"] for row in _once_tasks(c)}
-    return [row for row in c.rows if row["task_id"] in once_ids]
+from tests.support.planning_fixtures import _timeout_occ, _once_tasks, _once_occs, _after_completion_task
 
 
 # ── BF1 + BF2：修改时间 = 同一业务实例的时间修改 ─────────────────────
@@ -140,7 +128,7 @@ def test_bf1_healed_partial_instance_is_adopted_not_closed():
         c.create("daily", at(23))
         occ = _timeout_occ(c)
         with mock.patch.object(
-            planning, "_create_occurrences", side_effect=RuntimeError("down"),
+            planning_generation, "_create_occurrences", side_effect=RuntimeError("down"),
         ):
             try:
                 planning.reschedule_timeout_as_new(
@@ -204,7 +192,7 @@ def test_bf2_concurrent_first_creation_converges_via_database_guard():
 
             return Guard(q)
 
-        real_create = planning._create_occurrences
+        real_create = planning_generation._create_occurrences
 
         def k1_completes_first(*args, **kwargs):
             if not state["k1_done"]:
@@ -212,7 +200,7 @@ def test_bf2_concurrent_first_creation_converges_via_database_guard():
                 return real_create(*args, **kwargs)
             return real_create(*args, **kwargs)
 
-        with mock.patch.object(planning, "get_client",
+        with mock.patch.object(planning_runtime, "get_client",
                                return_value=type("C", (), {
                                    "table": staticmethod(guard_table),
                                    "rpc": staticmethod(c.db.rpc),
@@ -221,7 +209,7 @@ def test_bf2_concurrent_first_creation_converges_via_database_guard():
                 occ["id"], {"est_start": at(25, 18).isoformat()}, at(25, 15),
                 idempotency_key="k1",
             )
-            with mock.patch.object(planning, "_create_occurrences", side_effect=real_create):
+            with mock.patch.object(planning_generation, "_create_occurrences", side_effect=real_create):
                 r2 = planning.reschedule_timeout_as_new(
                     occ["id"], {"est_start": at(25, 19).isoformat()}, at(25, 15, 10),
                     idempotency_key="k2",
@@ -272,9 +260,9 @@ def test_bf2_adopt_failure_keeps_current_todo_recoverable():
             occ["id"], {"est_start": at(25, 18).isoformat()}, at(25, 15),
             idempotency_key="k1",
         )
-        real_finalize = planning._finalize_reschedule_occurrence
+        real_finalize = planning_reschedule._finalize_reschedule_occurrence
         with mock.patch.object(
-            planning, "_finalize_reschedule_occurrence", side_effect=RuntimeError("down"),
+            planning_reschedule, "_finalize_reschedule_occurrence", side_effect=RuntimeError("down"),
         ):
             try:
                 planning.reschedule_timeout_as_new(
@@ -331,9 +319,6 @@ def test_bf4_business_occurrences_are_never_deleted_by_reschedule_flows():
 
 # ── BF3：30 分钟防重复窗口 ───────────────────────────────────────────
 
-
-def _after_completion_task(c, created=at(24, 7)):
-    return c.create("interval", created, refresh_mode="after_completion", interval_days=3)
 
 
 def test_bf3_scenario_d_retry_within_30min_window_is_duplicate():
@@ -394,7 +379,7 @@ def test_bf3_scenario_f_failed_first_attempt_does_not_block_retry():
         _after_completion_task(c)
         planning.set_occurrence_status(c.rows[0]["id"], {"status": "completed"}, at(24, 7))
         # 08:00 的尝试在写入任何事实前数据库不可用（_require_client 503）
-        with mock.patch.object(planning, "get_client", return_value=None):
+        with mock.patch.object(planning_runtime, "get_client", return_value=None):
             try:
                 planning.complete_task_early(1, at(24, 8), idempotency_key="k1")
             except planning.PlanningError as error:
@@ -474,7 +459,7 @@ def test_bf4_scenario_h_concurrent_user_fact_write_survives_adopt():
             idempotency_key="k1",
         )
         occ_id = r1["occurrence"]["id"]
-        real_finalize = planning._finalize_reschedule_occurrence
+        real_finalize = planning_reschedule._finalize_reschedule_occurrence
 
         def interleaved_finalize(*args, **kwargs):
             # 并发用户写入在接管读取之后、锚定更新之前提交
@@ -485,7 +470,7 @@ def test_bf4_scenario_h_concurrent_user_fact_write_survives_adopt():
             return real_finalize(*args, **kwargs)
 
         with mock.patch.object(
-            planning, "_finalize_reschedule_occurrence", side_effect=interleaved_finalize,
+            planning_reschedule, "_finalize_reschedule_occurrence", side_effect=interleaved_finalize,
         ):
             r2 = planning.reschedule_timeout_as_new(
                 occ["id"], {"est_start": at(25, 20).isoformat()}, at(25, 15, 30),

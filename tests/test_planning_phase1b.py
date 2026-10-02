@@ -15,51 +15,12 @@ import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
-from gateway import planning
+from gateway import planning, planning_runtime
 from gateway.config import cfg
 from gateway.planning_api import planning_api_routes
-from test_planning_phase1a import _Database
 
 
-CST = timezone(timedelta(hours=8))
-
-
-def at(day, hour=7, minute=0):
-    return datetime(2026, 9, day, hour, minute, tzinfo=CST)
-
-
-class Context:
-    def __init__(self):
-        self.db = _Database()
-        self.settings = {}
-        self.patches = [
-            mock.patch.object(planning, "get_client", return_value=self.db),
-            mock.patch.object(planning.db, "load_app_setting", side_effect=self.settings.get),
-            mock.patch.object(planning.db, "save_app_setting", side_effect=self.save),
-            mock.patch.object(planning, "request_recompute"),
-        ]
-
-    def save(self, key, value):
-        self.settings[key] = value
-        return True
-
-    def __enter__(self):
-        for patch in self.patches:
-            patch.start()
-        return self
-
-    def __exit__(self, *_):
-        for patch in reversed(self.patches):
-            patch.stop()
-
-    @property
-    def rows(self):
-        return self.db.rows["planning_occurrence"]
-
-    def create(self, kind, now=at(24), **kwargs):
-        return planning.create_task({
-            "content": kind, "task_type": kind, "estimated_minutes": 30, **kwargs,
-        }, now)
+from tests.support.planning_context import CST, Context, at
 
 
 def test_boundary_change_keeps_current_cycle_and_takes_effect_next_cycle():
@@ -363,7 +324,7 @@ def test_discard_this_starts_after_completion_cycle_and_history_survives_cleanup
         assert first["handled_at"] == at(24, 15).isoformat()
         assert planning.generate_due(at(27, 14, 59))["created"] == 0
         assert planning.generate_due(at(27, 15))["created"] == 1
-        with mock.patch.object(planning, "_rows", return_value=c.rows):
+        with mock.patch.object(planning_runtime, "_rows", return_value=c.rows):
             planning.cleanup_discarded(at(29, 16))
         assert first in c.rows
 

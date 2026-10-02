@@ -15,8 +15,8 @@
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
-from gateway import planning
-from test_planning_phase1b import Context, at
+from gateway import planning, planning_generation, planning_reschedule
+from tests.support.planning_context import Context, at
 
 
 CST = timezone(timedelta(hours=8))
@@ -75,7 +75,7 @@ def test_h3a_partial_user_fact_survives_takeover():
         c.create("daily", at(23))
         occ = _timeout_occ(c)
         with mock.patch.object(
-            planning, "_create_occurrences", side_effect=RuntimeError("down"),
+            planning_generation, "_create_occurrences", side_effect=RuntimeError("down"),
         ):
             try:
                 planning.reschedule_timeout_as_new(
@@ -109,7 +109,7 @@ def test_h3b_in_progress_user_fact_survives_takeover():
         c.create("daily", at(23))
         occ = _timeout_occ(c)
         with mock.patch.object(
-            planning, "_create_occurrences", side_effect=RuntimeError("down"),
+            planning_generation, "_create_occurrences", side_effect=RuntimeError("down"),
         ):
             try:
                 planning.reschedule_timeout_as_new(
@@ -140,7 +140,7 @@ def test_h3c_background_artifact_is_adopted_not_duplicated():
         c.create("daily", at(23))
         occ = _timeout_occ(c)
         with mock.patch.object(
-            planning, "_create_occurrences", side_effect=RuntimeError("down"),
+            planning_generation, "_create_occurrences", side_effect=RuntimeError("down"),
         ):
             try:
                 planning.reschedule_timeout_as_new(
@@ -169,7 +169,7 @@ def test_h4_superseded_inflight_call_cannot_land_completed():
     with Context() as c:
         c.create("daily", at(23))
         occ = _timeout_occ(c)
-        real_create = planning._create_occurrences
+        real_create = planning_generation._create_occurrences
         state = {"phase": "A"}
 
         def interleaved(*args, **kwargs):
@@ -181,7 +181,7 @@ def test_h4_superseded_inflight_call_cannot_land_completed():
                 )
             return real_create(*args, **kwargs)
 
-        with mock.patch.object(planning, "_create_occurrences", side_effect=interleaved):
+        with mock.patch.object(planning_generation, "_create_occurrences", side_effect=interleaved):
             r1 = planning.reschedule_timeout_as_new(
                 occ["id"], {"est_start": at(25, 18).isoformat()}, at(25, 15),
                 idempotency_key="k1",
@@ -251,7 +251,7 @@ def test_m6_failed_first_request_stays_recoverable_and_is_taken_over_cleanly():
         c.create("daily", at(23))
         occ = _timeout_occ(c)
         with mock.patch.object(
-            planning, "_create_occurrences", side_effect=RuntimeError("down"),
+            planning_generation, "_create_occurrences", side_effect=RuntimeError("down"),
         ):
             try:
                 planning.reschedule_timeout_as_new(
@@ -290,7 +290,7 @@ def test_matrix_c_background_heal_then_new_action_takes_over():
         c.create("daily", at(23))
         occ = _timeout_occ(c)
         with mock.patch.object(
-            planning, "_create_occurrences", side_effect=RuntimeError("down"),
+            planning_generation, "_create_occurrences", side_effect=RuntimeError("down"),
         ):
             try:
                 planning.reschedule_timeout_as_new(
@@ -318,7 +318,7 @@ def test_matrix_d_same_key_interleaved_calls_converge():
     with Context() as c:
         c.create("daily", at(23))
         occ = _timeout_occ(c)
-        real_finalize = planning._finalize_reschedule_occurrence
+        real_finalize = planning_reschedule._finalize_reschedule_occurrence
         calls = {"n": 0}
 
         def interleaved_finalize(*args, **kwargs):
@@ -333,7 +333,7 @@ def test_matrix_d_same_key_interleaved_calls_converge():
             return real_finalize(*args, **kwargs)
 
         with mock.patch.object(
-            planning, "_finalize_reschedule_occurrence", side_effect=interleaved_finalize,
+            planning_reschedule, "_finalize_reschedule_occurrence", side_effect=interleaved_finalize,
         ):
             result_a = planning.reschedule_timeout_as_new(
                 occ["id"], {"est_start": at(25, 18).isoformat()}, at(25, 15),

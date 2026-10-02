@@ -115,16 +115,8 @@ async def tasks_collection(request: Request) -> JSONResponse:
 
 async def task_item(request: Request) -> JSONResponse:
     task_id = request.path_params["task_id"]
-
-    def _get() -> dict[str, Any]:
-        client = planning._require_client()
-        task = planning._fetch_task(client, task_id)
-        if not task:
-            raise planning.PlanningError("not_found", "planning task not found", 404)
-        return planning.serialize_task(task, planning._now())
-
     if request.method == "GET":
-        return await _dispatch(request, _get)
+        return await _dispatch(request, planning.get_task, task_id)
     return await _dispatch_json(request, planning.update_task, task_id)
 
 
@@ -156,19 +148,8 @@ async def occurrences_collection(request: Request) -> JSONResponse:
 
 async def occurrence_item(request: Request) -> JSONResponse:
     occurrence_id = request.path_params["occurrence_id"]
-
-    def _get() -> dict[str, Any]:
-        client = planning._require_client()
-        occ = planning._fetch_occurrence(client, occurrence_id)
-        if not occ:
-            raise planning.PlanningError("not_found", "planning occurrence not found", 404)
-        task = planning._fetch_task(client, occ["task_id"])
-        if not task:
-            raise planning.PlanningError("not_found", "planning task not found", 404)
-        return planning.serialize_occurrence(occ, task, planning._now())
-
     if request.method == "GET":
-        return await _dispatch(request, _get)
+        return await _dispatch(request, planning.get_occurrence, occurrence_id)
     return await _dispatch_json(request, planning.patch_occurrence, occurrence_id)
 
 
