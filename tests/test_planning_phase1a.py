@@ -1084,16 +1084,22 @@ RECOMPUTE_SINGLE_FIELDS = frozenset({
 RECOMPUTE_ROUND_FIELDS = frozenset({
     "target_id", "sibling_id", "target_patch", "sibling_patch",
 })
+# #25（2026-10-02）：批量重算 expected 必填键 = 既有排程输入键 + 生命周期
+# 事实字段（与 planning.LIFECYCLE_FACT_FIELDS 同一集合，单一来源）。
+RECOMPUTE_EXPECTED_FIELDS = ROUND_PATCH_EXPECTED_FIELDS | set(
+    planning.LIFECYCLE_FACT_FIELDS)
 
 
 def emulate_planning_recompute_batch(db, params):
     """#6（2026-10-02）：重算整批事务的 fake 仿真——与 20261002040000
     真库 SQL 同语义（不同步替身会掩盖整批回滚缺陷）：
     * expected 快照（全部参与计算行）形状与必填键（#13 同契约，含
-      sort_order），任一行缺失或漂移 → RuntimeError（应用层映射并发拒绝，
-      整批放弃）；
+      sort_order；#25 补生命周期事实），任一行缺失或漂移 → RuntimeError
+      （应用层映射并发拒绝，整批放弃）；
     * singles / rounds 键硬白名单，待写行 id 必须已在 expected 集合内；
-    * singles 补丁按键应用（缺键 = 保持现值）；
+    * singles 补丁按键应用（缺键 = 保持现值），写入前锁内重核同一可排程
+      条件（#25：状态 pending + 生命周期事实全空 + 可重排所有权元组，
+      未命中 → RuntimeError 整批放弃）；
     * rounds 逐轮复用 emulate_planning_round_patch（expected 传 None——
       全量复核已在批级完成）。
     """
@@ -1103,7 +1109,7 @@ def emulate_planning_recompute_batch(db, params):
     rounds = params.get("p_rounds") or []
     if (not isinstance(expected, list) or not expected
             or any(not isinstance(e, dict)
-                   or not ROUND_PATCH_EXPECTED_FIELDS <= set(e) for e in expected)):
+                   or not RECOMPUTE_EXPECTED_FIELDS <= set(e) for e in expected)):
         raise RuntimeError(
             "planning_apply_recompute_batch: invalid expected snapshot")
     if (not isinstance(singles, list) or not isinstance(rounds, list)
@@ -1140,6 +1146,17 @@ def emulate_planning_recompute_batch(db, params):
     written = []
     for entry in singles:
         row = rows_by_id[entry["id"]]
+        # #25：写入前重核同一可排程条件（迁移语句 5 的 WHERE 同形）。
+        if (row.get("status") != "pending"
+                or any(row.get(field) for field in planning.LIFECYCLE_FACT_FIELDS)
+                or row.get("is_fixed")
+                or row.get("schedule_managed") is not True
+                or row.get("fixed_source") is not None
+                or row.get("estimated_time_source")
+                not in ("unassigned", "automatic", "rule")):
+            raise RuntimeError(
+                "planning_apply_recompute_batch: schedule inputs drifted "
+                "(stale recompute result)")
         for key, value in entry.items():
             if key == "id":
                 continue

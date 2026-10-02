@@ -537,6 +537,35 @@ def test_recompute_batch_abandons_on_non_written_row_drift():
         assert fixed_row["window_end_at"] == iso(24, 10)
 
 
+def test_recompute_abandons_when_written_row_gains_actual_start():
+    # #25（2026-10-02，R1 回退）：重算读取 pending 行并计算后、提交前，另一
+    # 请求经合法 patch_occurrence 补录 actual_start（status 仍 pending）——
+    # 旧计算不得把已开始实例重新排程：expected 快照与库行生命周期事实漂移
+    # → 整批放弃（updated=0、stale_skipped=待写行数），已有事实保留
+    #（基线 4c838a5 的旧条件 UPDATE 对同一交错返回 false，est 不动）。
+    with Context() as c:
+        c.create("daily", at(24, 10), estimated_minutes=30)
+        occ = c.rows[0]
+        est_before = occ["est_start"]
+        original_rpc = c.db.rpc
+
+        def record_actual_start_then_rpc(name, params=None):
+            if name == "planning_apply_recompute_batch":
+                # 计算与提交之间：另一请求补录实际开始（已落库）
+                occ["actual_start"] = iso(24, 10, 45)
+            return original_rpc(name, params)
+
+        with mock.patch.object(c.db, "rpc",
+                               side_effect=record_actual_start_then_rpc):
+            result = planning.recompute_today(at(24, 13))
+        assert result["updated"] == 0
+        assert result.get("stale_skipped") == 1
+        assert occ["est_start"] == est_before  # 旧排程结果不落库
+        assert occ["actual_start"] == iso(24, 10, 45)  # 并发事实保留
+        # 故障恢复视角：事实已在，下一次重算不再重排该行（不可排程）。
+        assert not planning._freely_schedulable(occ, {})
+
+
 def test_recompute_hollow_round_is_atomic():
     # 问题 2：中空同轮两阶段同时被重排 → 单次 RPC；注入失败 → 两阶段保持
     # 旧时间（无 A 新 B 旧半提交）。

@@ -7,13 +7,17 @@
 -- 排序、参与计算的成员集合等任一在读取后漂移，旧计算结果不应落库。
 -- 修复（本函数）：一次 RPC 内完成——
 --   * 全量 expected 快照复核（语句 4）：快照必须覆盖**全部参与计算行**
---     （不只待写行），每行含状态 / 生命周期事实 / 所有权元组 / 冻结窗口 /
---     既有 est 预态 / sort_order（#13 同一必填键契约）；任一行缺失或漂移
---     → PC001 整批放弃；
+--     （不只待写行），每行含状态 / 生命周期事实（#25：actual_start /
+--     actual_end / partial_at / handled_at / closed_at 显式参与复核）/
+--     所有权元组 / 冻结窗口 / 既有 est 预态 / sort_order（#13 同一必填键
+--     契约）；任一行缺失或漂移 → PC001 整批放弃；
 --   * 稳定锁序（语句 3）：全部参与计算行按 id 升序加锁（与 round patch 的
 --     id 升序、#20/#1 的锁序纪律一致）；
 --   * 普通行补丁（语句 5）：est / 所有权元组 / nominal_start / updated_at
---     键硬白名单，patch 缺键 = 保持现值；
+--     键硬白名单，patch 缺键 = 保持现值；#25：写入时锁内重核同一可排程
+--     条件（状态 pending + 生命周期事实全空 + 可重排所有权元组）——旧
+--     _conditional_schedulable_update 的生命周期门在批量路径的承接，待写
+--     行任一条件未命中 → PC001 整批放弃；
 --   * 中空轮补丁（语句 6）：逐轮复用 planning_patch_occurrence_round（行
 --     已在语句 3 锁定、expected 已在语句 4 全量复核，传 NULL 跳过其内部
 --     expected 复核）——其白名单 / 严格门 / 窗口一致性 / 原子回滚逐字保留；
@@ -50,7 +54,9 @@ begin
            or not e.value ?& array[
                'id', 'status', 'window_start_at', 'window_end_at',
                'est_start', 'est_end', 'estimated_time_source',
-               'fixed_source', 'is_fixed', 'schedule_managed', 'sort_order']
+               'fixed_source', 'is_fixed', 'schedule_managed', 'sort_order',
+               'actual_start', 'actual_end', 'partial_at', 'handled_at',
+               'closed_at']
     ) then
         raise exception 'planning_apply_recompute_batch: invalid expected snapshot';
     end if;
@@ -107,8 +113,9 @@ begin
      for update;
 
     -- 语句 4：全量快照复核（缺口 B）——任一参与计算行在读取后漂移（状态 /
-    -- 窗口 / est 预态 / 所有权元组 / 排序），或行消失，整批放弃（§19.1：
-    -- 旧计算输入已失效，不得部分落库）。
+    -- 生命周期事实（#25：读取后并发补录的实际开始 / 结束、部分完成、处理
+    -- 与关闭事实同样使计算输入失效）/ 窗口 / est 预态 / 所有权元组 / 排
+    -- 序），或行消失，整批放弃（§19.1：旧计算输入已失效，不得部分落库）。
     select count(*) into v_count
       from jsonb_array_elements(p_expected) as e
       join public.planning_occurrence o on o.id = (e.value->>'id')::bigint;
@@ -129,14 +136,23 @@ begin
             or (e.value ? 'fixed_source' and o.fixed_source is distinct from e.value->>'fixed_source')
             or (e.value ? 'is_fixed' and o.is_fixed is distinct from (e.value->>'is_fixed')::boolean)
             or (e.value ? 'schedule_managed' and o.schedule_managed is distinct from (e.value->>'schedule_managed')::boolean)
-            or (e.value ? 'sort_order' and o.sort_order is distinct from (e.value->>'sort_order')::integer))
+            or (e.value ? 'sort_order' and o.sort_order is distinct from (e.value->>'sort_order')::integer)
+            or (e.value ? 'actual_start' and o.actual_start is distinct from (e.value->>'actual_start')::timestamptz)
+            or (e.value ? 'actual_end' and o.actual_end is distinct from (e.value->>'actual_end')::timestamptz)
+            or (e.value ? 'partial_at' and o.partial_at is distinct from (e.value->>'partial_at')::timestamptz)
+            or (e.value ? 'handled_at' and o.handled_at is distinct from (e.value->>'handled_at')::timestamptz)
+            or (e.value ? 'closed_at' and o.closed_at is distinct from (e.value->>'closed_at')::timestamptz))
     ) then
         raise exception 'planning_apply_recompute_batch: schedule inputs drifted (stale recompute result)'
             using errcode = 'PC001';
     end if;
 
-    -- 语句 5：普通行补丁（est / 所有权元组 / nominal_start / updated_at；
-    -- patch 缺键 = 保持现值）。
+    -- 语句 5：普通行 / 单阶段补丁（est / 所有权元组 / nominal_start /
+    -- updated_at；patch 缺键 = 保持现值）。#25：写入时锁内重核同一可排程
+    -- 条件（与 _freely_schedulable 同源：状态 pending + 生命周期事实全空 +
+    -- 可重排所有权元组）——expected 复核只证明「行与读取时一致」，本条件
+    -- 证明「待写行确实可被自动重排」；任一未命中 → PC001 整批放弃（旧
+    -- _conditional_schedulable_update 生命周期门在批量路径的承接）。
     for v_entry in select * from jsonb_array_elements(p_singles) loop
         update public.planning_occurrence set
             est_start = case when v_entry ? 'est_start'
@@ -155,7 +171,21 @@ begin
                 then (v_entry->>'is_fixed')::boolean else is_fixed end,
             updated_at = case when v_entry ? 'updated_at'
                 then (v_entry->>'updated_at')::timestamptz else updated_at end
-          where id = (v_entry->>'id')::bigint;
+          where id = (v_entry->>'id')::bigint
+            and status = 'pending'
+            and actual_start is null
+            and actual_end is null
+            and partial_at is null
+            and handled_at is null
+            and closed_at is null
+            and is_fixed = false
+            and schedule_managed = true
+            and fixed_source is null
+            and estimated_time_source in ('unassigned', 'automatic', 'rule');
+        if not found then
+            raise exception 'planning_apply_recompute_batch: schedule inputs drifted (stale recompute result)'
+                using errcode = 'PC001';
+        end if;
         v_written := v_written || to_jsonb((v_entry->>'id')::bigint);
     end loop;
 

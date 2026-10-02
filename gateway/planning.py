@@ -3103,13 +3103,15 @@ def _conditional_lifecycle_update(client, occ: dict[str, Any], patch: dict[str, 
 
 def _recompute_expected_snapshot(occ: dict[str, Any]) -> dict[str, Any]:
     """重算某行的 expected snapshot（最终验收修复问题 3；#6 扩为全部参与
-    计算行）：compute_schedule 实际读取并决定「可排 / 可覆盖 / 窗口」的
-    输入字段——状态（含 in_progress / partial 等冻结槽的真实开放状态，#6
-    前硬编码 pending 会误判参与行漂移）、生命周期事实、所有权元组、冻结
-    窗口、既有 est 预态与排序（#13：sort_order 是遍历顺序输入，读取后
-    save_order 改序即旧结果作废，与单行条件 UPDATE 的内联等值守卫同源）。
-    NULL 显式参与复核。"""
-    return {
+    计算行；#25 补回生命周期事实）：compute_schedule 实际读取并决定「可排 /
+    可覆盖 / 窗口」的输入字段——状态（含 in_progress / partial 等冻结槽的
+    真实开放状态，#6 前硬编码 pending 会误判参与行漂移）、生命周期事实
+    （#25：actual_start 等事实读取后并发补录使可排程谓词失效——旧
+    _conditional_schedulable_update 的内联门在批量路径的承接）、所有权
+    元组、冻结窗口、既有 est 预态与排序（#13：sort_order 是遍历顺序输入，
+    读取后 save_order 改序即旧结果作废，与单行条件 UPDATE 的内联等值守卫
+    同源）。NULL 显式参与复核。"""
+    snapshot: dict[str, Any] = {
         "id": occ["id"],
         "status": occ.get("status"),
         "window_start_at": occ.get("window_start_at"),
@@ -3122,6 +3124,11 @@ def _recompute_expected_snapshot(occ: dict[str, Any]) -> dict[str, Any]:
         "schedule_managed": bool(occ.get("schedule_managed")),
         "sort_order": occ["sort_order"],
     }
+    # #25：生命周期事实字段集合单一来源（LIFECYCLE_FACT_FIELDS），与
+    # _has_lifecycle_fact / 实例编辑门控同一集合，不复制第二份字段清单。
+    for field in LIFECYCLE_FACT_FIELDS:
+        snapshot[field] = occ.get(field)
+    return snapshot
 
 
 def _atomic_round_write(client, target: dict[str, Any], main_patch: dict[str, Any],

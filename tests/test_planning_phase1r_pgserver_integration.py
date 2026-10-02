@@ -3531,7 +3531,9 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
 
     def _batch_expected_element(self, occ_id, *, status="pending", sort_order=10,
                                 est_start=None, est_end=None,
-                                estimated_time_source="unassigned"):
+                                estimated_time_source="unassigned",
+                                actual_start=None):
+        # #25：生命周期事实是必填键（NULL 显式参与复核）。
         return json.dumps({
             "id": occ_id, "status": status,
             "window_start_at": None, "window_end_at": None,
@@ -3539,6 +3541,8 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
             "estimated_time_source": estimated_time_source,
             "fixed_source": None, "is_fixed": False,
             "schedule_managed": True, "sort_order": sort_order,
+            "actual_start": actual_start, "actual_end": None,
+            "partial_at": None, "handled_at": None, "closed_at": None,
         })
 
     def _batch_single_json(self, occ_id, est_start, est_end, updated_at):
@@ -3658,6 +3662,73 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
         end_row = dict(zip(self._occ_columns(), self._occ_row(end_id)))
         self.assertEqual(str(start_row["est_start"]), "2026-09-24 15:00:00+08:00")
         self.assertEqual(str(end_row["est_start"]), "2026-09-24 16:30:00+08:00")
+
+    # -- 清单 #25（2026-10-02）：重算漏查生命周期事实的回退 ───────────────
+
+    def test_recompute_batch_rejects_actual_start_drift_on_written_row(self):
+        # #25 复现（R1）：重算读取 pending 行并计算后，另一请求经合法
+        # patch_occurrence 补录 actual_start（status 仍 pending），旧计算
+        # 不得把已开始实例重新排程——expected 声称事实为空、行已携带
+        # actual_start → 生命周期事实漂移 → PC001 整批放弃、零写入
+        #（基线 4c838a5 的旧条件 UPDATE 对同一交错返回 false）。
+        task_a = self._daily_task_row(content="甲")
+        occ_a = self._pending_occ_on(task_a, round_key="cycle:2026-09-24")
+        # 并发补录实际开始（另一请求先提交，重算随后执行）。
+        self._query(
+            "update public.planning_occurrence set actual_start = %s"
+            " where id = %s",
+            ("2026-09-24T08:45:00+08:00", occ_a))
+        expected = "[%s]" % self._batch_expected_element(occ_a, sort_order=10)
+        singles = "[%s]" % self._batch_single_json(
+            occ_a, "2026-09-24T09:00:00+08:00", "2026-09-24T09:30:00+08:00",
+            "2026-09-24T09:00:00+08:00")
+        self._query_expecting_concurrency_rejection(
+            self.RECOMPUTE_BATCH_SQL, (expected, singles, "[]"))
+        row = dict(zip(self._occ_columns(), self._occ_row(occ_a)))
+        self.assertIsNone(row["est_start"])  # 零写入：旧排程结果不落库
+        self.assertIsNone(row["est_end"])
+        self.assertEqual(str(row["actual_start"]), "2026-09-24 08:45:00+08:00")
+        self.assertEqual(row["status"], "pending")
+
+    def test_recompute_batch_rejects_lifecycle_drift_on_hollow_single_phase(self):
+        # #25：中空轮只有一阶段待写时经 singles 提交（单阶段写入路径）——
+        # 锁内生命周期事实复核同样适用（该路径此前无 round patch 严格门）。
+        start_id, end_id = self._hollow_pair()
+        self._query(
+            "update public.planning_occurrence set actual_start = %s"
+            " where id = %s",
+            ("2026-09-24T08:45:00+08:00", start_id))
+        expected = "[%s, %s]" % (
+            self._batch_expected_element(start_id, sort_order=10),
+            self._batch_expected_element(end_id, sort_order=10))
+        singles = "[%s]" % self._batch_single_json(
+            start_id, "2026-09-24T09:00:00+08:00",
+            "2026-09-24T09:30:00+08:00", "2026-09-24T09:00:00+08:00")
+        self._query_expecting_concurrency_rejection(
+            self.RECOMPUTE_BATCH_SQL, (expected, singles, "[]"))
+        for occ_id in (start_id, end_id):
+            row = dict(zip(self._occ_columns(), self._occ_row(occ_id)))
+            self.assertIsNone(row["est_start"])
+
+    def test_recompute_batch_rejects_single_write_on_nonschedulable_row(self):
+        # #25 写侧门：即使 expected 如实快照了不可排程状态（快照等值复核
+        # 通过），singles 写入仍须重核同一可排程条件——携带 actual_start 的
+        # 行不得被批量重排（防御构造 caller，不依赖快照谎报）。
+        task_a = self._daily_task_row(content="甲")
+        occ_a = self._pending_occ_on(task_a, round_key="cycle:2026-09-24")
+        self._query(
+            "update public.planning_occurrence set actual_start = %s"
+            " where id = %s",
+            ("2026-09-24T08:45:00+08:00", occ_a))
+        expected = "[%s]" % self._batch_expected_element(
+            occ_a, sort_order=10, actual_start="2026-09-24T08:45:00+08:00")
+        singles = "[%s]" % self._batch_single_json(
+            occ_a, "2026-09-24T09:00:00+08:00", "2026-09-24T09:30:00+08:00",
+            "2026-09-24T09:00:00+08:00")
+        self._query_expecting_concurrency_rejection(
+            self.RECOMPUTE_BATCH_SQL, (expected, singles, "[]"))
+        row = dict(zip(self._occ_columns(), self._occ_row(occ_a)))
+        self.assertIsNone(row["est_start"])
 
     def test_recompute_batch_single_signature(self):
         # #15 纪律：新函数恰一签名（3 个 jsonb 参数）。

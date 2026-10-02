@@ -532,16 +532,24 @@ class PlanningRecomputeBatchMigrationContractTests(unittest.TestCase):
                 self.assertNotIn(forbidden, self.folded)
 
     def test_expected_covers_all_participating_rows(self):
-        # 缺口 B：expected 必填键与 #13 同源（含 sort_order）；行消失与
+        # 缺口 B：expected 必填键与 #13 同源（含 sort_order；#25 补生命周期
+        # 事实——读取后并发补录的实际开始等事实使计算输入失效）；行消失与
         # 任一漂移都构成整批放弃（count 比对 + 漂移存在性检查）。
         folded = self.folded
-        self.assertIn("'fixed_source', 'is_fixed', 'schedule_managed', 'sort_order']",
+        self.assertIn("'fixed_source', 'is_fixed', 'schedule_managed', 'sort_order',",
                       folded)
+        self.assertIn("'actual_start', 'actual_end', 'partial_at', 'handled_at',",
+                      folded)
+        self.assertIn("'closed_at']", folded)
         self.assertIn("v_count <> jsonb_array_length(p_expected)", folded)
         self.assertIn("o.sort_order is distinct from (e.value->>'sort_order')::integer",
                       folded)
+        self.assertIn("o.actual_start is distinct from (e.value->>'actual_start')::timestamptz",
+                      folded)
+        self.assertIn("o.closed_at is distinct from (e.value->>'closed_at')::timestamptz",
+                      folded)
         self.assertEqual(folded.count(
-            "schedule inputs drifted (stale recompute result)"), 2)
+            "schedule inputs drifted (stale recompute result)"), 3)
 
     def test_stable_lock_order_and_write_subset_guard(self):
         # 锁序纪律：全部参与行按 id 升序加锁；singles / rounds 的待写 id
@@ -553,6 +561,25 @@ class PlanningRecomputeBatchMigrationContractTests(unittest.TestCase):
         self.assertIn("invalid round write", folded)
         self.assertIn(
             "(x.value->>'id')::bigint = (e.value->>'id')::bigint", folded)
+
+    def test_singles_rewrite_schedulable_condition_in_lock(self):
+        # #25（2026-10-02）：singles 写入时锁内重核同一可排程条件（状态
+        # pending + 生命周期事实全空 + 可重排所有权元组），任一未命中
+        # PC001 整批放弃——旧 _conditional_schedulable_update 生命周期门
+        # 在批量路径的承接（此前 singles 只有 id 条件）。
+        folded = self.folded
+        self.assertIn("and status = 'pending'", folded)
+        for field in ("actual_start", "actual_end", "partial_at",
+                      "handled_at", "closed_at"):
+            with self.subTest(field=field):
+                self.assertIn("and %s is null" % field, folded)
+        self.assertIn("and is_fixed = false", folded)
+        self.assertIn("and schedule_managed = true", folded)
+        self.assertIn("and fixed_source is null", folded)
+        self.assertIn(
+            "and estimated_time_source in ('unassigned', 'automatic', 'rule')",
+            folded)
+        self.assertIn("if not found then", folded)
 
     def test_singles_whitelist_and_rounds_reuse_patch_rpc(self):
         # singles 键硬白名单（est / 所有权 / nominal_start / updated_at），
@@ -570,8 +597,9 @@ class PlanningRecomputeBatchMigrationContractTests(unittest.TestCase):
         self.assertNotIn("security definer", folded)
 
     def test_pc001_whole_batch_rejection(self):
-        # 漂移 / 行消失统一 PC001（乐观并发拒绝族）——应用层整批放弃。
-        self.assertEqual(self.folded.count("using errcode = 'pc001'"), 2)
+        # 漂移 / 行消失 / 待写行不可排程统一 PC001（乐观并发拒绝族）——
+        # 应用层整批放弃。
+        self.assertEqual(self.folded.count("using errcode = 'pc001'"), 3)
 
 
 class PlanningSplitAtomicMigrationContractTests(unittest.TestCase):
