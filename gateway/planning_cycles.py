@@ -40,7 +40,11 @@ def _load_boundary_state(now: datetime) -> tuple[time, BoundaryTransition | None
     但只有在过渡真正走完后才会在下一次边界修改时转入永久登记——生效前再次
     修改边界会整体重算计划吸收，原计划日期自动恢复为有效周期。
     """
-    raw = db.load_app_setting(common.PLANNING_BOUNDARY_STATE_KEY)
+    return _parse_boundary_state(db.load_app_setting(common.PLANNING_BOUNDARY_STATE_KEY), now)
+
+
+def _parse_boundary_state(raw: Any, now: datetime) -> tuple[time, BoundaryTransition | None, frozenset[date]]:
+    """Interpret a stored boundary snapshot using the existing transition rules."""
     if raw is db.APP_SETTING_QUERY_FAILED:
         raise common.PlanningError("database_unavailable", "规划周期配置暂时无法读取", 503)
     if not isinstance(raw, dict):
@@ -77,6 +81,46 @@ def _load_boundary_state(now: datetime) -> tuple[time, BoundaryTransition | None
         except (TypeError, ValueError):
             continue
     return boundary, transition, frozenset(absorbed | planned_absorbed)
+
+
+class PlanningRequestContext:
+    """Lazy request-local settings, with failures interpreted at their original stage.
+
+    Immediate creation uses only boundary and daily-refresh settings. Loading
+    their raw values together must not turn a generation failure into a failed
+    task insert; validation only interprets the boundary when it needs it.
+    """
+
+    def __init__(self, now: datetime):
+        self.now = now
+        self._values: dict[str, Any] | None = None
+        self._boundary: tuple[time, BoundaryTransition | None, frozenset[date]] | None = None
+
+    def _setting(self, key: str) -> Any:
+        if self._values is None:
+            self._values = db.load_app_settings((
+                common.PLANNING_BOUNDARY_STATE_KEY, common.PLANNING_DAILY_REFRESH_KEY,
+            ))
+        return self._values.get(key)
+
+    def boundary_state(self) -> tuple[time, BoundaryTransition | None, frozenset[date]]:
+        if self._boundary is None:
+            self._boundary = _parse_boundary_state(
+                self._setting(common.PLANNING_BOUNDARY_STATE_KEY), self.now,
+            )
+        return self._boundary
+
+    @property
+    def cycle(self) -> PlanningCycle:
+        configured, transition, _ = self.boundary_state()
+        return planning_cycle_at(self.now, configured, transition)
+
+    @property
+    def daily_refresh_enabled(self) -> bool:
+        value = self._setting(common.PLANNING_DAILY_REFRESH_KEY)
+        if value is db.APP_SETTING_QUERY_FAILED:
+            raise common.PlanningError("database_unavailable", "每日刷新配置暂时无法读取", 503)
+        return value if isinstance(value, bool) else True
 
 
 def get_cycle_settings(now: datetime | None = None) -> dict[str, Any]:

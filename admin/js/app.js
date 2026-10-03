@@ -1,10 +1,10 @@
 // app.js - shell: login, sidebar, routing, theme, mobile drawers
-import { NAV, ROUTE_INDEX } from './routes.js?v=20261003-memo-review-fixes1';
-import { loading, errorBlock, icon, esc } from './ui.js?v=20261003-memo-review-fixes1';
-import { gw, getToken, setToken, clearToken } from './api.js?v=20261003-memo-review-fixes1';
+import { NAV, ROUTE_INDEX } from './routes.js?v=20261003-planning-create-latency2';
+import { loading, errorBlock, icon, esc } from './ui.js?v=20261003-planning-create-latency2';
+import { gw, getToken, setToken, clearToken } from './api.js?v=20261003-planning-create-latency2';
 
 const DEFAULT_ROUTE = 'memories';
-const ASSET_VERSION = '20261003-memo-review-fixes1';
+const ASSET_VERSION = '20261003-planning-create-latency2';
 
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);

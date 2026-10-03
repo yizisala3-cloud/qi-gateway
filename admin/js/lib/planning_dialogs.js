@@ -1,6 +1,6 @@
 // Instance dialogs: form-local inputs and timeout retry identity stay in their closures.
-import { gw } from '../api.js?v=20261003-memo-review-fixes1';
-import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261003-memo-review-fixes1';
+import { gw } from '../api.js?v=20261003-planning-create-latency2';
+import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261003-planning-create-latency2';
 
 export function createPlanningDialogs({
   findOccurrence, getOccurrences, getTasks, openTaskForm,

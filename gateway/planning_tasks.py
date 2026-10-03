@@ -213,7 +213,10 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
     return result
 
 
-def _validate_template_window_constraints(row: dict[str, Any], now: datetime) -> None:
+def _validate_template_window_constraints(
+    row: dict[str, Any], now: datetime, *,
+    context: cycles.PlanningRequestContext | None = None,
+) -> None:
     """模板窗口的保存校验（§30.6；创建与规则编辑共用同一套领域约束）。
 
     * 任何非空模板都要求有效占用跨度（预计耗时；中空 = 完整包络）；
@@ -239,7 +242,7 @@ def _validate_template_window_constraints(row: dict[str, Any], now: datetime) ->
         raise common.PlanningError("invalid_payload", "填写了可安排时段的待办必须提供有效预计耗时", 400)
     if not template.is_bounded:
         return
-    boundary, _, _ = cycles._load_boundary_state(now)
+    boundary, _, _ = context.boundary_state() if context is not None else cycles._load_boundary_state(now)
     try:
         validate_template_window(template, boundary)
     except ValueError as exc:
@@ -249,7 +252,10 @@ def _validate_template_window_constraints(row: dict[str, Any], now: datetime) ->
         ) from exc
 
 
-def _validate_window_creation(row: dict[str, Any], now: datetime) -> None:
+def _validate_window_creation(
+    row: dict[str, Any], now: datetime, *,
+    context: cycles.PlanningRequestContext | None = None,
+) -> None:
     """创建入口的窗口与产品边界校验（§10 / §12.1 / §30.6 / §32.40 / §32.41 / §32.45）。
 
     * once 目标日期为可选项（2026-10-01）：非空时不得早于当前业务日期
@@ -279,7 +285,7 @@ def _validate_window_creation(row: dict[str, Any], now: datetime) -> None:
                 )
         if row.get("window_start_tod") or row.get("window_end_tod"):
             _validate_once_date_window_pair(row)
-    _validate_template_window_constraints(row, now)
+    _validate_template_window_constraints(row, now, context=context)
     template = common._task_window_template(row)
     if template is None:
         return
@@ -359,6 +365,7 @@ def _fixed_interval_anchor_due(row: dict[str, Any], now: datetime) -> bool:
 
 def _first_round_settlement(
     row: dict[str, Any], now: datetime,
+    *, context: cycles.PlanningRequestContext | None = None,
 ) -> tuple[bool, date | None]:
     """创建时刻的首轮裁决（R1 / R3 / R6 / R7 审查修复）：一次性判定并给出结算。
 
@@ -389,8 +396,8 @@ def _first_round_settlement(
     mode = row["refresh_mode"]
     if mode == "fixed_interval" and not _fixed_interval_anchor_due(row, now):
         return False, None  # 显式未来首次基准未到期：首轮尚未成为当前轮（R7）
-    configured, transition, _ = cycles._load_boundary_state(now)
-    cycle_key = cycles._current_cycle(now).key
+    configured, transition, _ = context.boundary_state() if context is not None else cycles._load_boundary_state(now)
+    cycle_key = context.cycle.key if context is not None else cycles._current_cycle(now).key
     if mode in ("fixed_weekday", "fixed_monthday") and not generation._should_occur(row, cycle_key):
         return False, None  # 当前周期无合法轮次：无「当前轮」可跳过（R6）
     if not _round_deadline_passed(row, cycle_key, now, configured, transition):
@@ -403,6 +410,7 @@ def _first_round_settlement(
 
 def _creation_window_outcome(
     row: dict[str, Any], now: datetime,
+    *, context: cycles.PlanningRequestContext | None = None,
 ) -> tuple[bool, bool, date | None]:
     """创建反馈与首轮结算（§30.6 / §18.1 / §32.45，2026-10-01）。
 
@@ -439,13 +447,13 @@ def _creation_window_outcome(
         return False, False, None
     if mode == "fixed_interval" and not _fixed_interval_anchor_due(row, now):
         return False, False, None  # 首个轴点未到期：尚无当前轮（R7）
-    configured, transition, _ = cycles._load_boundary_state(now)
-    cycle_key = cycles._current_cycle(now).key
+    configured, transition, _ = context.boundary_state() if context is not None else cycles._load_boundary_state(now)
+    cycle_key = context.cycle.key if context is not None else cycles._current_cycle(now).key
     if (mode in ("fixed_weekday", "fixed_monthday")
             and not generation._should_occur(row, cycle_key)):
         return False, False, None  # 非规则日没有当前轮（R6 / R10）
     if skip_eligible:
-        skipped, settle_day = _first_round_settlement(row, now)
+        skipped, settle_day = _first_round_settlement(row, now, context=context)
         if skipped:
             return True, False, settle_day
     # 未跳过时本轮冻结窗口 = 以当前时刻为参考的候选解析（与
@@ -458,21 +466,22 @@ def create_task(payload: Any, now: datetime | None = None) -> dict[str, Any]:
     now = now or runtime._now()
     row = validate_task_payload(payload, partial=False)
     _prepare_refresh_definition(row, now)
-    _validate_window_creation(row, now)
+    context = cycles.PlanningRequestContext(now)
+    _validate_window_creation(row, now, context=context)
     row["created_at"] = common._iso(now)
     row["updated_at"] = common._iso(now)
     row["is_fixed"] = bool(row.get("is_fixed"))
     # 创建反馈 + 首轮结算（§30.6 / §18.1 / §32.45）：判定、提示与结算在
     # 写入前一次完成；跳过经生成游标随任务行原子落库（R3 稳定裁决），
     # 生成侧不再按当下时间重判。
-    first_round_skipped, schedule_conflict, settle_day = _creation_window_outcome(row, now)
+    first_round_skipped, schedule_conflict, settle_day = _creation_window_outcome(row, now, context=context)
     if settle_day is not None:
         row["refresh_generated_through"] = settle_day.isoformat()
     client = runtime._require_client()
     response = client.table("planning_task").insert(row).execute()
     created = (response.data or [{}])[0]
     # 即时生成：新建的待办（含 interval 立即到期）不等后台循环，立刻出现在列表。
-    _generate_due_quietly(client, now)
+    _generate_created_task_quietly(created["id"], now, context)
     serialized = presentation.serialize_task(created, now)
     # 创建反馈（§30.6 / §18.1）：区分「本轮已截止、次日起生效」与
     # 「已创建但存在排程冲突」，两者都不改变任务已保存的事实。
@@ -530,6 +539,24 @@ def _prepare_refresh_definition(row: dict[str, Any], now: datetime, current: dic
         )
     if combined.get("is_fixed") and not combined.get("est_start_tod"):
         raise common.PlanningError("invalid_payload", "固定时间必须有有效的预估开始时间", 400)
+
+
+def _generate_created_task_quietly(
+    task_id: int, now: datetime, context: cycles.PlanningRequestContext,
+) -> None:
+    """Create the new task's due round immediately, then schedule the whole cycle."""
+    with runtime._maintenance_lock:
+        try:
+            result = generation.generate_task(task_id, now, context=context)
+        except Exception:
+            log.exception("planning 新任务同步生成失败（等待后台循环重试）: task=%s", task_id)
+            return
+        if not common._should_recompute_after_generation(result):
+            return
+        try:
+            recompute._recompute_for_cycle(now, context.cycle)
+        except Exception:
+            log.exception("planning 新任务同步重算失败: task=%s", task_id)
 
 
 def _generate_due_quietly(client, now: datetime) -> None:

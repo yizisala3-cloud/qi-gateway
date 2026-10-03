@@ -34,7 +34,8 @@ DIALOGS = ROOT / 'admin/js/lib/planning_dialogs.js'
 SORT = ROOT / 'admin/js/lib/planning_sort.js'
 REMINDER = ROOT / 'admin/js/lib/planning_reminder.js'
 MEMO = ROOT / 'admin/js/lib/planning_memo.js'
-PLANNING_MODULES = (DISPLAY, TASK_FORM, DIALOGS, SORT, REMINDER, MEMO)
+READS = ROOT / 'admin/js/lib/planning_reads.js'
+PLANNING_MODULES = (DISPLAY, TASK_FORM, DIALOGS, SORT, REMINDER, MEMO, READS)
 STYLE = ROOT / "admin" / "css" / "style.css"
 CREDITS = ROOT / "admin" / "assets" / "audio" / "CREDITS.md"
 
@@ -720,8 +721,9 @@ class PlanningNavigationContractTests(unittest.TestCase):
             "createdTask?.first_round_skipped",
             "createdTask?.schedule_conflict",
             "本轮已过最晚完成，从次日起按重复规则生效",
-            "try { close(); } catch {",
-            "try { await onSaved(); } catch {",
+            "try { close(); } catch (error) {",
+            "try { await onSaved(); } catch (error) {",
+            "待办已创建，列表更新失败，请刷新重试",
         ):
             with self.subTest(post_step=step):
                 self.assertIn(step, post_seg)
@@ -1026,7 +1028,7 @@ class PlanningNavigationContractTests(unittest.TestCase):
 
         # F：成功后 loadAll 抛异常 → 不误报「保存失败」、不重复提交
         self.assertEqual(out["f_load_fail"]["closed"], 1)
-        self.assertEqual(out["f_load_fail"]["lastToast"], "待办已创建")
+        self.assertEqual(out["f_load_fail"]["lastToast"], "待办已创建，列表更新失败，请刷新重试")
         self.assertTrue(out["f_load_fail"]["disabled"])
         self.assertEqual(out["f_reclick_calls"], 1, "committed form must never submit again")
 
@@ -1036,7 +1038,7 @@ class PlanningNavigationContractTests(unittest.TestCase):
         self.assertEqual(out["e1_fail"]["url"], "/admin/api/planning/tasks/7")
         self.assertFalse(out["e1_fail"]["disabled"])
         self.assertIn("保存失败", out["e1_fail"]["lastToast"])
-        self.assertEqual(out["e1_success_load_fail"]["lastToast"], "待办已保存")
+        self.assertEqual(out["e1_success_load_fail"]["lastToast"], "待办已保存，列表更新失败，请刷新重试")
         self.assertNotIn("保存失败", out["e1_success_load_fail"]["lastToast"])
         self.assertTrue(out["e1_success_load_fail"]["disabled"])
         self.assertEqual(out["e1_reclick_calls"], 2, "committed edit form must never submit again")

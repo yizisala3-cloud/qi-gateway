@@ -1,24 +1,25 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
-// 数据按需加载：今日看板 30 秒轮询，全部待办首次切到该页签时才拉取。
-import { gw } from '../api.js?v=20261003-memo-review-fixes1';
+// 数据按需加载：今日看板保留 30 秒提醒轮询，首次/失效切入时刷新可见列表。
+import { gw } from '../api.js?v=20261003-planning-create-latency2';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, esc,
   createDetailPanel,
-} from '../ui.js?v=20261003-memo-review-fixes1';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261003-memo-review-fixes1';
-import { createRetroSelectField } from '../lib/retro_select.js?v=20261003-memo-review-fixes1';
+} from '../ui.js?v=20261003-planning-create-latency2';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261003-planning-create-latency2';
+import { createRetroSelectField } from '../lib/retro_select.js?v=20261003-planning-create-latency2';
 import {
   TASK_TYPE_LABELS, TASK_TYPES, STATUS_META, CLOSED_STATUSES,
   fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty,
   itemMeta, isClosedOcc, formatLoggedDuration, durationText, durationDetailRows,
   itemBadges, itemHtml,
-} from '../lib/planning_display.js?v=20261003-memo-review-fixes1';
-import { openTaskForm } from '../lib/planning_task_form.js?v=20261003-memo-review-fixes1';
-import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261003-memo-review-fixes1';
-import { createPlanningSort } from '../lib/planning_sort.js?v=20261003-memo-review-fixes1';
-import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261003-memo-review-fixes1';
-import { createPlanningMemo } from '../lib/planning_memo.js?v=20261003-memo-review-fixes1';
+} from '../lib/planning_display.js?v=20261003-planning-create-latency2';
+import { openTaskForm } from '../lib/planning_task_form.js?v=20261003-planning-create-latency2';
+import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261003-planning-create-latency2';
+import { createPlanningSort } from '../lib/planning_sort.js?v=20261003-planning-create-latency2';
+import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261003-planning-create-latency2';
+import { createPlanningMemo } from '../lib/planning_memo.js?v=20261003-planning-create-latency2';
+import { createPlanningReads } from '../lib/planning_reads.js?v=20261003-planning-create-latency2';
 
 // 部分完成属于开放生命周期：实例仍在「进度中」，直到「已全部完成」才关闭
 const OPEN_STATUSES = ['pending', 'in_progress', 'deferred', 'partial'];
@@ -36,23 +37,32 @@ export default {
   reorderMode: false,
   activeTab: 'today',
   activeSection: 'progress',
-  loadedTabs: null,
+  reads: null,
+  readErrors: null,
+  savedRefresh: null,
   pollTimer: null,
   reminder: createPlanningReminder(),
   dialogs: null,
   sort: null,
   memo: null,
+  taskForm: null,
+  loadedTabs: null, // 仅用于备忘录的按需挂载
 
   async mount(root) {
     this.root = root;
+    this.reads = createPlanningReads();
+    this.readErrors = new Map();
+    this.savedRefresh = null;
+    this.loadedTabs = new Set();
+    const mountedReads = this.reads;
     this.dialogs ||= createPlanningDialogs({
       findOccurrence: (id) => this.findOccurrence(id),
       getOccurrences: () => this.occurrences,
       getTasks: () => this.tasks,
       openTaskForm: (task) => this.openTaskForm(task),
-      loadToday: () => this.loadToday(),
-      loadTasks: () => this.loadTasks(),
-      loadOccurrences: () => this.loadOccurrences(),
+      loadToday: () => this.loadToday({ fresh: true }),
+      loadTasks: () => this.loadTasks({ fresh: true }),
+      loadOccurrences: () => this.loadOccurrences({ fresh: true }),
     });
     this.sort ||= createPlanningSort({
       getRoot: () => this.root,
@@ -62,13 +72,12 @@ export default {
       getActiveSection: () => this.activeSection,
       selectSection: (section) => this.switchSection(section),
       renderBoard: () => this.renderBoard(),
-      loadToday: () => this.loadToday(),
+      loadToday: () => this.loadToday({ fresh: true }),
       getReorderMode: () => this.reorderMode,
       setReorderMode: (enabled) => { this.reorderMode = enabled; },
     });
     this.activeTab = 'today';
     this.activeSection = 'progress';
-    this.loadedTabs = new Set();
     root.innerHTML = `
       <div class="page-with-detail" id="planning-layout">
         <div class="page-main">
@@ -85,6 +94,7 @@ export default {
             <button class="btn btn-secondary" data-act="recompute">${icon('refresh')}重新计算时间</button>
             <button class="btn btn-secondary" data-act="enter-reorder" id="planning-reorder-btn">${icon('sort')}调整顺序</button>
           </div>
+          <div id="planning-load-feedback" role="alert" hidden></div>
           <div id="planning-reorder-bar" style="display:none;margin-bottom:12px">
             <div class="plan-alarm-bar">
               ${icon('sort')}
@@ -186,23 +196,31 @@ export default {
         </div>
       </div>`;
 
-    this.detail = createDetailPanel(root.querySelector('#planning-layout'));
+    const actionRoot = root.querySelector('#planning-layout');
+    this.detail = createDetailPanel(actionRoot);
     this.progressList = root.querySelector('#planning-progress');
-    root.addEventListener('click', (e) => this.handleItemClick(e));
-    this.bindDetailActions();
+    actionRoot.addEventListener('click', (e) => {
+      if (this.reads === mountedReads) this.handleItemClick(e);
+    });
+    this.bindDetailActions(actionRoot, mountedReads);
     this.initRetroFields(root);
 
-    delegate(root, {
+    const actions = {
       'new-task': () => this.openTaskForm(null),
       recompute: () => this.runRecompute(),
       'enter-reorder': () => this.enterReorder(),
       'confirm-reorder': () => this.confirmReorder(),
       'cancel-reorder': () => this.cancelReorder(),
       'clear-filters': () => this.clearFilters(),
+      'retry-lists': () => this.retryLists(),
       stop: () => this.reminder.stopRinging(),
       'plan-tab': (el) => this.switchTab(el.dataset.tab),
       'plan-subtab': (el) => this.switchSection(el.dataset.section),
-    });
+    };
+    // 路由外层 root 会复用；委托只绑本次创建的布局，避免重挂载重复开表单。
+    delegate(actionRoot, Object.fromEntries(Object.entries(actions).map(([name, action]) => [
+      name, (...args) => { if (this.reads === mountedReads) return action(...args); },
+    ])));
     root.querySelector('#planning-filter-type').addEventListener('change', (e) => {
       this.filters.task_type = e.target.value;
       this.loadOccurrences();
@@ -218,8 +236,8 @@ export default {
     });
 
     this.reminder.attach();
-    this.loadedTabs.add('today');
     await this.loadToday();
+    if (this.reads !== mountedReads || !this.root) return;
     this.pollTimer = setInterval(() => {
       if (this.reorderMode) return;  // 排列中不重绘，避免打断拖拽
       this.loadToday({ silent: true });
@@ -244,11 +262,8 @@ export default {
     this.root.querySelectorAll('.plan-region[data-panel]').forEach((panel) => {
       panel.hidden = panel.dataset.panel !== tab;
     });
-    if (tab === 'all' && !this.loadedTabs.has('all')) {
-      this.loadedTabs.add('all');
-      this.loadTasks();
-      this.loadOccurrences();
-    }
+    this.renderReadFeedback();
+    this.refreshVisible({ onlyInvalid: true });
     if (tab === 'memo' && !this.loadedTabs.has('memo')) {
       // 备忘录数据按需加载；编辑器中的未保存内容由模块自身生命周期承接
       this.loadedTabs.add('memo');
@@ -290,62 +305,127 @@ export default {
   },
 
   unmount() {
+    this.reads?.dispose();
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = null;
     this.memo?.dispose();
     this.memo = null;
+    this.loadedTabs = null;
     this.reminder.dispose();
     this.detail = null;
-    this.loadedTabs = null;
+    this.reads = null;
+    this.readErrors = null;
+    this.savedRefresh = null;
     this.root = null;
   },
 
 
   /* ---------- 数据加载 ---------- */
 
-  async loadAll() {
-    await Promise.all([this.loadToday(), this.loadTasks(), this.loadOccurrences()]);
-  },
-
-  async loadToday({ silent = false } = {}) {
-    try {
-      const board = await gw('/admin/api/planning/today');
-      this.board = board;
-      this.renderBoard();
-      this.reminder.checkAlarms(board);
-    } catch (error) {
+  async loadList(name, { key = '', request, apply, silent = false, fresh = false }) {
+    const reads = this.reads;
+    if (!reads || !this.root) return true;
+    if (fresh) reads.invalidate([name]);
+    const result = await reads.read(name, { key, request, apply });
+    if (this.reads !== reads || !this.root || result.ignored) return true;
+    if (result.error) {
       if (!silent) {
-        this.root.querySelector('#planning-progress').innerHTML =
-          errorBlock(`当前待办读取失败：${esc(error.message)}`);
+        this.readErrors.set(name, result.error.message);
+        // 首次加载失败不继续显示“正在加载”；已有列表留在原位供用户查看。
+        if (!reads.hasData(name)) {
+          const selector = { today: '#planning-progress', tasks: '#planning-tasks',
+            occurrences: '#planning-occurrences' }[name];
+          this.root.querySelector(selector).innerHTML = errorBlock('列表读取失败，请刷新重试');
+        }
+        this.renderReadFeedback();
       }
+      return false;
     }
+    this.readErrors.delete(name);
+    if (this.savedRefresh?.names.every((list) => !reads.needsRead(list))) this.savedRefresh = null;
+    this.renderReadFeedback();
+    return true;
   },
 
-  async loadTasks() {
-    try {
-      const tasks = await gw('/admin/api/planning/tasks?include_inactive=true');
-      this.tasks = tasks;
-      this.renderTasks();
-    } catch (error) {
-      this.root.querySelector('#planning-tasks').innerHTML =
-        errorBlock(`任务定义读取失败：${esc(error.message)}`);
-    }
+  loadToday(options = {}) {
+    return this.loadList('today', {
+      ...options,
+      request: () => gw('/admin/api/planning/today'),
+      apply: (board) => {
+        this.board = board;
+        this.renderBoard();
+        this.reminder.checkAlarms(board);
+      },
+    });
   },
 
-  async loadOccurrences() {
-    try {
-      const params = new URLSearchParams();
-      if (this.filters.task_type) params.set('task_type', this.filters.task_type);
-      if (this.filters.status) params.set('status', this.filters.status);
-      if (this.filters.schedule_date) params.set('schedule_date', this.filters.schedule_date);
-      const suffix = params.toString();
-      const occurrences = await gw(`/admin/api/planning/occurrences${suffix ? `?${suffix}` : ''}`);
-      this.occurrences = occurrences;
-      this.renderOccurrences();
-    } catch (error) {
-      this.root.querySelector('#planning-occurrences').innerHTML =
-        errorBlock(`出现记录读取失败：${esc(error.message)}`);
-    }
+  loadTasks(options = {}) {
+    return this.loadList('tasks', {
+      ...options,
+      request: () => gw('/admin/api/planning/tasks?include_inactive=true'),
+      apply: (tasks) => { this.tasks = tasks; this.renderTasks(); },
+    });
+  },
+
+  loadOccurrences(options = {}) {
+    const params = new URLSearchParams();
+    if (this.filters.task_type) params.set('task_type', this.filters.task_type);
+    if (this.filters.status) params.set('status', this.filters.status);
+    if (this.filters.schedule_date) params.set('schedule_date', this.filters.schedule_date);
+    const suffix = params.toString();
+    return this.loadList('occurrences', {
+      ...options, key: suffix,
+      request: () => gw(`/admin/api/planning/occurrences${suffix ? `?${suffix}` : ''}`),
+      apply: (occurrences) => { this.occurrences = occurrences; this.renderOccurrences(); },
+    });
+  },
+
+  visibleLists() {
+    return this.activeTab === 'today' ? ['today']
+      : this.activeTab === 'all' ? ['tasks', 'occurrences'] : [];
+  },
+
+  async refreshVisible({ onlyInvalid = false } = {}) {
+    const names = this.visibleLists();
+    const load = { today: () => this.loadToday(), tasks: () => this.loadTasks(),
+      occurrences: () => this.loadOccurrences() };
+    const results = await Promise.all(names.filter((name) => !onlyInvalid || this.reads?.needsRead(name))
+      .map((name) => load[name]()));
+    return results.every(Boolean);
+  },
+
+  async taskSaved(editing) {
+    // 保存前发出的慢轮询自此失效；隐藏列表仅标记，下一次切入再读取。
+    // 表单关闭/路由重挂载不会撤销业务写入；成功时刷新当前挂载的页面。
+    const mountedReads = this.reads;
+    if (!mountedReads || !this.root) return;
+    mountedReads.invalidate();
+    const names = this.visibleLists();
+    const ok = await this.refreshVisible();
+    if (this.reads !== mountedReads || !this.root || ok) return;
+    this.savedRefresh = { names, message: editing ? '待办已保存，列表更新失败' : '待办已创建，列表更新失败' };
+    this.renderReadFeedback();
+    toast(`${this.savedRefresh.message}，请刷新重试`, 'warn');
+  },
+
+  renderReadFeedback() {
+    if (!this.root || !this.readErrors) return;
+    const host = this.root.querySelector('#planning-load-feedback');
+    const labels = { today: '当前待办', tasks: '任务定义', occurrences: '出现记录' };
+    const visibleErrors = this.visibleLists().filter((name) => this.readErrors.has(name));
+    const message = this.savedRefresh?.message || visibleErrors
+      .map((name) => `${labels[name]}读取失败：${this.readErrors.get(name)}`).join('；');
+    host.hidden = !message;
+    host.innerHTML = message ? errorBlock(`${esc(message)} <button type="button" class="btn btn-secondary btn-sm" data-act="retry-lists">${icon('refresh')}刷新重试</button>`) : '';
+  },
+
+  async retryLists() {
+    const reads = this.reads;
+    const names = new Set([...this.visibleLists(), ...(this.savedRefresh?.names || [])]);
+    const load = { today: () => this.loadToday(), tasks: () => this.loadTasks(),
+      occurrences: () => this.loadOccurrences() };
+    await Promise.all([...names].map((name) => load[name]()));
+    if (this.reads === reads && this.root) this.renderReadFeedback();
   },
 
   /* ---------- 渲染 ---------- */
@@ -570,6 +650,7 @@ export default {
         }),
       });
       toast('提醒已保存');
+      this.reads?.invalidate();
       await this.loadToday();
       await this.loadOccurrences();
       const fresh = this.findOccurrence(occId) || this.occurrences.find((o) => o.id === occId);
@@ -712,6 +793,7 @@ export default {
       } else {
         toast(`已重新计算，更新了 ${result.updated} 项待办时间`);
       }
+      this.reads?.invalidate(['today', 'occurrences']);
       await this.loadToday();
     } catch (error) {
       toast(`重算失败：${error.message}`, 'err');
@@ -768,6 +850,7 @@ export default {
       else if (act === 'split') return this.askSplit(id);
       else if (act === 'spawn-remaining') return this.askRemaining(id);
       toast('已更新');
+      this.reads?.invalidate();
       await this.loadToday();
       await this.loadOccurrences();
     } catch (error) {
@@ -834,6 +917,7 @@ export default {
           if (el) el.disabled = false;
         }
       }
+      this.reads?.invalidate();
       await Promise.all([this.loadTasks(), this.loadToday()]);
       if (act === 'pause-refresh' || act === 'resume-refresh') {
         // 按钮状态只来自服务端持久化数据，刷新页面后同样正确（需求 24H）
@@ -886,17 +970,23 @@ export default {
   /* ---------- 新建 / 编辑任务表单 ---------- */
 
   openTaskForm(task) {
-    return openTaskForm(task, {
+    if (this.taskForm?.isSubmitting()) {
+      toast(this.taskForm.editing ? '待办正在保存，请等待完成' : '待办正在创建，请等待完成', 'warn');
+      return;
+    }
+    this.taskForm = openTaskForm(task, {
       occurrences: this.occurrences,
       initRetroFields: (scope, options) => this.initRetroFields(scope, options),
-      onSaved: () => this.loadAll(),
+      onSaved: () => this.taskSaved(!!task?.id),
     });
+    return this.taskForm;
   },
 
   /* ---------- 事件委托（详情动作） ---------- */
 
-  bindDetailActions() {
-    this.root.addEventListener('click', (e) => {
+  bindDetailActions(scope, mountedReads) {
+    scope.addEventListener('click', (e) => {
+      if (this.reads !== mountedReads) return;
       const el = e.target.closest('[data-act]');
       if (!el || el.disabled) return;
       const act = el.dataset.act;

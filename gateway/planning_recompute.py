@@ -13,6 +13,7 @@ from . import planning_common as common
 from . import planning_runtime as runtime
 from . import planning_cycles as cycles
 from . import planning_schedule as scheduler
+from .planning_domain import PlanningCycle
 
 log = logging.getLogger("gateway.planning")
 
@@ -130,7 +131,12 @@ def recompute_today(now: datetime | None = None) -> dict[str, Any]:
     保留），不留「部分行新排程、部分行旧排程」的混合状态。
     """
     now = now or runtime._now()
-    today = cycles._current_cycle(now).key
+    return _recompute_for_cycle(now, cycles._current_cycle(now))
+
+
+def _recompute_for_cycle(now: datetime, cycle: PlanningCycle) -> dict[str, Any]:
+    """Recompute the complete cycle using the caller's request-local boundary."""
+    today = cycle.key
     client = runtime._require_client()
     open_rows = runtime._rows(
         client, "planning_occurrence",

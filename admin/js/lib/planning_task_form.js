@@ -1,7 +1,7 @@
 // Task creation/edit form. Local submitting/committed state belongs to one opened form.
-import { gw } from '../api.js?v=20261003-memo-review-fixes1';
-import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261003-memo-review-fixes1';
-import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES } from './planning_display.js?v=20261003-memo-review-fixes1';
+import { gw } from '../api.js?v=20261003-planning-create-latency2';
+import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261003-planning-create-latency2';
+import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES } from './planning_display.js?v=20261003-planning-create-latency2';
 
 export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
   const editing = !!task?.id;
@@ -172,7 +172,7 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
   // 早于任何异步请求，不能只依赖按钮 disabled（按钮聚焦后按 Enter /
   // 空格仍会触发 click）。两阶段语义：
   // 提交/API 阶段失败 → 释放锁与按钮，user 可修改后重新提交；
-  // 服务器保存成功 → committed 终态：此后 toast/close/loadAll 等 UI
+  // 服务器保存成功 → committed 终态：此后 toast/close/onSaved 等 UI
   // 后处理无论成败，本表单都不再解锁、不再发出第二次保存请求，也
   // 不得把已成功的事实误报为「保存失败」。即使弹窗因异常未被移除，
   // 提交按钮保持禁用，重复点击也不会再发请求；关闭失败时可经取消 /
@@ -188,6 +188,7 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
     if (committed || submitting) return;
     submitting = true;
     submitBtn.disabled = true;
+    submitBtn.textContent = editing ? '正在保存…' : '正在创建…';
     createdTask = null;
     try {
       const type = typeSelect.value;
@@ -265,6 +266,7 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
       // 目标日期类错误进 once 区，可安排时段及其余错误进时段区。
       submitting = false;
       submitBtn.disabled = false;
+      submitBtn.textContent = editing ? '保存' : '创建';
       const message = String(error.message || '');
       const area = root.querySelector(
         message.includes('目标日期') || message.includes('单次待办已生成')
@@ -281,6 +283,7 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
     // 重新赋予本表单提交资格，也不得误报「保存失败」。
     committed = true;
     submitting = false;
+    submitBtn.textContent = editing ? '已保存' : '已创建';
     // 后处理逐项 best-effort：一步失败只影响该步，后续步骤照常执行
     try {
       toast(editing ? '待办已保存' : '待办已创建');
@@ -292,8 +295,20 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
       } else if (createdTask?.schedule_conflict) {
         toast('待办已创建，但可安排时段剩余空间不足，存在排程冲突');
       }
-    } catch { /* 不误报失败 */ }
-    try { close(); } catch { /* 旧表单保持终态（按钮已禁用 + committed 拦截） */ }
-    try { await onSaved(); } catch { /* 刷新失败不改变已保存事实 */ }
+    } catch (error) {
+      globalThis.console?.error({ location: 'planning_task_form.savedFeedback',
+        stack: error.stack, error, editing, taskId: task?.id || createdTask?.id });
+    }
+    try { close(); } catch (error) {
+      globalThis.console?.error({ location: 'planning_task_form.closeAfterSave',
+        stack: error.stack, error, editing, taskId: task?.id || createdTask?.id });
+    }
+    try { await onSaved(); } catch (error) {
+      globalThis.console?.error({ location: 'planning_task_form.refreshAfterSave',
+        stack: error.stack, error, editing, taskId: task?.id || createdTask?.id });
+      toast(editing ? '待办已保存，列表更新失败，请刷新重试' : '待办已创建，列表更新失败，请刷新重试', 'warn');
+    }
   };
+  // 页面保留句柄：关闭弹窗不会取消已经发出的请求，仍须拦住重新打开提交。
+  return { editing, isSubmitting: () => submitting };
 }

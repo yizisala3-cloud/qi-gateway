@@ -684,6 +684,40 @@ def _reconcile_task_rounds(
     return created, timed_out, events
 
 
+def generate_task(
+    task_id: int, now: datetime | None = None, *,
+    context: cycles.PlanningRequestContext | None = None,
+) -> dict[str, Any]:
+    """Reconcile only a newly saved task through the shared generation rules.
+
+    The caller holds the maintenance lock. Re-read by identity after acquiring
+    it so a task edited or deactivated while waiting is not generated from the
+    insert response. Database generation guards remain authoritative.
+    """
+    now = now or runtime._now()
+    context = context or cycles.PlanningRequestContext(now)
+    configured, transition, absorbed = context.boundary_state()
+    cycle = context.cycle
+    daily_enabled = context.daily_refresh_enabled
+    client = runtime._require_client()
+    task = runtime._fetch_task(client, task_id)
+    result = {"created": 0, "timed_out": 0, "date": cycle.key.isoformat()}
+    if task is None or task.get("is_active") is False:
+        return result
+    try:
+        created, timed_out, _ = _reconcile_task_rounds(
+            client, task, cycle, now, configured, transition, absorbed, daily_enabled,
+        )
+    except Exception as exc:
+        # A task may have committed occurrences before a later step failed.
+        # Preserve the error signal so the caller still recomputes those rows.
+        log.exception("planning 新任务生成失败: task=%s", task_id)
+        result["errors"] = [{"task_id": task_id, "error": type(exc).__name__}]
+    else:
+        result.update(created=created, timed_out=timed_out)
+    return result
+
+
 def generate_due(now: datetime | None = None) -> dict[str, Any]:
     """Generate stable rounds from their own refresh model, never legacy cursors.
 
