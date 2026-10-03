@@ -1,25 +1,25 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
 // 数据按需加载：今日看板保留 30 秒提醒轮询，首次/失效切入时刷新可见列表。
-import { gw } from '../api.js?v=20261003-planning-create-latency2';
+import { gw } from '../api.js?v=20261003-memo-bugfix2';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, esc,
   createDetailPanel,
-} from '../ui.js?v=20261003-planning-create-latency2';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261003-planning-create-latency2';
-import { createRetroSelectField } from '../lib/retro_select.js?v=20261003-planning-create-latency2';
+} from '../ui.js?v=20261003-memo-bugfix2';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261003-memo-bugfix2';
+import { createRetroSelectField } from '../lib/retro_select.js?v=20261003-memo-bugfix2';
 import {
   TASK_TYPE_LABELS, TASK_TYPES, STATUS_META, CLOSED_STATUSES,
   fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty,
   itemMeta, isClosedOcc, formatLoggedDuration, durationText, durationDetailRows,
   itemBadges, itemHtml,
-} from '../lib/planning_display.js?v=20261003-planning-create-latency2';
-import { openTaskForm } from '../lib/planning_task_form.js?v=20261003-planning-create-latency2';
-import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261003-planning-create-latency2';
-import { createPlanningSort } from '../lib/planning_sort.js?v=20261003-planning-create-latency2';
-import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261003-planning-create-latency2';
-import { createPlanningMemo } from '../lib/planning_memo.js?v=20261003-planning-create-latency2';
-import { createPlanningReads } from '../lib/planning_reads.js?v=20261003-planning-create-latency2';
+} from '../lib/planning_display.js?v=20261003-memo-bugfix2';
+import { openTaskForm } from '../lib/planning_task_form.js?v=20261003-memo-bugfix2';
+import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261003-memo-bugfix2';
+import { createPlanningSort } from '../lib/planning_sort.js?v=20261003-memo-bugfix2';
+import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261003-memo-bugfix2';
+import { createPlanningMemo } from '../lib/planning_memo.js?v=20261003-memo-bugfix2';
+import { createPlanningReads } from '../lib/planning_reads.js?v=20261003-memo-bugfix2';
 
 // 部分完成属于开放生命周期：实例仍在「进度中」，直到「已全部完成」才关闭
 const OPEN_STATUSES = ['pending', 'in_progress', 'deferred', 'partial'];
@@ -90,9 +90,10 @@ export default {
           </div>
 
           <div class="toolbar" style="margin-bottom:14px">
-            <button class="btn btn-primary" data-act="new-task">${icon('plus')}新建待办</button>
-            <button class="btn btn-secondary" data-act="recompute">${icon('refresh')}重新计算时间</button>
-            <button class="btn btn-secondary" data-act="enter-reorder" id="planning-reorder-btn">${icon('sort')}调整顺序</button>
+            <button class="btn btn-primary" data-act="new-task" data-toolbar-tab="today">${icon('plus')}新建待办</button>
+            <button class="btn btn-secondary" data-act="recompute" data-toolbar-tab="todo">${icon('refresh')}重新计算时间</button>
+            <button class="btn btn-secondary" data-act="enter-reorder" id="planning-reorder-btn" data-toolbar-tab="todo">${icon('sort')}调整顺序</button>
+            <button class="btn btn-primary" data-act="memo-new" data-toolbar-tab="memo" hidden>${icon('plus')}新建备忘录</button>
           </div>
           <div id="planning-load-feedback" role="alert" hidden></div>
           <div id="planning-reorder-bar" style="display:none;margin-bottom:12px">
@@ -204,15 +205,20 @@ export default {
     });
     this.bindDetailActions(actionRoot, mountedReads);
     this.initRetroFields(root);
+    this.syncToolbarForTab(this.activeTab);
 
     const actions = {
       'new-task': () => this.openTaskForm(null),
       recompute: () => this.runRecompute(),
+      // 工具栏「新建备忘录」（2026-10-03 移位）：委托给备忘录模块；模块
+      // 自身的单实例守卫覆盖连点与在途打开
+      'memo-new': () => this.memo?.openEditor(null),
       'enter-reorder': () => this.enterReorder(),
       'confirm-reorder': () => this.confirmReorder(),
       'cancel-reorder': () => this.cancelReorder(),
       'clear-filters': () => this.clearFilters(),
       'retry-lists': () => this.retryLists(),
+      'memo-new': () => this.memo?.openEditor(null),
       stop: () => this.reminder.stopRinging(),
       'plan-tab': (el) => this.switchTab(el.dataset.tab),
       'plan-subtab': (el) => this.switchSection(el.dataset.section),
@@ -264,13 +270,33 @@ export default {
     });
     this.renderReadFeedback();
     this.refreshVisible({ onlyInvalid: true });
-    if (tab === 'memo' && !this.loadedTabs.has('memo')) {
-      // 备忘录数据按需加载；编辑器中的未保存内容由模块自身生命周期承接
-      this.loadedTabs.add('memo');
-      this.memo ||= createPlanningMemo();
-      this.memo.mount(this.root.querySelector('[data-memo-root]'));
+    this.syncToolbarForTab(tab);
+    if (tab === 'memo') {
+      if (!this.loadedTabs.has('memo')) {
+        // 备忘录数据按需加载；编辑器中的未保存内容由模块自身生命周期承接
+        this.loadedTabs.add('memo');
+        this.memo ||= createPlanningMemo();
+        this.memo.mount(this.root.querySelector('[data-memo-root]'));
+      } else {
+        // 已挂载过的备忘录重返（BUG-08）：首次读取失败不能被当成已加载，
+        // 重返必须重读（含读取其他设备的更新），否则失败态一直挂着
+        this.memo?.show();
+      }
     }
     // 长期目标 / 每日总结为占位页签，无数据需要加载
+  },
+
+  /** 工具栏按钮按页签显隐（2026-10-03 确认）：「新建待办」只在当前待办；
+   *  「重新计算时间」「调整顺序」在当前待办与全部待办；备忘录页签顶部
+   *  放「新建备忘录」（从备忘录区块工具栏移入，打开后由模块单实例守卫）。 */
+  syncToolbarForTab(tab) {
+    if (!this.root) return;
+    this.root.querySelectorAll('[data-toolbar-tab]').forEach((el) => {
+      const scope = el.dataset.toolbarTab;
+      el.hidden = scope === 'today' ? tab !== 'today'
+        : scope === 'memo' ? tab !== 'memo'
+          : !(tab === 'today' || tab === 'all');
+    });
   },
 
   switchSection(section) {

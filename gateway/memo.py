@@ -123,6 +123,18 @@ _TABLE_ORDER_KEYS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _is_range_not_satisfiable(exc: Exception) -> bool:
+    """识别 PostgREST 的 416 范围错误（PGRST103）。
+
+    真实服务端在请求范围起点越过匹配总数时返回 416，body 带
+    ``{"code": "PGRST103", ...}``（postgrest SDK 解析为 APIError.code）；
+    旧版本无 code 字段时 SDK 以数字状态码 416 兜底。PostgreSQL 的
+    SQLSTATE 形如 "23505"，不会与这两个字面量相撞。
+    """
+    code = getattr(exc, "code", None)
+    return code is not None and str(code) in ("PGRST103", "416")
+
+
 def _rows(client, table: str, query_fn=None, *, paginate: bool = True,
           order_by: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
     """表读取。
@@ -132,13 +144,15 @@ def _rows(client, table: str, query_fn=None, *, paginate: bool = True,
     集合，因此统一按稳定排序分页取全（F07），不依赖项目把上限调大。
     单行读取（limit(1)）不需要分页。
 
-    计数在 select 构造阶段以 count="exact" 声明（postgrest ≥1.0 的
-    execute() 不接收参数，BUG-01/R01）；offset 每页按实际返回行数推进，
-    服务端把每页截小也不会跳行。终止条件：空页，或累计行数达到最新
-    count（每页都刷新，不沿用首页旧值——匹配行跨页减少时空页必须终止，
-    BUG-01/R09）。并发下集合变化时读到的是「每页发出时刻」的前缀一致
-    快照：新增行可能在后续页出现、移除行已取到的仍保留；以空页或最新
-    count 收敛，不保证跨页事务级一致性快照（个人规模全量组装的既有边界）。
+    页长 1000；offset 每页按实际返回行数推进，服务端把每页截小也不会
+    跳行。终止条件：空页，累计行数达到最新 count（每页都刷新，不沿用
+    首页旧值），或后续页返回 416/PGRST103——并发归档/删除使匹配集合
+    缩减后，下一请求的 offset 可能已越过最新总数，真实服务端以 416
+    拒绝该范围；按已声明的分页读取一致性边界，这只说明「剩余不足一页」，
+    已取行即全量，正常终止（BUG-01）。其他数据库失败原样上抛，不吞成
+    成功。并发下集合变化时读到的是「每页发出时刻」的前缀一致快照：新增
+    行可能在后续页出现、移除行已取到的仍保留；以空页、最新 count 或 416
+    收敛，不保证跨页事务级一致性快照（个人规模全量组装的既有边界）。
     """
     if order_by is None:
         order_by = _TABLE_ORDER_KEYS.get(table)
@@ -162,7 +176,12 @@ def _rows(client, table: str, query_fn=None, *, paginate: bool = True,
         for field in order_by:
             query = query.order(field)
         query = query.range(offset, offset + page_size - 1)
-        response = query.execute()
+        try:
+            response = query.execute()
+        except Exception as exc:
+            if _is_range_not_satisfiable(exc):
+                break   # 集合缩减导致范围越界：已取行即全量，有限终止
+            raise
         page = response.data or []
         rows.extend(page)
         count = getattr(response, "count", None)

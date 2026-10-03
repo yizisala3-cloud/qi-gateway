@@ -97,13 +97,13 @@ async function runPlanningTests(browser, baseUrl, evidenceDir) {
   };
   try {
     await page.goto(`${baseUrl}/__planning_latency__`);
-    await page.addStyleTag({ url: `${baseUrl}/admin/css/style.css?v=20261003-planning-create-latency2` });
+    await page.addStyleTag({ url: `${baseUrl}/admin/css/style.css?v=20261003-memo-bugfix2` });
     await page.evaluate(async () => {
       document.documentElement.dataset.theme = 'day';
       const root = document.createElement('main');
       root.id = 'planning-fixture'; root.style.padding = '20px';
       document.body.append(root);
-      window.__planning = (await import('/admin/js/pages/planning.js?v=20261003-planning-create-latency2')).default;
+      window.__planning = (await import('/admin/js/pages/planning.js?v=20261003-memo-bugfix2')).default;
       await window.__planning.mount(root);
     });
 

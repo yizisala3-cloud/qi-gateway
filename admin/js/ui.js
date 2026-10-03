@@ -1,5 +1,5 @@
 // ui.js - shared retro UI components: icons, tags, modal, toast, detail panel
-export const ASSET_VERSION = '20261003-planning-create-latency2';
+export const ASSET_VERSION = '20261003-memo-bugfix2';
 
 /* ---------- SVG icons (stroke, no emoji) ---------- */
 const ICON_PATHS = {
@@ -178,9 +178,15 @@ export function confirm(msg, { title = '请确认', okText = '确认', cancelTex
       body: `<p class="confirm-text">${msg}</p>`,
       footer: `<button class="btn btn-secondary" data-cancel>${cancelText}</button>
                <button class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-ok>${okText}</button>`,
+      // 遮罩点击同样按取消结算（BUG-11）：只移除节点不结束 Promise 会让
+      // 背后的保存/删除流程永远等待
+      onMaskClose: () => { close(); resolve(false); },
     });
+    // 确认 / 取消 / × / 遮罩四个入口都只结算一次 Promise；×与遮罩按取消
+    // 处理（BUG-11）。重复 resolve 本身无害，显式覆盖 × 的默认 close。
     root.querySelector('[data-cancel]').onclick = () => { close(); resolve(false); };
     root.querySelector('[data-ok]').onclick = () => { close(); resolve(true); };
+    root.querySelector('.modal-close').onclick = () => { close(); resolve(false); };
   });
 }
 

@@ -60,8 +60,14 @@ class PlanningMemoTabContractTests(unittest.TestCase):
 
     def test_memo_tab_data_loaded_on_demand(self):
         # 页签切换按需加载（与「全部待办」同模式），不拖慢首屏
-        self.assertIn("tab === 'memo' && !this.loadedTabs.has('memo')", self.page)
+        self.assertIn("if (!this.loadedTabs.has('memo')) {", self.page)
         self.assertIn("this.memo ||= createPlanningMemo()", self.page)
+
+    def test_memo_tab_return_refetches_after_failed_first_load(self):
+        # BUG-08：首次读取失败不能被当成已加载；重返页签必须重读
+        # （show → reload），读取其他设备的更新并恢复失败态页面
+        self.assertIn("this.memo?.show()", self.page)
+        self.assertIn("} else {", self.page[self.page.index("if (tab === 'memo') {"):])
 
     def test_planning_lifecycle_wires_memo(self):
         # 切走页签 flush 未保存内容；页面卸载释放编辑器与监听
