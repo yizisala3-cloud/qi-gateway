@@ -1,115 +1,96 @@
-// 复古时间字段：date YYYY-MM-DD、time HH:MM、datetime YYYY-MM-DDTHH:MM。
-// 已有 time HH:MM:SS 可读取；“此刻”始终采用 Asia/Shanghai 的墙上时钟。
-import { icon } from '../ui.js?v=20261002-frontend-controls1';
-import {
-  setupRetroField, attachRetroOverlay, positionRetroOverlay,
-  moveRetroOptionFocus, retroSourceOptions, retroId, restoreRetroFieldFocus,
-} from './retro_fields.js?v=20261002-frontend-controls1';
+// lib/retro_time.js - 复古时间选择器（纸张卡片 + 金线日历，替换原生 date/time 弹窗）
+// 从 pages/_memory_form.js 的 createRetroTimeField / openRetroTimePop 提取，
+// 行为与原 datetime 实现一致；额外支持两种模式（BUG-14 统一原生控件）：
+//   datetime（默认）：月历 + 时/分，产出 YYYY-MM-DDTHH:MM（原 _memory_form.js 行为）
+//   date：只显示月历 + 清除/今天，产出 YYYY-MM-DD
+//   time：隐藏月历，只留时/分 + 清除/确定，产出 HH:MM（tod 字符串，后端不变）
+// 样式复用 style.css 的 .retro-time-*；input 上挂 _applyRetroValue 供外部程序化清空。
+import { icon } from '../ui.js?v=20261002-planning-modules1';
 
 let activeRetroTimePop = null;
 
-export function closeRetroTimePop({ restoreFocus = false } = {}) {
-  const pop = activeRetroTimePop;
-  if (!pop) return;
-  activeRetroTimePop = null;
-  pop._cleanup?.();
-  pop.remove();
-  if (restoreFocus) restoreRetroFieldFocus(pop._anchor, pop._forInput);
+function closeRetroTimePop() {
+  if (activeRetroTimePop) {
+    const pop = activeRetroTimePop;
+    activeRetroTimePop = null;
+    if (pop._cleanup) pop._cleanup();
+    pop.remove();
+  }
 }
 
-export function destroyRetroTimeField(target) {
-  (target?._retroField || target?.closest?.('.retro-time')?._retroField)?.destroy();
+function pad2(n) {
+  return String(n).padStart(2, '0');
 }
 
-function pad2(number) { return String(number).padStart(2, '0'); }
-
-/** 时分子列表使用独立焦点；第一层 Escape 收子列表，下一层才收日历。 */
-function createRtpUnit(host, values, initial, label, onChange, closeOthers) {
-  const id = retroId('rtp-unit');
+/**
+ * 时间弹层内的时/分下拉：纸色按钮 + 金线选项列表（与复古下拉同一视觉体系）。
+ * 列表约显示 6 项，其余滚动；下方放不下自动向上弹。返回 set(value) 供程序化赋值。
+ */
+function createRtpUnit(host, values, initial, onChange) {
   host.innerHTML = `
-    <button type="button" class="rtp-select-btn" aria-haspopup="listbox"
-      aria-expanded="false" aria-controls="${id}" aria-label="${label}">
-      <span class="rtp-unit-label">${label}</span><span class="rtp-select-text"></span>
+    <button type="button" class="rtp-select-btn" aria-haspopup="listbox" title="${host.title}">
+      <span class="rtp-select-text"></span>
       ${icon('chevron-down')}
     </button>
-    <div class="rtp-select-pop" id="${id}" role="listbox" aria-label="${label}" hidden></div>`;
-  const button = host.querySelector('.rtp-select-btn');
-  const text = host.querySelector('.rtp-select-text');
+    <div class="rtp-select-pop" hidden></div>`;
+  const btn = host.querySelector('.rtp-select-btn');
+  const textEl = host.querySelector('.rtp-select-text');
   const list = host.querySelector('.rtp-select-pop');
   let current = String(initial);
   const render = () => {
-    text.textContent = current;
-    list.innerHTML = values.map((value) => `
-      <button type="button" role="option" tabindex="-1"
-        aria-selected="${value === current}"
-        class="rtp-select-option${value === current ? ' is-selected' : ''}"
-        data-value="${value}">${value}</button>`).join('');
+    textEl.textContent = current;
+    list.innerHTML = values.map((v) => `
+      <button type="button" class="rtp-select-option${v === current ? ' is-selected' : ''}"
+        data-value="${v}">${v}</button>`).join('');
   };
-  const close = ({ restoreFocus = false } = {}) => {
+  const close = () => {
     list.hidden = true;
     host.classList.remove('is-open');
-    button.setAttribute('aria-expanded', 'false');
-    if (restoreFocus) button.focus({ preventScroll: true });
   };
-  const open = (last = false) => {
-    closeOthers();
+  const open = () => {
     render();
     list.hidden = false;
     host.classList.add('is-open');
-    button.setAttribute('aria-expanded', 'true');
-    // A fixed child list escapes the calendar's short-viewport scroll clipping.
-    // It stays a DOM child, so modal ownership and the Escape order stay intact.
-    const rect = button.getBoundingClientRect();
-    list.style.position = 'fixed';
-    list.style.width = `${rect.width}px`;
-    list.style.minWidth = `${rect.width}px`;
-    list.style.maxHeight = `${Math.min(145, window.innerHeight - 16)}px`;
+    const selected = list.querySelector('.is-selected');
+    if (selected) selected.scrollIntoView({ block: 'nearest' });
+    // 下方放不下就向上弹
+    list.style.top = '';
     list.style.bottom = '';
-    list.style.zIndex = '2200';
-    const size = list.getBoundingClientRect();
-    const preferredTop = rect.bottom + 4 + size.height <= window.innerHeight - 8
-      ? rect.bottom + 4 : rect.top - size.height - 4;
-    list.style.top = `${Math.max(8, Math.min(preferredTop, window.innerHeight - size.height - 8))}px`;
-    list.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - size.width - 8))}px`;
-    const options = [...list.querySelectorAll('.rtp-select-option')];
-    const selected = options.find((option) => option.dataset.value === current)
-      || (last ? options.at(-1) : options[0]);
-    if (selected) {
-      selected.tabIndex = 0;
-      selected.focus({ preventScroll: true });
-      selected.scrollIntoView({ block: 'nearest' });
+    if (list.getBoundingClientRect().bottom > window.innerHeight - 8) {
+      list.style.top = 'auto';
+      list.style.bottom = 'calc(100% + 4px)';
     }
   };
-  button.addEventListener('click', () => list.hidden ? open() : close());
-  button.addEventListener('keydown', (event) => {
-    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-    event.preventDefault();
-    open(event.key === 'ArrowUp');
+  btn.addEventListener('click', () => {
+    const wasOpen = !list.hidden;
+    document.querySelectorAll('.rtp-select-pop:not([hidden])').forEach((p) => {
+      if (p !== list) {
+        p.hidden = true;
+        p.parentElement.classList.remove('is-open');
+      }
+    });
+    wasOpen ? close() : open();
   });
-  list.addEventListener('click', (event) => {
-    const option = event.target.closest('.rtp-select-option');
-    if (!option) return;
-    current = option.dataset.value;
+  list.addEventListener('click', (e) => {
+    const opt = e.target.closest('.rtp-select-option');
+    if (!opt) return;
+    current = opt.dataset.value;
     onChange(current);
     render();
-    close({ restoreFocus: true });
-  });
-  list.addEventListener('keydown', (event) => {
-    if (event.key === 'Tab') {
-      close({ restoreFocus: true });
-      return;
-    }
-    moveRetroOptionFocus(list, '.rtp-select-option', event);
+    close();
   });
   render();
   return {
-    host, button, close,
-    get isOpen() { return !list.hidden; },
-    set(value) { current = String(value); render(); },
+    set(v) {
+      current = String(v);
+      render();
+    },
   };
 }
 
 const SHANGHAI_OFFSET_MS = 8 * 3600 * 1000;
+
+/** 当前时刻的 Asia/Shanghai datetime-local 表示（与系统时区无关）。 */
 function nowShanghaiLocalInput() {
   const shifted = new Date(Date.now() + SHANGHAI_OFFSET_MS);
   return `${shifted.getUTCFullYear()}-${pad2(shifted.getUTCMonth() + 1)}-${pad2(shifted.getUTCDate())}T${pad2(shifted.getUTCHours())}:${pad2(shifted.getUTCMinutes())}`;
@@ -118,140 +99,100 @@ function nowShanghaiLocalInput() {
 function fmtDisplay(mode, value) {
   const text = String(value || '');
   if (mode === 'date') {
-    const match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-    return match ? `${match[1]}年${match[2]}月${match[3]}日` : '';
+    const m = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    return m ? `${m[1]}年${m[2]}月${m[3]}日` : '';
   }
   if (mode === 'time') {
-    const match = text.match(/^(\d{2}):(\d{2})(?::\d{2})?$/);
-    return match ? `${match[1]}:${match[2]}` : '';
+    // 真实 PostgREST time 列形状为 HH:MM:SS（批次 8 HIGH #1）：编辑表单
+    // 会把任务现有窗口原样装进 data-retro-value，必须按同值显示而非空。
+    const m = text.match(/^(\d{2}):(\d{2})(?::\d{2})?$/);
+    return m ? `${m[1]}:${m[2]}` : '';
   }
-  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
-  return match ? `${match[1]}年${match[2]}月${match[3]}日 ${match[4]}:${match[5]}` : '';
+  const m = text.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+  return m ? `${m[1]}年${m[2]}月${m[3]}日 ${m[4]}:${m[5]}` : '';
 }
 
-/** 返回原 id 的隐藏 input；非静默更新派发 input，保留 _applyRetroValue。 */
-export function createRetroTimeField(host, { id, value = '', mode = 'datetime', align = 'left', ...config } = {}) {
-  host._retroField?.destroy();
+/** 在 host 内挂载复古时间字段：隐藏 input 保留原 id/value 契约，展示层为纸色按钮。 */
+export function createRetroTimeField(host, { id, value = '', mode = 'datetime', align = 'left' } = {}) {
   host.classList.add('retro-time');
   host.innerHTML = `
-    <input type="hidden" class="retro-time-value">
+    <input type="hidden" id="${id}" class="retro-time-value">
     <button type="button" class="retro-time-field" aria-haspopup="dialog">
-      <span class="retro-time-text"></span>${icon('clock')}
+      <span class="retro-time-text"></span>
+      ${icon('clock')}
     </button>`;
   const input = host.querySelector('.retro-time-value');
-  const button = host.querySelector('.retro-time-field');
-  const text = host.querySelector('.retro-time-text');
-  const field = setupRetroField(host, input, button, {
-    id, ...config, validationType: mode === 'datetime' ? 'datetime-local' : mode,
-  });
-  const apply = (localValue, silent = false) => {
-    input.value = String(localValue || '');
-    const shown = fmtDisplay(mode, input.value);
-    text.textContent = shown;
-    text.classList.toggle('is-empty', !shown);
-    field.syncValue();
+  const textEl = host.querySelector('.retro-time-text');
+  const apply = (localValue, silent) => {
+    input.value = localValue || '';
+    const shown = fmtDisplay(mode, localValue);
+    textEl.textContent = shown;
+    textEl.classList.toggle('is-empty', !shown);
     if (!silent) input.dispatchEvent(new Event('input', { bubbles: true }));
   };
-  input._applyRetroValue = apply;
-  field.close = (settings) => {
-    if (activeRetroTimePop?._forInput === input) closeRetroTimePop(settings);
-  };
-  const onClick = () => {
-    if (input.disabled || button.disabled || button.matches(':disabled')) return;
-    if (activeRetroTimePop?._forInput === input) field.close({ restoreFocus: true });
-    else openRetroTimePop(button, input, apply, mode, align);
-  };
-  const onKey = (event) => {
-    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-    event.preventDefault();
-    if (!input.disabled && !button.disabled) openRetroTimePop(button, input, apply, mode, align);
-  };
-  button.addEventListener('click', onClick);
-  button.addEventListener('keydown', onKey);
-  field.onDestroy = () => {
-    button.removeEventListener('click', onClick);
-    button.removeEventListener('keydown', onKey);
-  };
   apply(value, true);
-  field.initialValue = input.value;
-  input.defaultValue = input.value;
+  input._applyRetroValue = apply;
+  host.querySelector('.retro-time-field').addEventListener('click', () => {
+    if (activeRetroTimePop && activeRetroTimePop._forInput === input) {
+      closeRetroTimePop();
+      return;
+    }
+    closeRetroTimePop();
+    openRetroTimePop(host.querySelector('.retro-time-field'), input, apply, mode, align);
+  });
   return input;
 }
 
-/** 同时覆盖原生日期/时间字段与既有 data-retro 宿主；重复初始化不重绑。 */
-export function initRetroTimeFields(root) {
-  const selector = 'input[type="date"], input[type="time"], input[type="datetime-local"]';
-  const sources = [...root.querySelectorAll(selector)].filter((source) => !source.classList.contains('retro-validation-input'));
-  if (root.matches?.(selector) && !root.classList.contains('retro-validation-input')) sources.unshift(root);
-  const inputs = sources.map((source) => {
-    const config = retroSourceOptions(source);
-    const host = document.createElement('span');
-    host.className = `${source.className} retro-time`.trim();
-    host.style.cssText = source.style.cssText;
-    const mode = source.type === 'datetime-local' ? 'datetime' : source.type;
-    source.replaceWith(host);
-    return createRetroTimeField(host, { ...config, mode });
-  });
-  const hosts = [...root.querySelectorAll('.retro-time[data-retro-for]')];
-  if (root.matches?.('.retro-time[data-retro-for]')) hosts.unshift(root);
-  for (const host of hosts) {
-    if (host._retroField) continue;
-    inputs.push(createRetroTimeField(host, {
-      id: host.dataset.retroFor, value: host.dataset.retroValue || '',
-      mode: host.dataset.retroMode || 'datetime', align: host.dataset.retroAlign || 'left',
-      required: host.dataset.retroRequired === 'true' || host.hasAttribute('required'),
-      disabled: host.dataset.retroDisabled === 'true' || host.hasAttribute('disabled'),
-      label: host.dataset.retroLabel, name: host.dataset.retroName,
-      min: host.dataset.retroMin, max: host.dataset.retroMax, step: host.dataset.retroStep,
-    }));
-  }
-  return inputs;
-}
-
 export function openRetroTimePop(anchor, input, apply, mode = 'datetime', align = 'left') {
-  if (anchor.disabled || input.disabled || anchor.matches(':disabled')) return null;
-  closeRetroTimePop();
   const current = String(input.value || '');
   const nowText = nowShanghaiLocalInput();
-  const now = nowText.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
-  const calendar = mode === 'datetime' || mode === 'date';
-  const timeRow = mode === 'datetime' || mode === 'time';
-  const dateMatch = current.match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?$/);
-  const timeMatch = current.match(/^(\d{2}):(\d{2})(?::\d{2})?$/);
-  const state = {
-    year: Number(dateMatch?.[1] || now[1]), month: Number(dateMatch?.[2] || now[2]),
-    day: dateMatch ? Number(dateMatch[3]) : null,
-    hour: mode === 'time' ? timeMatch?.[1] || now[4] : dateMatch?.[4] || now[4],
-    minute: mode === 'time' ? timeMatch?.[2] || now[5] : dateMatch?.[5] || now[5],
-  };
-  let focusDay = state.day || (state.year === Number(now[1]) && state.month === Number(now[2]) ? Number(now[3]) : 1);
+  const nowM = nowText.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+  const showCalendar = mode === 'datetime' || mode === 'date';
+  const showTimeRow = mode === 'datetime' || mode === 'time';
+
+  let state;
+  if (mode === 'date') {
+    const m = current.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    state = m
+      ? { year: Number(m[1]), month: Number(m[2]), day: Number(m[3]) }
+      : { year: Number(nowM[1]), month: Number(nowM[2]), day: null };
+  } else if (mode === 'time') {
+    // HH:MM:SS 初始值（真实 PostgREST time 列形状）按 HH:MM 打开选择器，
+    // 避免已有窗口在编辑时回退为「当前时刻」初始态（批次 8 HIGH #1）。
+    const m = current.match(/^(\d{2}):(\d{2})(?::\d{2})?$/);
+    state = { hour: m ? m[1] : nowM[4], minute: m ? m[2] : nowM[5] };
+  } else {
+    const m = current.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+    state = m
+      ? { year: Number(m[1]), month: Number(m[2]), day: Number(m[3]), hour: m[4], minute: m[5] }
+      : { year: Number(nowM[1]), month: Number(nowM[2]), day: null, hour: nowM[4], minute: nowM[5] };
+  }
+
   const pop = document.createElement('div');
   pop.className = `retro-time-pop${mode === 'time' ? ' is-time-only' : ''}`;
-  pop.setAttribute('role', 'dialog');
-  pop.setAttribute('aria-label', `${input._retroField?.label || anchor.getAttribute('aria-label') || '时间'}选择器`);
   pop._forInput = input;
-  pop._anchor = anchor;
   pop.innerHTML = `
-    ${calendar ? `
+    ${showCalendar ? `
     <div class="retro-time-head">
       <div class="retro-time-nav">
-        <button type="button" data-nav="year-" aria-label="上一年" data-tooltip="上一年">${icon('chevron-left')}${icon('chevron-left')}</button>
-        <button type="button" data-nav="month-" aria-label="上一月" data-tooltip="上一月">${icon('chevron-left')}</button>
+        <button type="button" data-nav="year-" title="上一年">${icon('chevron-left')}${icon('chevron-left')}</button>
+        <button type="button" data-nav="month-" title="上一月">${icon('chevron-left')}</button>
       </div>
-      <span class="retro-time-title" aria-live="polite"></span>
+      <span class="retro-time-title"></span>
       <div class="retro-time-nav">
-        <button type="button" data-nav="month+" aria-label="下一月" data-tooltip="下一月">${icon('chevron-right')}</button>
-        <button type="button" data-nav="year+" aria-label="下一年" data-tooltip="下一年">${icon('chevron-right')}${icon('chevron-right')}</button>
+        <button type="button" data-nav="month+" title="下一月">${icon('chevron-right')}</button>
+        <button type="button" data-nav="year+" title="下一年">${icon('chevron-right')}${icon('chevron-right')}</button>
       </div>
     </div>
-    <div class="retro-time-week" aria-hidden="true">
+    <div class="retro-time-week">
       <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span>
     </div>
-    <div class="retro-time-grid" role="group" aria-label="日期"></div>` : ''}
-    ${timeRow ? `
+    <div class="retro-time-grid"></div>` : ''}
+    ${showTimeRow ? `
     <div class="retro-time-time">
-      <div class="rtp-unit" data-unit="hour"></div><span class="rtp-colon" aria-hidden="true">:</span>
-      <div class="rtp-unit" data-unit="minute"></div>
+      <div class="rtp-unit" data-unit="hour" title="小时"></div>
+      <span class="rtp-colon">:</span>
+      <div class="rtp-unit" data-unit="minute" title="分钟"></div>
     </div>` : ''}
     <div class="retro-time-foot">
       <button type="button" class="btn btn-quiet btn-sm" data-act="clear">清除</button>
@@ -262,146 +203,169 @@ export function openRetroTimePop(anchor, input, apply, mode = 'datetime', align 
       </span>
     </div>`;
   document.body.appendChild(pop);
-  pop._cleanup = attachRetroOverlay(pop, anchor, closeRetroTimePop);
   activeRetroTimePop = pop;
-  const units = [];
-  let hourPick;
-  let minutePick;
-  const closeUnits = () => units.forEach((unit) => unit.close());
-  if (timeRow) {
-    hourPick = createRtpUnit(pop.querySelector('[data-unit="hour"]'),
-      Array.from({ length: 24 }, (_, hour) => pad2(hour)), state.hour, '小时',
-      (value) => { state.hour = value; }, closeUnits);
-    units.push(hourPick);
-    minutePick = createRtpUnit(pop.querySelector('[data-unit="minute"]'),
-      Array.from({ length: 60 }, (_, minute) => pad2(minute)), state.minute, '分钟',
-      (value) => { state.minute = value; }, closeUnits);
-    units.push(minutePick);
-    pop.addEventListener('mousedown', (event) => {
-      for (const unit of units) if (!unit.host.contains(event.target)) unit.close();
-    });
-  }
-  pop._closeSubpanel = () => {
-    const unit = units.find((item) => item.isOpen);
-    if (!unit) return false;
-    unit.close({ restoreFocus: true });
-    return true;
-  };
 
   const grid = pop.querySelector('.retro-time-grid');
-  const title = pop.querySelector('.retro-time-title');
-  const renderGrid = () => {
-    if (!calendar) return;
-    title.textContent = `${state.year}年${state.month}月`;
-    grid.setAttribute('aria-label', `${state.year}年${state.month}月日期`);
-    grid.innerHTML = '';
-    const first = new Date(Date.UTC(state.year, state.month - 1, 1));
-    const leading = (first.getUTCDay() + 6) % 7;
-    for (let i = 0; i < leading; i++) grid.insertAdjacentHTML('beforeend', '<span aria-hidden="true"></span>');
-    const days = new Date(Date.UTC(state.year, state.month, 0)).getUTCDate();
-    focusDay = Math.min(Math.max(focusDay, 1), days);
-    for (let day = 1; day <= days; day++) {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.textContent = String(day);
-      button.dataset.day = String(day);
-      button.tabIndex = day === focusDay ? 0 : -1;
-      button.setAttribute('aria-label', `${state.year}年${state.month}月${day}日`);
-      button.setAttribute('aria-pressed', String(state.day === day));
-      if (state.day === day) button.classList.add('is-selected');
-      if (`${state.year}-${pad2(state.month)}-${pad2(day)}` === nowText.slice(0, 10)) {
-        button.classList.add('is-today');
-        button.setAttribute('aria-current', 'date');
-      }
-      button.addEventListener('click', () => {
-        state.day = day;
-        focusDay = day;
-        for (const option of grid.querySelectorAll('button')) {
-          const selected = Number(option.dataset.day) === day;
-          option.classList.toggle('is-selected', selected);
-          option.setAttribute('aria-pressed', String(selected));
-          option.tabIndex = selected ? 0 : -1;
+  let hourPick = null;
+  let minutePick = null;
+  if (showTimeRow) {
+    hourPick = createRtpUnit(
+      pop.querySelector('[data-unit="hour"]'),
+      Array.from({ length: 24 }, (_, h) => pad2(h)),
+      state.hour,
+      (v) => { state.hour = v; },
+    );
+    minutePick = createRtpUnit(
+      pop.querySelector('[data-unit="minute"]'),
+      Array.from({ length: 60 }, (_, m) => pad2(m)),
+      state.minute,
+      (v) => { state.minute = v; },
+    );
+    // 点击弹层内其他区域时收起打开的时/分下拉（点在单元内交给其自身开关处理）
+    pop.addEventListener('mousedown', (e) => {
+      pop.querySelectorAll('.rtp-unit').forEach((unit) => {
+        if (unit.contains(e.target)) return;
+        const list = unit.querySelector('.rtp-select-pop');
+        if (list && !list.hidden) {
+          list.hidden = true;
+          unit.classList.remove('is-open');
         }
       });
-      grid.appendChild(button);
-    }
-  };
-  if (calendar) {
-    renderGrid();
-    grid.addEventListener('keydown', (event) => {
-      const button = event.target.closest('button[data-day]');
-      if (!button) return;
-      let date = new Date(Date.UTC(state.year, state.month - 1, Number(button.dataset.day)));
-      const day = date.getUTCDate();
-      if (event.key === 'ArrowLeft') date.setUTCDate(day - 1);
-      else if (event.key === 'ArrowRight') date.setUTCDate(day + 1);
-      else if (event.key === 'ArrowUp') date.setUTCDate(day - 7);
-      else if (event.key === 'ArrowDown') date.setUTCDate(day + 7);
-      else if (event.key === 'Home') date.setUTCDate(day - (date.getUTCDay() + 6) % 7);
-      else if (event.key === 'End') date.setUTCDate(day + 6 - (date.getUTCDay() + 6) % 7);
-      else if (event.key === 'PageUp' || event.key === 'PageDown') {
-        const shift = event.key === 'PageUp' ? -1 : 1;
-        const target = new Date(Date.UTC(state.year + (event.shiftKey ? shift : 0),
-          state.month - 1 + (event.shiftKey ? 0 : shift), 1));
-        const last = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
-        target.setUTCDate(Math.min(day, last));
-        date = target;
-      } else return;
-      event.preventDefault();
-      if (date.getUTCFullYear() !== state.year || date.getUTCMonth() + 1 !== state.month) state.day = null;
-      state.year = date.getUTCFullYear();
-      state.month = date.getUTCMonth() + 1;
-      focusDay = date.getUTCDate();
-      renderGrid();
-      grid.querySelector(`[data-day="${focusDay}"]`).focus({ preventScroll: true });
     });
-    pop.querySelectorAll('[data-nav]').forEach((button) => {
-      button.addEventListener('click', () => {
-        const delta = button.dataset.nav.endsWith('+') ? 1 : -1;
-        const date = new Date(Date.UTC(state.year + (button.dataset.nav.startsWith('year') ? delta : 0),
-          state.month - 1 + (button.dataset.nav.startsWith('month') ? delta : 0), 1));
-        state.year = date.getUTCFullYear();
-        state.month = date.getUTCMonth() + 1;
+  }
+
+  let titleEl = null;
+  if (showCalendar) {
+    titleEl = pop.querySelector('.retro-time-title');
+    const renderGrid = () => {
+      titleEl.textContent = `${state.year}年${state.month}月`;
+      grid.innerHTML = '';
+      const first = new Date(Date.UTC(state.year, state.month - 1, 1));
+      // 周一为一周之首：getUTCDay() 周日=0 → 位移 (day+6)%7
+      const lead = (first.getUTCDay() + 6) % 7;
+      for (let i = 0; i < lead; i++) grid.insertAdjacentHTML('beforeend', '<span></span>');
+      const daysInMonth = new Date(Date.UTC(state.year, state.month, 0)).getUTCDate();
+      const todayStr = nowText.slice(0, 10);
+      for (let d = 1; d <= daysInMonth; d++) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = String(d);
+        const dateStr = `${state.year}-${pad2(state.month)}-${pad2(d)}`;
+        if (state.day === d) btn.classList.add('is-selected');
+        if (dateStr === todayStr) btn.classList.add('is-today');
+        btn.addEventListener('click', () => {
+          state.day = d;
+          grid.querySelectorAll('.is-selected').forEach((el) => el.classList.remove('is-selected'));
+          btn.classList.add('is-selected');
+        });
+        grid.appendChild(btn);
+      }
+    };
+    renderGrid();
+
+    pop.querySelectorAll('[data-nav]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const step = btn.dataset.nav;
+        if (step === 'month-') { state.month -= 1; if (state.month < 1) { state.month = 12; state.year -= 1; } }
+        if (step === 'month+') { state.month += 1; if (state.month > 12) { state.month = 1; state.year += 1; } }
+        if (step === 'year-') state.year -= 1;
+        if (step === 'year+') state.year += 1;
         state.day = null;
         renderGrid();
       });
     });
-  }
-  pop.querySelector('[data-act="clear"]').addEventListener('click', () => {
-    apply('');
-    closeRetroTimePop({ restoreFocus: true });
-  });
-  if (mode === 'datetime' || mode === 'date') {
-    pop.querySelector(mode === 'datetime' ? '[data-act="now"]' : '[data-act="today"]')
-      .addEventListener('click', () => {
-        const fresh = nowShanghaiLocalInput().match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
-        state.year = Number(fresh[1]); state.month = Number(fresh[2]); state.day = Number(fresh[3]);
-        focusDay = state.day;
+    if (mode === 'date') {
+      pop.querySelector('[data-act="today"]').addEventListener('click', () => {
+        state.year = Number(nowM[1]); state.month = Number(nowM[2]); state.day = Number(nowM[3]);
         renderGrid();
-        if (timeRow) {
-          state.hour = fresh[4]; state.minute = fresh[5];
-          hourPick.set(state.hour); minutePick.set(state.minute);
-        }
       });
+    }
+  }
+
+  pop.querySelector('[data-act="clear"]').addEventListener('click', () => {
+    if (showCalendar) state.day = null;
+    apply('');
+    closeRetroTimePop();
+  });
+  if (mode === 'datetime') {
+    pop.querySelector('[data-act="now"]').addEventListener('click', () => {
+      const now = nowShanghaiLocalInput().match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+      state.year = Number(now[1]); state.month = Number(now[2]); state.day = Number(now[3]);
+      state.hour = now[4]; state.minute = now[5];
+      renderGrid();
+      hourPick.set(state.hour);
+      minutePick.set(state.minute);
+    });
   }
   pop.querySelector('[data-act="ok"]').addEventListener('click', () => {
+    if (mode === 'time') {
+      apply(`${state.hour}:${state.minute}`);
+      closeRetroTimePop();
+      return;
+    }
+    if (!state.day) {
+      apply('');
+      closeRetroTimePop();
+      return;
+    }
     const date = `${state.year}-${pad2(state.month)}-${pad2(state.day)}`;
-    const value = mode === 'time' ? `${state.hour}:${state.minute}`
-      : !state.day ? '' : mode === 'date' ? date : `${date}T${state.hour}:${state.minute}`;
-    apply(value);
-    if (input._retroField && !input._retroField.validate()) return;
-    closeRetroTimePop({ restoreFocus: true });
+    apply(mode === 'date' ? date : `${date}T${state.hour}:${state.minute}`);
+    closeRetroTimePop();
   });
-  pop.addEventListener('keydown', (event) => {
-    if (event.key !== 'Tab') return;
-    const tabbable = [...pop.querySelectorAll('button')].filter((button) =>
-      !button.disabled && button.tabIndex >= 0 && !button.closest('[hidden]'));
-    if ((!event.shiftKey && document.activeElement === tabbable.at(-1))
-      || (event.shiftKey && document.activeElement === tabbable[0])) closeRetroTimePop({ restoreFocus: true });
+
+  // 定位：先把字段滚入视口，再放字段正下方；下方放不下翻到上方，
+  // 最终双向夹紧到视口内（字段被表单滚动移出视口时也不会漂出屏幕）。
+  // align="right" 时右缘对齐字段（时钟图标一侧），宽字段下弹层贴着图标；
+  // 窄字段回退左对齐，避免弹层伸到字段左侧之外。
+  anchor.scrollIntoView({ block: 'nearest' });
+  const rect = anchor.getBoundingClientRect();
+  const popRect = pop.getBoundingClientRect();
+  let left = align === 'right'
+    ? Math.max(rect.right - popRect.width, rect.left)
+    : rect.left;
+  let top = rect.bottom + 6;
+  if (top + popRect.height > window.innerHeight - 8) {
+    top = rect.top - popRect.height - 6;
+  }
+  top = Math.min(Math.max(top, 8), Math.max(8, window.innerHeight - popRect.height - 8));
+  left = Math.min(Math.max(left, 8), Math.max(8, window.innerWidth - popRect.width - 8));
+  pop.style.left = `${left}px`;
+  pop.style.top = `${top}px`;
+
+  const onOutside = (e) => {
+    if (!pop.contains(e.target) && !anchor.contains(e.target)) closeRetroTimePop();
+  };
+  const onKey = (e) => { if (e.key === 'Escape') closeRetroTimePop(); };
+  // 视口变化后固定定位不再贴合字段，直接关闭，避免弹层漂移出屏；
+  // 打开瞬间的 scrollIntoView 自身引发的滚动豁免 300ms，否则弹层刚开即关。
+  // 弹层内部列表（时/分下拉）自身的滚动不在此列——那不是视口变化。
+  const openedAt = Date.now();
+  const onViewportChange = (e) => {
+    if (Date.now() - openedAt < 300) return;
+    if (e && e.type === 'scroll' && e.target !== window && e.target !== document
+      && pop.contains(e.target)) return;
+    closeRetroTimePop();
+  };
+  const cleanup = () => {
+    document.removeEventListener('mousedown', onOutside);
+    document.removeEventListener('keydown', onKey);
+    window.removeEventListener('resize', onViewportChange);
+    window.removeEventListener('scroll', onViewportChange, true);
+  };
+  setTimeout(() => {
+    document.addEventListener('mousedown', onOutside);
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('resize', onViewportChange);
+    window.addEventListener('scroll', onViewportChange, true);
   });
-  pop.addEventListener('scroll', (event) => { if (event.target === pop) closeUnits(); });
-  positionRetroOverlay(pop, anchor, align);
-  const initialFocus = calendar ? grid.querySelector(`[data-day="${focusDay}"]`) : hourPick.button;
-  initialFocus?.focus({ preventScroll: true });
-  return pop;
+  pop._cleanup = cleanup;
+
+  // 外层容器（如表单 modal）被其父节点整体移除时，宿主按钮离开文档，
+  // 立即回收弹层与其全局监听。
+  const rootObserver = new MutationObserver(() => {
+    if (!document.contains(anchor)) closeRetroTimePop();
+  });
+  rootObserver.observe(document.body, { childList: true });
+  const prevCleanup = pop._cleanup;
+  pop._cleanup = () => { prevCleanup(); rootObserver.disconnect(); };
 }

@@ -529,9 +529,6 @@ input:focus, textarea:focus, select:focus {
   box-shadow: 0 0 0 3px var(--gold-soft);
 }
 input::placeholder, textarea::placeholder { color: var(--ink-faint); }
-input[type="number"] { appearance: textfield; -moz-appearance: textfield; }
-input[type="number"]::-webkit-inner-spin-button,
-input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 textarea { resize: vertical; line-height: 1.6; }
 textarea.mono, input.mono { font-family: var(--mono); font-size: 12.5px; }
 select {
@@ -1527,40 +1524,6 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
 }
 .retro-select-option.is-selected:hover,
 .retro-select-option.is-selected:focus-visible { background: var(--green-mid); }
-
-/* Shared field states, validation and portal hints use the same theme variables. */
-.retro-select, .retro-time { position: relative; min-width: 0; }
-.toolbar .retro-select { min-width: 130px; max-width: 100%; }
-.retro-select-text, .retro-time-text { overflow-wrap: anywhere; text-align: left; }
-.retro-select-pop { max-width: calc(100vw - 16px); }
-.retro-select-option { white-space: normal; overflow-wrap: anywhere; flex-shrink: 0; }
-.retro-select-field:disabled, .retro-time-field:disabled,
-.retro-select-option:disabled, .rtp-select-option:disabled {
-  opacity: 0.5; cursor: not-allowed; box-shadow: none;
-}
-.retro-select-field:disabled:hover, .retro-time-field:disabled:hover { border-color: var(--gold-faint); }
-.retro-select.is-invalid .retro-select-field,
-.retro-time.is-invalid .retro-time-field { border-color: var(--red); }
-.retro-validation-input {
-  position: absolute; width: 1px; height: 1px; opacity: 0;
-  pointer-events: none; clip-path: inset(50%);
-}
-.retro-field-error { color: var(--red); margin: 5px 0 0; }
-.retro-field-error[hidden] { display: none; }
-.rtp-unit-label { font-size: 11px; color: var(--ink-muted); }
-.retro-time-pop { max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); overflow-y: auto; }
-.retro-time-nav button:focus-visible, .retro-time-grid button:focus-visible,
-.rtp-select-btn:focus-visible, .modal-close:focus-visible, .icon-btn:focus-visible {
-  outline: 2px solid var(--gold); outline-offset: 2px;
-}
-.retro-tooltip {
-  position: fixed; z-index: 2300; max-width: min(320px, calc(100vw - 16px));
-  padding: 7px 10px; border: 1px solid var(--gold-line); border-radius: var(--radius-sm);
-  background: var(--paper-solid); color: var(--ink); box-shadow: var(--shadow-lift);
-  font-family: var(--font); font-size: 12px; line-height: 1.5;
-  overflow-wrap: anywhere; pointer-events: none;
-}
-.retro-tooltip[hidden] { display: none; }
 
 /* ---------- 规划管理（一期） ---------- */
 /* 可安排时段：与「目标日期」同款的全宽复古时间字段（上下排布） */

@@ -320,7 +320,7 @@ class PlanningPageContractTests(unittest.TestCase):
         self.assertNotIn('type="time"', (self.page + self.form))
         self.assertNotIn('type="date"', (self.page + self.form))
         self.assertIn("lib/retro_time.js", (self.page + self.form))
-        self.assertIn("initRetroTimeFields", (self.page + self.form))
+        self.assertIn("createRetroTimeField", (self.page + self.form))
         self.assertEqual((self.page + self.form).count('data-retro-mode="time"'), 2)
         self.assertEqual((self.page + self.form).count('data-retro-mode="date"'), 2)
         for field_id in (
@@ -469,7 +469,7 @@ class PlanningPageContractTests(unittest.TestCase):
         # 批次 9 UI #1 修复：锁定判定以后端 has_generated_occurrence 为权威
         # （不依赖 occurrences 列表加载状态）；复古选择器 input + 按钮
         # 一起禁用（只禁 input 拦不住按钮弹层改值）；提示挂在
-        # 可安排时段区的常驻说明；提交侧兜底强制回传任务现值。
+        # [data-type-block="once"]；提交侧兜底强制回传任务现值。
         form = self._task_form_source()
         for marker in (
             "onceLocked",
@@ -479,7 +479,7 @@ class PlanningPageContractTests(unittest.TestCase):
             "调整时段",
             "input.disabled = true;",
             "button.disabled = true;",
-            'id="pf-locked-note"',
+            '[data-type-block="once"]',
             "body.target_date = task.target_date ?? null;",
             "body.window_start_tod = task.window_start_tod ?? null;",
             "body.window_end_tod = task.window_end_tod ?? null;",

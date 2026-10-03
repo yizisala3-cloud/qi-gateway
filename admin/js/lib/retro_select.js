@@ -1,145 +1,137 @@
-// 复古单选字段：隐藏值保持原 id/name，纸色按钮与金线列表承担展示。
-import { esc, icon } from '../ui.js?v=20261002-frontend-controls1';
-import {
-  setupRetroField, attachRetroOverlay, positionRetroOverlay,
-  moveRetroOptionFocus, retroSourceOptions, restoreRetroFieldFocus,
-} from './retro_fields.js?v=20261002-frontend-controls1';
+// lib/retro_select.js - 复古下拉选择器（纸张卡片 + 金线选项列表，替换原生 select 弹层）
+// 与 lib/retro_time.js 同一套机制：隐藏 input 保留原 id/value 契约（change 事件照发），
+// 展示层为纸色按钮，弹层为象牙纸卡；选中项深绿高亮（同日历选中日）。
+// 选项来自调用方传入的 [{ value, label }]，键盘支持 Esc 关闭与上下箭头换选项。
+import { esc, icon } from '../ui.js?v=20261002-planning-modules1';
 
 let activeRetroSelectPop = null;
 
-export function closeRetroSelectPop({ restoreFocus = false } = {}) {
-  const pop = activeRetroSelectPop;
-  if (!pop) return;
-  activeRetroSelectPop = null;
-  pop._cleanup?.();
-  pop.remove();
-  if (restoreFocus) restoreRetroFieldFocus(pop._anchor, pop._forInput);
+function closeRetroSelectPop() {
+  if (activeRetroSelectPop) {
+    const pop = activeRetroSelectPop;
+    activeRetroSelectPop = null;
+    if (pop._cleanup) pop._cleanup();
+    pop.remove();
+  }
 }
 
-export function destroyRetroSelectField(target) {
-  (target?._retroField || target?.closest?.('.retro-select')?._retroField)?.destroy();
-}
-
-/** 返回原 id 的隐藏 input；支持 disabled/required/name 与可访问标签。 */
-export function createRetroSelectField(host, { id, value = '', options = [], ...config } = {}) {
-  host._retroField?.destroy();
+/** 在 host 内挂载复古下拉；返回隐藏 input（原 id 契约不变）。 */
+export function createRetroSelectField(host, { id, value = '', options = [] } = {}) {
   host.classList.add('retro-select');
   host.innerHTML = `
-    <input type="hidden" class="retro-select-value">
+    <input type="hidden" id="${id}" class="retro-select-value">
     <button type="button" class="retro-select-field" aria-haspopup="listbox">
-      <span class="retro-select-text"></span>${icon('chevron-down')}
+      <span class="retro-select-text"></span>
+      ${icon('chevron-down')}
     </button>`;
   const input = host.querySelector('.retro-select-value');
-  const button = host.querySelector('.retro-select-field');
-  const text = host.querySelector('.retro-select-text');
-  const field = setupRetroField(host, input, button, { id, ...config });
-  const apply = (localValue, silent = false) => {
-    input.value = String(localValue ?? '');
-    const selected = options.find((option) => String(option.value) === input.value);
-    text.textContent = selected?.label ?? '';
-    text.classList.toggle('is-empty', !text.textContent);
-    field.syncValue();
-    if (activeRetroSelectPop?._forInput === input) {
-      for (const option of activeRetroSelectPop.querySelectorAll('.retro-select-option')) {
-        const chosen = option.dataset.value === input.value;
-        option.classList.toggle('is-selected', chosen);
-        option.setAttribute('aria-selected', String(chosen));
-      }
-    }
+  const textEl = host.querySelector('.retro-select-text');
+  const labelOf = (v) => (options.find((o) => String(o.value) === String(v)) || {}).label || '';
+  const apply = (localValue, silent) => {
+    input.value = localValue;
+    textEl.textContent = labelOf(localValue);
     if (!silent) input.dispatchEvent(new Event('change', { bubbles: true }));
   };
-  input._applyRetroValue = apply;
-  field.close = (settings) => {
-    if (activeRetroSelectPop?._forInput === input) closeRetroSelectPop(settings);
-  };
-  const open = (last = false) => {
-    if (input.disabled || button.disabled || button.matches(':disabled')) return;
-    closeRetroSelectPop();
-    openRetroSelectPop(button, input, apply, options, last);
-  };
-  const onClick = () => {
-    if (activeRetroSelectPop?._forInput === input) field.close({ restoreFocus: true });
-    else open();
-  };
-  const onKey = (event) => {
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault();
-      open(event.key === 'ArrowUp');
-    }
-  };
-  button.addEventListener('click', onClick);
-  button.addEventListener('keydown', onKey);
-  field.onDestroy = () => {
-    button.removeEventListener('click', onClick);
-    button.removeEventListener('keydown', onKey);
-  };
   apply(value, true);
-  field.initialValue = input.value;
-  input.defaultValue = input.value;
+  input._applyRetroValue = apply;
+  host.querySelector('.retro-select-field').addEventListener('click', () => {
+    if (activeRetroSelectPop && activeRetroSelectPop._forInput === input) {
+      closeRetroSelectPop();
+      return;
+    }
+    closeRetroSelectPop();
+    const pop = openRetroSelectPop(host.querySelector('.retro-select-field'), input, apply, options);
+    host.classList.add('is-open');
+    const prevCleanup = pop._cleanup;
+    pop._cleanup = () => {
+      host.classList.remove('is-open');
+      prevCleanup();
+    };
+  });
   return input;
 }
 
-/** 将单选 select 原位接入共享字段；必须在业务监听绑定前调用。 */
-export function initRetroSelectFields(root) {
-  const sources = [...root.querySelectorAll('select:not([multiple])')];
-  if (root.matches?.('select:not([multiple])')) sources.unshift(root);
-  return sources.map((source) => {
-    const config = retroSourceOptions(source);
-    const options = [...source.options].map((option) => ({
-      value: option.value, label: option.textContent.trim(),
-      disabled: option.disabled || option.parentElement?.disabled,
-    }));
-    const host = document.createElement('span');
-    host.className = `${source.className} retro-select`.trim();
-    host.style.cssText = source.style.cssText;
-    source.replaceWith(host);
-    return createRetroSelectField(host, { ...config, options });
-  });
-}
-
-export function openRetroSelectPop(anchor, input, apply, options, preferLast = false) {
-  if (anchor.disabled || input.disabled || anchor.matches(':disabled')) return null;
-  closeRetroSelectPop();
+export function openRetroSelectPop(anchor, input, apply, options) {
   const current = String(input.value ?? '');
   const pop = document.createElement('div');
   pop.className = 'retro-select-pop';
-  pop.setAttribute('role', 'listbox');
-  pop.setAttribute('aria-label', input._retroField?.label || anchor.getAttribute('aria-label') || '选项');
   pop._forInput = input;
-  pop._anchor = anchor;
-  pop.innerHTML = options.map((option) => `
-    <button type="button" role="option" tabindex="-1"
-      aria-selected="${String(option.value) === current}" aria-disabled="${Boolean(option.disabled)}"
-      class="retro-select-option${String(option.value) === current ? ' is-selected' : ''}"
-      data-value="${esc(option.value)}" ${option.disabled ? 'disabled' : ''}>${esc(option.label)}</button>`).join('');
+  pop.innerHTML = options.map((o) => `
+    <button type="button" class="retro-select-option${String(o.value) === current ? ' is-selected' : ''}"
+      data-value="${esc(o.value)}">${esc(o.label)}</button>`).join('');
   document.body.appendChild(pop);
-  pop._cleanup = attachRetroOverlay(pop, anchor, closeRetroSelectPop);
   activeRetroSelectPop = pop;
-  pop.addEventListener('click', (event) => {
-    const option = event.target.closest('.retro-select-option');
-    if (!option || option.disabled || input.disabled || anchor.disabled) return;
-    apply(option.dataset.value);
-    closeRetroSelectPop({ restoreFocus: true });
+
+  pop.querySelectorAll('.retro-select-option').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      apply(btn.dataset.value);
+      closeRetroSelectPop();
+      anchor.focus();
+    });
   });
-  pop.addEventListener('keydown', (event) => {
-    if (event.key === 'Tab') {
-      closeRetroSelectPop({ restoreFocus: true });
-      return;
-    }
-    moveRetroOptionFocus(pop, '.retro-select-option', event);
+  // 弹层内上下箭头在选项间移动焦点（Tab 亦可用）
+  pop.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    const opts = [...pop.querySelectorAll('.retro-select-option')];
+    const idx = opts.indexOf(document.activeElement);
+    const next = e.key === 'ArrowDown' ? Math.min(idx + 1, opts.length - 1) : Math.max(idx - 1, 0);
+    if (opts[next]) opts[next].focus();
+    e.preventDefault();
   });
+  const selectedBtn = pop.querySelector('.retro-select-option.is-selected') || pop.querySelector('.retro-select-option');
+  if (selectedBtn) selectedBtn.focus({ preventScroll: true });
+
+  // 定位与回收机制与 retro_time 一致：字段正下方，放不下翻上方，双向夹紧视口；
+  // 与字段同宽起算，选项多的窄字段也不会挤成一列窄条。
+  anchor.scrollIntoView({ block: 'nearest' });
   pop.style.minWidth = `${anchor.getBoundingClientRect().width}px`;
-  positionRetroOverlay(pop, anchor);
-  const enabled = [...pop.querySelectorAll('.retro-select-option')].filter((option) => !option.disabled);
-  const selected = enabled.find((option) => option.dataset.value === current)
-    || (preferLast ? enabled.at(-1) : enabled[0]);
-  if (selected) {
-    selected.tabIndex = 0;
-    selected.focus({ preventScroll: true });
-    selected.scrollIntoView({ block: 'nearest' });
-  } else {
-    pop.tabIndex = -1;
-    pop.focus({ preventScroll: true });
+  const rect = anchor.getBoundingClientRect();
+  const popRect = pop.getBoundingClientRect();
+  let left = rect.left;
+  let top = rect.bottom + 6;
+  if (top + popRect.height > window.innerHeight - 8) {
+    top = rect.top - popRect.height - 6;
   }
+  top = Math.min(Math.max(top, 8), Math.max(8, window.innerHeight - popRect.height - 8));
+  left = Math.min(Math.max(left, 8), Math.max(8, window.innerWidth - popRect.width - 8));
+  pop.style.left = `${left}px`;
+  pop.style.top = `${top}px`;
+
+  const onOutside = (e) => {
+    if (!pop.contains(e.target) && !anchor.contains(e.target)) closeRetroSelectPop();
+  };
+  const onKey = (e) => { if (e.key === 'Escape') closeRetroSelectPop(); };
+  // 视口变化后固定定位不再贴合字段，直接关闭，避免弹层漂移出屏；
+  // 打开瞬间的 scrollIntoView 自身引发的滚动豁免 300ms，否则弹层刚开即关。
+  // 弹层自身选项列表的滚动不算视口变化（选项多时内部滚动不应关窗）。
+  const openedAt = Date.now();
+  const onViewportChange = (e) => {
+    if (Date.now() - openedAt < 300) return;
+    if (e && e.type === 'scroll' && e.target !== window && e.target !== document
+      && pop.contains(e.target)) return;
+    closeRetroSelectPop();
+  };
+  const cleanup = () => {
+    document.removeEventListener('mousedown', onOutside);
+    document.removeEventListener('keydown', onKey);
+    window.removeEventListener('resize', onViewportChange);
+    window.removeEventListener('scroll', onViewportChange, true);
+  };
+  setTimeout(() => {
+    document.addEventListener('mousedown', onOutside);
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('resize', onViewportChange);
+    window.addEventListener('scroll', onViewportChange, true);
+  });
+  pop._cleanup = cleanup;
+
+  // 外层容器（如表单 modal）被其父节点整体移除时，宿主按钮离开文档，
+  // 立即回收弹层与其全局监听。
+  const rootObserver = new MutationObserver(() => {
+    if (!document.contains(anchor)) closeRetroSelectPop();
+  });
+  rootObserver.observe(document.body, { childList: true });
+  const prevCleanup = pop._cleanup;
+  pop._cleanup = () => { prevCleanup(); rootObserver.disconnect(); };
   return pop;
 }

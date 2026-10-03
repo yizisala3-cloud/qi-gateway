@@ -127,26 +127,21 @@ class MemoryBrowserContractTests(unittest.TestCase):
         form = FORM.read_text(encoding="utf-8")
         self.assertIn("patch.continuity_type = type;", form)
 
-    def test_picker_cleanup_covers_nested_shared_hosts(self):
-        # Both fields now use one shared subtree observer, including nested
-        # type changes and route replacement (also exercised in a browser).
+    def test_picker_cleanup_watches_body_not_modal(self):
+        # modal 关闭是被其父节点（body）整体移除，modal 内部无 childList
+        # 变化；清理观察必须挂在 body 上（辅助断言，主验为浏览器验收）。
         form = FORM.read_text(encoding="utf-8")
-        shared = (ROOT / "admin/js/lib/retro_fields.js").read_text(encoding="utf-8")
-        self.assertIn("initRetroTimeFields(continuityHost)", form)
-        self.assertIn("fieldObserver.observe(document.body, { childList: true, subtree: true });", shared)
-        self.assertIn("!field.host.isConnected", shared)
-        self.assertIn("field.destroy()", shared)
+        self.assertIn("rootObserver.observe(document.body, { childList: true });", form)
+        self.assertNotIn("observer.observe(host,", form)
+        self.assertIn("if (!document.contains(anchor)) closeRetroTimePop();", form)
 
     def test_no_native_datetime_inputs_remain(self):
         # 原生 datetime-local 的浏览器弹窗与复古视觉体系不符，
         # 一律使用自绘复古时间选择器。
         form = FORM.read_text(encoding="utf-8")
         self.assertNotIn("datetime-local", form)
-        self.assertIn("initRetroTimeFields(rootEl)", form)
-        self.assertNotIn("function createRetroTimeField", form)
-        picker = (ROOT / "admin/js/lib/retro_time.js").read_text(encoding="utf-8")
-        self.assertIn("retro-time-field", picker)
-        self.assertIn("retro-time-pop", picker)
+        self.assertIn("retro-time-field", form)
+        self.assertIn("retro-time-pop", form)
         css = (ROOT / "admin" / "css" / "style.css").read_text(encoding="utf-8")
         self.assertIn(".retro-time-pop", css)
         self.assertNotIn("#3b82f6", css.lower())

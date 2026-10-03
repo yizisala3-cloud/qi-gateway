@@ -1,8 +1,8 @@
 // pages/config.js - 配置：真实状态展示 + 功能开关
-import { gw, esc } from '../api.js?v=20261002-frontend-controls1';
-import { loading, errorBlock, tag, toast, delegate, icon } from '../ui.js?v=20261002-frontend-controls1';
-import { openCycleSettings } from '../lib/cycle_settings.js?v=20261002-frontend-controls1';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261002-frontend-controls1';
+import { gw, esc } from '../api.js?v=20260927-planning10';
+import { loading, errorBlock, tag, toast, delegate, icon } from '../ui.js?v=20260927-planning10';
+import { openCycleSettings } from '../lib/cycle_settings.js?v=20261002-planning-modules1';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261002-planning-modules1';
 
 // 规划数据库不可用时的示例数据（仅本地预览；保存会因库不可用自然报错）
 const DEMO_CYCLE = {
@@ -21,11 +21,11 @@ function okTag(value, yes = '正常', no = '异常') {
 }
 
 function toggleHtml(action, enabled, title) {
-  return `<button type="button" class="toggle-switch" role="switch" aria-checked="${enabled ? 'true' : 'false'}" data-act="${action}" aria-label="${esc(title)}" data-tooltip="${esc(title)}"><span class="toggle-knob"></span></button>`;
+  return `<button class="toggle-switch" role="switch" aria-checked="${enabled ? 'true' : 'false'}" data-act="${action}" title="${title}"><span class="toggle-knob"></span></button>`;
 }
 
 function unknownToggle() {
-  return `${tag('状态未知', 'muted')} <button type="button" class="toggle-switch" role="switch" disabled aria-checked="false" aria-label="开关状态读取失败"><span class="toggle-knob"></span></button>`;
+  return `${tag('状态未知', 'muted')} <button class="toggle-switch" disabled aria-checked="false"><span class="toggle-knob"></span></button>`;
 }
 
 export default {
@@ -129,7 +129,7 @@ export default {
             <div class="kv"><span class="k">MCP 服务</span><span class="v">${boolTag(status.memory_mcp_configured)}</span></div>
             <div class="kv"><span class="k">待办插件</span><span class="v">${boolTag(status.todo_plugin_configured)}</span></div>
             <div class="kv"><span class="k">更换 API 配置</span><span class="v">
-              <button class="btn btn-secondary btn-sm is-disabled" disabled>更换配置</button>
+              <button class="btn btn-secondary btn-sm is-disabled" disabled title="暂未接入">更换配置</button>
               <span class="disabled-note" style="margin-left:8px">暂未接入</span>
             </span></div>
           </div>

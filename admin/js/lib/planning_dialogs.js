@@ -1,7 +1,6 @@
 // Instance dialogs: form-local inputs and timeout retry identity stay in their closures.
-import { gw } from '../api.js?v=20261002-frontend-controls1';
-import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261002-frontend-controls1';
-import { initRetroTimeFields } from './retro_time.js?v=20261002-frontend-controls1';
+import { gw } from '../api.js?v=20261002-planning-modules1';
+import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261002-planning-modules1';
 
 export function createPlanningDialogs({
   findOccurrence, getOccurrences, getTasks, openTaskForm,
@@ -78,12 +77,11 @@ export function createPlanningDialogs({
       const { root, close } = modal({
         title: '重新安排执行时间',
         body: `<div class="field muted text-sm">重新安排当前待办的执行时间，已有进度会保留；原超时记录保留。</div>
-               <div class="field"><label for="planning-reschedule-time">新的执行时间</label>
+               <div class="field"><label>新的执行时间</label>
                <input type="datetime-local" id="planning-reschedule-time"></div>`,
         footer: `<button class="btn btn-secondary" data-cancel>取消</button>
                  <button class="btn btn-primary" data-ok>保存</button>`,
       });
-      initRetroTimeFields(root);
       root.querySelector('[data-cancel]').onclick = close;
       root.querySelector('[data-ok]').onclick = async () => {
         const value = root.querySelector('#planning-reschedule-time').value;
@@ -111,12 +109,11 @@ export function createPlanningDialogs({
     askNewTime(id, targetStatus, title) {
       const { root, close } = modal({
         title,
-        body: `<div class="field"><label for="planning-new-time">新的执行时间</label>
+        body: `<div class="field"><label>新的执行时间</label>
                <input type="datetime-local" id="planning-new-time"></div>`,
         footer: `<button class="btn btn-secondary" data-cancel>取消</button>
                  <button class="btn btn-primary" data-ok>确认</button>`,
       });
-      initRetroTimeFields(root);
       root.querySelector('[data-cancel]').onclick = close;
       root.querySelector('[data-ok]').onclick = async () => {
         const value = root.querySelector('#planning-new-time').value;
@@ -161,15 +158,14 @@ export function createPlanningDialogs({
         title: '调整时段',
         body: `
           <p class="muted text-sm">调整当前这一轮的可安排时段（最早开始 / 最晚完成，两端可独立留空）。把时段收窄到恰好容纳预计耗时，就会把这条待办钉在该时间，不再被自动重算移动。</p>
-          <div class="field"><label for="planning-adj-window-start">最早开始（可选）</label><input type="datetime-local" id="planning-adj-window-start" value="${toLocal(occ.window_start_at)}" aria-describedby="planning-adj-note pf-adj-error" ${disabledAttr}></div>
-          <div class="field"><label for="planning-adj-window-end">最晚完成（可选，越过即超时）</label><input type="datetime-local" id="planning-adj-window-end" value="${toLocal(occ.window_end_at)}" aria-describedby="planning-adj-note pf-adj-error" ${disabledAttr}></div>
-          ${residentOnce ? '<p class="field-hint" id="planning-adj-note">未指定日期的单次待办常驻显示、不设可安排时段：不能为它的当前实例新增时间窗口。</p>' : '<p class="field-hint" id="planning-adj-note">可独立清空一端；已有时段需保留至少一端。</p>'}
+          <div class="field"><label>最早开始（可选）</label><input type="datetime-local" id="planning-adj-window-start" value="${toLocal(occ.window_start_at)}" ${disabledAttr}></div>
+          <div class="field"><label>最晚完成（可选，越过即超时）</label><input type="datetime-local" id="planning-adj-window-end" value="${toLocal(occ.window_end_at)}" ${disabledAttr}></div>
+          ${residentOnce ? '<p class="muted text-sm">未指定日期的单次待办常驻显示、不设可安排时段：不能为它的当前实例新增时间窗口。</p>' : ''}
           ${hasWindow ? '<p class="muted text-sm">这一轮已带时段约束：两端都清空会取消既有约束，后端会拒绝；请保留至少一端。</p>' : ''}
-          <div id="pf-adj-error" role="alert" hidden></div>`,
+          <div id="pf-adj-error" hidden></div>`,
         footer: `<button class="btn btn-secondary" data-cancel>取消</button>
                  <button class="btn btn-primary" data-ok>保存</button>`,
       });
-      initRetroTimeFields(root);
       root.querySelector('[data-cancel]').onclick = close;
       root.querySelector('[data-ok]').onclick = async () => {
         const start = root.querySelector('#planning-adj-window-start').value;
@@ -212,13 +208,12 @@ export function createPlanningDialogs({
       const { root, close } = modal({
         title: '补填实际时间',
         body: `
-          <div class="field"><label for="planning-backfill-start">实际开始</label><input type="datetime-local" id="planning-backfill-start" value="${toLocal(occ.actual_start)}" aria-describedby="planning-backfill-note"></div>
-          <div class="field"><label for="planning-backfill-end">实际结束</label><input type="datetime-local" id="planning-backfill-end" value="${toLocal(occ.actual_end)}" aria-describedby="planning-backfill-note"></div>
-          <p class="field-hint" id="planning-backfill-note">留空即清除该时间；同时有起止时自动计算实际耗时，预估耗时独立保留。</p>`,
+          <div class="field"><label>实际开始</label><input type="datetime-local" id="planning-backfill-start" value="${toLocal(occ.actual_start)}"></div>
+          <div class="field"><label>实际结束</label><input type="datetime-local" id="planning-backfill-end" value="${toLocal(occ.actual_end)}"></div>
+          <p class="muted text-sm">留空即清除该时间；同时有起止时自动计算实际耗时，预估耗时独立保留。</p>`,
         footer: `<button class="btn btn-secondary" data-cancel>取消</button>
                  <button class="btn btn-primary" data-ok>保存</button>`,
       });
-      initRetroTimeFields(root);
       root.querySelector('[data-cancel]').onclick = close;
       root.querySelector('[data-ok]').onclick = async () => {
         const start = root.querySelector('#planning-backfill-start').value;
@@ -254,7 +249,7 @@ export function createPlanningDialogs({
           <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
             <label style="white-space:nowrap">耗时</label>
             <input type="text" data-part-minutes value="30" placeholder="分钟或 1h30m" style="width:130px">
-            <button type="button" class="btn btn-quiet btn-sm" data-remove-part data-tooltip="移除这一项" aria-label="移除这一项">${icon('x')}移除</button>
+            <button type="button" class="btn btn-quiet btn-sm" data-remove-part title="移除这一项">${icon('x')}移除</button>
           </div>
         </div>`;
       const { root, close } = modal({
