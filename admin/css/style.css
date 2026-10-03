@@ -1741,3 +1741,123 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
 @media (max-width: 768px) {
   .body-field-name { width: 44px; }
 }
+
+/* =========================================================
+   备忘录（规划管理页签内，一期）
+   复用纸色卡片 + 暗金线 + 墨绿选中态；板块 = 内容展示单元
+   ========================================================= */
+
+.memo-toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
+.memo-toolbar .search-box { flex: 1; min-width: 180px; max-width: 340px; }
+
+.memo-body { min-height: 200px; }
+
+/* ── 标签板块 ── */
+.memo-board { display: flex; flex-direction: column; gap: 18px; }
+.memo-section {
+  border: 1px solid var(--gold-faint);
+  border-radius: var(--radius);
+  padding: 12px 14px 14px;
+  background: var(--paper-card);
+}
+.memo-section-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.memo-section-title {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: none; background: none; padding: 2px 4px;
+  font: inherit; font-weight: 600; font-size: 15px; color: var(--ink);
+  cursor: pointer; border-radius: var(--radius-sm);
+}
+.memo-section-title:hover { color: var(--green-ink); background: var(--green-soft); }
+.memo-handle {
+  color: var(--ink-faint); touch-action: none; cursor: grab; flex: none;
+}
+.memo-handle:hover { color: var(--gold-strong); }
+.memo-handle-spacer { width: 30px; flex: none; }
+body.memo-dragging { user-select: none; }
+body.memo-dragging .memo-handle { cursor: grabbing; }
+
+/* ── 条目：标题 + 一行正文（溢出省略）── */
+.memo-list { display: flex; flex-direction: column; gap: 6px; }
+.memo-item {
+  display: flex; align-items: center; gap: 8px;
+  border: 1px solid var(--gold-faint); border-radius: var(--radius-sm);
+  background: var(--paper-solid);
+  padding: 8px 12px 8px 4px; cursor: pointer;
+}
+.memo-item:hover { border-color: var(--gold-line); box-shadow: var(--shadow-lift); }
+.memo-item.is-dragging { border-style: dashed; border-color: var(--gold-strong); box-shadow: var(--shadow-lift); opacity: 0.92; }
+.memo-item-handle { width: 26px; height: 34px; }
+.memo-item-main { flex: 1; min-width: 0; }
+.memo-item-title {
+  font-size: 13.5px; font-weight: 600; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.memo-item-excerpt {
+  margin-top: 2px; font-size: 12px; color: var(--ink-muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.memo-item-side { flex: none; max-width: 40%; overflow: hidden; }
+
+/* ── 详情头 / 模式切换 ── */
+.memo-detail-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.memo-detail-title { margin: 0; font-size: 16px; font-weight: 600; color: var(--ink); }
+.memo-mode-tabs { margin-bottom: 10px; }
+
+.memo-empty-actions { margin-top: 14px; }
+
+/* ── 编辑器 ── */
+.memo-tag-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.memo-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--gold-faint); border-radius: 999px;
+  padding: 3px 12px 3px 8px; cursor: pointer;
+  font-size: 12.5px; color: var(--ink-soft); background: var(--paper-solid);
+}
+.memo-chip:hover { border-color: var(--gold-line); }
+.memo-chip.is-checked { border-color: var(--green-mid); color: var(--green-ink); background: var(--green-soft); }
+.memo-chip input[type="checkbox"] { margin: 0; }
+.memo-new-tag { display: flex; gap: 8px; margin-top: 8px; }
+.memo-new-tag input { max-width: 200px; }
+
+.memo-save-status { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.memo-save { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; }
+.memo-save .ico { width: 14px; height: 14px; }
+.memo-save-pending { color: var(--ink-muted); }
+.memo-save-saving { color: var(--slate); }
+.memo-save-ok { color: var(--green-ink); }
+.memo-save-err { color: var(--red); }
+
+/* ── 阅读视图：Markdown 正文 ── */
+.memo-md { color: var(--ink); font-size: 14px; line-height: 1.75; word-break: break-word; }
+.memo-md h1, .memo-md h2, .memo-md h3, .memo-md h4 {
+  color: var(--ink); margin: 18px 0 8px; line-height: 1.4;
+}
+.memo-md h1 { font-size: 20px; } .memo-md h2 { font-size: 17px; } .memo-md h3 { font-size: 15.5px; }
+.memo-md p { margin: 8px 0; }
+.memo-md ul, .memo-md ol { margin: 8px 0; padding-left: 24px; }
+.memo-md li { margin: 3px 0; }
+.memo-md blockquote {
+  margin: 10px 0; padding: 6px 14px;
+  border-left: 3px solid var(--gold-line); background: var(--gold-soft);
+  color: var(--ink-soft);
+}
+.memo-md code {
+  font-family: var(--mono); font-size: 12.5px;
+  background: var(--gold-soft); border: 1px solid var(--gold-faint);
+  border-radius: 4px; padding: 1px 5px;
+}
+.memo-md pre {
+  background: var(--paper-solid); border: 1px solid var(--gold-faint);
+  border-radius: var(--radius-sm); padding: 10px 12px; overflow-x: auto;
+}
+.memo-md pre code { background: none; border: none; padding: 0; }
+.memo-md a { color: var(--green-ink); }
+.memo-md hr { border: none; border-top: 1px dashed var(--gold-faint); margin: 14px 0; }
+.memo-md img { max-width: 100%; }
+.memo-md table { border-collapse: collapse; margin: 10px 0; }
+.memo-md th, .memo-md td { border: 1px solid var(--gold-faint); padding: 5px 10px; font-size: 13px; }
+
+@media (max-width: 560px) {
+  .memo-toolbar .search-box { max-width: none; }
+  .memo-item-side { max-width: 46%; }
+}

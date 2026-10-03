@@ -33,7 +33,8 @@ TASK_FORM = ROOT / 'admin/js/lib/planning_task_form.js'
 DIALOGS = ROOT / 'admin/js/lib/planning_dialogs.js'
 SORT = ROOT / 'admin/js/lib/planning_sort.js'
 REMINDER = ROOT / 'admin/js/lib/planning_reminder.js'
-PLANNING_MODULES = (DISPLAY, TASK_FORM, DIALOGS, SORT, REMINDER)
+MEMO = ROOT / 'admin/js/lib/planning_memo.js'
+PLANNING_MODULES = (DISPLAY, TASK_FORM, DIALOGS, SORT, REMINDER, MEMO)
 STYLE = ROOT / "admin" / "css" / "style.css"
 CREDITS = ROOT / "admin" / "assets" / "audio" / "CREDITS.md"
 
@@ -72,9 +73,11 @@ class PlanningPageContractTests(unittest.TestCase):
         cls.reminder = REMINDER.read_text(encoding="utf-8")
         cls.sources = "\n".join((cls.page, cls.display, cls.form, cls.dialogs, cls.sorter, cls.reminder))
 
-    def test_four_regions_exist(self):
+    def test_five_regions_exist(self):
+        # 备忘录一期（2026-10-02）：规划管理页签含备忘录区域
         for region_id in (
-            "planning-today", "planning-all", "planning-goals", "planning-summary",
+            "planning-today", "planning-all", "planning-memo",
+            "planning-goals", "planning-summary",
         ):
             with self.subTest(region=region_id):
                 self.assertIn(f'id="{region_id}"', self.page)
@@ -87,20 +90,24 @@ class PlanningPageContractTests(unittest.TestCase):
             with self.subTest(section=section_id):
                 self.assertIn(f'id="{section_id}"', self.page)
 
-    def test_top_tabs_four_items_with_region_icons(self):
-        # BUG-16：工具栏下方一条 .tabs，四个页签沿用原区域图标，同一时刻只显示激活区域
+    def test_top_tabs_five_items_with_region_icons(self):
+        # BUG-16：工具栏下方一条 .tabs，沿用原区域图标，同一时刻只显示激活区域；
+        # 备忘录一期（2026-10-02）：页签顺序 当前待办/全部待办/备忘录/长期目标/每日总结
         match = re.search(r'<div class="tabs" id="planning-tabs"[^>]*>(.*?)</div>', self.page, re.S)
         self.assertIsNotNone(match, "planning page must render the top .tabs bar")
         block = match.group(1)
         for tab_key, icon_name in (
-            ("today", "calendar"), ("all", "inbox"), ("goals", "star"), ("summary", "journal"),
+            ("today", "calendar"), ("all", "inbox"), ("memo", "feather"),
+            ("goals", "star"), ("summary", "journal"),
         ):
             with self.subTest(tab=tab_key):
                 self.assertIn(f'data-tab="{tab_key}"', block)
                 self.assertIn(f"icon('{icon_name}')", block)
-        self.assertEqual(block.count('class="tab'), 4)
-        # 默认激活「当前待办」
+        self.assertEqual(block.count('class="tab'), 5)
+        # 默认激活「当前待办」；备忘录位于全部待办与长期目标之间
         self.assertIn('<button class="tab active" data-act="plan-tab" data-tab="today"', block)
+        self.assertLess(block.index('data-tab="all"'), block.index('data-tab="memo"'))
+        self.assertLess(block.index('data-tab="memo"'), block.index('data-tab="goals"'))
 
     def test_today_subtabs_three_sections_default_progress(self):
         # BUG-16c：「当前待办」页签内 .subtabs 二级页签，默认进度中，切换只显示对应列表
