@@ -6,7 +6,6 @@ from pathlib import Path
 from gateway.memory_continuity_schema import (
     ContinuityDataError,
     validate_continuity_data,
-    validate_relation_direction,
 )
 
 
@@ -70,17 +69,6 @@ class ContinuitySchemaTests(unittest.TestCase):
         data.pop("explicit_instruction")
         with self.assertRaises(ContinuityDataError):
             validate_continuity_data("interaction_rule", None, data)
-
-    def test_evokes_direction_is_moment_or_episode_to_inside_joke(self):
-        for source in ("moment", "episode"):
-            with self.subTest(source=source):
-                self.assertEqual(
-                    validate_relation_direction(source, "evokes", "inside_joke"),
-                    (source, "evokes", "inside_joke"),
-                )
-        for target in ("moment", "episode"):
-            with self.subTest(target=target), self.assertRaises(ContinuityDataError):
-                validate_relation_direction("inside_joke", "evokes", target)
 
 
 class Phase1MigrationContractTests(unittest.TestCase):

@@ -41,7 +41,7 @@
 | `RUMINATION_BASE_URL` / `RUMINATION_API_KEY` / `RUMINATION_MODEL` | 反刍连续感路径的独立提取模型；留空回退复用 `CONTINUITY_*` |
 | `RUMINATION_MAX_TOKENS` | 反刍文本提取最大输出 token 数，默认 8192 |
 | `RUMINATION_DAILY_HOUR` | 反刍每日调度小时（Asia/Shanghai），默认 6 点 |
-| `PORT` | 端口（默认 8000） |
+| `PORT` | 部署平台端口映射惯例保留；网关启动端口由 Dockerfile 固定为 8000，代码不读取 |
 
 ### Zeabur 部署
 

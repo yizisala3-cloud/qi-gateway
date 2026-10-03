@@ -27,7 +27,6 @@ DEFAULT_BATCH_SIZE = 60
 MAX_BATCH_SIZE = 100
 DEFAULT_MAX_CHARS = 12000
 STALE_RUN_MINUTES = 30
-FAILED_RETRY_MINUTES = 60
 MAX_EXTRACTED_MEMORIES = 8
 
 EXTRACT_SYSTEM_PROMPT = """从带 id、北京时间 t 和 role 的聊天原文中，提取最多 8 条有长期价值且有原文证据的独立记忆。
@@ -999,91 +998,3 @@ def get_digest_status() -> dict[str, Any]:
         "analysis_configured": _analysis_configured(),
         "recent_runs": list_digest_runs(20),
     }
-
-
-def _recent_run_blocks_retry(assistant_id: str) -> bool:
-    response = (
-        _client().table("memory_digest_runs")
-        .select("status,started_at")
-        .eq("assistant_id", assistant_id)
-        .eq("mode", "execute")
-        .order("started_at", desc=True)
-        .limit(1)
-        .execute()
-    )
-    if not response.data:
-        return False
-    latest = response.data[0]
-    if latest.get("status") == "running":
-        return True
-    if latest.get("status") != "failed":
-        return False
-    started = _parse_time(latest.get("started_at"), timezone.utc)
-    return bool(started and datetime.now(timezone.utc) - started < timedelta(minutes=FAILED_RETRY_MINUTES))
-
-
-def _daily_run_exists(assistant_id: str, now_cst: datetime) -> bool:
-    local_midnight = now_cst.replace(hour=0, minute=0, second=0, microsecond=0)
-    response = (
-        _client().table("memory_digest_runs")
-        .select("id")
-        .eq("assistant_id", assistant_id)
-        .eq("trigger", "scheduled_daily")
-        .in_("status", ["running", "succeeded", "skipped"])
-        .gte("started_at", local_midnight.astimezone(timezone.utc).isoformat())
-        .limit(1)
-        .execute()
-    )
-    return bool(response.data)
-
-
-def run_scheduled_digest_if_due() -> dict[str, Any] | None:
-    # Do not query the database or create audit rows every scheduler tick when
-    # the provider is intentionally not configured.
-    if not _analysis_configured():
-        return None
-    assistant_id: str | None = None
-    try:
-        assistant_id = resolve_assistant_id()
-    except Exception:
-        log.exception("Scheduled digest failed: cannot resolve assistant_id")
-        return None
-
-    try:
-        _mark_stale_runs()
-        status = get_digest_status()
-        if status["backlog_count"] <= 0:
-            return None
-
-        if _recent_run_blocks_retry(assistant_id):
-            return None
-
-        now_cst = datetime.now(CST)
-        daily_hour = max(0, min(23, int(cfg.MEMORY_DIGEST_DAILY_HOUR or 3)))
-        if now_cst.hour >= daily_hour and not _daily_run_exists(assistant_id, now_cst):
-            return run_memory_digest("scheduled_daily", "execute")
-
-        latest_at = _parse_time(status.get("latest_message_at"), CST)
-        if latest_at and now_cst - latest_at.astimezone(CST) >= timedelta(hours=cfg.MEMORY_DIGEST_IDLE_HOURS):
-            return run_memory_digest("idle_six_hours", "execute")
-    except Exception as exc:
-        log.exception("Scheduled memory digest check failed")
-        try:
-            failed_run = _create_run(
-                assistant_id,
-                "scheduled_daily",
-                "execute",
-                [],
-                status="failed",
-                error_code="scheduled_check_error",
-                error_message=f"{type(exc).__name__}: {str(exc)[:1200]}",
-            )
-            return _public_run(failed_run)
-        except Exception:
-            log.exception("Failed to persist scheduled digest error")
-    return None
-
-
-# Backward-compatible entry point used by older callers.
-def run_daily_digest() -> dict[str, Any]:
-    return run_memory_digest("scheduled_daily", "execute")

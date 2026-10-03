@@ -363,17 +363,6 @@ def _call_rpc(client: Any, name: str, payload: dict[str, Any]) -> dict[str, Any]
     return _rpc_result(response.data, "admin_memory_rpc_failed")
 
 
-def _memory_brief(row: dict[str, Any]) -> dict[str, Any]:
-    memory = row.get("memory") if isinstance(row.get("memory"), dict) else row
-    return {
-        "memory_id": memory.get("id"),
-        "continuity_id": memory.get("continuity_id"),
-        "continuity_type": memory.get("continuity_type"),
-        "is_active": memory.get("is_active"),
-        "superseded_by_memory_id": memory.get("superseded_by_memory_id"),
-    }
-
-
 # ---------------------------------------------------------------------------
 # 1. Create a user-authored formal memory
 # ---------------------------------------------------------------------------

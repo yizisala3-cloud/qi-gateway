@@ -93,10 +93,6 @@ def calendar_round_key(cycle_key: date) -> str:
     return f"cycle:{cycle_key.isoformat()}"
 
 
-def once_round_key() -> str:
-    return "once"
-
-
 def timed_round_key(kind: str, cycle_key: date, token: str) -> str:
     """Stable identity from a due baseline or a distinct early action token."""
     if kind not in ("fixed", "handled", "early") or not token:

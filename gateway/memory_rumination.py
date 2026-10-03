@@ -28,16 +28,12 @@ import httpx
 from .config import cfg
 from .db import get_client
 from .memory_continuity_schema import (
-    SCHEMA_VERSION,
     ContinuityDataError,
     validate_continuity_data,
 )
 from .memory_continuity_shadow import (
-    ShadowPreviewError,
-    _clean_content,
     _contains_secret,
     _normalize_memory_time,
-    _parse_time,
     _response_diagnostic,
     _resolve_message_time,
 )
@@ -1441,25 +1437,6 @@ def _resolve_thread_timelines(
                 else:
                     op["continuity_data"] = validated_data
     return ops
-
-
-def _validated_continuity_data(
-    continuity_type: str,
-    thread_state: str | None,
-    value: Any,
-) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise RuminationPipelineError(
-            "model_schema_error", f"{continuity_type} continuity_data must be an object",
-        )
-    try:
-        return validate_continuity_data(
-            continuity_type, thread_state, value, automatic=False,
-        )
-    except ContinuityDataError as exc:
-        raise RuminationPipelineError(
-            "model_schema_error", f"invalid {continuity_type} continuity_data: {exc}",
-        ) from exc
 
 
 STRUCTURE_FALLBACK_TYPES = frozenset(

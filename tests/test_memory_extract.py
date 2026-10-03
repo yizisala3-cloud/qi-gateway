@@ -31,7 +31,6 @@ from gateway.memory_extract import (
     _parse_model_output as _parse_model_output_v1,
     _resolve_message_time,
     run_memory_digest,
-    run_scheduled_digest_if_due,
 )
 
 
@@ -87,19 +86,6 @@ def _sequential_posts(responses):
 
 
 class ModelBoundaryTests(unittest.TestCase):
-    def test_scheduled_digest_does_nothing_when_analysis_is_not_configured(self):
-        with (
-            patch.object(cfg, "ANALYSIS_API_KEY", ""),
-            patch(f"{MODULE}._mark_stale_runs") as mark_stale,
-            patch(f"{MODULE}.get_digest_status") as get_status,
-            patch(f"{MODULE}.run_memory_digest") as run_digest,
-        ):
-            self.assertIsNone(run_scheduled_digest_if_due())
-
-        mark_stale.assert_not_called()
-        get_status.assert_not_called()
-        run_digest.assert_not_called()
-
     def test_manual_digest_fails_before_database_access_when_not_configured(self):
         with (
             patch.object(cfg, "ANALYSIS_API_KEY", ""),
@@ -894,28 +880,6 @@ class AtomicCommitTests(unittest.TestCase):
 
         self.assertEqual(memories, [])
         self.assertEqual(call_count[0], 2)
-
-    def test_scheduled_digest_persists_error_on_exception(self):
-        with (
-            patch.object(cfg, "ANALYSIS_API_KEY", "configured"),
-            patch(f"{MODULE}._mark_stale_runs"),
-            patch(f"{MODULE}.resolve_assistant_id", return_value="assistant-1"),
-            patch(f"{MODULE}.get_digest_status", side_effect=RuntimeError("db down")),
-            patch(f"{MODULE}._create_run", return_value={
-                "id": 99,
-                "assistant_id": "assistant-1",
-                "trigger": "scheduled_daily",
-                "mode": "execute",
-                "status": "failed",
-                "error_code": "scheduled_check_error",
-            }) as create_run,
-        ):
-            result = run_scheduled_digest_if_due()
-
-        self.assertIsNotNone(result)
-        self.assertEqual(result["status"], "failed")
-        self.assertEqual(result["error_code"], "scheduled_check_error")
-        create_run.assert_called_once()
 
 
 if __name__ == "__main__":

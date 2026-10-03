@@ -7,42 +7,12 @@ from typing import Any
 CONTINUITY_TYPES = frozenset({"moment", "thread", "episode", "inside_joke", "profile", "interaction_rule"})
 AUTOMATIC_TYPES = frozenset({"moment", "thread", "episode", "inside_joke"})
 THREAD_STATES = frozenset({"open", "paused", "resolved", "dissolved", "abandoned", "unknown"})
-# Directed edges are written as (from_type, relation_type, to_type).
-# In v1 a moment or episode evokes an inside joke, never the reverse.
-RELATION_DIRECTIONS = frozenset({
-    ("moment", "part_of", "episode"),
-    ("moment", "advances", "thread"),
-    ("episode", "advances", "thread"),
-    ("moment", "resolves", "thread"),
-    ("episode", "resolves", "thread"),
-    ("moment", "dissolves", "thread"),
-    ("episode", "dissolves", "thread"),
-    ("moment", "origin_of", "inside_joke"),
-    ("episode", "origin_of", "inside_joke"),
-    ("moment", "evokes", "inside_joke"),
-    ("episode", "evokes", "inside_joke"),
-    ("moment", "supports", "profile"),
-    ("episode", "supports", "profile"),
-    ("moment", "contradicts", "profile"),
-    ("episode", "contradicts", "profile"),
-    ("moment", "contradicts", "thread"),
-    ("episode", "contradicts", "thread"),
-    ("inside_joke", "governed_by", "interaction_rule"),
-})
 SCHEMA_VERSION = 1
 _TIME = re.compile(r"^\d{4}-\d{2}-\d{2}(?:[T ][0-9:.+-]+Z?)?$")
 
 
 class ContinuityDataError(ValueError):
     pass
-
-
-def validate_relation_direction(from_type: Any, relation_type: Any, to_type: Any) -> tuple[str, str, str]:
-    """Return a normalized legal v1 relation direction or reject it."""
-    edge = tuple(str(value or "").strip().casefold() for value in (from_type, relation_type, to_type))
-    if edge not in RELATION_DIRECTIONS:
-        raise ContinuityDataError("invalid continuity relation direction")
-    return edge
 
 
 def _only(data: dict[str, Any], names: set[str]) -> None:

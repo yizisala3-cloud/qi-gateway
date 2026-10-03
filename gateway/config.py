@@ -37,7 +37,6 @@ class Config:
     SUPABASE_SERVICE_ROLE_KEY: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
     # Transitional fallback for existing deployments. This may be a publishable key.
     SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "")
-    PORT: int = int(os.getenv("PORT", "8000"))
     UPSTREAM_READ_TIMEOUT: float = float(os.getenv("UPSTREAM_READ_TIMEOUT", "180"))
     # 记忆检索与旧版自动总结（硅基流动）：普通记忆提取与 embedding。
     ANALYSIS_BASE_URL: str = os.getenv("ANALYSIS_BASE_URL", "https://api.siliconflow.cn/v1")
@@ -65,8 +64,6 @@ class Config:
     MEMORY_ASSISTANT_ID: str = os.getenv("MEMORY_ASSISTANT_ID", "")
     MEMORY_DIGEST_MAX_MESSAGES: int = int(os.getenv("MEMORY_DIGEST_MAX_MESSAGES", "60"))
     MEMORY_DIGEST_MAX_CHARS: int = int(os.getenv("MEMORY_DIGEST_MAX_CHARS", "12000"))
-    MEMORY_DIGEST_DAILY_HOUR: int = max(0, min(23, int(os.getenv("MEMORY_DIGEST_DAILY_HOUR", "3"))))
-    MEMORY_DIGEST_IDLE_HOURS: float = float(os.getenv("MEMORY_DIGEST_IDLE_HOURS", "6"))
     # OrangeChat request_memory tool. Keep this token separate from gateway and
     # Supabase credentials so plugin access can be revoked independently.
     MEMORY_PLUGIN_TOKEN: str = os.getenv("MEMORY_PLUGIN_TOKEN", "")

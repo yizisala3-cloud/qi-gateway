@@ -58,10 +58,3 @@ def load_persona() -> str:
 
     log.warning("人设读取失败且无缓存")
     return ""
-
-
-def invalidate_cache():
-    """手动清除缓存（修改人设后调用）。"""
-    global _cache, _cache_ts
-    _cache = None
-    _cache_ts = 0

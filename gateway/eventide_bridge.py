@@ -4,8 +4,7 @@
 Eventide 通过 pip install git+https://github.com/chuli1122/Eventide.git 安装。
 """
 import logging
-import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Any
 
 log = logging.getLogger("gateway.eventide")
@@ -80,35 +79,6 @@ def advance_and_render(
     except Exception as e:
         log.error(f"Eventide advance 失败: {e}")
         return state_data, None
-
-
-def apply_settlement(state_data: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
-    """应用互动结算结果。"""
-    runtime = get_runtime()
-    if not runtime or not state_data:
-        return state_data or {}
-
-    try:
-        state = runtime.load_state(state_data)
-        runtime.settle(state, result)
-        return runtime.dump_state(state)
-    except Exception as e:
-        log.error(f"Eventide settlement 失败: {e}")
-        return state_data
-
-
-def get_body_payload(state_data: dict[str, Any]) -> dict[str, Any] | None:
-    """获取结构化身体状态（用于调试/前端）。"""
-    runtime = get_runtime()
-    if not runtime or not state_data:
-        return None
-
-    try:
-        state = runtime.load_state(state_data)
-        return runtime.payload(state)
-    except Exception as e:
-        log.error(f"Eventide payload 失败: {e}")
-        return None
 
 
 def _iso(value: Any) -> str | None:

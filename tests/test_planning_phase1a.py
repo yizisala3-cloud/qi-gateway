@@ -25,7 +25,6 @@ from gateway.planning_domain import (
     calendar_round_key,
     cycle_start_boundary,
     fixed_round_key,
-    once_round_key,
     parse_refresh_boundary,
     planning_cycle_at,
     round_phase_group,
@@ -75,7 +74,6 @@ class PlanningDomainTests(unittest.TestCase):
         self.assertEqual(carried.schedule_date, original.schedule_date)
         self.assertEqual(carried.display_reason, "carryover")
         self.assertEqual(manual.display_reason, "manual_defer")
-        self.assertEqual(once_round_key(), "once")
         self.assertNotEqual(timed_round_key("handled", date(2026, 9, 24), "one"),
                             timed_round_key("handled", date(2026, 9, 24), "two"))
         with self.assertRaises(ValueError):
