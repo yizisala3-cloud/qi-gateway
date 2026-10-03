@@ -41,6 +41,10 @@ def setup_core(module_now=None):
         def __enter__(self):
             self._tokens.append(patch("gateway.planning_runtime.get_client", return_value=client))
             self._tokens.append(patch(f"{MODULE}.db.load_app_setting", fake_load_setting))
+            self._tokens.append(patch(
+                f"{MODULE}.db.load_app_settings",
+                lambda keys: {key: planning.db.load_app_setting(key) for key in keys},
+            ))
             self._tokens.append(patch(f"{MODULE}.db.save_app_setting", fake_save_setting))
             if self._now is not None:
                 self._tokens.append(patch.object(planning_runtime, "_now", lambda: self._now))
@@ -68,6 +72,9 @@ class Context:
         self.patches = [
             mock.patch.object(planning_runtime, "get_client", return_value=self.db),
             mock.patch.object(planning.db, "load_app_setting", side_effect=self.settings.get),
+            mock.patch.object(planning.db, "load_app_settings", side_effect=lambda keys: {
+                key: planning.db.load_app_setting(key) for key in keys
+            }),
             mock.patch.object(planning.db, "save_app_setting", side_effect=self.save),
             mock.patch.object(planning_recompute, "request_recompute"),
         ]

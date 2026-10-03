@@ -1,9 +1,9 @@
 // 复古单选字段：隐藏值保持原 id/name，纸色按钮与金线列表承担展示。
-import { esc, icon } from '../ui.js?v=20261002-frontend-controls1';
+import { esc, icon } from '../ui.js?v=20261003-planning-create-latency1';
 import {
   setupRetroField, attachRetroOverlay, positionRetroOverlay,
   moveRetroOptionFocus, retroSourceOptions, restoreRetroFieldFocus,
-} from './retro_fields.js?v=20261002-frontend-controls1';
+} from './retro_fields.js?v=20261003-planning-create-latency1';
 
 let activeRetroSelectPop = null;
 

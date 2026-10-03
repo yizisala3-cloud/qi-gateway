@@ -1,5 +1,5 @@
 // ui.js - shared retro UI components: icons, tags, modal, toast, detail panel
-export const ASSET_VERSION = '20261002-frontend-controls1';
+export const ASSET_VERSION = '20261003-planning-create-latency1';
 
 /* ---------- SVG icons (stroke, no emoji) ---------- */
 const ICON_PATHS = {

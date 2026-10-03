@@ -1,10 +1,10 @@
 // 复古时间字段：date YYYY-MM-DD、time HH:MM、datetime YYYY-MM-DDTHH:MM。
 // 已有 time HH:MM:SS 可读取；“此刻”始终采用 Asia/Shanghai 的墙上时钟。
-import { icon } from '../ui.js?v=20261002-frontend-controls1';
+import { icon } from '../ui.js?v=20261003-planning-create-latency1';
 import {
   setupRetroField, attachRetroOverlay, positionRetroOverlay,
   moveRetroOptionFocus, retroSourceOptions, retroId, restoreRetroFieldFocus,
-} from './retro_fields.js?v=20261002-frontend-controls1';
+} from './retro_fields.js?v=20261003-planning-create-latency1';
 
 let activeRetroTimePop = null;
 

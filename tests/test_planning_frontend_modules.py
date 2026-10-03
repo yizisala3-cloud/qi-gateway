@@ -60,3 +60,18 @@ class PlanningFrontendModulesTests(unittest.TestCase):
 
     def test_page_mount_remount_and_reminder_lifecycle(self):
         self._run_group("B6-lifecycle")
+
+    def test_save_refreshes_visible_lists_and_invalidates_hidden_tabs(self):
+        self._run_group("C1-visible-refresh")
+
+    def test_poll_and_filter_reads_merge_and_ignore_older_responses(self):
+        self._run_group("C2-stale-responses")
+
+    def test_committed_form_preserves_lists_and_retries_refresh_without_creating(self):
+        self._run_group("C3-committed-refresh-retry")
+
+    def test_inflight_reads_cannot_render_or_restart_poll_after_unmount(self):
+        self._run_group("C4-inflight-unmount")
+
+    def test_closing_pending_form_and_remounting_cannot_start_second_create(self):
+        self._run_group("C5-closed-pending-form")

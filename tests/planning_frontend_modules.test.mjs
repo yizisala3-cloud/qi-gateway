@@ -133,12 +133,25 @@ const formModule = await import(moduleUrl('lib/planning_task_form.js'));
 const dialogModule = await import(moduleUrl('lib/planning_dialogs.js'));
 const sortModule = await import(moduleUrl('lib/planning_sort.js'));
 const reminderModule = await import(moduleUrl('lib/planning_reminder.js'));
+const readsModule = await import(moduleUrl('lib/planning_reads.js'));
 const ui = await import(moduleUrl('ui.js'));
 const lastModal = () => masks.at(-1).querySelector('.modal');
 const response = (body = {}) => ({ ok: true, json: async () => body });
 const failure = (error) => ({ ok: false, status: 409, statusText: 'Conflict', json: async () => ({ error }) });
 const listenerCount = (name) => windowListeners.get(name)?.size || 0;
 const emptyBoard = () => ({ progress: [], attention: [], done: [], conflicts: [], recompute: {} });
+const boardWith = (id, content) => ({ ...emptyBoard(), progress: [{ id, content, status: 'pending' }] });
+const flush = async () => { for (let count = 0; count < 12; count += 1) await Promise.resolve(); };
+const fillCreate = () => {
+  page.openTaskForm(null);
+  const root = lastModal();
+  root.querySelector('#pf-type').value = 'daily';
+  root.querySelector('#pf-content').value = '创建延迟探针';
+  root.querySelector('#pf-estimated').value = '30';
+  return root.querySelector('[data-ok]');
+};
+const readPaths = () => requests.filter(({ options }) => !options.method)
+  .map(({ url }) => new URL(url).pathname);
 
 const checks = {
   async graph() {
@@ -148,10 +161,11 @@ const checks = {
     assert.equal(typeof dialogModule.createPlanningDialogs, 'function');
     assert.equal(typeof sortModule.createPlanningSort, 'function');
     assert.equal(typeof reminderModule.createPlanningReminder, 'function');
+    assert.equal(typeof readsModule.createPlanningReads, 'function');
     assert.equal(ui.ASSET_VERSION, version);
     for (const file of [
       'pages/planning.js', 'lib/planning_display.js', 'lib/planning_task_form.js',
-      'lib/planning_dialogs.js', 'lib/planning_sort.js', 'lib/planning_reminder.js',
+      'lib/planning_dialogs.js', 'lib/planning_sort.js', 'lib/planning_reminder.js', 'lib/planning_reads.js',
       'lib/retro_time.js', 'lib/retro_select.js', 'lib/cycle_settings.js',
     ]) {
       const source = await readFile(join(workspace, 'admin/js', file), 'utf8');
@@ -200,15 +214,19 @@ const checks = {
     await button.onclick();
     assert.equal(requests.length, 1);
     assert.equal(button.disabled, true);
+    assert.equal(button.textContent, '正在创建…');
     resolveRequest(failure('first request failed'));
     await first;
     assert.equal(button.disabled, false);
+    assert.equal(button.textContent, '创建');
     respond = async () => response({ first_round_skipped: true });
     await button.onclick();
     assert.equal(saved, 1);
     assert.equal(button.disabled, true);
+    assert.equal(button.textContent, '已创建');
     assert.equal(masks.at(-1).removed, true);
     assert.ok(toastMessages.includes('本轮已过最晚完成，从次日起按重复规则生效'));
+    assert.ok(toastMessages.includes('待办已创建，列表更新失败，请刷新重试'));
     await button.onclick();
     assert.equal(requests.length, 2);
     assert.equal(requests[1].body.task_type, 'daily');
@@ -377,6 +395,189 @@ const checks = {
     assert.equal(intervals.size, 0);
     assert.equal(listenerCount('pointerdown'), 0);
     assert.equal(listenerCount('beforeunload'), 0);
+  },
+
+  async 'C1-visible-refresh'() {
+    respond = async ({ url, options }) => response(options.method ? { id: 10 }
+      : url.includes('/today') ? emptyBoard() : []);
+    await page.mount(new Element());
+    requests.length = 0;
+    await fillCreate().onclick();
+    assert.deepEqual(readPaths(), ['/admin/api/planning/today']);
+    assert.equal(page.reads.needsRead('today'), false);
+    assert.equal(page.reads.needsRead('tasks'), true);
+    assert.equal(page.reads.needsRead('occurrences'), true);
+
+    requests.length = 0;
+    page.switchTab('all');
+    await page.refreshVisible();
+    assert.deepEqual(readPaths().sort(), ['/admin/api/planning/occurrences', '/admin/api/planning/tasks']);
+    assert.equal(page.reads.needsRead('tasks'), false);
+    assert.equal(page.reads.needsRead('occurrences'), false);
+    requests.length = 0;
+    await fillCreate().onclick();
+    assert.deepEqual(readPaths().sort(), ['/admin/api/planning/occurrences', '/admin/api/planning/tasks']);
+    assert.equal(page.reads.needsRead('today'), true);
+
+    requests.length = 0;
+    page.switchTab('today');
+    await page.refreshVisible();
+    assert.deepEqual(readPaths(), ['/admin/api/planning/today']);
+    page.switchTab('goals');
+    requests.length = 0;
+    await fillCreate().onclick();
+    assert.deepEqual(readPaths(), []);
+    assert.equal(page.reads.needsRead('tasks'), true);
+    requests.length = 0;
+    page.switchTab('all');
+    await page.refreshVisible();
+    assert.deepEqual(readPaths().sort(), ['/admin/api/planning/occurrences', '/admin/api/planning/tasks']);
+    // The reminder keeps reading today while another tab is visible.
+    requests.length = 0;
+    [...intervals.values()][0].fn();
+    await flush();
+    assert.deepEqual(readPaths(), ['/admin/api/planning/today']);
+    assert.equal([...intervals.values()][0].ms, 30000);
+    page.unmount();
+  },
+
+  async 'C2-stale-responses'() {
+    respond = async () => response(emptyBoard());
+    await page.mount(new Element());
+    requests.length = 0;
+    const queue = [];
+    respond = ({ options }) => options.method ? Promise.resolve(response({ id: 20 }))
+      : new Promise((resolve) => queue.push(resolve));
+    const oldPoll = page.loadToday({ silent: true });
+    const samePoll = page.loadToday({ silent: true });
+    assert.equal(queue.length, 1, 'identical in-flight polling shares a read');
+    const button = fillCreate();
+    const saved = button.onclick();
+    await flush();
+    assert.equal(queue.length, 2, 'a successful write immediately begins a new read');
+    const joinedFresh = page.loadToday({ silent: true });
+    assert.equal(queue.length, 2, 'polling after the write shares the fresh read');
+    queue[1](response(boardWith(20, '新列表')));
+    await Promise.all([saved, joinedFresh]);
+    const newHtml = page.root.querySelector('#planning-progress').innerHTML;
+    assert.equal(page.board.progress[0].id, 20);
+    queue[0](response(boardWith(1, '旧列表')));
+    await Promise.all([oldPoll, samePoll]);
+    assert.equal(page.board.progress[0].id, 20);
+    assert.equal(page.root.querySelector('#planning-progress').innerHTML, newHtml);
+
+    // Changing filters is also a new revision, even when the older request is slow.
+    queue.length = 0;
+    page.filters.status = 'pending';
+    const oldFilter = page.loadOccurrences();
+    const sameFilter = page.loadOccurrences();
+    assert.equal(queue.length, 1);
+    page.filters.status = 'completed';
+    const newFilter = page.loadOccurrences();
+    assert.equal(queue.length, 2);
+    queue[1](response([{ id: 22, content: '已完成', status: 'completed' }]));
+    await newFilter;
+    queue[0](failure('old filter failed'));
+    await Promise.all([oldFilter, sameFilter]);
+    assert.equal(page.occurrences[0].id, 22);
+    assert.equal(page.readErrors.has('occurrences'), false);
+    page.unmount();
+  },
+
+  async 'C3-committed-refresh-retry'() {
+    respond = async () => response(boardWith(1, '已有列表'));
+    await page.mount(new Element());
+    const previousHtml = page.root.querySelector('#planning-progress').innerHTML;
+    requests.length = 0;
+    respond = async ({ options }) => options.method ? response({ id: 30, schedule_conflict: true })
+      : failure('refresh failed');
+    const button = fillCreate();
+    await button.onclick();
+    assert.equal(button.disabled, true);
+    assert.equal(button.textContent, '已创建');
+    assert.equal(page.root.querySelector('#planning-progress').innerHTML, previousHtml);
+    const feedback = page.root.querySelector('#planning-load-feedback');
+    assert.equal(feedback.hidden, false);
+    assert.ok(feedback.innerHTML.includes('待办已创建，列表更新失败'));
+    assert.ok(feedback.innerHTML.includes('data-act="retry-lists"'));
+    assert.ok(toastMessages.includes('待办已创建，但可安排时段剩余空间不足，存在排程冲突'));
+    assert.ok(!toastMessages.some((message) => message.startsWith('保存失败')));
+    await button.onclick();
+    assert.equal(requests.filter(({ options }) => options.method === 'POST').length, 1);
+    respond = async () => response(boardWith(30, '重试后列表'));
+    await page.retryLists();
+    assert.equal(feedback.hidden, true);
+    assert.equal(page.board.progress[0].id, 30);
+    assert.equal(button.disabled, true);
+    assert.equal(requests.filter(({ options }) => options.method === 'POST').length, 1);
+    assert.equal(page.reads.needsRead('today'), false);
+    page.unmount();
+  },
+
+  async 'C4-inflight-unmount'() {
+    let finishMount;
+    respond = () => new Promise((resolve) => { finishMount = resolve; });
+    const oldRoot = new Element();
+    const mounting = page.mount(oldRoot);
+    page.unmount();
+    const before = oldRoot.querySelector('#planning-progress').innerHTML;
+    finishMount(response(boardWith(1, '已卸载页面')));
+    await mounting;
+    assert.equal(oldRoot.querySelector('#planning-progress').innerHTML, before);
+    assert.equal(intervals.size, 0, 'an unmounted initial read cannot recreate the poll timer');
+    assert.equal(listenerCount('beforeunload'), 0);
+
+    respond = async () => response(emptyBoard());
+    await page.mount(new Element());
+    let finishOld;
+    respond = () => new Promise((resolve) => { finishOld = resolve; });
+    const old = page.loadToday();
+    page.unmount();
+    respond = async () => response(boardWith(44, '重新挂载'));
+    await page.mount(new Element());
+    const currentHtml = page.root.querySelector('#planning-progress').innerHTML;
+    finishOld(failure('old route failed'));
+    await old;
+    assert.equal(page.board.progress[0].id, 44);
+    assert.equal(page.root.querySelector('#planning-progress').innerHTML, currentHtml);
+    assert.equal(page.root.querySelector('#planning-load-feedback').hidden, true);
+    assert.equal(intervals.size, 1);
+    page.unmount();
+  },
+
+  async 'C5-closed-pending-form'() {
+    respond = async () => response(emptyBoard());
+    await page.mount(new Element());
+    let finishCreate;
+    let created = false;
+    respond = ({ url, options }) => options.method === 'POST'
+      ? new Promise((resolve) => { finishCreate = resolve; }) : Promise.resolve(response(
+        url.includes('/today') ? created ? boardWith(55, '重挂载后创建成功') : emptyBoard() : []));
+    const button = fillCreate();
+    const save = button.onclick();
+    lastModal().querySelector('[data-cancel]').onclick();
+    const count = masks.length;
+    page.openTaskForm(null);
+    assert.equal(masks.length, count, 'closing a pending form cannot open another create');
+    assert.ok(toastMessages.includes('待办正在创建，请等待完成'));
+    page.unmount();
+    await page.mount(new Element());
+    page.openTaskForm(null);
+    assert.equal(masks.length, count, 'route remount keeps the pending create guard');
+    page.switchTab('all');
+    await page.refreshVisible();
+    assert.equal(page.reads.needsRead('tasks'), false);
+    page.switchTab('today');
+    await page.refreshVisible();
+    created = true;
+    finishCreate(response({ id: 55 }));
+    await save;
+    assert.equal(page.board.progress[0].id, 55, 'the committed write refreshes the currently mounted page');
+    assert.equal(page.reads.needsRead('tasks'), true);
+    assert.equal(page.reads.needsRead('occurrences'), true);
+    page.openTaskForm(null);
+    assert.equal(masks.length, count + 1, 'a committed create may be followed by a new form');
+    page.unmount();
   },
 };
 

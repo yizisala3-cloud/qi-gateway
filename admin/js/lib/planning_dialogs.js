@@ -1,7 +1,7 @@
 // Instance dialogs: form-local inputs and timeout retry identity stay in their closures.
-import { gw } from '../api.js?v=20261002-frontend-controls1';
-import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261002-frontend-controls1';
-import { initRetroTimeFields } from './retro_time.js?v=20261002-frontend-controls1';
+import { gw } from '../api.js?v=20261003-planning-create-latency1';
+import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261003-planning-create-latency1';
+import { initRetroTimeFields } from './retro_time.js?v=20261003-planning-create-latency1';
 
 export function createPlanningDialogs({
   findOccurrence, getOccurrences, getTasks, openTaskForm,

@@ -52,6 +52,9 @@ class PlanningApiContractTests(unittest.TestCase):
             mock.patch.object(cfg, "GATEWAY_TOKEN", GATEWAY_TOKEN),
             mock.patch.object(planning_runtime, "get_client", lambda: self.client),
             mock.patch.object(planning.db, "load_app_setting", fake_load),
+            mock.patch.object(planning.db, "load_app_settings", lambda keys: {
+                key: planning.db.load_app_setting(key) for key in keys
+            }),
             mock.patch.object(planning.db, "save_app_setting", fake_save),
         ]
         for item in patches:

@@ -1,6 +1,6 @@
 // pages/logs.js - 日志：真实空状态，接口尚未接入
-import { icon, empty } from '../ui.js?v=20261002-frontend-controls1';
-import { initRetroSelectFields } from '../lib/retro_select.js?v=20261002-frontend-controls1';
+import { icon, empty } from '../ui.js?v=20261003-planning-create-latency1';
+import { initRetroSelectFields } from '../lib/retro_select.js?v=20261003-planning-create-latency1';
 
 export default {
   async mount(root) {

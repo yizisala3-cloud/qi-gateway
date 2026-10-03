@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 
-const VERSION = '20261002-frontend-controls1';
+const VERSION = '20261003-planning-create-latency1';
 const TYPES = ['moment', 'thread', 'episode', 'inside_joke', 'profile', 'interaction_rule'];
 const ENUMS = {
   moment: { moment_state: 'standalone' }, thread: { thread_state: 'open' },

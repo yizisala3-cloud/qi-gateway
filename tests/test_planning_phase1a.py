@@ -557,10 +557,15 @@ class PlanningIdentityPathTests(unittest.TestCase):
         self.now = datetime(2026, 9, 24, 7, tzinfo=BEIJING)
         self.client_patch = mock.patch.object(planning_runtime, "get_client", return_value=self.db)
         self.setting_patch = mock.patch.object(planning.db, "load_app_setting", return_value=None)
+        self.settings_patch = mock.patch.object(planning.db, "load_app_settings", side_effect=lambda keys: {
+            key: planning.db.load_app_setting(key) for key in keys
+        })
         self.client_patch.start()
         self.setting_patch.start()
+        self.settings_patch.start()
         self.addCleanup(self.client_patch.stop)
         self.addCleanup(self.setting_patch.stop)
+        self.addCleanup(self.settings_patch.stop)
 
     def test_create_generate_read_round_identity_and_cross_day_display(self):
         task = planning.create_task({"content": "安排", "task_type": "daily",

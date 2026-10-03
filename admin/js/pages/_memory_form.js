@@ -1,14 +1,14 @@
 // pages/_memory_form.js - 手工新增 / 完整编辑 / 修改类型 共用动态表单
 // 六类连续感结构全部由本模块的中文动态表单生成，用户永不直接编辑 JSON；
 // 普通标签与召回标签是两套独立控件；召回向量和 content_hash 均由服务端维护。
-import { gw, esc } from '../api.js?v=20261002-frontend-controls1';
-import { modal, confirm, toast, icon } from '../ui.js?v=20261002-frontend-controls1';
-import { initRetroSelectFields } from '../lib/retro_select.js?v=20261002-frontend-controls1';
-import { initRetroTimeFields } from '../lib/retro_time.js?v=20261002-frontend-controls1';
+import { gw, esc } from '../api.js?v=20261003-planning-create-latency1';
+import { modal, confirm, toast, icon } from '../ui.js?v=20261003-planning-create-latency1';
+import { initRetroSelectFields } from '../lib/retro_select.js?v=20261003-planning-create-latency1';
+import { initRetroTimeFields } from '../lib/retro_time.js?v=20261003-planning-create-latency1';
 import {
   toDatetimeLocal, fromDatetimeLocal,
   buildEditPatch, mergeContinuityForSubmit, continuityEquals,
-} from './_memory_patch.js?v=20261002-frontend-controls1';
+} from './_memory_patch.js?v=20261003-planning-create-latency1';
 
 /* ---------- 枚举与字段定义 ---------- */
 

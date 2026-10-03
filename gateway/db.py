@@ -205,6 +205,27 @@ def load_app_setting(key: str) -> Any:
     return None
 
 
+def load_app_settings(keys: tuple[str, ...]) -> dict[str, Any]:
+    """Read a bounded key set once, preserving missing/query-failed states."""
+    keys = tuple(dict.fromkeys(keys))
+    if not keys:
+        return {}
+    failed = {key: APP_SETTING_QUERY_FAILED for key in keys}
+    client = get_client()
+    if not client:
+        return failed
+    try:
+        response = client.table("app_settings").select("key,value").in_("key", keys).execute()
+        values = {key: None for key in keys}
+        for row in response.data or []:
+            if row.get("key") in values:
+                values[row["key"]] = row.get("value")
+        return values
+    except Exception:
+        log.exception("app_settings 批量读取失败: keys=%s", keys)
+        return failed
+
+
 @safe_query
 def save_app_setting(key: str, value: Any) -> bool:
     """保存 app_settings 单值（upsert）。"""
