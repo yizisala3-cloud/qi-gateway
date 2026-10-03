@@ -1861,3 +1861,8 @@ body.memo-dragging .memo-handle { cursor: grabbing; }
   .memo-toolbar .search-box { max-width: none; }
   .memo-item-side { max-width: 46%; }
 }
+
+/* [hidden] 属性的作者级兜底（2026-10-03）：UA 的 [hidden]{display:none}
+   会被任何作者 .btn{display:...} 普通规则覆盖（作者普通 > UA 普通，
+   与优先级无关）——作者 !important 才能压过一切普通声明。 */
+[hidden] { display: none !important; }

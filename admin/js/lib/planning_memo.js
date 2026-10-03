@@ -15,12 +15,12 @@
 // 一期不实现清单勾选、待办互通与 AI 读写（F01–F03 仅预留稳定身份与
 // 可复用基础接口）。
 
-import { gw } from '../api.js?v=20261003-planning-create-latency2';
+import { gw } from '../api.js?v=20261003-memo-bugfix2';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, icon, esc,
-} from '../ui.js?v=20261003-planning-create-latency2';
-import { createRetroSelectField } from './retro_select.js?v=20261003-planning-create-latency2';
-import { renderMarkdown } from './memo_markdown.js?v=20261003-planning-create-latency2';
+} from '../ui.js?v=20261003-memo-bugfix2';
+import { createRetroSelectField } from './retro_select.js?v=20261003-memo-bugfix2';
+import { renderMarkdown } from './memo_markdown.js?v=20261003-memo-bugfix2';
 
 const KIND_LABELS = { pinned: '常驻备忘', note: '随笔' };
 const AUTOSAVE_DELAY_MS = 800;
@@ -60,6 +60,8 @@ export function createMemoAutosave({
     emptied: false,            // cancelPending 撤下快照后不误报 saved（F08）
     suppressFailed: false,     // 撤下后在途保存失败：失败快照不代表当前草稿
     stopping: false,           // 卸载路径接管后泵不再另发请求（F03）
+    keepaliveSnapshot: null,   // 卸载 keepalive 在途的快照（BUG-03 结果跟踪）
+    keepalivePromise: null,    // 卸载 keepalive 在途的传输 promise（BUG-03）
   };
 
   function setStatus(status, error = null) {
@@ -74,11 +76,54 @@ export function createMemoAutosave({
     for (const resolve of waiters) resolve();
   }
 
+  /** 卸载 keepalive 的结果落定（BUG-03）：失败并回队列并置失败状态——
+   *  bfcache 返回后 isBusy 保持，完成按钮不能再把未入库草稿当已排空
+   *  清掉；成功才算排空。页面真被销毁时 promise 永不落定，草稿槽兜底、
+   *  重开恢复流程接管。 */
+  function onKeepaliveSettled(snapshot, error, result) {
+    if (state.keepaliveSnapshot !== snapshot) return;   // 已被接管/清理
+    state.keepaliveSnapshot = null;
+    state.keepalivePromise = null;
+    const requeue = () => {
+      state.pendingSnapshot = state.pendingSnapshot
+        ? { ...snapshot, ...state.pendingSnapshot }
+        : snapshot;
+      state.dirty = true;
+    };
+    const retrySoon = () => {
+      if (!state.stopping && !state.running) {
+        state.timer = schedule(() => { state.timer = null; return pump(); }, 0);
+      }
+    };
+    if (error) {
+      requeue();
+      setStatus('error', error);
+      retrySoon();
+      return;
+    }
+    if (result && result.applied === false) {
+      // 幂等键取得首次记录：本次草稿没有入库，并回队列继续 PATCH（F02）
+      requeue();
+      if (state.stopping || state.running) setStatus('pending');
+      else retrySoon();
+      return;
+    }
+    if (result && result.suppressSaved) return;   // 已按当前草稿清理（F08）
+    // 已入库：停机/销毁中保持静默；已恢复且有新输入时续排保存
+    if (!state.stopping && state.dirty && !state.running) retrySoon();
+  }
+
   async function pump() {
     if (state.running || state.stopping) return;
     state.running = true;
     try {
       while (true) {
+        // 卸载 keepalive 在途（BUG-03）：单飞行——等它落定再发下一个
+        // 请求，避免恢复输入后与 keepalive 并发提交两个同版本草稿
+        if (state.keepalivePromise) {
+          try { await state.keepalivePromise; } catch { /* 落定回调已并回队列 */ }
+          continue;
+        }
         if (!state.dirty || !state.pendingSnapshot) {
           if (!state.dirty) setStatus(state.emptied ? 'idle' : 'saved');
           break;
@@ -184,20 +229,29 @@ export function createMemoAutosave({
         // 最新草稿由本地草稿槽持久保存、重开后恢复；无在途时原子取走
         // 待保存快照立即发送，并置 stopping 让泵不再发出第二个请求。
         state.stopping = true;
-        if (!state.savingSnapshot && state.pendingSnapshot) {
+        if (!state.savingSnapshot && !state.keepaliveSnapshot && state.pendingSnapshot) {
           const snapshot = state.pendingSnapshot;
           state.pendingSnapshot = null;
           state.dirty = false;
-          // keepalive 的结果不在卸载路径上等待；传输失败（含 bfcache 冻结
-          // 中的中止）不能变成悬空 rejection——草稿槽已兜底，重开后恢复
-          try {
-            Promise.resolve(send(snapshot, { keepalive: true }))
-              .catch(() => { /* 卸载路径尽力而为 */ });
-          } catch { /* 卸载路径尽力而为 */ }
+          // keepalive 结果照常跟踪（BUG-03）：传输失败（含 bfcache 冻结
+          // 中的中止）不再是无主请求——落定后并回队列、置失败状态，见
+          // onKeepaliveSettled；页面被销毁时 promise 不落定，草稿槽兜底。
+          state.keepaliveSnapshot = snapshot;
+          const settled = Promise.resolve(send(snapshot, { keepalive: true }));
+          state.keepalivePromise = settled;
+          settled.then(
+            (result) => onKeepaliveSettled(snapshot, null, result),
+            (error) => onKeepaliveSettled(snapshot, error, null),
+          );
         }
         return Promise.resolve();
       }
       if (state.stopping) return Promise.resolve();
+      // keepalive 在途（BUG-03）：完成/切页签的 flush 必须反映它的真实
+      // 结果——落定并回后再按普通流程排空，不允许提前返回「已排空」
+      if (state.keepalivePromise) {
+        return state.keepalivePromise.then(() => autosave.flush(), () => autosave.flush());
+      }
       if (state.running) {
         return new Promise((resolve) => state.flushWaiters.push(resolve));
       }
@@ -213,7 +267,9 @@ export function createMemoAutosave({
     resume() {
       if (!state.stopping) return;
       state.stopping = false;
-      if (!state.running && state.dirty && state.pendingSnapshot) {
+      // keepalive 在途时不另派泵：落定回调负责并回/续排（BUG-03）
+      if (!state.running && !state.keepalivePromise
+          && state.dirty && state.pendingSnapshot) {
         state.timer = schedule(() => {
           state.timer = null;
           return pump();
@@ -233,7 +289,8 @@ export function createMemoAutosave({
     },
 
     isBusy() {
-      return state.running || state.dirty;
+      // keepalive 在途也算忙（BUG-03）：结果未落定前不能把草稿当已排空
+      return state.running || state.dirty || state.keepaliveSnapshot != null;
     },
 
     dispose() {
@@ -241,6 +298,7 @@ export function createMemoAutosave({
       state.timer = null;
       state.pendingSnapshot = null;
       state.dirty = false;
+      state.stopping = true;   // 在途 keepalive 的落定回调不得再派泵
       resolveFlushWaiters();
     },
   };
@@ -364,12 +422,15 @@ export function createPlanningMemo() {
     _openingEditor: false,    // 编辑器打开在途去重（F01 连点）
     editor: null,
     _saveState: { status: 'idle', error: null },
+    _epoch: 0,                // 构建生命周期代数：dispose 使待决异步构建失效（BUG-12）
+    writeQueue: Promise.resolve(),  // 重排/模式写串行队列（BUG-06）
+    _writeIdle: true,         // 写队列空闲标记：空闲时同步派发（BUG-06/F11）
+    _pendingRefresh: false,   // 写入已提交但看板刷新未确认：暂不放行下一次拖动（BUG-06）
 
     async mount(root) {
       this.root = root;
       root.innerHTML = `
         <div class="memo-toolbar">
-          <button class="btn btn-primary" data-act="memo-new">${icon('plus')}新建备忘录</button>
           <span class="retro-select" data-memo-filter></span>
           <div class="search-box">
             ${icon('search')}
@@ -428,6 +489,9 @@ export function createPlanningMemo() {
     },
 
     dispose() {
+      // 推进构建代数（BUG-12）：在途的草稿恢复确认/打开流程在下一个
+      // await 返回后复核失败，不再创建旧编辑框或清草稿
+      this._epoch += 1;
       if (this.searchTimer) clearTimeout(this.searchTimer);
       this.searchTimer = null;
       if (this.pagehideHandler) {
@@ -459,8 +523,20 @@ export function createPlanningMemo() {
     switchView(view) {
       this.view = view;
       this.seq += 1;
+      // 输入去抖的旧 timer 持有关键词，不清掉会在到期时把视图拖回 search
+      // （BUG-07：300ms 内清除搜索或切走后，搜索结果又自动跳回来）
+      if (this.searchTimer) {
+        clearTimeout(this.searchTimer);
+        this.searchTimer = null;
+      }
+      // 搜索请求身份随视图失效（BUG-07）：切走后迟到的搜索成功/失败都
+      // 不再写当前视图与提示区
+      this.searchSeq += 1;
     },
 
+    /** 看板+标签读取。返回 true = 本次读取已应用为本模块的最新数据；
+     *  false = 读取失败或响应已过期（切视图/卸载）。重排/模式写入后的
+     *  刷新确认依赖这个返回值（BUG-06）。 */
     async reload({ silent = false } = {}) {
       const seq = ++this.seq;
       try {
@@ -468,17 +544,26 @@ export function createPlanningMemo() {
           gw('/admin/api/memo/board'),
           gw('/admin/api/memo/tags'),
         ]);
-        if (seq !== this.seq || !this.root) return;
+        if (seq !== this.seq || !this.root) return false;
         this.board = board;
         this.tags = tags;
+        // 上一次重排/模式写入的待确认刷新到此完成（BUG-06）：缓存已反映
+        // 服务端最新顺序，恢复放行下一次拖动
+        if (this._pendingRefresh) {
+          this._pendingRefresh = false;
+          this.reorderBusy = false;
+          if (this.statusHost) this.statusHost.innerHTML = '';
+        }
         this.mountFilter();
         if (this.view === 'search' || this.view === 'archived' || this.view === 'trash') {
-          return;   // 非看板视图由各自流程刷新（F12：搜索按当前关键词重查）
+          return true;   // 非看板视图由各自流程刷新（F12：搜索按当前关键词重查）
         }
         this.render();
+        return true;
       } catch (error) {
-        if (seq !== this.seq || !this.root || silent) return;
+        if (seq !== this.seq || !this.root || silent) return false;
         this.statusHost.innerHTML = errorBlock(`备忘录读取失败：${esc(error.message)}`);
+        return false;
       }
     },
 
@@ -588,7 +673,6 @@ export function createPlanningMemo() {
             <button class="memo-section-title" data-act="memo-view-tag"
                     data-tag-id="${section.tag ? section.tag.id : 'untagged'}">
               ${esc(this.sectionLabel(section))}
-              <span class="plan-count">${section.pinned_count + section.note_count}</span>
             </button>
             <span class="grow"></span>
             <button class="btn btn-quiet btn-sm" data-act="memo-view-tag"
@@ -838,21 +922,40 @@ export function createPlanningMemo() {
 
     /* ---------- 标签操作 ---------- */
 
-    async setNoteMode(mode) {
+    setNoteMode(mode) {
+      // 模式切换与重排共用同一条写队列（BUG-06）：快速 manual→latest 按
+      // 点击顺序逐个提交，服务端最终状态与最后一次有效选择一致，不靠
+      // 忽略旧响应碰运气；写入成功后必须确认读取到新数据才放行下一次拖动。
       const payload = { mode, tag_id: this.activeTagId === 'untagged' ? null : this.activeTagId };
+      return this._enqueueWrite(() => this._runModeWrite(mode, payload));
+    },
+
+    async _runModeWrite(mode, payload) {
+      this.reorderBusy = true;
       try {
-        await gw('/admin/api/memo/note-mode', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        toast(mode === 'manual'
-          ? '已切换到手动排序'
-          : '已切回最新排序；原手动顺序已保留');
-        await this.reload({ silent: true });
-        this.render();
-      } catch (error) {
-        toast(`切换排序模式失败：${error.message}`, 'err');
+        try {
+          await gw('/admin/api/memo/note-mode', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          toast(mode === 'manual'
+            ? '已切换到手动排序'
+            : '已切回最新排序；原手动顺序已保留');
+        } catch (error) {
+          toast(`切换排序模式失败：${error.message}`, 'err');
+          await this.reload({ silent: true });   // 服务端未变更：尽力恢复视图
+          return;
+        }
+        const applied = await this.reload({ silent: true });
+        if (!applied) {
+          // 刷新失败或被切视图打断：缓存可能落后于服务端模式/顺序，
+          // 保持拖动暂停并给出可重试入口（任一次成功 reload 自动恢复）
+          this._pendingRefresh = true;
+          this.renderStaleRefreshNotice();
+        }
+      } finally {
+        if (!this._pendingRefresh) this.reorderBusy = false;
       }
     },
 
@@ -866,6 +969,9 @@ export function createPlanningMemo() {
         toast('标签已删除');
         this.switchView('board');
         this.activeTagId = null;
+        // 被删的正是当前筛选项（BUG-09）：同步清掉筛选身份，否则剩余
+        // 内容被不存在的标签过滤成空白；其他有效标签筛选不受影响
+        if (this.filterTagId === tagId) this.filterTagId = '';
         await this.reload({ silent: true });
       } catch (error) {
         toast(`删除标签失败：${error.message}`, 'err');
@@ -903,20 +1009,11 @@ export function createPlanningMemo() {
       const allTags = this.tags.map((t) => t.id);
       const merged = [...visibleOrder, ...allTags.filter((id) => !visibleOrder.includes(id))];
       if (!merged.length) return;
-      this.reorderBusy = true;
-      gw('/admin/api/memo/reorder', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scope: 'tags', order: merged }),
-      }).then(() => {
-        toast('板块顺序已保存');
-        return this.reload({ silent: true });
-      }).catch((error) => {
-        toast(`保存板块顺序失败：${error.message}`, 'err');
-        return this.reload({ silent: true });
-      }).finally(() => {
-        this.reorderBusy = false;
-      });
+      this.commitReorderWrite(
+        { scope: 'tags', order: merged },
+        '板块顺序已保存',
+        '保存板块顺序失败',
+      );
     },
 
     /** 板块内条目重排：拖动只改变它所属用途区（常驻/随笔）的顺序；
@@ -937,25 +1034,82 @@ export function createPlanningMemo() {
         .filter((id) => id !== draggedId);
       fullOrder.splice(rank, 0, draggedId);
       const willEnterManual = kind === 'note' && section.note_sort_mode === 'latest';
-      this.reorderBusy = true;
-      gw('/admin/api/memo/reorder', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      this.commitReorderWrite(
+        {
           scope: 'group',
           tag_id: section.tag ? section.tag.id : null,
           section: kind,
           order: fullOrder,
-        }),
-      }).then(() => {
-        toast(willEnterManual ? '顺序已保存；随笔已进入手动排序模式' : '顺序已保存');
-        return this.reload({ silent: true });
-      }).catch((error) => {
-        toast(`保存顺序失败：${error.message}`, 'err');
-        return this.reload({ silent: true });
-      }).finally(() => {
-        this.reorderBusy = false;
-      });
+        },
+        willEnterManual ? '顺序已保存；随笔已进入手动排序模式' : '顺序已保存',
+        '保存顺序失败',
+      );
+    },
+
+    /** 重排写入（BUG-06）：写请求进串行队列（与模式切换互斥），成功后
+     *  必须确认读取到反映本次顺序的看板数据才解锁拖动——RPC 成功但刷新
+     *  失败/被切视图打断时，旧 board 会构造出撤回本次结果的第二次请求。 */
+    commitReorderWrite(payload, successToast, failToast) {
+      // 提交即同步置忙（F11）：队列派发是微任务，拖动守卫必须在提交拍
+      // 生效，否则在途窗口内第二次拖动会漏过检查
+      this.reorderBusy = true;
+      return this._enqueueWrite(() => this._runReorderWrite(payload, successToast, failToast));
+    },
+
+    /** 写队列（BUG-06）：空闲时同步派发（保持「点击/拖动即发请求」的
+     *  原有时序）；忙时排队，严格按提交顺序执行——快速 manual→latest
+     *  的最终服务端状态与最后一次有效选择一致。 */
+    _enqueueWrite(op) {
+      if (this._writeIdle) {
+        this._writeIdle = false;
+        const run = Promise.resolve(op()).finally(() => { this._writeIdle = true; });
+        this.writeQueue = run.then(() => {}, () => {});
+        return run;
+      }
+      const run = this.writeQueue.then(op, op);
+      this.writeQueue = run.then(() => {}, () => {});
+      return run;
+    },
+
+    async _runReorderWrite(payload, successToast, failToast) {
+      this.reorderBusy = true;
+      try {
+        try {
+          await gw('/admin/api/memo/reorder', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          toast(successToast);
+        } catch (error) {
+          toast(`${failToast}：${error.message}`, 'err');
+          await this.reload({ silent: true });   // 服务端未变更：恢复服务端顺序
+          return;
+        }
+        const applied = await this.reload({ silent: true });
+        if (!applied) {
+          this._pendingRefresh = true;
+          this.renderStaleRefreshNotice();
+        }
+      } finally {
+        if (!this._pendingRefresh) this.reorderBusy = false;
+      }
+    },
+
+    /** 重排/模式已保存但刷新未确认（BUG-06）：显式重试入口；任何一次
+     *  成功的 reload（含重返页签）都会解除拖动暂停并清掉本提示。 */
+    renderStaleRefreshNotice() {
+      if (!this.statusHost) return;
+      this.statusHost.innerHTML = errorBlock(
+        '排序已保存，但列表刷新失败，暂不能继续拖动。 '
+        + `<button type="button" class="btn btn-secondary btn-sm" data-reorder-refresh>${icon('refresh')}刷新重试</button>`);
+      const btn = this.statusHost.querySelector('[data-reorder-refresh]');
+      if (btn) {
+        btn.onclick = () => {
+          btn.disabled = true;
+          this.reload({ silent: true });
+        };
+      }
     },
 
     sectionOfList(list) {
@@ -982,8 +1136,11 @@ export function createPlanningMemo() {
       // 两次 fetch 各建一个弹窗会让模块只管住后一个（F01）。
       if (this.editor || this._openingEditor) return;
       this._openingEditor = true;
+      const epoch = this._epoch;
       this.fetchEntryOrBlank(entryId).then((seed) => {
         this._openingEditor = false;
+        // 打开在途卸载（BUG-12）：fetch 期间模块已 dispose 时不得继续构建
+        if (epoch !== this._epoch) return;
         if (seed && this.root && !this.editor) {
           // 构建期间（含草稿恢复决策的确认）继续挡住连点
           this._openingEditor = true;
@@ -994,8 +1151,9 @@ export function createPlanningMemo() {
 
     async fetchEntryOrBlank(entryId) {
       if (!entryId) {
+        // 新建默认用途 = 常驻备忘（2026-10-03 确认）；用途始终由用户可改
         return {
-          id: null, title: '', content: '', kind: 'note',
+          id: null, title: '', content: '', kind: 'pinned',
           tag_ids: [], content_version: 0, status: 'active',
         };
       }
@@ -1030,6 +1188,10 @@ export function createPlanningMemo() {
     },
 
     async buildEditor(seed) {
+      // 构建生命周期身份（BUG-12）：草稿恢复决策是异步确认，等待期间
+      // 页面/模块可能已卸载；dispose 推进 _epoch，任何 await 返回后先
+      // 复核身份，再允许清稿、创建弹窗或排程保存。
+      const epoch = this._epoch;
       // 草稿槽恢复（F03）：同一条目、版本相邻且内容确有差异才自动采用。
       // 恢复后以草稿自身版本为基准继续保存——服务端若已被推进（如卸载时
       // 在途保存竞争的提交），首次保存会被版本门拦下走冲突确认，不静默
@@ -1063,6 +1225,9 @@ export function createPlanningMemo() {
               + '「丢弃草稿」清除本机草稿并显示服务端最新内容。',
               { okText: '恢复草稿', cancelText: '丢弃草稿' },
             );
+            // 确认等待期间已卸载（BUG-12）：旧确认结果作废——不创建编辑框、
+            // 不排程保存，也不清草稿（留待用户重新进入时决定）
+            if (epoch !== this._epoch || !this.root) return;
             if (restore) {
               baseVersion = draft.baseVersion ?? baseVersion;
               seed = {
@@ -1088,10 +1253,16 @@ export function createPlanningMemo() {
         // 新建恢复沿用原 crid：首次创建若已提交，幂等键能把已落库的记录
         // 找回来，而不是再建一条（F02/F03 联动）
         crid: seed.id ? null : (restored && draft.crid ? draft.crid : crypto.randomUUID()),
+        // 草稿槽会话归属（BUG-03）：关闭时只清理属于本会话的草稿。crid
+        // 在首次创建成功后会被清空，这里固定建会话时的值供归属核对。
+        slotEntryId: seed.id,
+        slotCrid: null,
         kind: seed.kind,
         selectedTagIds: new Set(seed.tag_ids || []),
+        pendingOps: new Set(),   // 标签创建等在途操作（BUG-05 关闭等待）
         autosave: null,
       };
+      editor.slotCrid = editor.crid;
       const { root, close } = modal({
         title: seed.id ? '编辑备忘录' : '新建备忘录',
         wide: true,
@@ -1102,7 +1273,6 @@ export function createPlanningMemo() {
           <div class="field">
             <label>用途</label>
             <span class="retro-select" data-editor-kind></span>
-            <p class="field-hint">常驻备忘优先展示在板块前列；随笔默认按创建时间倒序。用途由你明确选择，不会随内容自动改变。</p>
           </div>
           <div class="field">
             <label>标签（可多选，可不选）</label>
@@ -1201,7 +1371,7 @@ export function createPlanningMemo() {
       });
     },
 
-    async addEditorTag() {
+    addEditorTag() {
       const editor = this.editor;
       if (!editor) return;
       const input = editor.modal.root.querySelector('[data-new-tag-name]');
@@ -1210,22 +1380,37 @@ export function createPlanningMemo() {
         toast('请输入标签名称', 'warn');
         return;
       }
-      try {
-        const created = await gw('/admin/api/memo/tags', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name }),
-        });
-        if (!this.tags.some((t) => t.id === created.id)) this.tags.push(created);
-        editor.selectedTagIds.add(created.id);
-        input.value = '';
-        this.renderEditorTags();
-        this.mountFilter();
-        if (created.existed) toast(`标签「${created.name}」已存在，已直接选用`);
-        this.markEditorDirty();
-      } catch (error) {
-        toast(`添加标签失败：${error.message}`, 'err');
-      }
+      // 标签创建登记为本会话在途操作（BUG-05）：完成按钮先等它落定再走
+      // 保存排空，「添加后立即完成」不再把标签留在未关联状态；迟到的
+      // 落定只作用于本会话对象，不碰已关闭/新开的编辑器。
+      const op = (async () => {
+        try {
+          const created = await gw('/admin/api/memo/tags', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+          });
+          if (!this.tags.some((t) => t.id === created.id)) this.tags.push(created);
+          editor.selectedTagIds.add(created.id);
+          input.value = '';
+          if (this.editor === editor && this.root) {
+            this.renderEditorTags();
+            this.mountFilter();
+          }
+          if (created.existed) toast(`标签「${created.name}」已存在，已直接选用`);
+          this.markEditorDirty();
+          return true;
+        } catch (error) {
+          toast(`添加标签失败：${error.message}`, 'err');
+          return false;
+        }
+      })();
+      editor.pendingOps.add(op);
+      op.then(
+        () => editor.pendingOps.delete(op),
+        () => editor.pendingOps.delete(op),
+      );
+      return op;
     },
 
     editorSnapshot(editor = this.editor) {
@@ -1413,17 +1598,39 @@ export function createPlanningMemo() {
       }
     },
 
-    async requestEditorClose() {
+    requestEditorClose() {
       const editor = this.editor;
       if (!editor) return;
+      // 关闭流程重入守卫（BUG-05）：连点完成/遮罩/×共享同一次关闭决策，
+      // 不再各自等待同一失败 flush 并各建一个确认框；确认「返回编辑」后
+      // 守卫解除，可再次发起关闭。
+      if (editor.closeInFlight) return editor.closeInFlight;
+      editor.closeInFlight = this._runEditorClose(editor).finally(() => {
+        editor.closeInFlight = null;
+      });
+      return editor.closeInFlight;
+    },
+
+    async _runEditorClose(editor) {
+      const epoch = this._epoch;
+      // 未完成的标签创建先落定（BUG-05）：成功会带着标签选择进入下面的
+      // 保存排空；失败按「保存未成功」处理，不静默丢关联。
+      let tagOpFailed = false;
+      if (editor.pendingOps && editor.pendingOps.size) {
+        const results = await Promise.all([...editor.pendingOps]);
+        if (epoch !== this._epoch || this.editor !== editor) return;
+        tagOpFailed = results.some((r) => r === false);
+      }
       // 排空在途/待保存后再关（F01/F04）：正文被清空导致请求失败的情形
       // 同样要走完失败确认，不能静默丢弃用户的其他修改。关闭入口只有在
       // 「未确认输入已确认入库」或「用户明确丢弃」后才允许清稿
       // （BUG-03/R04）：flush 提前返回（队列未真正排空）视同失败确认。
       if (editor.autosave.isBusy()) {
-        await editor.autosave.flush();   // resolve 时队列已排空或停在失败态
+        await editor.autosave.flush();
+        if (epoch !== this._epoch || this.editor !== editor) return;
         const drained = !editor.autosave.isBusy();
-        const failed = this._saveState.status === 'error'
+        const failed = tagOpFailed
+          || this._saveState.status === 'error'
           || this._saveState.status === 'conflict'
           || this._saveState.status === 'lifecycle';
         if (!drained || failed) {
@@ -1433,7 +1640,14 @@ export function createPlanningMemo() {
           );
           if (!force) return;
         }
+      } else if (tagOpFailed) {
+        const force = await confirm(
+          '标签尚未保存成功。关闭后未保存的修改将丢失，确定要关闭吗？',
+          { danger: true, okText: '丢弃并关闭', cancelText: '返回编辑' },
+        );
+        if (!force) return;
       }
+      if (epoch !== this._epoch || this.editor !== editor) return;
       this.closeEditor();
     },
 
@@ -1441,8 +1655,14 @@ export function createPlanningMemo() {
       const editor = this.editor;
       if (!editor) return;
       this.editor = null;
-      // 关闭即放弃本地草稿槽：保留还是丢弃已由用户在关闭流程中决定
-      clearStoredDraft();
+      // 草稿槽按会话归属清理（BUG-03）：槽里是其他条目/会话的未确认草稿
+      // 时（例如 A 的草稿未处理，期间打开并关闭了 B），不得顺手清掉——
+      // 清理条件核对条目身份与新建会话的幂等键。
+      const draft = readStoredDraft();
+      const ownsDraft = !!draft
+        && draft.entryId === editor.slotEntryId
+        && (editor.slotEntryId != null || draft.crid === editor.slotCrid);
+      if (ownsDraft) clearStoredDraft();
       editor.autosave.dispose();
       try { editor.modal.close(); } catch { /* 已移除 */ }
       this.refreshAfterWrite();

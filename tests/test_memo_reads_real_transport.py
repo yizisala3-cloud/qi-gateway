@@ -216,6 +216,74 @@ class MemoRealTransportReadTests(unittest.TestCase):
         self.assertEqual(len(rows), 1500)
         self.assertEqual(offsets, [0, 1000])
 
+    # ── BUG-01：集合缩减后的 416/PGRST103 范围越界 ─────────────────
+
+    def test_shrunk_collection_416_terminates_with_collected_rows(self):
+        """首页 1000 条（count=1500），下一页前匹配数缩到 999：offset=1000
+        越过最新总数，真实服务端形态 = 416 + {"code": "PGRST103"}——按
+        已声明的分页一致性边界终止，已取行即全量（BUG-01）。"""
+        offsets = []
+
+        def handler(request):
+            offset = int(request.url.params.get("offset", "0"))
+            offsets.append(offset)
+            if offset == 0:
+                page = [{"id": i} for i in range(1000)]
+                return httpx.Response(200, json=page,
+                                      headers={"Content-Range": "0-999/1500"})
+            # 集合已缩到 999：范围起点 1000 不可满足 → PostgREST 416
+            return httpx.Response(416, json={
+                "code": "PGRST103",
+                "message": "Requested range not satisfiable on public.memo_entry",
+                "hint": None, "details": None,
+            }, headers={"Content-Range": "*/999"})
+
+        rows = self._rows_via_service("memo_entry", handler)
+        self.assertEqual([r["id"] for r in rows], list(range(1000)),
+                         "416 时已取行即全量，不得报内部错误")
+        self.assertEqual(offsets, [0, 1000], "416 后立即有限终止")
+
+    def test_legacy_416_without_code_field_terminates_too(self):
+        """旧版 PostgREST 的 416 响应无 code 字段：SDK 以数字状态码兜底，
+        同样按范围越界终止，不伪装成其他数据库错误。"""
+        offsets = []
+
+        def handler(request):
+            offset = int(request.url.params.get("offset", "0"))
+            offsets.append(offset)
+            if offset == 0:
+                return httpx.Response(
+                    200, json=[{"id": i} for i in range(1000)],
+                    headers={"Content-Range": "0-999/1500"})
+            return httpx.Response(416, text="Range Not Satisfiable",
+                                  headers={"Content-Range": "*/999"})
+
+        rows = self._rows_via_service("memo_entry", handler)
+        self.assertEqual(len(rows), 1000)
+        self.assertEqual(offsets, [0, 1000])
+
+    def test_other_database_errors_still_fail_during_pagination(self):
+        """非范围错误（如 42P01 关系缺失）不得被吞成部分成功——原样上抛，
+        由 API 层返回明确失败（BUG-01 验收：与真实范围错误明确区分）。"""
+
+        def handler(request):
+            offset = int(request.url.params.get("offset", "0"))
+            if offset == 0:
+                return httpx.Response(
+                    200, json=[{"id": i} for i in range(1000)],
+                    headers={"Content-Range": "0-999/1500"})
+            return httpx.Response(500, json={
+                "code": "42P01", "message": "relation does not exist"})
+
+        with self.assertRaises(Exception) as caught:
+            self._rows_via_service("memo_entry", handler)
+        # 上抛的是 SDK 的 APIError，不是被吞掉后的假成功；且不得被当成
+        # 范围越界终止（真实安装的 postgrest 以数字状态码为 APIError.code，
+        # body 里的 42P01 只出现在 details 原文中）
+        self.assertEqual(getattr(caught.exception, "code", None), 500)
+        self.assertFalse(memo._is_range_not_satisfiable(caught.exception),
+                         "非范围错误不得按 416 终止")
+
     def test_head_read_does_not_invoke_write_rpc(self):
         """HEAD 读取语义（F20）在真实传输下保持：API 层以 HEAD 进入读取
         分支，SDK 层只发出无正文的读请求，不触发任何写路径。"""

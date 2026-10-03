@@ -1085,6 +1085,218 @@ class MemoPhase1PostgresTests(unittest.TestCase):
         self._call(_update_entry_sql(moved, 1, {"tag_ids": [tag_a]}))
         self.assertEqual(len(self._positions(tag_a)), 2)
 
+    # ── BUG-04 第二轮：分组锁序与创建路径同构 + 模式复核干净退出 ──────
+
+    def _wait_for_lock(self, conn, key, out, deadline=5.0):
+        """等待连接进入锁等待（外部行锁延长正常等待窗口，不改变 RPC）。"""
+        import time
+        pid = conn.info.backend_pid
+        end = time.monotonic() + deadline
+        while time.monotonic() < end:
+            rows = self._query(
+                "select wait_event_type from pg_stat_activity where pid = %s", (pid,))
+            if rows and rows[0][0] == "Lock":
+                out[key] = True
+                return
+            time.sleep(0.01)
+        raise AssertionError(f"连接 {pid} 未进入预期锁等待")
+
+    def test_bug04_round2_new_lock_order_functions_installed(self):
+        """前置守卫：统一锁序迁移（20261003010000）必须已随重放安装——
+        update 含 v_lock_tags（标签升序分组锁），mode 含 v_recheck
+        （成员集合锁内复核）。"""
+        update_src = self._query(
+            "select prosrc from pg_proc where proname = 'memo_update_entry'")[0][0]
+        mode_src = self._query(
+            "select prosrc from pg_proc where proname = 'memo_set_note_mode'")[0][0]
+        self.assertIn("v_lock_tags", update_src,
+                      "统一锁序迁移未安装：update 仍是旧版")
+        self.assertIn("v_recheck", mode_src,
+                      "统一锁序迁移未安装：mode 仍是旧版")
+
+    def test_bug04_round2_create_vs_edit_reversed_group_ids_no_deadlock(self):
+        """tag.id 升序与 group.id 升序相反时（先关联 B 再关联 A 的种子）：
+        编辑（转常驻 + 新增标签 A）与创建 A+B 的分组加锁顺序必须同构，
+        双向交错均无 40P01（BUG-04 复审场景 1）。"""
+        import threading
+        import time
+
+        import psycopg
+
+        tag_a = self._make_tag("BUG04二轮A")["id"]
+        tag_b = self._make_tag("BUG04二轮B")["id"]
+        entry_b = self._make_entry({
+            "kind": "note", "content": "B种子", "tag_ids": [tag_b]})
+        self._make_entry({"kind": "note", "content": "A种子", "tag_ids": [tag_a]})
+        group_a = self._query(
+            "select id from public.memo_group where tag_id = %s", (tag_a,))[0][0]
+        group_b = self._query(
+            "select id from public.memo_group where tag_id = %s", (tag_b,))[0][0]
+        # 场景前提：group.id 与 tag.id 升序相反
+        self.assertLess(tag_a, tag_b)
+        self.assertGreater(group_a, group_b)
+
+        out = {}
+        # 编辑连接：预取编辑 RPC 自己的第一把分组锁（新锁序 = 标签升序
+        # → group_a），把「第一把组锁 → 后续组锁」的正常窗口拉长
+        edit_conn = psycopg.connect(self.server.get_uri())
+        edit_conn.execute("set statement_timeout = '10s'")
+        edit_conn.execute("set deadlock_timeout = '500ms'")
+        create_conn = psycopg.connect(self.server.get_uri())
+        create_conn.execute("set statement_timeout = '10s'")
+        create_conn.execute("set deadlock_timeout = '500ms'")
+        try:
+            edit_conn.execute(
+                "select 1 from public.memo_entry where id = %s for update",
+                (entry_b["id"],))
+            edit_conn.execute(
+                "select 1 from public.memo_group where id = %s for update",
+                (group_a,))
+            thread = threading.Thread(target=self._run_rpc, args=(
+                create_conn,
+                _create_entry_sql({
+                    "kind": "pinned", "content": "BUG04二轮创建",
+                    "tag_ids": [tag_a, tag_b]}),
+                "create", out))
+            thread.start()
+            self._wait_for_lock(create_conn, "create_wait", out)
+            # 创建在 group_a 上等待；编辑 RPC 在同一连接继续：新锁序下
+            # 第二把组锁 group_b 空闲 → 正常完成并提交，创建随后恢复
+            self._run_rpc(edit_conn, _update_entry_sql(
+                entry_b["id"], entry_b["content_version"],
+                {"kind": "pinned", "tag_ids": [tag_b, tag_a]}), "update", out)
+            thread.join(15)
+            self.assertFalse(thread.is_alive(), f"create 卡住: {out}")
+            for key in ("create", "update"):
+                self.assertNotIn(f"{key}_err", out, f"{key} 不得失败: {out}")
+            # 最终状态一致：编辑后的记录带双标签且为常驻；创建的记录存在
+            kinds = dict(self._query(
+                "select id, kind from public.memo_entry where id = any(%s)",
+                ([entry_b["id"], out["create"]["value"]["id"]],)))
+            self.assertEqual(kinds[entry_b["id"]], "pinned")
+            self.assertEqual(len(kinds), 2)
+        finally:
+            edit_conn.close()
+            create_conn.close()
+            thread.join(15)
+
+    def test_bug04_round2_missing_group_create_vs_edit_no_deadlock(self):
+        """A 分组尚不存在时，创建 A+B 与「B 记录转常驻并新增关联 A」全并
+        发交错：统一锁序（编辑也按标签升序 ensure+锁缺失分组）后任何
+        交错都不再成环（BUG-04 复审场景 2；旧实现「编辑先持既有 G(B)
+        再 ensure 缺失 G(A)」窗口内与创建的未提交分组插入确定性 40P01，
+        本场景对旧代码多轮内必然复现）。"""
+        import threading
+
+        import psycopg
+
+        for round_no in range(6):
+            tag_a = self._make_tag(f"BUG04缺失组A{round_no}")["id"]
+            tag_b = self._make_tag(f"BUG04缺失组B{round_no}")["id"]
+            entry_b = self._make_entry({
+                "kind": "note", "content": "B种子", "tag_ids": [tag_b]})
+            self.assertEqual(self._query(
+                "select count(*) from public.memo_group where tag_id = %s",
+                (tag_a,)), [(0,)])
+            conn_a = self._new_conn(autocommit=False)
+            conn_e = self._new_conn(autocommit=False)
+            try:
+                out = {}
+                t1 = threading.Thread(target=self._run_rpc, args=(
+                    conn_a, _create_entry_sql({
+                        "kind": "pinned", "content": f"缺失组创建{round_no}",
+                        "tag_ids": [tag_a, tag_b]}), "create", out))
+                t2 = threading.Thread(target=self._run_rpc, args=(
+                    conn_e, _update_entry_sql(
+                        entry_b["id"], entry_b["content_version"],
+                        {"kind": "pinned", "tag_ids": [tag_b, tag_a]}),
+                    "update", out))
+                t1.start()
+                t2.start()
+                t1.join(15)
+                t2.join(15)
+                self.assertFalse(t1.is_alive() or t2.is_alive(),
+                                 f"round {round_no} 卡住: {out}")
+                for key in ("create", "update"):
+                    self.assertNotIn(f"{key}_err", out,
+                                     f"round {round_no} {key} 不得死锁/超时: {out}")
+                rows = self._query(
+                    "select count(*) from public.memo_group where tag_id = any(%s)",
+                    ([tag_a, tag_b],))
+                self.assertEqual(rows[0][0], 2,
+                                 f"round {round_no}: 两个分组各恰好一行")
+            finally:
+                conn_a.close()
+                conn_e.close()
+
+    def test_bug04_round2_note_mode_materializes_only_protected_members(self):
+        """等分组锁期间新成员加入（已提交）：取得分组锁后成员集合复核
+        不一致必须 ME004 干净退出，不为未受记录锁保护的成员物化位次
+        （BUG-04 复审场景 3；旧实现在此窗口与改用途形成记录↔分组环）。"""
+        import threading
+
+        import psycopg
+
+        tag = self._make_tag("BUG04模式复核")["id"]
+        other = self._make_tag("BUG04模式旁组")["id"]
+        old_note = self._make_entry({
+            "kind": "note", "content": "旧成员", "tag_ids": [tag]})
+        new_note = self._make_entry({
+            "kind": "note", "content": "新成员", "tag_ids": [other]})
+        group_id = self._query(
+            "select id from public.memo_group where tag_id = %s", (tag,))[0][0]
+
+        out = {}
+        gate_conn = psycopg.connect(self.server.get_uri())
+        mode_conn = psycopg.connect(self.server.get_uri())
+        mode_conn.execute("set statement_timeout = '10s'")
+        mode_conn.execute("set deadlock_timeout = '500ms'")
+        update_conn = psycopg.connect(self.server.get_uri())
+        update_conn.execute("set statement_timeout = '10s'")
+        update_conn.execute("set deadlock_timeout = '500ms'")
+        try:
+            # 模式 RPC 的首步是锁成员记录行：在旧成员行上拦住它
+            gate_conn.execute("select 1 from public.memo_entry where id = %s for update",
+                              (old_note["id"],))
+            thread = threading.Thread(target=self._run_rpc, args=(
+                mode_conn, _note_mode_sql(tag, "manual"), "mode", out))
+            thread.start()
+            self._wait_for_lock(mode_conn, "mode_wait", out)
+            # 等待期间另一个正常 RPC 把新成员加入该分组并提交
+            self._call(_update_entry_sql(
+                new_note["id"], new_note["content_version"],
+                {"tag_ids": [other, tag]}))
+            # 新成员的记录行被预锁（模拟改用途事务已到达行锁）
+            update_conn.execute(
+                "select 1 from public.memo_entry where id = %s for update",
+                (new_note["id"],))
+            gate_conn.commit()   # 放行模式 RPC
+            thread.join(15)
+            self.assertFalse(thread.is_alive(), f"mode 卡住: {out}")
+            # 新代码：集合复核不一致 → ME004（可重试），不物化未保护成员
+            self.assertEqual(out.get("mode", {}).get("sqlstate"), "ME004",
+                             f"模式必须干净退出: {out}")
+            # 随后改用途正常完成（不再与模式互相等待）
+            self._run_rpc(update_conn, _update_entry_sql(
+                new_note["id"], self._query(
+                    "select content_version from public.memo_entry where id = %s",
+                    (new_note["id"],))[0][0],
+                {"kind": "pinned"}), "update", out)
+            self.assertNotIn("sqlstate", out.get("update", {}), f"{out}")
+            # 位次未被未保护成员污染：分组内没有新成员的位次行
+            positions = self._query(
+                "select entry_id from public.memo_position where group_id = %s",
+                (group_id,))
+            self.assertNotIn((new_note["id"],), positions)
+            # 客户端基于最新数据重试：成功，成员集合完整落位
+            result = self._call(_note_mode_sql(tag, "manual"))
+            self.assertEqual(result["note_sort_mode"], "manual")
+        finally:
+            gate_conn.close()
+            mode_conn.close()
+            update_conn.close()
+            thread.join(15)
+
 
 if __name__ == "__main__":
     unittest.main()
