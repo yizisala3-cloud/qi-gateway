@@ -2,7 +2,7 @@
 // 与 lib/retro_time.js 同一套机制：隐藏 input 保留原 id/value 契约（change 事件照发），
 // 展示层为纸色按钮，弹层为象牙纸卡；选中项深绿高亮（同日历选中日）。
 // 选项来自调用方传入的 [{ value, label }]，键盘支持 Esc 关闭与上下箭头换选项。
-import { esc, icon } from '../ui.js?v=20261002-planning-modules1';
+import { esc, icon } from '../ui.js?v=20261003-memo-review-fixes1';
 
 let activeRetroSelectPop = null;
 

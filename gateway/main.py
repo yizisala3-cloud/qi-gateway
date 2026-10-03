@@ -29,6 +29,7 @@ from .admin_api import admin_api_routes
 from .admin_memory_api import admin_memory_routes
 from .context_admin_api import context_admin_routes
 from .eventide_admin_api import eventide_admin_routes
+from .memo_api import memo_api_routes
 from .memory_digest_api import memory_digest_routes
 from .memory_request_api import memory_request_routes
 from .memory_review_api import memory_review_routes
@@ -436,6 +437,7 @@ _routes.extend(memory_request_routes)
 _routes.extend(memory_review_routes)
 _routes.extend(todo_routes)
 _routes.extend(planning_api_routes)
+_routes.extend(memo_api_routes)
 
 
 class NoCacheStaticFiles(StaticFiles):

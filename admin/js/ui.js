@@ -1,5 +1,5 @@
 // ui.js - shared retro UI components: icons, tags, modal, toast, detail panel
-export const ASSET_VERSION = '20261002-planning-modules1';
+export const ASSET_VERSION = '20261003-memo-review-fixes1';
 
 /* ---------- SVG icons (stroke, no emoji) ---------- */
 const ICON_PATHS = {
@@ -129,7 +129,7 @@ export function toast(msg, type = 'ok') {
 }
 
 /* ---------- modal ---------- */
-export function modal({ title, body, footer, wide = false, draggable = false }) {
+export function modal({ title, body, footer, wide = false, draggable = false, onMaskClose = null }) {
   const mask = document.createElement('div');
   mask.className = 'modal-mask';
   mask.innerHTML = `
@@ -142,7 +142,13 @@ export function modal({ title, body, footer, wide = false, draggable = false }) 
   const root = mask.querySelector('.modal');
   const close = () => mask.remove();
   mask.querySelector('.modal-close').onclick = close;
-  mask.addEventListener('click', e => { if (e.target === mask) close(); });
+  mask.addEventListener('click', e => {
+    if (e.target !== mask) return;
+    // onMaskClose：调用方自有的关闭流程（含保存确认/清理）；不提供时保持
+    // 原默认直接移除
+    if (onMaskClose) { onMaskClose(); return; }
+    close();
+  });
   if (draggable) {
     const head = mask.querySelector('.modal-head');
     head.classList.add('draggable');

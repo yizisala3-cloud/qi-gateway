@@ -1,23 +1,24 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
 // 数据按需加载：今日看板 30 秒轮询，全部待办首次切到该页签时才拉取。
-import { gw } from '../api.js?v=20261002-planning-modules1';
+import { gw } from '../api.js?v=20261003-memo-review-fixes1';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, esc,
   createDetailPanel,
-} from '../ui.js?v=20261002-planning-modules1';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261002-planning-modules1';
-import { createRetroSelectField } from '../lib/retro_select.js?v=20261002-planning-modules1';
+} from '../ui.js?v=20261003-memo-review-fixes1';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261003-memo-review-fixes1';
+import { createRetroSelectField } from '../lib/retro_select.js?v=20261003-memo-review-fixes1';
 import {
   TASK_TYPE_LABELS, TASK_TYPES, STATUS_META, CLOSED_STATUSES,
   fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty,
   itemMeta, isClosedOcc, formatLoggedDuration, durationText, durationDetailRows,
   itemBadges, itemHtml,
-} from '../lib/planning_display.js?v=20261002-planning-modules1';
-import { openTaskForm } from '../lib/planning_task_form.js?v=20261002-planning-modules1';
-import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261002-planning-modules1';
-import { createPlanningSort } from '../lib/planning_sort.js?v=20261002-planning-modules1';
-import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261002-planning-modules1';
+} from '../lib/planning_display.js?v=20261003-memo-review-fixes1';
+import { openTaskForm } from '../lib/planning_task_form.js?v=20261003-memo-review-fixes1';
+import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261003-memo-review-fixes1';
+import { createPlanningSort } from '../lib/planning_sort.js?v=20261003-memo-review-fixes1';
+import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261003-memo-review-fixes1';
+import { createPlanningMemo } from '../lib/planning_memo.js?v=20261003-memo-review-fixes1';
 
 // 部分完成属于开放生命周期：实例仍在「进度中」，直到「已全部完成」才关闭
 const OPEN_STATUSES = ['pending', 'in_progress', 'deferred', 'partial'];
@@ -40,6 +41,7 @@ export default {
   reminder: createPlanningReminder(),
   dialogs: null,
   sort: null,
+  memo: null,
 
   async mount(root) {
     this.root = root;
@@ -73,6 +75,7 @@ export default {
           <div class="tabs" id="planning-tabs" style="margin-bottom:14px">
             <button class="tab active" data-act="plan-tab" data-tab="today">${icon('calendar')}当前待办</button>
             <button class="tab" data-act="plan-tab" data-tab="all">${icon('inbox')}全部待办</button>
+            <button class="tab" data-act="plan-tab" data-tab="memo">${icon('feather')}备忘录</button>
             <button class="tab" data-act="plan-tab" data-tab="goals">${icon('star')}长期目标</button>
             <button class="tab" data-act="plan-tab" data-tab="summary">${icon('journal')}每日总结</button>
           </div>
@@ -138,6 +141,16 @@ export default {
               <div id="planning-tasks">${loading()}</div>
               <div class="plan-group-title">出现记录 <span class="plan-count" id="planning-occ-count"></span></div>
               <div id="planning-occurrences">${loading()}</div>
+            </div>
+          </div>
+
+          <div class="plan-region" id="planning-memo" data-panel="memo" hidden>
+            <div class="card">
+              <div class="plan-region-head">
+                <div class="plan-region-title">${icon('feather')}备忘录</div>
+                <span class="plan-region-sub">常驻与随笔 · 自动保存</span>
+              </div>
+              <div data-memo-root></div>
             </div>
           </div>
 
@@ -223,6 +236,7 @@ export default {
       this.exitReorder();
       this.loadToday();
     }
+    if (this.activeTab === 'memo') this.memo?.flushPending();   // 切走前保存未落库内容
     this.activeTab = tab;
     this.root.querySelectorAll('#planning-tabs .tab').forEach((el) => {
       el.classList.toggle('active', el.dataset.tab === tab);
@@ -234,6 +248,12 @@ export default {
       this.loadedTabs.add('all');
       this.loadTasks();
       this.loadOccurrences();
+    }
+    if (tab === 'memo' && !this.loadedTabs.has('memo')) {
+      // 备忘录数据按需加载；编辑器中的未保存内容由模块自身生命周期承接
+      this.loadedTabs.add('memo');
+      this.memo ||= createPlanningMemo();
+      this.memo.mount(this.root.querySelector('[data-memo-root]'));
     }
     // 长期目标 / 每日总结为占位页签，无数据需要加载
   },
@@ -272,6 +292,8 @@ export default {
   unmount() {
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = null;
+    this.memo?.dispose();
+    this.memo = null;
     this.reminder.dispose();
     this.detail = null;
     this.loadedTabs = null;
