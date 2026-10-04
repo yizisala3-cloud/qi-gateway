@@ -1,6 +1,6 @@
 // Pointer sorting controller. The page keeps reorderMode and refresh scheduling.
-import { gw } from '../api.js?v=20261004-memo-bugfix3';
-import { toast } from '../ui.js?v=20261004-memo-bugfix3';
+import { gw } from '../api.js?v=20261004-ring-fix1';
+import { toast } from '../ui.js?v=20261004-ring-fix1';
 
 export function createPlanningSort({
   getRoot, getProgressList, getBoard, getActiveTab, getActiveSection,

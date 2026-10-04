@@ -919,6 +919,8 @@ html[data-theme="night"] .tab.active { color: #f0ebd5; }
 .modal-close .ico { width: 15px; height: 15px; }
 .modal-close:hover { background: var(--gold-soft); color: var(--ink); }
 .confirm-text { margin: 4px 0; color: var(--ink-soft); }
+/* 规划提醒弹窗：多项提醒合并展示时的条目分隔（#31） */
+hr.ring-divider { border: 0; border-top: 1px solid var(--gold-faint); margin: 10px 0; }
 
 .relation-target { text-align: left; width: 100%; font-family: inherit; }
 .relation-target.selected {

@@ -1,25 +1,25 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
 // 数据按需加载：今日看板保留 30 秒提醒轮询，首次/失效切入时刷新可见列表。
-import { gw } from '../api.js?v=20261004-memo-bugfix3';
+import { gw } from '../api.js?v=20261004-ring-fix1';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, esc,
   createDetailPanel,
-} from '../ui.js?v=20261004-memo-bugfix3';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261004-memo-bugfix3';
-import { createRetroSelectField } from '../lib/retro_select.js?v=20261004-memo-bugfix3';
+} from '../ui.js?v=20261004-ring-fix1';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261004-ring-fix1';
+import { createRetroSelectField } from '../lib/retro_select.js?v=20261004-ring-fix1';
 import {
   TASK_TYPE_LABELS, TASK_TYPES, STATUS_META, CLOSED_STATUSES,
   fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty,
   itemMeta, isClosedOcc, formatLoggedDuration, durationText, durationDetailRows,
   itemBadges, itemHtml,
-} from '../lib/planning_display.js?v=20261004-memo-bugfix3';
-import { openTaskForm } from '../lib/planning_task_form.js?v=20261004-memo-bugfix3';
-import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261004-memo-bugfix3';
-import { createPlanningSort } from '../lib/planning_sort.js?v=20261004-memo-bugfix3';
-import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261004-memo-bugfix3';
-import { createPlanningMemo } from '../lib/planning_memo.js?v=20261004-memo-bugfix3';
-import { createPlanningReads } from '../lib/planning_reads.js?v=20261004-memo-bugfix3';
+} from '../lib/planning_display.js?v=20261004-ring-fix1';
+import { openTaskForm } from '../lib/planning_task_form.js?v=20261004-ring-fix1';
+import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261004-ring-fix1';
+import { createPlanningSort } from '../lib/planning_sort.js?v=20261004-ring-fix1';
+import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261004-ring-fix1';
+import { createPlanningMemo } from '../lib/planning_memo.js?v=20261004-ring-fix1';
+import { createPlanningReads } from '../lib/planning_reads.js?v=20261004-ring-fix1';
 
 // 部分完成属于开放生命周期：实例仍在「进度中」，直到「已全部完成」才关闭
 const OPEN_STATUSES = ['pending', 'in_progress', 'deferred', 'partial'];

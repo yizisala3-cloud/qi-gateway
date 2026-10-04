@@ -51,6 +51,13 @@ class Element {
     this.children.push(child);
     if (child.className === 'modal-mask') masks.push(child);
   }
+  contains(node) {
+    if (node === this) return true;
+    for (const child of this.nodes.values()) {
+      if (child === node || child.contains?.(node)) return true;
+    }
+    return false;
+  }
   addEventListener(name, fn) {
     if (!this.listeners.has(name)) this.listeners.set(name, new Set());
     this.listeners.get(name).add(fn);
@@ -64,15 +71,31 @@ class Element {
 }
 
 class AudioFixture {
-  constructor(url) { this.url = url; this.currentTime = 0; this.plays = 0; this.pauses = 0; }
-  play() { this.plays += 1; return Promise.resolve(); }
-  pause() { this.pauses += 1; }
+  constructor(url) {
+    this.url = url; this.currentTime = 0; this.plays = 0; this.pauses = 0;
+    this.muted = false; this.paused = true; this.loop = false;
+    // behavior：'success' 立即成功 | 'blocked' 播放被拒 | 'deferred' 由用例手动结算
+    this.behavior = 'success'; this.pending = []; this.calls = [];
+  }
+  play() {
+    this.plays += 1;
+    this.calls.push({ muted: this.muted, loop: this.loop });
+    if (this.behavior === 'blocked') return Promise.reject(new Error('NotAllowedError: play blocked'));
+    this.paused = false;
+    if (this.behavior === 'deferred') return new Promise((resolve) => this.pending.push(resolve));
+    return Promise.resolve();
+  }
+  pause() { this.pauses += 1; this.paused = true; }
 }
 
 class NotificationFixture {
   static permission = 'granted';
+  static created = 0;
   static requestPermission() { return Promise.resolve(this.permission); }
-  constructor(title, options) { this.title = title; this.options = options; }
+  constructor(title, options) {
+    this.title = title; this.options = options;
+    NotificationFixture.created += 1;
+  }
 }
 
 globalThis.document = { body: new Element(), createElement: () => new Element() };
@@ -119,6 +142,18 @@ const lastModal = () => masks.at(-1).querySelector('.modal');
 const response = (body = {}) => ({ ok: true, json: async () => body });
 const failure = (error) => ({ ok: false, status: 409, statusText: 'Conflict', json: async () => ({ error }) });
 const listenerCount = (name) => windowListeners.get(name)?.size || 0;
+// 模拟一次页面按下：按注册顺序触发全部 pointerdown 监听，once 监听触发后移除
+const gesture = async (event) => {
+  const registry = windowListeners.get('pointerdown');
+  if (!registry) return;
+  for (const [fn, options] of [...registry]) {
+    if (options?.once) registry.delete(fn);
+    await fn(event);
+  }
+};
+const maskClick = (mask) => {
+  for (const fn of [...(mask.listeners.get('click') || [])]) fn({ target: mask });
+};
 const emptyBoard = () => ({ progress: [], attention: [], done: [], conflicts: [], recompute: {} });
 const boardWith = (id, content) => ({ ...emptyBoard(), progress: [{ id, content, status: 'pending' }] });
 const flush = async () => { for (let count = 0; count < 12; count += 1) await Promise.resolve(); };
@@ -375,6 +410,162 @@ const checks = {
     assert.equal(intervals.size, 0);
     assert.equal(listenerCount('pointerdown'), 0);
     assert.equal(listenerCount('beforeunload'), 0);
+  },
+
+  async 'B7-reminder-ring'() {
+    const flushRings = async () => { for (let count = 0; count < 12; count += 1) await Promise.resolve(); };
+    const hint = '浏览器拦截了自动响铃，点一下页面即可恢复';
+
+    // #28A：无提醒配置时首次触摸只做静音预热——play 全程 muted，无弹窗，
+    // 迟到结算自行收尾并还原静音标记
+    {
+      const reminders = reminderModule.createPlanningReminder();
+      reminders.attach();
+      reminders.ensureAudio();
+      reminders.alarmAudio.behavior = 'deferred';
+      reminders.timerAudio.behavior = 'deferred';
+      reminders.checkAlarms({ progress: [{ id: 1, alarm_start: false, alarm_end: false, timer_minutes: null }] });
+      await gesture();
+      assert.equal(reminders.alarmAudio.calls.length, 1);
+      assert.equal(reminders.alarmAudio.calls[0].muted, true);
+      assert.equal(reminders.timerAudio.calls[0].muted, true);
+      assert.equal(reminders.alarmAudio.paused, false);
+      assert.equal(reminders.ringModal, null);
+      reminders.alarmAudio.pending.shift()('');
+      reminders.timerAudio.pending.shift()('');
+      await flushRings();
+      assert.equal(reminders.alarmAudio.paused, true);
+      assert.equal(reminders.alarmAudio.muted, false);
+      assert.equal(reminders.alarmAudio.currentTime, 0);
+      reminders.dispose();
+    }
+
+    // #28B：预热 Promise 迟到结算不会暂停之后开始的真实响铃
+    {
+      const reminders = reminderModule.createPlanningReminder();
+      reminders.ensureAudio();
+      reminders.alarmAudio.behavior = 'deferred';
+      reminders.unlockAudio();
+      reminders.alarmAudio.behavior = 'success';
+      reminders.showRingModal('真实响铃', '12:00');
+      await flushRings();
+      assert.equal(reminders.alarmAudio.calls.length, 2);
+      assert.equal(reminders.alarmAudio.calls[1].muted, false);
+      assert.equal(reminders.alarmAudio.paused, false);
+      reminders.alarmAudio.pending.shift()('');
+      await flushRings();
+      assert.equal(reminders.alarmAudio.paused, false);
+      assert.ok(reminders.ringModal);
+      reminders.dispose();
+    }
+
+    // #29：停止按钮、右上角 ×、遮罩关闭都会停止音频并清理弹窗
+    for (const route of ['stop-button', 'close-button', 'mask']) {
+      const reminders = reminderModule.createPlanningReminder();
+      reminders.showRingModal('闹钟', '12:00');
+      await flushRings();
+      assert.equal(reminders.alarmAudio.paused, false);
+      const mask = masks.at(-1);
+      if (route === 'stop-button') lastModal().querySelector('[data-act-ring-stop]').onclick();
+      else if (route === 'close-button') lastModal().querySelector('.modal-close').onclick();
+      else maskClick(mask);
+      await flushRings();
+      assert.equal(mask.removed, true);
+      assert.equal(reminders.alarmAudio.paused, true);
+      assert.equal(reminders.timerAudio.paused, true);
+      assert.equal(reminders.ringModal, null);
+      reminders.dispose();
+    }
+
+    // #30：起播被拦截后按提示点击页面即可恢复；连续拒绝可继续重试；
+    // 不重复创建弹窗或通知；轮询重查不重复触发
+    {
+      const reminders = reminderModule.createPlanningReminder();
+      reminders.attach();
+      reminders.ensureAudio();
+      reminders.alarmAudio.behavior = 'blocked';
+      const now = Date.now();
+      const occ = { id: 5, alarm_start: true, est_start: new Date(now).toISOString(), content: '响铃' };
+      reminders.checkAlarms({ progress: [occ] });
+      await flushRings();
+      const modalCount = masks.length;
+      const notifyCount = NotificationFixture.created;
+      assert.equal(reminders.alarmAudio.paused, true);
+      assert.equal(reminders.firedKeys.size, 1);
+      assert.ok(reminders.pendingRecovery);
+      assert.equal(toastMessages.at(-1), hint);
+      assert.equal(listenerCount('pointerdown'), 2);  // 未消费的预热 + 恢复监听
+      await gesture();  // 第一次手势仍被拒
+      await flushRings();
+      assert.equal(reminders.alarmAudio.paused, true);
+      assert.ok(reminders.pendingRecovery);
+      reminders.alarmAudio.behavior = 'success';
+      await gesture();  // 再次手势重试成功
+      await flushRings();
+      assert.equal(reminders.alarmAudio.paused, false);
+      assert.equal(reminders.pendingRecovery, null);
+      assert.equal(listenerCount('pointerdown'), 0);  // 成功后恢复监听移除
+      reminders.checkAlarms({ progress: [occ] });
+      await flushRings();
+      assert.equal(masks.length, modalCount);
+      assert.equal(NotificationFixture.created, notifyCount);
+      assert.equal(reminders.alarmAudio.paused, false);
+      reminders.dispose();
+    }
+
+    // #30 补充：主动停止后待恢复取消，后续手势只静音预热，不再恢复旧提醒
+    {
+      const reminders = reminderModule.createPlanningReminder();
+      reminders.attach();
+      reminders.ensureAudio();
+      reminders.alarmAudio.behavior = 'blocked';
+      const now = Date.now();
+      const occ = { id: 9, alarm_start: true, est_start: new Date(now).toISOString(), content: '响铃' };
+      reminders.checkAlarms({ progress: [occ] });
+      await flushRings();
+      reminders.alarmAudio.behavior = 'success';
+      reminders.stopRinging();
+      await flushRings();
+      assert.equal(reminders.pendingRecovery, null);
+      assert.equal(reminders.ringModal, null);
+      await gesture();
+      await flushRings();
+      assert.equal(reminders.alarmAudio.calls.at(-1).muted, true);
+      assert.equal(reminders.alarmAudio.paused, true);
+      assert.equal(reminders.ringModal, null);
+      reminders.dispose();
+    }
+
+    // #31：同刻多项提醒复用同一弹窗合并展示；先后到点、闹钟计时器交错
+    // 均无孤立弹窗；卸载清理全部弹窗
+    {
+      const reminders = reminderModule.createPlanningReminder();
+      const before = masks.length;
+      reminders.showRingModal('第一项闹钟', '12:00');
+      await flushRings();
+      reminders.showRingModal('第二项计时', '12:01', true);
+      await flushRings();
+      assert.equal(masks.length - before, 1);
+      const listHtml = reminders.ringModal.listEl.innerHTML;
+      assert.ok(listHtml.includes('第一项闹钟'));
+      assert.ok(listHtml.includes('第二项计时'));
+      assert.ok(listHtml.includes('ring-divider'));
+      assert.equal(reminders.alarmAudio.paused, true);   // 新提醒接管音频
+      assert.equal(reminders.timerAudio.paused, false);
+      lastModal().querySelector('[data-act-ring-stop]').onclick();
+      assert.equal(masks.at(-1).removed, true);
+      assert.equal(reminders.ringModal, null);
+      assert.deepEqual(reminders.ringItems, []);
+      assert.equal(reminders.timerAudio.paused, true);
+
+      reminders.showRingModal('闹钟A', '12:00');
+      await flushRings();
+      reminders.showRingModal('计时B', '12:05', true);
+      await flushRings();
+      assert.equal(masks.length - before, 2);
+      reminders.dispose();
+      assert.equal(masks.slice(before).filter((mask) => !mask.removed).length, 0);
+    }
   },
 
   async 'C1-visible-refresh'() {
