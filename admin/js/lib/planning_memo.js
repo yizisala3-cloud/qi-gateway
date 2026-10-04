@@ -15,18 +15,30 @@
 // 一期不实现清单勾选、待办互通与 AI 读写（F01–F03 仅预留稳定身份与
 // 可复用基础接口）。
 
-import { gw } from '../api.js?v=20261003-memo-bugfix2';
+import { gw } from '../api.js?v=20261004-memo-bugfix3';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, icon, esc,
-} from '../ui.js?v=20261003-memo-bugfix2';
-import { createRetroSelectField } from './retro_select.js?v=20261003-memo-bugfix2';
-import { renderMarkdown } from './memo_markdown.js?v=20261003-memo-bugfix2';
+} from '../ui.js?v=20261004-memo-bugfix3';
+import { createRetroSelectField } from './retro_select.js?v=20261004-memo-bugfix3';
+import { renderMarkdown } from './memo_markdown.js?v=20261004-memo-bugfix3';
 
 const KIND_LABELS = { pinned: '常驻备忘', note: '随笔' };
 const AUTOSAVE_DELAY_MS = 800;
 const SEARCH_DEBOUNCE_MS = 300;
 // 视图 → 生命周期列表 API 的 status（F09：回收站恢复后不能用 view 名当 status）
 const VIEW_STATUS = { archived: 'archived', trash: 'deleted' };
+// 回收站保留期（M19，2026-10-03 确认）：自删除时刻起 72 小时后彻底删除；
+// 到期清除由服务端执行，这里只按同一口径展示剩余时间。
+const TRASH_RETENTION_MS = 72 * 60 * 60 * 1000;
+
+function trashRemainingText(deletedAt) {
+  if (!deletedAt) return '';
+  const expires = new Date(deletedAt).getTime() + TRASH_RETENTION_MS;
+  if (!Number.isFinite(expires)) return '';
+  const remaining = expires - Date.now();
+  if (remaining <= 0) return '已到期，即将清除';
+  return `约 ${Math.ceil(remaining / (60 * 60 * 1000))} 小时后清除`;
+}
 
 /* ═══════════════ 自动保存泵（独立工厂，quickjs 行为测试直接执行） ═══════════════
  *
@@ -109,8 +121,15 @@ export function createMemoAutosave({
       return;
     }
     if (result && result.suppressSaved) return;   // 已按当前草稿清理（F08）
-    // 已入库：停机/销毁中保持静默；已恢复且有新输入时续排保存
-    if (!state.stopping && state.dirty && !state.running) retrySoon();
+    if (state.dirty) {
+      // 有新输入：续排保存（停机中由 resume 接管，泵运行中自会排空）
+      if (!state.stopping && !state.running) retrySoon();
+      return;
+    }
+    // 已入库且无新输入：保存反馈必须结算，不能把成功 keepalive 后的
+    // bfcache 返回停留在「待保存」（BUG-03）。停机中页面不可见，状态
+    // 照常落定为已保存；页面真被销毁时 onChange 由会话守卫拦下。
+    setStatus('saved');
   }
 
   async function pump() {
@@ -486,6 +505,16 @@ export function createPlanningMemo() {
     async show() {
       if (!this.root) return;
       await this.reload();
+      if (!this.root) return;
+      // 重返按当前视图刷新（BUG-08）：reload 推进的 seq 已使在途的旧
+      // 生命周期/搜索请求失效，但它本身只接上看板数据——归档/回收站
+      // 必须重发当前视图的读取，否则页面停在「正在载入」；已显示的
+      // 搜索/生命周期列表重返时同样重读，反映其他设备的变化。
+      if (this.view === 'archived' || this.view === 'trash') {
+        await this.renderLifecycleList(VIEW_STATUS[this.view]);
+      } else if (this.view === 'search') {
+        await this.runSearch();
+      }
     },
 
     dispose() {
@@ -777,13 +806,15 @@ export function createPlanningMemo() {
               ${item.body_excerpt ? `<div class="memo-item-excerpt">${esc(item.body_excerpt)}</div>` : ''}
             </div>
             <div class="memo-item-side"><div class="tag-row">
-              <span class="muted text-sm">${archived ? '归档于' : '删除于'} ${esc(((archived ? item.archived_at : item.deleted_at) || '').slice(0, 10))}</span>
+              <span class="muted text-sm">${archived
+                ? `归档于 ${esc(((item.archived_at) || '').slice(0, 10))}`
+                : `删除于 ${esc(((item.deleted_at) || '').slice(0, 10))} · ${esc(trashRemainingText(item.deleted_at))}`}</span>
               <button class="btn btn-secondary btn-sm" data-act="memo-restore" data-id="${item.id}">${icon('refresh')}恢复</button>
               ${archived ? `<button class="btn btn-danger-line btn-sm" data-act="memo-lifecycle-delete" data-id="${item.id}">${icon('x')}移入回收站</button>` : ''}
             </div></div>
           </div>`).join('')}</div>`
           : empty(archived ? '没有已归档的备忘录' : '回收站是空的',
-              archived ? '归档的内容随时可以恢复' : '删除的内容会保留在这里，随时可恢复'));
+              archived ? '归档的内容随时可以恢复' : '删除的内容会保留 72 小时，随时可恢复'));
       } catch (error) {
         if (seq !== this.seq || !this.root) return;
         this.body.innerHTML = errorBlock(`读取失败：${esc(error.message)}`);
@@ -887,7 +918,7 @@ export function createPlanningMemo() {
 
     async lifecycleEntry(id, action, closeReader = null) {
       if (action === 'delete' && !(await confirm(
-        '确认删除这条备忘录？可以在回收站恢复。',
+        '确认删除这条备忘录？删除后将在回收站保留 72 小时，到期彻底删除、无法恢复。',
         { danger: true, okText: '删除', cancelText: '取消' },
       ))) return;
       try {
@@ -897,7 +928,9 @@ export function createPlanningMemo() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ expected_version: entry.content_version }),
         });
-        toast(action === 'archive' ? '已归档，可在「归档」中找回' : '已删除，可在「回收站」恢复');
+        toast(action === 'archive'
+          ? '已归档，可在「归档」中找回'
+          : '已删除，72 小时内可在「回收站」恢复');
         if (closeReader) closeReader();
         await this.refreshAfterWrite();
       } catch (error) {
@@ -944,19 +977,28 @@ export function createPlanningMemo() {
             : '已切回最新排序；原手动顺序已保留');
         } catch (error) {
           toast(`切换排序模式失败：${error.message}`, 'err');
-          await this.reload({ silent: true });   // 服务端未变更：尽力恢复视图
+          // 提交结果未知（BUG-06）：网络失败时无法断定服务端未变更，
+          // 不再按「服务端未变更」直接恢复视图并解锁——缓存视为不可用，
+          // 等成功重读后才放行下一次拖动
+          this._markRefreshUnconfirmed();
           return;
         }
         const applied = await this.reload({ silent: true });
         if (!applied) {
           // 刷新失败或被切视图打断：缓存可能落后于服务端模式/顺序，
           // 保持拖动暂停并给出可重试入口（任一次成功 reload 自动恢复）
-          this._pendingRefresh = true;
-          this.renderStaleRefreshNotice();
+          this._markRefreshUnconfirmed();
         }
       } finally {
         if (!this._pendingRefresh) this.reorderBusy = false;
       }
+    },
+
+    /** 写入已提交/提交结果未知但缓存未确认（BUG-06/BUG-14）：保持拖动
+     *  暂停并给出显式重试入口；任何一次成功 reload 自动解除。 */
+    _markRefreshUnconfirmed() {
+      this._pendingRefresh = true;
+      this.renderStaleRefreshNotice();
     },
 
     async deleteTag(tagId) {
@@ -1058,16 +1100,20 @@ export function createPlanningMemo() {
 
     /** 写队列（BUG-06）：空闲时同步派发（保持「点击/拖动即发请求」的
      *  原有时序）；忙时排队，严格按提交顺序执行——快速 manual→latest
-     *  的最终服务端状态与最后一次有效选择一致。 */
+     *  的最终服务端状态与最后一次有效选择一致。空闲标记只在整条队列
+     *  排空后恢复：首项结束不等于队列空闲，否则排队项在途时第三次
+     *  写入会越过它直接派发（先提交者覆盖后提交者）。 */
     _enqueueWrite(op) {
-      if (this._writeIdle) {
-        this._writeIdle = false;
-        const run = Promise.resolve(op()).finally(() => { this._writeIdle = true; });
-        this.writeQueue = run.then(() => {}, () => {});
-        return run;
-      }
-      const run = this.writeQueue.then(op, op);
-      this.writeQueue = run.then(() => {}, () => {});
+      const run = this._writeIdle
+        ? Promise.resolve(op())
+        : this.writeQueue.then(op, op);
+      const settled = run.then(() => {}, () => {});
+      this.writeQueue = settled;
+      this._writeIdle = false;
+      settled.then(() => {
+        // 本项落定时仍是队列尾（期间没有新项入队）才恢复空闲
+        if (this.writeQueue === settled) this._writeIdle = true;
+      });
       return run;
     },
 
@@ -1083,13 +1129,15 @@ export function createPlanningMemo() {
           toast(successToast);
         } catch (error) {
           toast(`${failToast}：${error.message}`, 'err');
-          await this.reload({ silent: true });   // 服务端未变更：恢复服务端顺序
+          // 提交结果未知（BUG-06）：RPC 可能已提交但响应丢失——保持缓存
+          // 不可用并暂停拖动，防止下一次拖动从旧 board 构造撤回性重排；
+          // 成功重读后才解锁
+          this._markRefreshUnconfirmed();
           return;
         }
         const applied = await this.reload({ silent: true });
         if (!applied) {
-          this._pendingRefresh = true;
-          this.renderStaleRefreshNotice();
+          this._markRefreshUnconfirmed();
         }
       } finally {
         if (!this._pendingRefresh) this.reorderBusy = false;
@@ -1105,9 +1153,12 @@ export function createPlanningMemo() {
         + `<button type="button" class="btn btn-secondary btn-sm" data-reorder-refresh>${icon('refresh')}刷新重试</button>`);
       const btn = this.statusHost.querySelector('[data-reorder-refresh]');
       if (btn) {
-        btn.onclick = () => {
+        btn.onclick = async () => {
+          // 重试入口收尾（BUG-14）：等待刷新结果——失败恢复按钮与提示
+          // 保持可重复点击，成功由 reload 清掉提示并解锁拖动
           btn.disabled = true;
-          this.reload({ silent: true });
+          const applied = await this.reload({ silent: true });
+          if (!applied) this.renderStaleRefreshNotice();
         };
       }
     },
@@ -1253,16 +1304,17 @@ export function createPlanningMemo() {
         // 新建恢复沿用原 crid：首次创建若已提交，幂等键能把已落库的记录
         // 找回来，而不是再建一条（F02/F03 联动）
         crid: seed.id ? null : (restored && draft.crid ? draft.crid : crypto.randomUUID()),
-        // 草稿槽会话归属（BUG-03）：关闭时只清理属于本会话的草稿。crid
-        // 在首次创建成功后会被清空，这里固定建会话时的值供归属核对。
-        slotEntryId: seed.id,
-        slotCrid: null,
         kind: seed.kind,
         selectedTagIds: new Set(seed.tag_ids || []),
         pendingOps: new Set(),   // 标签创建等在途操作（BUG-05 关闭等待）
         autosave: null,
       };
-      editor.slotCrid = editor.crid;
+      // 草稿槽会话归属（BUG-03）：关闭时只清理属于本会话的草稿。新建会话
+      // 在首次 POST 成功后会从「null + 幂等键」升级为「真实 id」——升级前
+      // 在途窗口的输入落槽仍是旧身份，归属核对按会话使用过的全部身份
+      // 核对，而不是建会话时固定的一个值。
+      editor.slotIdentities = [seed.id ? { entryId: seed.id, crid: null }
+        : { entryId: null, crid: editor.crid }];
       const { root, close } = modal({
         title: seed.id ? '编辑备忘录' : '新建备忘录',
         wide: true,
@@ -1393,12 +1445,16 @@ export function createPlanningMemo() {
           if (!this.tags.some((t) => t.id === created.id)) this.tags.push(created);
           editor.selectedTagIds.add(created.id);
           input.value = '';
+          // 迟到的落定只作用于本会话（BUG-05）：编辑器已关闭/被替换时
+          // 不得重绘、更不得把脏标记打到当前编辑器上——那会给无关会话
+          // 额外发一次保存。会话仍打开时（含关闭等待中）标记脏，让标签
+          // 选择随本次保存排空。
           if (this.editor === editor && this.root) {
             this.renderEditorTags();
             this.mountFilter();
+            this.markEditorDirty();
           }
           if (created.existed) toast(`标签「${created.name}」已存在，已直接选用`);
-          this.markEditorDirty();
           return true;
         } catch (error) {
           toast(`添加标签失败：${error.message}`, 'err');
@@ -1512,6 +1568,10 @@ export function createPlanningMemo() {
       editor.entryId = saved.id;
       editor.version = saved.content_version;
       editor.crid = null;
+      // 会话身份原子升级（BUG-03）：后续输入落槽改用真实条目 id；升级前
+      // 的旧身份保留在归属历史里，明确丢弃/成功关闭时在途窗口的草稿同样
+      // 能被本会话正确清理。
+      editor.slotIdentities.push({ entryId: saved.id, crid: null });
 
       // 保存期间正文被清空（F08）：刚落库的内容不符合用户当前意图——
       // 删除刚创建的记录并把会话复位为全新草稿；删除失败则保留记录。
@@ -1521,6 +1581,8 @@ export function createPlanningMemo() {
         editor.entryId = null;
         editor.version = 0;
         editor.crid = crypto.randomUUID();
+        // 会话复位为全新草稿：新幂等键也是本会话的落槽身份（BUG-03）
+        editor.slotIdentities.push({ entryId: null, crid: editor.crid });
         if (!removed) toast('正文已清空；删除刚保存的记录失败，记录已保留', 'warn');
         return { suppressSaved: true };
       }
@@ -1613,13 +1675,14 @@ export function createPlanningMemo() {
 
     async _runEditorClose(editor) {
       const epoch = this._epoch;
-      // 未完成的标签创建先落定（BUG-05）：成功会带着标签选择进入下面的
-      // 保存排空；失败按「保存未成功」处理，不静默丢关联。
+      // 未完成的标签创建先落定（BUG-05）：等待期间新增的操作同样要排空
+      // ——只等开始时的快照会让「完成等待期间又添加的标签」创建成功却
+      // 不再关联。循环排空直到集合为空；任一失败按「保存未成功」处理。
       let tagOpFailed = false;
-      if (editor.pendingOps && editor.pendingOps.size) {
+      while (editor.pendingOps && editor.pendingOps.size) {
         const results = await Promise.all([...editor.pendingOps]);
         if (epoch !== this._epoch || this.editor !== editor) return;
-        tagOpFailed = results.some((r) => r === false);
+        if (results.some((r) => r === false)) tagOpFailed = true;
       }
       // 排空在途/待保存后再关（F01/F04）：正文被清空导致请求失败的情形
       // 同样要走完失败确认，不能静默丢弃用户的其他修改。关闭入口只有在
@@ -1657,12 +1720,14 @@ export function createPlanningMemo() {
       this.editor = null;
       // 草稿槽按会话归属清理（BUG-03）：槽里是其他条目/会话的未确认草稿
       // 时（例如 A 的草稿未处理，期间打开并关闭了 B），不得顺手清掉——
-      // 清理条件核对条目身份与新建会话的幂等键。
+      // 归属核对覆盖本会话使用过的全部身份：新建会话首次创建成功后身份
+      // 从「null + 幂等键」升级为真实 id，升级前后落槽的输入都算本会话。
       const draft = readStoredDraft();
-      const ownsDraft = !!draft
-        && draft.entryId === editor.slotEntryId
-        && (editor.slotEntryId != null || draft.crid === editor.slotCrid);
-      if (ownsDraft) clearStoredDraft();
+      const owned = draft && editor.slotIdentities.some((ident) => (
+        draft.entryId === ident.entryId
+        && (ident.entryId != null || draft.crid === ident.crid)
+      ));
+      if (owned) clearStoredDraft();
       editor.autosave.dispose();
       try { editor.modal.close(); } catch { /* 已移除 */ }
       this.refreshAfterWrite();

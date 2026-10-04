@@ -11,7 +11,8 @@
 - R09 分页进度与终止：服务端 Max Rows 把每页截小时不得跳行漏页；
   跨页匹配行减少时空页必须有限终止，不允许无限请求。
 
-不产生任何写 RPC（HEAD 读取语义保持）。
+GET 读取会携带回收站到期清扫 RPC（M19）；HEAD 读取语义保持零写——
+清扫只挂在真实 GET 与生命周期入口上。
 """
 
 import unittest
@@ -149,6 +150,10 @@ class MemoRealTransportReadTests(unittest.TestCase):
         self.assertEqual(orders["memo_position"], "group_id.asc,entry_id.asc",
                          "位置表必须按 (group_id, entry_id) 唯一键排序")
         for call in self.log.calls:
+            if call["path"].endswith("/rpc/memo_purge_expired_trash"):
+                # 回收站到期清扫（M19）是读路径上的 RPC 写调用，不携带
+                # 分页语义；count=exact 只约束表读取（RPC 无 select 阶段）
+                continue
             self.assertIn("count=exact", call["prefer"],
                           "计数必须在 select 阶段声明（Prefer: count=exact）")
 

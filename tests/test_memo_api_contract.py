@@ -283,10 +283,28 @@ class MemoApiContractTests(unittest.TestCase):
                 headers=self.auth,
             )
             self.assertEqual(response.status_code, 200, action)
-            fn, params = self.fake.rpc_calls[0]
+            # 生命周期入口先做回收站到期清扫（M19），随后才是业务 RPC
+            self.assertEqual(self.fake.rpc_calls[0][0], "memo_purge_expired_trash")
+            fn, params = self.fake.rpc_calls[1]
             self.assertEqual(fn, "memo_set_entry_lifecycle")
             self.assertEqual(params["p_action"], action)
             self.assertEqual(params["p_expected_version"], 2)
+
+    def test_read_and_lifecycle_entrypoints_purge_expired_trash_first(self):
+        """M19：看板 / 列表 / 详情入口均先调用到期清扫 RPC；清扫失败不
+        阻塞读取（恢复路径由数据库保留期门独立兜底）。"""
+        for path in ("/admin/api/memo/board",
+                     "/admin/api/memo/entries?status=deleted",
+                     "/admin/api/memo/entries/3"):
+            self.fake.rpc_calls.clear()
+            response = self.http.get(path, headers=self.auth)
+            self.assertEqual(response.status_code, 200, path)
+            self.assertEqual(self.fake.rpc_calls[0][0], "memo_purge_expired_trash",
+                             path)
+            self.assertIn("p_now", self.fake.rpc_calls[0][1])
+        self.fake.rpc_errors["memo_purge_expired_trash"] = RuntimeError("db down")
+        response = self.http.get("/admin/api/memo/board", headers=self.auth)
+        self.assertEqual(response.status_code, 200)
 
     # ── 标签 ──
 

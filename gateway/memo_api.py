@@ -68,7 +68,8 @@ async def _dispatch_json(request: Request, fn, *args, created: bool = False) -> 
 
 
 async def board(request: Request) -> JSONResponse:
-    return await _dispatch(request, memo.get_board)
+    # 回收站到期清扫（M19）只挂在真实 GET 读取上：HEAD 探测保持零写语义
+    return await _dispatch(request, memo.get_board, request.method == "GET")
 
 
 async def entries_collection(request: Request) -> JSONResponse:
@@ -77,14 +78,16 @@ async def entries_collection(request: Request) -> JSONResponse:
     if request.method in ("GET", "HEAD"):
         status = request.query_params.get("status", "active")
         query = request.query_params.get("q")
-        return await _dispatch(request, memo.list_entries, status, query)
+        return await _dispatch(
+            request, memo.list_entries, status, query, request.method == "GET")
     return await _dispatch_json(request, memo.create_entry, created=True)
 
 
 async def entry_item(request: Request) -> JSONResponse:
     entry_id = request.path_params["entry_id"]
     if request.method in ("GET", "HEAD"):
-        return await _dispatch(request, memo.get_entry, entry_id)
+        return await _dispatch(
+            request, memo.get_entry, entry_id, request.method == "GET")
     return await _dispatch_json(request, memo.update_entry, entry_id)
 
 

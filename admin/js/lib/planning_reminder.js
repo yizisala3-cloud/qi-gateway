@@ -1,6 +1,6 @@
 // Reminder state persists across mounts of the cached planning page.
-import { modal, toast, esc, icon } from '../ui.js?v=20261003-memo-bugfix2';
-import { fmtClock } from './planning_display.js?v=20261003-memo-bugfix2';
+import { modal, toast, esc, icon } from '../ui.js?v=20261004-memo-bugfix3';
+import { fmtClock } from './planning_display.js?v=20261004-memo-bugfix3';
 
 // 闹钟错过太久就静默跳过（只对未来 2 分钟内与刚过期的情况响铃）
 const ALARM_GRACE_MS = 2 * 60 * 1000;

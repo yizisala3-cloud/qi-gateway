@@ -97,13 +97,13 @@ async function runPlanningTests(browser, baseUrl, evidenceDir) {
   };
   try {
     await page.goto(`${baseUrl}/__planning_latency__`);
-    await page.addStyleTag({ url: `${baseUrl}/admin/css/style.css?v=20261003-memo-bugfix2` });
+    await page.addStyleTag({ url: `${baseUrl}/admin/css/style.css?v=20261004-memo-bugfix3` });
     await page.evaluate(async () => {
       document.documentElement.dataset.theme = 'day';
       const root = document.createElement('main');
       root.id = 'planning-fixture'; root.style.padding = '20px';
       document.body.append(root);
-      window.__planning = (await import('/admin/js/pages/planning.js?v=20261003-memo-bugfix2')).default;
+      window.__planning = (await import('/admin/js/pages/planning.js?v=20261004-memo-bugfix3')).default;
       await window.__planning.mount(root);
     });
 
@@ -266,6 +266,9 @@ async function runPlanningTests(browser, baseUrl, evidenceDir) {
       window.__memoEvents = [];
       window.__planning.memo = {
         mount: root => window.__memoEvents.push(['mount', Boolean(root)]),
+        // show() 参与页签重返读取（BUG-08）；假件缺 show 会让第二次
+        // switchTab('memo') 调用不存在的方法
+        show: async () => window.__memoEvents.push(['show']),
         flushPending: () => window.__memoEvents.push(['flush']),
         dispose: () => window.__memoEvents.push(['dispose']),
       };
@@ -275,7 +278,7 @@ async function runPlanningTests(browser, baseUrl, evidenceDir) {
       window.__planning.unmount();
     });
     assert.deepEqual(await page.evaluate(() => window.__memoEvents), [
-      ['mount', true], ['flush'], ['dispose'],
+      ['mount', true], ['flush'], ['show'], ['dispose'],
     ]);
     covered.push('Integration: memo mounts once on entry, flushes on exit and disposes on route unmount');
     assert.deepEqual(errors, [], 'No uncaught browser errors');
