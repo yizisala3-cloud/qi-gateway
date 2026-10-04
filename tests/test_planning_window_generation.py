@@ -550,7 +550,9 @@ def test_freeze_survives_carryover_and_template_edit():
         # 原样保留；同批生成的 9/25 轮按旧模板冻结
         planning.generate_due(at(26, 7))
         assert first["status"] == "timeout"
-        assert first["closed_at"] == iso(25, 6)
+        # R2 双死亡边界：冻结窗口（18:00–22:00）早于周期终点，收场取窗口
+        # 终点并保持窗口超时口径
+        assert first["closed_at"] == iso(24, 22)
         assert first["display_cycle_date"] == "2026-09-25"
         assert first["display_reason"] == "carryover"
         assert first["window_start_at"] == iso(24, 18)

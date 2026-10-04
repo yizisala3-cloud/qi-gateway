@@ -165,6 +165,198 @@ class PlanningApiContractTests(unittest.TestCase):
                   if row.get("task_id") == first.json()["id"]]
         self.assertEqual(len(rounds), 1)
 
+    # ── R3（残留 A）：同键同内容的迟到重试先于时效准入重放 ──────────
+
+    def test_create_late_retry_after_window_deadline_replays(self):
+        """9/22 07:00 创建窗口 08:00–09:00 的 once 成功；09:01 同键重试
+        必须重放同一任务，不得用当前时间重新否认已成立的创建。"""
+        clock = {"now": _cst(2026, 9, 22, 7, 0)}
+        headers = {**self.auth, "Idempotency-Key": "late-window-1"}
+        payload = {"content": "晨读", "task_type": "once", "estimated_minutes": 30,
+                   "target_date": "2026-09-22",
+                   "window_start_tod": "08:00", "window_end_tod": "09:00"}
+        with mock.patch.object(planning_runtime, "_now", lambda: clock["now"]):
+            first = self.http.post("/admin/api/planning/tasks", json=payload, headers=headers)
+            clock["now"] = _cst(2026, 9, 22, 9, 1)
+            retry = self.http.post("/admin/api/planning/tasks", json=payload, headers=headers)
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(retry.status_code, 201)
+        self.assertEqual(retry.json()["id"], first.json()["id"])
+        self.assertTrue(retry.json()["idempotent_replay"])
+        self.assertEqual(len(self.client.rows["planning_task"]), 1)
+
+    def test_create_late_retry_next_day_replays(self):
+        """23:59 创建当天无窗口 once 成功；次日 00:01 同键重试重放同一任务
+        （目标日期早于当前业务日期的下界校验不适用于已成立创建）。"""
+        clock = {"now": _cst(2026, 9, 22, 23, 59)}
+        headers = {**self.auth, "Idempotency-Key": "late-day-1"}
+        payload = {"content": "常驻", "task_type": "once", "estimated_minutes": 30,
+                   "target_date": "2026-09-22"}
+        with mock.patch.object(planning_runtime, "_now", lambda: clock["now"]):
+            first = self.http.post("/admin/api/planning/tasks", json=payload, headers=headers)
+            clock["now"] = _cst(2026, 9, 23, 0, 1)
+            retry = self.http.post("/admin/api/planning/tasks", json=payload, headers=headers)
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(retry.status_code, 201)
+        self.assertEqual(retry.json()["id"], first.json()["id"])
+        self.assertTrue(retry.json()["idempotent_replay"])
+        self.assertEqual(len(self.client.rows["planning_task"]), 1)
+
+    def test_create_late_retry_after_boundary_change_replays(self):
+        """创建与重试之间边界配置变化：同键同内容重放不读当前配置、
+        不受首次创建时效准入影响。"""
+        clock = {"now": _cst(2026, 9, 21, 12, 0)}
+        headers = {**self.auth, "Idempotency-Key": "late-boundary-1"}
+        payload = {"content": "晨读", "task_type": "once", "estimated_minutes": 30,
+                   "target_date": "2026-09-22",
+                   "window_start_tod": "08:00", "window_end_tod": "09:00"}
+        with mock.patch.object(planning_runtime, "_now", lambda: clock["now"]):
+            first = self.http.post("/admin/api/planning/tasks", json=payload, headers=headers)
+            self.http.patch(
+                "/admin/api/planning/cycle",
+                json={"refresh_boundary_time": "04:00"}, headers=self.auth)
+            clock["now"] = _cst(2026, 9, 22, 10, 0)
+            retry = self.http.post("/admin/api/planning/tasks", json=payload, headers=headers)
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(retry.status_code, 201)
+        self.assertEqual(retry.json()["id"], first.json()["id"])
+        self.assertTrue(retry.json()["idempotent_replay"])
+
+    def test_create_new_key_after_deadline_still_rejected(self):
+        """首次创建（新 key）的时效准入保留：截止已过的同形请求仍 400。"""
+        clock = {"now": _cst(2026, 9, 22, 7, 0)}
+        payload = {"content": "晨读", "task_type": "once", "estimated_minutes": 30,
+                   "target_date": "2026-09-22",
+                   "window_start_tod": "08:00", "window_end_tod": "09:00"}
+        with mock.patch.object(planning_runtime, "_now", lambda: clock["now"]):
+            first = self.http.post(
+                "/admin/api/planning/tasks", json=payload,
+                headers={**self.auth, "Idempotency-Key": "fresh-1"})
+            clock["now"] = _cst(2026, 9, 22, 9, 1)
+            second = self.http.post(
+                "/admin/api/planning/tasks", json=payload,
+                headers={**self.auth, "Idempotency-Key": "fresh-2"})
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 400)
+        self.assertEqual(second.json()["error_code"], "invalid_payload")
+        self.assertEqual(len(self.client.rows["planning_task"]), 1)
+
+    # ── R4（残留 B）：refresh_enabled / refresh_mode 纳入语义内容快照 ──
+
+    def test_create_same_key_refresh_toggle_rejected_409(self):
+        """同键其它字段相同但 refresh_enabled 翻转 = 不同创建意图：
+        409 request_conflict，原任务与实例零副作用。"""
+        headers = {**self.auth, "Idempotency-Key": "refresh-toggle-1"}
+        with mock.patch.object(planning_runtime, "_now", lambda: NOW):
+            first = self.http.post(
+                "/admin/api/planning/tasks",
+                json={"content": "背单词", "task_type": "daily",
+                      "estimated_minutes": 30, "refresh_enabled": False},
+                headers=headers)
+            second = self.http.post(
+                "/admin/api/planning/tasks",
+                json={"content": "背单词", "task_type": "daily",
+                      "estimated_minutes": 30, "refresh_enabled": True},
+                headers=headers)
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(second.json()["error_code"], "request_conflict")
+        tasks = self.client.rows["planning_task"]
+        self.assertEqual(len(tasks), 1)
+        self.assertIs(tasks[0]["refresh_enabled"], False)
+        self.assertEqual(self.client.rows["planning_occurrence"], [])
+
+    def test_create_same_key_omitted_refresh_enabled_matches_explicit_true(self):
+        """省略 refresh_enabled 与显式 true 语义等价：同键重放，不 409。"""
+        headers = {**self.auth, "Idempotency-Key": "refresh-default-1"}
+        with mock.patch.object(planning_runtime, "_now", lambda: NOW):
+            first = self.http.post(
+                "/admin/api/planning/tasks",
+                json={"content": "背单词", "task_type": "daily", "estimated_minutes": 30},
+                headers=headers)
+            retry = self.http.post(
+                "/admin/api/planning/tasks",
+                json={"content": "背单词", "task_type": "daily",
+                      "estimated_minutes": 30, "refresh_enabled": True},
+                headers=headers)
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(retry.status_code, 201)
+        self.assertEqual(retry.json()["id"], first.json()["id"])
+        self.assertTrue(retry.json()["idempotent_replay"])
+        self.assertEqual(len(self.client.rows["planning_task"]), 1)
+
+    def test_create_same_key_refresh_mode_semantic_default_matches(self):
+        """省略 daily 的 refresh_mode 与显式传 daily 语义等价（审查补充
+        观察 semantic_default）：同键重放，不 409。"""
+        headers = {**self.auth, "Idempotency-Key": "mode-default-1"}
+        with mock.patch.object(planning_runtime, "_now", lambda: NOW):
+            first = self.http.post(
+                "/admin/api/planning/tasks",
+                json={"content": "背单词", "task_type": "daily", "estimated_minutes": 30},
+                headers=headers)
+            retry = self.http.post(
+                "/admin/api/planning/tasks",
+                json={"content": "背单词", "task_type": "daily",
+                      "estimated_minutes": 30, "refresh_mode": "daily"},
+                headers=headers)
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(retry.status_code, 201)
+        self.assertEqual(retry.json()["id"], first.json()["id"])
+        self.assertTrue(retry.json()["idempotent_replay"])
+        self.assertEqual(len(self.client.rows["planning_task"]), 1)
+
+    def test_create_same_key_refresh_false_same_value_replays(self):
+        """refresh_enabled=false 同键同值重放照常收敛。"""
+        headers = {**self.auth, "Idempotency-Key": "refresh-false-1"}
+        payload = {"content": "背单词", "task_type": "daily",
+                   "estimated_minutes": 30, "refresh_enabled": False}
+        with mock.patch.object(planning_runtime, "_now", lambda: NOW):
+            first = self.http.post("/admin/api/planning/tasks", json=payload, headers=headers)
+            retry = self.http.post("/admin/api/planning/tasks", json=payload, headers=headers)
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(retry.status_code, 201)
+        self.assertEqual(retry.json()["id"], first.json()["id"])
+        self.assertTrue(retry.json()["idempotent_replay"])
+        self.assertEqual(len(self.client.rows["planning_task"]), 1)
+
+    def test_create_different_key_refresh_toggle_creates_independent_task(self):
+        """不同键的 refresh_enabled 差异 = 两个独立创建意图（不按内容去重）。"""
+        with mock.patch.object(planning_runtime, "_now", lambda: NOW):
+            first = self.http.post(
+                "/admin/api/planning/tasks",
+                json={"content": "背单词", "task_type": "daily",
+                      "estimated_minutes": 30, "refresh_enabled": False},
+                headers={**self.auth, "Idempotency-Key": "toggle-a"})
+            second = self.http.post(
+                "/admin/api/planning/tasks",
+                json={"content": "背单词", "task_type": "daily",
+                      "estimated_minutes": 30, "refresh_enabled": True},
+                headers={**self.auth, "Idempotency-Key": "toggle-b"})
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 201)
+        self.assertNotEqual(first.json()["id"], second.json()["id"])
+        self.assertEqual(len(self.client.rows["planning_task"]), 2)
+
+    def test_create_same_key_concurrent_requests_converge(self):
+        """同键并发创建：唯一索引收敛到先提交者，失败方重读重放，
+        全部请求返回同一任务，不重复建任务。"""
+        headers = {**self.auth, "Idempotency-Key": "concurrent-1"}
+        payload = {"content": "背单词", "task_type": "daily", "estimated_minutes": 30}
+        from concurrent.futures import ThreadPoolExecutor
+
+        def post(_):
+            return self.http.post("/admin/api/planning/tasks", json=payload, headers=headers)
+
+        with mock.patch.object(planning_runtime, "_now", lambda: NOW):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                responses = list(pool.map(post, range(8)))
+        self.assertTrue(all(r.status_code == 201 for r in responses),
+                        [r.status_code for r in responses])
+        ids = {r.json()["id"] for r in responses}
+        self.assertEqual(len(ids), 1, ids)
+        self.assertTrue(any(r.json().get("idempotent_replay") for r in responses))
+        self.assertEqual(len(self.client.rows["planning_task"]), 1)
+
     def test_invalid_task_payload_is_400_with_code(self):
         response = self.http.post(
             "/admin/api/planning/tasks",

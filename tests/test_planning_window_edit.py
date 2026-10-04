@@ -49,7 +49,8 @@ def test_patch_template_window_future_rounds_adopt_new_template():
         # A 随每日周期收场（清单 #32 口裁决，属生命周期规则而非模板改写），
         # 冻结窗口事实仍逐字节原样（status 是唯一合法变化）
         assert first["status"] == "timeout"
-        assert first["closed_at"] == iso(25, 6)
+        # R2 双死亡边界：冻结窗口早于周期终点，收场取窗口终点
+        assert first["closed_at"] == iso(24, 12)
         assert (first["window_start_at"], first["window_end_at"]) == (iso(24, 9), iso(24, 12))
         assert ({k: v for k, v in _fields(first).items() if k != "status"}
                 == {k: v for k, v in before.items() if k != "status"})

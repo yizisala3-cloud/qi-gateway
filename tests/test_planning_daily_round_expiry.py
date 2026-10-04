@@ -9,6 +9,8 @@ deferred / partial）自动关闭标记「已超时」，历史与已有事实�
 
 from gateway import planning
 
+from gateway.planning_common import PLANNING_BOUNDARY_STATE_KEY
+
 from tests.support.planning_context import Context, at
 
 OPEN = ("pending", "in_progress", "deferred", "partial")
@@ -192,3 +194,126 @@ def test_after_completion_and_once_carryover_unaffected():
         assert len(open_rows) == 2
         assert all(row["status"] == "pending" for row in open_rows)
         assert open_rows[0]["display_reason"] == "carryover"
+
+# ── R2（残留 B）：离线恢复的窗口截止保持窗口超时口径，与入口顺序无关 ──
+
+def test_offline_recovery_window_death_identical_both_orders():
+    # 9/21 07:00 创建（冻结窗口 08:00–09:00），窗口越过前离线，9/23 06:00
+    # 恢复：无论先生成后 sweep，还是先 sweep 后生成，旧轮都必须在窗口
+    # 终点（9/21 09:00）收场并保留「待处理」入口，closed_at 不随入口顺序。
+    for sweep_first in (False, True):
+        with Context() as c:
+            c.create("daily", at(21, 7), window_start_tod="08:00", window_end_tod="09:00")
+            if sweep_first:
+                planning.sweep_timeouts(at(23, 6))
+                planning.generate_due(at(23, 6, 1))
+            else:
+                planning.generate_due(at(23, 6))
+                planning.sweep_timeouts(at(23, 6, 1))
+            old = next(row for row in c.rows if row["schedule_date"] == "2026-09-21")
+            assert old["status"] == "timeout"
+            assert old["closed_at"] == at(21, 9).isoformat()
+            board = planning.today_board(at(23, 12))
+            assert [item["round_key"] for item in board["progress"]] == ["cycle:2026-09-23"]
+            assert [item["schedule_date"] for item in board["attention"]] == ["2026-09-21"]
+            assert board["done"] == []
+
+
+def test_repeated_maintenance_window_death_stable():
+    # 重复维护对窗口死亡幂等：closed_at 不被二次改写、不重复计数。
+    with Context() as c:
+        c.create("daily", at(21, 7), window_start_tod="08:00", window_end_tod="09:00")
+        first = planning.generate_due(at(23, 6))
+        assert first["timed_out"] == 1
+        second = planning.generate_due(at(23, 6, 30))
+        assert second["created"] == 0 and second["timed_out"] == 0
+        old = next(row for row in c.rows if row["schedule_date"] == "2026-09-21")
+        assert old["closed_at"] == at(21, 9).isoformat()
+
+
+def test_window_end_equal_cycle_end_keeps_attention():
+    # 窗口终点恰为周期终点（跨午夜 22:00–06:00，boundary 06:00）：保持
+    # 既有保守口径——按窗口超时进「待处理」。
+    with Context() as c:
+        c.create("daily", at(21, 7), window_start_tod="22:00", window_end_tod="06:00")
+        old = c.rows[0]
+        assert old["window_end_at"] == at(22, 6).isoformat()  # 周期 9/21 的自然终点
+        planning.generate_due(at(23, 6))
+        assert old["closed_at"] == at(22, 6).isoformat()
+        board = planning.today_board(at(23, 12))
+        assert [item["schedule_date"] for item in board["attention"]] == ["2026-09-21"]
+
+
+# ── R5（残留 C）：过渡结束后的收场按持久化记录还原实际周期终点 ──
+
+def test_absorbed_transition_death_uses_actual_cycle_end():
+    # 边界 06:00 → 9/23 05:00 改为 02:00：9/22 冻结周期延伸到 9/24 02:00，
+    # 9/23 被吸收。9/24 02:00 收场时 transition 已不再生效，死亡时刻必须
+    # 仍还原为实际周期终点 9/24 02:00，而不是按新边界回算的 9/23 02:00。
+    with Context() as c:
+        c.create("daily", at(22, 7))
+        planning.set_cycle_settings({"refresh_boundary_time": "02:00"}, at(23, 5))
+        state = planning.get_cycle_settings(at(23, 6))
+        assert state["pending_boundary"]["spanning_key"] == "2026-09-22"
+        assert state["cycle_end"] == at(24, 2).isoformat()  # 权威周期终点
+        result = planning.generate_due(at(24, 2))
+        assert result["created"] == 1  # 9/24 新周期正常生成
+        old = next(row for row in c.rows if row["schedule_date"] == "2026-09-22")
+        assert old["status"] == "timeout"
+        assert old["closed_at"] == at(24, 2).isoformat()
+
+
+def test_consecutive_boundary_changes_death_uses_actual_end():
+    # 连续两次边界修改（02:00 未生效前再改 04:00）：冻结段 9/22 的实际
+    # 终点随最新修改延伸到 9/24 04:00，收场 closed_at 与之一致。
+    with Context() as c:
+        c.create("daily", at(22, 7))
+        planning.set_cycle_settings({"refresh_boundary_time": "02:00"}, at(23, 5))
+        planning.set_cycle_settings({"refresh_boundary_time": "04:00"}, at(23, 10))
+        state = planning.get_cycle_settings(at(23, 11))
+        assert state["pending_boundary"]["spanning_key"] == "2026-09-22"
+        assert state["cycle_end"] == at(24, 4).isoformat()
+        result = planning.generate_due(at(24, 4))
+        assert result["created"] == 1
+        old = next(row for row in c.rows if row["schedule_date"] == "2026-09-22")
+        assert old["status"] == "timeout"
+        assert old["closed_at"] == at(24, 4).isoformat()
+
+
+def test_pause_across_transition_closes_at_actual_end_after_resume():
+    # 暂停穿越过渡、恢复后第一次生成收场：死亡时刻同样是实际周期终点。
+    with Context() as c:
+        task = c.create("daily", at(22, 7))
+        planning.update_task(task["id"], {"refresh_enabled": False}, at(22, 8))
+        planning.set_cycle_settings({"refresh_boundary_time": "02:00"}, at(23, 5))
+        planning.generate_due(at(23, 12))  # 暂停期间：不生成、不收场
+        assert len(c.rows) == 1
+        assert c.rows[0]["status"] == "pending"
+        planning.update_task(task["id"], {"refresh_enabled": True}, at(24, 1))
+        planning.generate_due(at(24, 2))
+        old = c.rows[0]
+        assert old["status"] == "timeout"
+        assert old["closed_at"] == at(24, 2).isoformat()
+
+
+def test_absorbed_day_skip_after_completed_transition_then_new_change():
+    # 第一次过渡（06:00→02:00，9/22 冻结段延伸到 9/24 02:00，9/23 吸收）
+    # 真正走完且吸收转入永久登记后，再次修改（02:00→04:00，冻结段变为
+    # 9/25）：旧 9/22 轮的名义终点落在被吸收的 9/23 上，死亡时刻必须按
+    # 吸收登记前移到下一个真实周期起点 9/24 02:00。
+    with Context() as c:
+        task = c.create("daily", at(22, 7))
+        planning.set_cycle_settings({"refresh_boundary_time": "02:00"}, at(23, 5))
+        planning.update_task(task["id"], {"refresh_enabled": False}, at(23, 6))
+        planning.generate_due(at(24, 2))  # 第一次过渡走完（暂停期间旧轮保持开放）
+        planning.set_cycle_settings({"refresh_boundary_time": "04:00"}, at(25, 10))
+        state = planning.get_cycle_settings(at(25, 11))
+        assert state["pending_boundary"]["spanning_key"] == "2026-09-25"
+        # 第一次过渡走完后，其吸收事实在下一次修改时转入永久登记（B1）
+        raw_state = c.settings[PLANNING_BOUNDARY_STATE_KEY]
+        assert "2026-09-23" in (raw_state.get("absorbed") or [])
+        planning.update_task(task["id"], {"refresh_enabled": True}, at(26, 3))
+        planning.generate_due(at(26, 4))
+        old = next(row for row in c.rows if row["schedule_date"] == "2026-09-22")
+        assert old["status"] == "timeout"
+        assert old["closed_at"] == at(24, 2).isoformat()

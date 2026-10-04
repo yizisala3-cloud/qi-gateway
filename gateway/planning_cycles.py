@@ -83,6 +83,40 @@ def _parse_boundary_state(raw: Any, now: datetime) -> tuple[time, BoundaryTransi
     return boundary, transition, frozenset(absorbed | planned_absorbed)
 
 
+def _load_boundary_record_transition() -> BoundaryTransition | None:
+    """从持久化边界快照重建过渡对象，无论其当前是否仍在生效（清单 #32 R5）。
+
+    ``_parse_boundary_state`` 只在过渡仍生效（``active_at(now)``）时返回
+    transition；过渡真正走完后记录仍持久保留在同一 app_settings 行，但
+    不再作为 transition 暴露。每日旧轮的**实际**周期终点重建需要这段
+    过渡历史（冻结段的终点 = ``effective_at``，晚于过渡完成时刻的扫描
+    仍须还原），本入口按同一 ``BoundaryTransition.plan`` 语义重建，不
+    复制第二套解析。快照缺失 / 无过渡记录 / 记录无效一律返回 None
+    （与既有「无效记录按无过渡处理」口径一致）；设置读取失败按既有
+    三态语义抛 503，不静默降级。
+    """
+    raw = db.load_app_setting(common.PLANNING_BOUNDARY_STATE_KEY)
+    if raw is db.APP_SETTING_QUERY_FAILED:
+        raise common.PlanningError("database_unavailable", "规划周期配置暂时无法读取", 503)
+    if not isinstance(raw, dict):
+        return None
+    info = raw.get("transition")
+    if not isinstance(info, dict):
+        return None
+    try:
+        return BoundaryTransition.plan(
+            date.fromisoformat(info["spanning_key"]),
+            parse_refresh_boundary(info["spanning_boundary"]),
+            common._parse_dt(info["change_at"], "refresh_boundary_change_at"),
+            parse_refresh_boundary(
+                raw.get("boundary") or DEFAULT_REFRESH_BOUNDARY.strftime("%H:%M")
+            ),
+        )
+    except (KeyError, TypeError, ValueError):
+        log.warning("planning 边界过渡记录无效，历史周期重建按无过渡处理")
+        return None
+
+
 class PlanningRequestContext:
     """Lazy request-local settings, with failures interpreted at their original stage.
 

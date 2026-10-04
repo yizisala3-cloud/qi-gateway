@@ -499,42 +499,65 @@ def _expire_fixed_rounds(client, task: dict[str, Any], now: datetime) -> int:
 
 def _daily_round_death_boundary(
     schedule_date: date, configured: time, transition: BoundaryTransition | None,
+    absorbed: frozenset[date],
 ) -> datetime:
-    """每日轮次的死亡边界 = 其所属规划周期的自然终点（下一实际周期开始）。
+    """每日轮次的死亡边界 = 其所属**实际**规划周期的自然终点（下一真实周期开始）。
 
-    完全复用既有周期原语，不复制第二套周期数学：以该轮周期自身的起始
+    复用既有周期原语重建，不复制第二套周期数学：以该轮周期自身的起始
     边界（``cycle_start_boundary``，过渡期冻结段沿用 spanning 边界）构造
     周期内时刻，再取 ``planning_cycle_at`` 的周期终点——跨周期冻结段
-    （spanning cycle）的终点已被权威函数替换为 ``effective_at``，吸收日
-    不存在轮次，无需在此特判。
+    （spanning cycle）的终点已被权威函数替换为 ``effective_at``，因此
+    过渡生效期间与过渡结束后的第一次收场（R5，配合调用方传入的持久化
+    记录重建 transition）都还原真实终点。当名义终点落在**更早的已完成
+    过渡**所吸收的日期上时（吸收日不命名规划周期，B1 语义），按吸收
+    登记逐日前移到下一个真实周期起点；已知局限：早于当前保留过渡记录
+    冻结段、且其所属周期边界又被更早过渡改变过的存量轮次，只能按现有
+    记录近似（与 ``cycle_start_boundary`` 的模型简化一致）。
     """
     start_boundary = cycle_start_boundary(schedule_date, configured, transition)
     moment = datetime.combine(schedule_date, start_boundary, BUSINESS_TIMEZONE)
-    return planning_cycle_at(moment, configured, transition).end
+    cycle = planning_cycle_at(moment, configured, transition)
+    nominal_end_day = cycle.end.astimezone(BUSINESS_TIMEZONE).date()
+    end_day = nominal_end_day
+    while end_day in absorbed:
+        end_day += timedelta(days=1)
+    if end_day == nominal_end_day:
+        return cycle.end
+    return datetime.combine(
+        end_day, cycle_start_boundary(end_day, configured, transition), BUSINESS_TIMEZONE)
 
 
 def _expire_daily_rounds(
     client, task: dict[str, Any], today: date, now: datetime,
     configured: time, transition: BoundaryTransition | None,
+    absorbed: frozenset[date],
 ) -> int:
     """每日旧轮在新轮照常生成的周期收场（清单 #32，2026-10-04 user 口裁决）。
 
     口径（user 确认）：新轮生成时，旧未处理每日轮自动关闭标记「已超时」
     （§8.4「到期死亡」同型生命周期；含执行中 / partial，已有事实原样保留，
-    不写完成 / 处理事实、不推进任何刷新基准），死亡时刻 = 旧轮所属周期的
-    自然终点。仅 ``can_generate``（生成门禁）时执行：暂停刷新 / 关闭每日
-    刷新不生成新轮，旧轮保持开放继续顺延展示（需求 24 / §5.3）。与固定
-    到期清理同序且解耦：清理先于新轮创建，新轮 INSERT 失败不阻止已越界
-    旧轮关闭（否则其在 ``closed_at`` 之前仍可被 completed）；清理幂等，
-    重复调用不重复计数、不重复终态写入。展示随关闭顺延到当前周期
-    （``display_reason=carryover``，不得早于 ``schedule_date``），使关闭
-    记录出现在收场周期「已完成」；「待处理」分区由
-    :func:`is_daily_cycle_death` 按同一口径排除这类周期死亡（user 裁决：
-    不出现在待处理）。
+    不写完成 / 处理事实、不推进任何刷新基准）。死亡时刻 = 旧轮所属实际
+    周期的自然终点，与已成立的冻结窗口截止共用**双死亡边界裁决**（R2，
+    与固定到期 ``_expire_fixed_rounds`` 同形）：窗口终点更早时取窗口终点，
+    收场原因随之归窗口超时（``is_daily_cycle_death`` 按 ``closed_at ==
+    window_end_at`` 识别），不再依赖 sweep 与收场的执行顺序；恰等时保持
+    既有保守口径（按窗口超时进「待处理」）。过渡完成后仍按持久化记录
+    重建历史周期（R5：``_parse_boundary_state`` 在 ``effective_at`` 之后
+    不再暴露 transition，按需读取一次记录重建）。仅 ``can_generate``
+    （生成门禁）时执行：暂停刷新 / 关闭每日刷新不生成新轮，旧轮保持
+    开放继续顺延展示（需求 24 / §5.3）。与固定到期清理同序且解耦：清理
+    先于新轮创建，新轮 INSERT 失败不阻止已越界旧轮关闭（否则其在
+    ``closed_at`` 之前仍可被 completed）；清理幂等，重复调用不重复计数、
+    不重复终态写入。展示随关闭顺延到当前周期（``display_reason=carryover``，
+    不得早于 ``schedule_date``），使关闭记录出现在收场周期「已完成」；
+    「待处理」分区由 :func:`is_daily_cycle_death` 按同一口径排除这类
+    周期死亡（user 裁决：不出现在待处理）。
     """
     open_rows = _task_open_rows(client, task["id"])
     expired = 0
     expired_rounds: set[str] = set()
+    record_transition = transition
+    record_resolved = transition is not None
     for occ in open_rows:
         round_key = occ.get("round_key")
         if not round_key or round_key in expired_rounds:
@@ -545,7 +568,17 @@ def _expire_daily_rounds(
         schedule_date = date.fromisoformat(raw)
         if schedule_date >= today:
             continue  # 当前周期的轮次（含本轮新轮）保持开放
-        death = _daily_round_death_boundary(schedule_date, configured, transition)
+        if not record_resolved:
+            # R5：无生效过渡 ≠ 无过渡历史——过渡完成后按持久化记录重建。
+            record_transition = cycles._load_boundary_record_transition()
+            record_resolved = True
+        death = _daily_round_death_boundary(
+            schedule_date, configured, record_transition, absorbed)
+        end_at = occ.get("window_end_at")
+        if end_at:
+            window_end = common._parse_dt(end_at, "window_end_at")
+            if window_end < death:
+                death = window_end  # 更早成立的窗口截止保持窗口超时口径（R2）
         client.table("planning_occurrence").update({
             "status": "timeout", "closed_at": common._iso(death),
             "display_cycle_date": today.isoformat(),
@@ -643,7 +676,7 @@ def _reconcile_task_rounds(
             # 旧轮保持开放继续顺延展示。legacy 门禁只禁止新生成，不影响
             # 存量轮次的到期死亡（与固定分支同一口径）。
             timed_out += _expire_daily_rounds(
-                client, task, today, now, configured, transition)
+                client, task, today, now, configured, transition, absorbed)
         if can_generate and not legacy_definition:
             task_created = common._parse_dt(task["created_at"], "created_at")
             first_cycle = planning_cycle_at(task_created, configured, transition).key
