@@ -751,6 +751,10 @@ class PlanningNavigationContractTests(unittest.TestCase):
             var __result = null, __error = null;
             (async () => {
               let cur = null;
+              // quickjs 裸环境无 Web Crypto：#9 创建幂等键在表单打开时生成，
+              // 计数器键可区分「同表单重试复用」与「重开新键」。
+              let __keySeq = 0;
+              globalThis.crypto = { randomUUID: () => 'form-key-' + (++__keySeq) };
               globalThis.loadAll = async () => {
                 if (cur.failLoad) throw new Error('load boom');
                 cur.loads += 1;
@@ -762,7 +766,8 @@ class PlanningNavigationContractTests(unittest.TestCase):
                 cur = s;
                 const queue = [];
                 const gw = (url, opts) => new Promise((resolve, reject) => {
-                  s.calls.push({ url: url, method: opts.method, body: opts.body });
+                  s.calls.push({ url: url, method: opts.method, body: opts.body,
+                                 headers: opts.headers || {} });
                   s.inFlightDisabled = submitBtn.disabled;
                   queue.push({ resolve: resolve, reject: reject });
                 });
@@ -789,6 +794,10 @@ class PlanningNavigationContractTests(unittest.TestCase):
                 const typeSelect = { value: 'daily' };
                 const submitBtn = { disabled: false };
                 let submitting = false, committed = false, createdTask = null;
+                // 创建幂等键（#9）：真实作用域在 openTaskForm 体内（每次打开
+                // 新建表单生成一次），拼接 handler 的场景桩以固定键等价模拟，
+                // 供 B 块断言「失败重试复用同一键」。
+                const creationIdempotencyKey = 'idem-key-fixed';
                 const onSaved = globalThis.loadAll;
                 // handler 源码在此拼接：闭包必须覆盖本场景的锁与终态变量
                 const onclick = __HANDLER__;
@@ -832,6 +841,11 @@ class PlanningNavigationContractTests(unittest.TestCase):
                 await p3;
                 out.b_retry = { disabled: env.submitBtn.disabled, calls: env.s.calls.length,
                                 closed: env.s.closed };
+                // #9 键生命周期：同一打开表单内失败重试复用同一创建键
+                out.b_keys_same = (
+                  env.s.calls.length >= 3
+                  && env.s.calls.every((c) => (
+                    c.headers && c.headers['Idempotency-Key'] === 'idem-key-fixed')));
               }
 
               // C：payload 构建阶段同步异常 → 解锁恢复，修复后可再次提交
@@ -913,7 +927,8 @@ class PlanningNavigationContractTests(unittest.TestCase):
                 const g = { calls: [], closedForms: 0, forms: [] };
                 const queue = [];
                 const gw = (url, opts) => new Promise((resolve, reject) => {
-                  g.calls.push({ url: url, method: opts.method, body: opts.body });
+                  g.calls.push({ url: url, method: opts.method, body: opts.body,
+                                 headers: opts.headers || {} });
                   queue.push({ resolve: resolve, reject: reject });
                 });
                 const toast = (msg) => { g.toasts.push(msg); };
@@ -954,7 +969,8 @@ class PlanningNavigationContractTests(unittest.TestCase):
                 queue[0].resolve({});
                 await p1;
                 out.g_form1 = { closedForms: g.closedForms, calls: g.calls.length,
-                                method: g.calls[0].method };
+                                method: g.calls[0].method,
+                                key: g.calls[0].headers['Idempotency-Key'] };
                 await click1();
                 out.g_form1_reclick_calls = g.calls.length;
                 openForm.call(self2, {});
@@ -963,7 +979,8 @@ class PlanningNavigationContractTests(unittest.TestCase):
                 queue[1].resolve({});
                 await p2;
                 out.g_form2 = { closedForms: g.closedForms, calls: g.calls.length,
-                                identicalPayload: g.calls[0].body === g.calls[1].body };
+                                identicalPayload: g.calls[0].body === g.calls[1].body,
+                                key: g.calls[1].headers['Idempotency-Key'] };
               }
 
               return out;
@@ -1004,6 +1021,9 @@ class PlanningNavigationContractTests(unittest.TestCase):
         self.assertEqual(out["b_retry"]["calls"], 3)
         self.assertTrue(out["b_retry"]["disabled"])
         self.assertEqual(out["b_retry"]["closed"], 1)
+        # #9：同一打开表单内失败重试复用同一创建幂等键
+        self.assertTrue(out["b_keys_same"],
+                        "retries within one opened form must reuse the same creation key")
 
         # C：构建阶段同步异常 → 解锁恢复，修复后可再次提交
         self.assertEqual(out["c_build_fail"]["calls"], 0, "no request must fire when build throws")
@@ -1052,6 +1072,9 @@ class PlanningNavigationContractTests(unittest.TestCase):
         self.assertEqual(out["g_form2"]["closedForms"], 2)
         self.assertTrue(out["g_form2"]["identicalPayload"],
                         "second identical create must send an identical payload")
+        # #9：重新打开表单 = 新创建意图 → 新键（不复用旧键）
+        self.assertEqual(out["g_form1"]["key"], "form-key-1")
+        self.assertEqual(out["g_form2"]["key"], "form-key-2")
 
     def test_task_form_creation_feedback_and_resident_clear_behaviour(self):
         """R4 / R5 行为级验证（quickjs 真实执行 openTaskForm 与提交 handler）。
@@ -1073,6 +1096,9 @@ class PlanningNavigationContractTests(unittest.TestCase):
             var __result = null, __error = null;
             (async () => {
               const out = {};
+              // quickjs 裸环境无 Web Crypto：#9 创建幂等键在表单打开时生成。
+              let __keySeq = 0;
+              globalThis.crypto = { randomUUID: () => 'probe-key-' + (++__keySeq) };
               const makeForm = (initial) => {
                 const values = Object.assign({
                   'pf-content': '审查探针', 'pf-estimated': '90',

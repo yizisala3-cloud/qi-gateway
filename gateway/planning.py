@@ -263,6 +263,11 @@ def today_board(now: datetime | None = None) -> dict[str, Any]:
             progress.append(item)
         elif row["status"] in common.CLOSED_STATUSES:
             done.append(item)
+        elif row["status"] == "timeout" and generation.is_daily_cycle_death(row, task):
+            # 清单 #32（2026-10-04 user 口裁决）：每日周期死亡不进「待处理」，
+            # 作为关闭记录进入收场周期「已完成」；窗口 sweep 超时（§18.2）
+            # 仍走 attention。
+            done.append(item)
     progress.sort(key=lambda item: (item["sort_order"], item["id"]))
     done.sort(key=lambda item: (item.get("closed_at") or "", item["id"]), reverse=True)
 
@@ -270,6 +275,12 @@ def today_board(now: datetime | None = None) -> dict[str, Any]:
     for row in timeout_rows:
         task = tasks.get(row["task_id"])
         if not task:
+            continue
+        # 清单 #32（2026-10-04 user 口裁决）：每日旧轮随新轮生成自动超时
+        # 收场（周期死亡），只作为关闭历史出现在当前周期「已完成」与全部
+        # 待办，不进「待处理」；窗口 sweep 超时（用户明确的最晚完成，§18.2）
+        # 保持既有待处理展示。识别与收场写入同源（generation 模块）。
+        if generation.is_daily_cycle_death(row, task):
             continue
         attention.append(presentation.serialize_occurrence(row, task, now))
     attention.sort(key=lambda item: (item["schedule_date"], item["id"]))

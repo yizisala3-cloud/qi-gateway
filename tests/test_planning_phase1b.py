@@ -149,6 +149,9 @@ def test_early_round_is_not_an_axis_round_and_survives_expiry_sweeps():
 
 
 def test_daily_boundary_switch_replay_and_identity_carryover():
+    # 清单 #32（2026-10-04 user 口裁决）：每日旧轮不作为开放轮次顺延——
+    # 新轮生成的周期开始时，旧轮按其所属周期终点自动收场（timeout，展示
+    # 随收场顺延 carryover，历史与身份保留）。
     with Context() as c:
         before = at(24, 5, 59)
         c.create("daily", before)
@@ -158,17 +161,24 @@ def test_daily_boundary_switch_replay_and_identity_carryover():
         assert planning.generate_due(at(24, 6))["created"] == 1
         assert first["round_key"] == "cycle:2026-09-23"
         assert first["schedule_date"] == first["for_date"] == "2026-09-23"
+        # 旧轮收场：死亡边界 = 9/23 周期自然终点（9/24 06:00），展示顺延
+        assert first["status"] == "timeout"
+        assert first["closed_at"] == at(24, 6).isoformat()
         assert (first["display_cycle_date"], first["display_reason"]) == ("2026-09-24", "carryover")
         assert planning.generate_due(at(24, 6))["created"] == 0
         planning.set_cycle_settings({"daily_refresh_enabled": False}, at(25))
         assert planning.generate_due(at(25))["created"] == 0
         assert len(c.rows) == 2
+        # 每日刷新关闭期间不收场：9/24 轮保持开放继续顺延
+        assert c.rows[1]["status"] == "pending"
         planning.set_cycle_settings({"daily_refresh_enabled": True}, at(25))
         assert planning.generate_due(at(25))["created"] == 1
         assert planning.generate_due(at(25))["created"] == 0
         assert {row["round_key"] for row in c.rows} == {
             "cycle:2026-09-23", "cycle:2026-09-24", "cycle:2026-09-25",
         }
+        assert c.rows[1]["status"] == "timeout"
+        assert c.rows[1]["closed_at"] == at(25, 6).isoformat()
 
 
 def test_daily_outage_resumes_current_cycle_without_stale_new_rounds():
@@ -177,6 +187,11 @@ def test_daily_outage_resumes_current_cycle_without_stale_new_rounds():
         assert planning.generate_due(at(27))["created"] == 1
         assert {row["schedule_date"] for row in c.rows} == {"2026-09-24", "2026-09-27"}
         assert all(row["display_cycle_date"] == "2026-09-27" for row in c.rows)
+        # 离线恢复只生成当前周期轮；错过的旧轮按其周期终点（9/25 06:00）
+        # 收场，不补生成缺席周期（§7.1.1）。
+        old = next(row for row in c.rows if row["schedule_date"] == "2026-09-24")
+        assert old["status"] == "timeout"
+        assert old["closed_at"] == at(25, 6).isoformat()
 
 
 def test_concurrent_replay_cannot_create_two_rows_for_one_round():

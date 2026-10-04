@@ -147,12 +147,16 @@ def test_monthly_pause_and_resume_continues_on_calendar_axis():
 
 def test_pause_never_closes_or_alters_open_occurrences():
     # E：pending / in_progress / partial 实例不因暂停被关闭、删除或改状态。
+    # （清单 #32 口裁决后：daily 旧轮的周期收场只发生在恢复刷新后的新轮
+    # 生成周期，暂停本身不收场、不改写任何实例。）
     with Context() as c:
         daily = c.create("daily", at(23))
         weekly = c.create("weekly", at(23, 8), weekdays=[3])
         planning.generate_due(at(24, 6))
         pending_row = next(row for row in c.rows if row["task_id"] == weekly["id"])
-        started = next(row for row in c.rows if row["task_id"] == daily["id"])
+        started = next(row for row in c.rows
+                       if row["task_id"] == daily["id"]
+                       and row["schedule_date"] == "2026-09-24")
         planning.set_occurrence_status(started["id"], {"status": "in_progress"}, at(24, 7))
         planning.set_occurrence_status(
             pending_row["id"],
@@ -165,48 +169,70 @@ def test_pause_never_closes_or_alters_open_occurrences():
                         row.get("partial_note"), row["round_key"], row["schedule_date"])
             for row in c.rows
         }
-        assert {row["status"] for row in c.rows} <= {"in_progress", "partial", "pending"}
         for _ in range(3):
             planning.generate_due(at(26, 6))
-        planning.update_task(daily["id"], {"refresh_enabled": True}, at(26, 7))
-        planning.update_task(weekly["id"], {"refresh_enabled": True}, at(26, 7))
-        planning.generate_due(at(27, 6))
+        # 暂停期间所有已存在实例零改写（含此前已周期收场的 9/23 轮）
         for row in c.rows:
             if row["id"] in snapshot:
                 assert (row["status"], row.get("closed_at"), row.get("handled_at"),
                         row.get("partial_note"), row["round_key"], row["schedule_date"]) \
                     == snapshot[row["id"]]
+        planning.update_task(daily["id"], {"refresh_enabled": True}, at(26, 7))
+        planning.update_task(weekly["id"], {"refresh_enabled": True}, at(26, 7))
+        planning.generate_due(at(27, 6))
+        # 恢复后生成当前轮；daily 旧轮随新轮按 #32 口径收场（timeout，已有
+        # 事实保留），weekly 固定轴轮次不受影响、保持 partial 开放。
+        daily_old = next(row for row in c.rows
+                         if row["task_id"] == daily["id"]
+                         and row["schedule_date"] == "2026-09-24")
+        daily_new = next(row for row in c.rows
+                         if row["task_id"] == daily["id"]
+                         and row["schedule_date"] == "2026-09-27")
+        weekly_row = next(row for row in c.rows if row["task_id"] == weekly["id"])
+        assert daily_old["status"] == "timeout"
+        assert daily_old["closed_at"] == at(25, 6).isoformat()
+        assert daily_old.get("actual_start") is not None  # in_progress 事实保留
+        assert daily_old.get("handled_at") is None        # 收场不写处理事实
+        assert daily_new["status"] == "pending"
+        assert weekly_row["status"] == "partial"
+        assert weekly_row["partial_note"] == "进行了一半"
         assert c.db.rows["planning_task"][0]["is_active"] is True
 
 
 def test_pause_and_resume_leave_closed_history_untouched():
-    # F：completed / discarded_this 历史实例完全不被修改。
+    # F：closed 历史（周期收场 timeout / completed / discarded_this）完全
+    # 不被暂停 / 恢复修改；暂停期间开放轮次保持开放。
     with Context() as c:
         task = c.create("daily", at(23))
         planning.generate_due(at(24, 6))
-        first = c.rows[0]
-        planning.set_occurrence_status(first["id"], {"status": "completed"}, at(24, 7))
+        first = next(row for row in c.rows if row["schedule_date"] == "2026-09-23")
+        assert first["status"] == "timeout"  # #32：9/24 周期开始时收场
+        second = next(row for row in c.rows if row["schedule_date"] == "2026-09-24")
+        planning.set_occurrence_status(second["id"], {"status": "completed"}, at(24, 7))
         planning.generate_due(at(25, 6))
-        second = c.rows[-1]
-        planning.set_occurrence_status(second["id"], {"status": "discarded_this"}, at(25, 8))
         pending_row = next(row for row in c.rows if row["status"] == "pending")
         history = {
             row["id"]: (row["status"], row.get("handled_at"), row.get("closed_at"),
                         row.get("updated_at"))
-            for row in c.rows if row["status"] in ("completed", "discarded_this")
+            for row in c.rows if row["status"] in ("completed", "discarded_this", "timeout")
         }
         assert len(history) == 2
         planning.update_task(task["id"], {"refresh_enabled": False}, at(25, 9))
         for _ in range(2):
             planning.generate_due(at(27, 6))
+        # 暂停前已开放的实例不被关闭（其顺延展示更新属正常行为）
+        assert next(row for row in c.rows if row["id"] == pending_row["id"])["status"] == "pending"
         planning.update_task(task["id"], {"refresh_enabled": True}, at(27, 7))
         planning.generate_due(at(28, 6))
         for row in c.rows:
             if row["id"] in history:
                 assert (row["status"], row.get("handled_at"), row.get("closed_at"),
                         row.get("updated_at")) == history[row["id"]]
-        # 暂停前已开放的实例不被关闭（其顺延展示更新属正常行为）
-        assert next(row for row in c.rows if row["id"] == pending_row["id"])["status"] == "pending"
+        # 恢复后：当前轮生成；暂停前开放的 9/25 轮随新轮按 #32 口径收场
+        assert next(row for row in c.rows
+                    if row["schedule_date"] == "2026-09-28")["status"] == "pending"
+        assert pending_row["status"] == "timeout"
+        assert pending_row["closed_at"] == at(26, 6).isoformat()
 
 
 def test_consecutive_pause_resume_toggles_converge_without_new_rounds():

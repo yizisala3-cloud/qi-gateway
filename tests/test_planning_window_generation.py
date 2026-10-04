@@ -538,16 +538,21 @@ def test_window_already_started_freezes_full_candidate():
 
 
 def test_freeze_survives_carryover_and_template_edit():
-    # 冻结窗口不改写：顺延（展示周期变化）与模板后续修改均不追溯；
-    # 模板修改只作用于尚未生成的未来轮次（§28.1、不变量 36）。
+    # 冻结窗口不改写：展示周期变化（#32 口裁决后旧轮随收场顺延）与模板
+    # 后续修改均不追溯；模板修改只作用于尚未生成的未来轮次（§28.1、
+    # 不变量 36）。
     with Context() as c:
         c.create("daily", at(24, 10), estimated_minutes=30,
                  window_start_tod="18:00", window_end_tod="22:00")
         first = c.rows[0]
         planning.generate_due(at(25, 7))
-        # 顺延到 9/25 展示后窗口仍冻结；同批生成的 9/25 轮按旧模板冻结
+        # 旧轮随新轮收场：展示顺延到收场周期（9/25）后不再移动，冻结窗口
+        # 原样保留；同批生成的 9/25 轮按旧模板冻结
         planning.generate_due(at(26, 7))
-        assert first["display_cycle_date"] == "2026-09-26"
+        assert first["status"] == "timeout"
+        assert first["closed_at"] == iso(25, 6)
+        assert first["display_cycle_date"] == "2026-09-25"
+        assert first["display_reason"] == "carryover"
         assert first["window_start_at"] == iso(24, 18)
         assert first["window_end_at"] == iso(24, 22)
         second = next(row for row in c.rows if row["schedule_date"] == "2026-09-25")
@@ -560,7 +565,7 @@ def test_freeze_survives_carryover_and_template_edit():
         third = next(row for row in c.rows if row["schedule_date"] == "2026-09-27")
         assert third["window_start_at"] == iso(27, 20)
         assert third["window_end_at"] == iso(27, 23)
-        # 已生成轮次不因模板修改被重新解释
+        # 已生成轮次（含收场行）不因模板修改被重新解释
         assert first["window_start_at"] == iso(24, 18)
         assert second["window_start_at"] == iso(25, 18)
 

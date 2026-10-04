@@ -62,7 +62,7 @@ async def _dispatch(
 
 
 async def _dispatch_json(
-    request: Request, fn, *args, created: bool = False,
+    request: Request, fn, *args, created: bool = False, **kwargs,
 ) -> JSONResponse:
     if not _authorized(request):
         return _error("unauthorized", 401, "unauthorized")
@@ -70,7 +70,7 @@ async def _dispatch_json(
         payload = await request.json()
     except Exception:
         return _error("request body must be valid JSON", 400, "invalid_json")
-    return await _dispatch(request, fn, *args, payload, created=created)
+    return await _dispatch(request, fn, *args, payload, created=created, **kwargs)
 
 
 async def _dispatch_json_optional(
@@ -110,7 +110,11 @@ async def tasks_collection(request: Request) -> JSONResponse:
     if request.method == "GET":
         include_inactive = _parse_bool(request.query_params.get("include_inactive"), True)
         return await _dispatch(request, planning.list_tasks, include_inactive)
-    return await _dispatch_json(request, planning.create_task, created=True)
+    # 创建请求幂等（清单 #9）：键可选（兼容无键调用方）；前端为每次创建
+    # 意图生成稳定键，结果未知的重试同键收敛到同一任务，同键不同内容 409。
+    key = request.headers.get("Idempotency-Key")
+    return await _dispatch_json(
+        request, planning.create_task, created=True, idempotency_key=key)
 
 
 async def task_item(request: Request) -> JSONResponse:

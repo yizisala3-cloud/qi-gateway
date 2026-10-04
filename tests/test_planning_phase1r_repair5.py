@@ -563,8 +563,12 @@ def test_bf5_hollow_stage_content_frozen():
                  hollow_start_minutes=10, hollow_wait_minutes=30,
                  hollow_end_minutes=5, hollow_end_content="煮饭")
         planning.generate_due(at(24, 6))
-        start = next(row for row in c.rows if row["phase"] == "start")
-        end = next(row for row in c.rows if row["phase"] == "end")
+        # #32 口裁决后 9/23 轮已随 9/24 新轮周期收场；看板展示的是 9/24 轮
+        # （改名前生成，同样必须保留旧内容快照）
+        start = next(row for row in c.rows
+                     if row["phase"] == "start" and row["round_key"] == "cycle:2026-09-24")
+        end = next(row for row in c.rows
+                   if row["phase"] == "end" and row["round_key"] == "cycle:2026-09-24")
         assert start["display_content"] == "泡豆·开始"
         assert end["display_content"] == "煮饭·结束"
         planning.update_task(

@@ -5,6 +5,10 @@ import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES } from './planning_display.
 
 export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
   const editing = !!task?.id;
+  // 创建幂等键（清单 #9）：绑定本次打开表单的创建意图——提交 / API 阶段
+  // 失败解锁后重试复用同一键，服务端收敛到同一任务；关闭重开是新意图，
+  // 生成新键。编辑走 PATCH（自身幂等语义），不携带创建键。
+  const creationIdempotencyKey = editing ? null : crypto.randomUUID();
   // once 已生成当前实例 → 任务级排程身份锁定（§28.3）：目标日期与未来
   // 窗口模板禁用并提示走当前实例调整；后端 400 仍是权威兜底。
   // 批次 9 UI 修复：优先用后端随任务列表返回的 has_generated_occurrence
@@ -256,7 +260,10 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
       } else {
         createdTask = await gw('/admin/api/planning/tasks', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': creationIdempotencyKey,
+          },
           body: JSON.stringify(body),
         });
       }

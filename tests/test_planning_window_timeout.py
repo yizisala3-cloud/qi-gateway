@@ -103,8 +103,12 @@ def test_only_earliest_window_never_times_out_via_window_model():
 
 def test_no_window_open_instances_never_time_out():
     with Context() as c:
-        c.create("daily", at(23), estimated_minutes=30)
-        planning.generate_due(at(25, 6))  # 顺延 + 新轮，均无窗口
+        # 无窗口的持续顺延型（处理后刷新）：sweep 永不触碰；跨周期仍是
+        # 同一个开放实例（§22.5）。每日旧轮的周期收场属 #32 独立生命周期，
+        # 不是窗口超时（另见 test_planning_daily_round_expiry.py）。
+        c.create("interval", at(23), estimated_minutes=30,
+                 refresh_mode="after_completion", interval_days=3)
+        planning.generate_due(at(25, 6))  # 顺延，无窗口
         assert all(row["window_end_at"] is None for row in c.rows)
         assert planning.sweep_timeouts(at(26, 12))["timed_out"] == 0
         assert all(row["status"] == "pending" for row in c.rows)
@@ -1207,9 +1211,16 @@ def test_error_triggered_recompute_safe_without_new_rows(caplog):
         gen = result["generation"]
         assert [e["task_id"] for e in gen["errors"]] == [stale["task_id"]]
         assert "generation_recompute" in result
-        # 既有实例生命周期不被破坏：正常实例仍开放且排程完好
-        assert normal["status"] == "pending"
-        assert normal["est_start"] is not None
+        # 既有实例生命周期不被破坏：当前轮正常生成且排程完好（旧轮按 #32
+        # 口径随新轮周期收场，与本次注入的固定清理失败无关）
+        assert normal["status"] == "timeout"
+        assert normal["closed_at"] == at(25, 6).isoformat()
+        assert normal["est_start"] is not None  # 收场不改写开放期间的历史排程
+        current = next(row for row in c.rows
+                       if row["task_id"] == normal["task_id"]
+                       and row["schedule_date"] == "2026-09-29")
+        assert current["status"] == "pending"
+        assert current["est_start"] is not None
         assert stale["status"] == "pending"  # 清理失败的轮不被伪造关闭
 
 

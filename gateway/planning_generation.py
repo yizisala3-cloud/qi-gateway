@@ -9,6 +9,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from .planning_domain import (
+    BUSINESS_TIMEZONE,
     BoundaryTransition,
     EstimatedTimeOwnership,
     OccurrenceIdentity,
@@ -496,6 +497,87 @@ def _expire_fixed_rounds(client, task: dict[str, Any], now: datetime) -> int:
     return expired
 
 
+def _daily_round_death_boundary(
+    schedule_date: date, configured: time, transition: BoundaryTransition | None,
+) -> datetime:
+    """每日轮次的死亡边界 = 其所属规划周期的自然终点（下一实际周期开始）。
+
+    完全复用既有周期原语，不复制第二套周期数学：以该轮周期自身的起始
+    边界（``cycle_start_boundary``，过渡期冻结段沿用 spanning 边界）构造
+    周期内时刻，再取 ``planning_cycle_at`` 的周期终点——跨周期冻结段
+    （spanning cycle）的终点已被权威函数替换为 ``effective_at``，吸收日
+    不存在轮次，无需在此特判。
+    """
+    start_boundary = cycle_start_boundary(schedule_date, configured, transition)
+    moment = datetime.combine(schedule_date, start_boundary, BUSINESS_TIMEZONE)
+    return planning_cycle_at(moment, configured, transition).end
+
+
+def _expire_daily_rounds(
+    client, task: dict[str, Any], today: date, now: datetime,
+    configured: time, transition: BoundaryTransition | None,
+) -> int:
+    """每日旧轮在新轮照常生成的周期收场（清单 #32，2026-10-04 user 口裁决）。
+
+    口径（user 确认）：新轮生成时，旧未处理每日轮自动关闭标记「已超时」
+    （§8.4「到期死亡」同型生命周期；含执行中 / partial，已有事实原样保留，
+    不写完成 / 处理事实、不推进任何刷新基准），死亡时刻 = 旧轮所属周期的
+    自然终点。仅 ``can_generate``（生成门禁）时执行：暂停刷新 / 关闭每日
+    刷新不生成新轮，旧轮保持开放继续顺延展示（需求 24 / §5.3）。与固定
+    到期清理同序且解耦：清理先于新轮创建，新轮 INSERT 失败不阻止已越界
+    旧轮关闭（否则其在 ``closed_at`` 之前仍可被 completed）；清理幂等，
+    重复调用不重复计数、不重复终态写入。展示随关闭顺延到当前周期
+    （``display_reason=carryover``，不得早于 ``schedule_date``），使关闭
+    记录出现在收场周期「已完成」；「待处理」分区由
+    :func:`is_daily_cycle_death` 按同一口径排除这类周期死亡（user 裁决：
+    不出现在待处理）。
+    """
+    open_rows = _task_open_rows(client, task["id"])
+    expired = 0
+    expired_rounds: set[str] = set()
+    for occ in open_rows:
+        round_key = occ.get("round_key")
+        if not round_key or round_key in expired_rounds:
+            continue  # 旧实例身份不受控，属受控迁移范围
+        raw = occ.get("schedule_date")
+        if not raw:
+            continue
+        schedule_date = date.fromisoformat(raw)
+        if schedule_date >= today:
+            continue  # 当前周期的轮次（含本轮新轮）保持开放
+        death = _daily_round_death_boundary(schedule_date, configured, transition)
+        client.table("planning_occurrence").update({
+            "status": "timeout", "closed_at": common._iso(death),
+            "display_cycle_date": today.isoformat(),
+            "display_reason": "carryover", "updated_at": common._iso(now),
+        }).eq("task_id", task["id"]).eq("round_key", round_key).in_(
+            "status", list(common.OPEN_STATUSES)).execute()
+        expired += sum(item["round_key"] == round_key for item in open_rows)
+        expired_rounds.add(round_key)
+    return expired
+
+
+def is_daily_cycle_death(row: dict[str, Any], task: dict[str, Any]) -> bool:
+    """识别「每日轮周期死亡」超时行（#32 user 裁决：不进「待处理」分区）。
+
+    识别口径与 :func:`_expire_daily_rounds` 的写入同源：每日刷新任务的
+    超时行，且该关闭不是窗口 sweep——窗口死亡以 ``closed_at ==
+    window_end_at`` 为特征（用户明确设置的最晚完成，§18.2，保持既有
+    待处理展示）；周期死亡写入周期终点，与窗口终点（必然在周期内）不同。
+    两入口竞争同一行时谁先提交谁定 ``closed_at``，识别跟随实际关闭者；
+    唯一歧义角落（窗口终点恰为边界时刻且周期死亡先落库）落在「展示」
+    一侧，属保守方向。
+    """
+    if task.get("refresh_mode") != "daily":
+        return False
+    end_at = row.get("window_end_at")
+    closed_at = row.get("closed_at")
+    if not end_at or not closed_at:
+        return True
+    return (common._parse_dt(closed_at, "closed_at")
+            != common._parse_dt(end_at, "window_end_at"))
+
+
 def _after_completion_due(client, task: dict[str, Any]) -> datetime | None:
     """Use the latest persisted round, so a failed task-cache write cannot skip a cycle."""
     rows = runtime._rows(client, "planning_occurrence", lambda q: q.eq("task_id", task["id"]).order("id", desc=True))
@@ -554,6 +636,14 @@ def _reconcile_task_rounds(
     #   不自动转换，见施工计划 §10.2）。
     legacy_definition = task.get("time_mode") == "explicit"
     if mode == "daily":
+        if can_generate:
+            # 清单 #32（2026-10-04 user 口裁决）：先收场旧轮——与固定到期
+            # 清理同序且解耦，旧每日轮生命周期结束不依赖本轮新轮 INSERT
+            # 成功；暂停刷新 / 关闭每日刷新（can_generate=False）不收场，
+            # 旧轮保持开放继续顺延展示。legacy 门禁只禁止新生成，不影响
+            # 存量轮次的到期死亡（与固定分支同一口径）。
+            timed_out += _expire_daily_rounds(
+                client, task, today, now, configured, transition)
         if can_generate and not legacy_definition:
             task_created = common._parse_dt(task["created_at"], "created_at")
             first_cycle = planning_cycle_at(task_created, configured, transition).key

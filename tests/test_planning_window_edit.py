@@ -46,8 +46,13 @@ def test_patch_template_window_future_rounds_adopt_new_template():
         planning.generate_due(at(25, 7))
         second = next(row for row in c.rows if row["schedule_date"] == "2026-09-25")
         assert (second["window_start_at"], second["window_end_at"]) == (iso(25, 14), iso(25, 18))
-        # A 仍然原样
-        assert _fields(first) == before
+        # A 随每日周期收场（清单 #32 口裁决，属生命周期规则而非模板改写），
+        # 冻结窗口事实仍逐字节原样（status 是唯一合法变化）
+        assert first["status"] == "timeout"
+        assert first["closed_at"] == iso(25, 6)
+        assert (first["window_start_at"], first["window_end_at"]) == (iso(24, 9), iso(24, 12))
+        assert ({k: v for k, v in _fields(first).items() if k != "status"}
+                == {k: v for k, v in before.items() if k != "status"})
 
 
 def test_patch_template_window_to_single_sided_and_clear():

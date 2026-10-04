@@ -21,6 +21,22 @@ UNIQUE_VIOLATION = (
     '"planning_occurrence_round_phase_uq"'
 )
 
+# 创建请求幂等（清单 #9）：planning_task 部分唯一索引
+# planning_task_creation_key_uq（creation_request_key 非空行唯一）的
+# fake 仿真——真实索引语义由迁移 20261004020000 定义。
+CREATION_KEY_VIOLATION = (
+    'duplicate key value violates unique constraint '
+    '"planning_task_creation_key_uq"'
+)
+
+
+def _assert_creation_key_unique(rows, item) -> None:
+    key = item.get("creation_request_key")
+    if key is None:
+        return
+    if any(existing.get("creation_request_key") == key for existing in rows):
+        raise RuntimeError(CREATION_KEY_VIOLATION)
+
 
 class CoreQuery:
     def __init__(self, client, table):
@@ -130,6 +146,9 @@ class CoreQuery:
                             and existing.get("phase") == item.get("phase")
                         ):
                             raise RuntimeError(UNIQUE_VIOLATION)
+            if self.table == "planning_task":
+                for item in payloads:
+                    _assert_creation_key_unique(rows, item)
             inserted = []
             for item in payloads:
                 row = dict(item)
@@ -349,6 +368,8 @@ class IdentityQuery:
                     and old.get("phase") == item.get("phase") for old in rows
                 ):
                     raise RuntimeError("planning_occurrence_round_phase_uq")
+                if self.name == "planning_task":
+                    _assert_creation_key_unique(rows, item)
                 row = {**item, "id": self.db.next_id(self.name)}
                 rows.append(row)
                 inserted.append(dict(row))

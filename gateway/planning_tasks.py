@@ -462,9 +462,47 @@ def _creation_window_outcome(
     return False, not window_feasible(resolved, now, occupancy), None
 
 
-def create_task(payload: Any, now: datetime | None = None) -> dict[str, Any]:
+# 创建幂等内容快照字段（清单 #9）：取校验归一化后的用户语义输入。
+# ``weekdays`` / ``month_days`` 经 ``_clean_int_list`` 排序去重、时刻经
+# ``_tod_str`` 归一化、耗时简写解析为整数分钟，同义写法视为同内容；
+# 服务端注入的缺省（固定间隔 anchor=当前时刻、created_at 等）不参与
+# 内容比对——两次相同意图在不同时刻创建的缺省不同不构成「不同内容」。
+_CREATION_CONTENT_FIELDS = (
+    "content", "task_type", "time_mode", "estimated_minutes",
+    "window_start_tod", "window_end_tod",
+    "interval_days", "weekdays", "month_days", "target_date",
+    "refresh_mode", "refresh_anchor_at",
+    "is_hollow", "hollow_start_content", "hollow_start_minutes",
+    "hollow_wait_minutes", "hollow_wait_note", "hollow_end_content",
+    "hollow_end_minutes",
+    "alarm_start", "alarm_end", "timer_minutes", "is_active",
+)
+
+
+def _creation_request_content(row: dict[str, Any]) -> dict[str, Any]:
+    return {field: row.get(field) for field in _CREATION_CONTENT_FIELDS}
+
+
+def _find_task_by_creation_key(client, key: str) -> dict[str, Any] | None:
+    rows = runtime._rows(
+        client, "planning_task", lambda q: q.eq("creation_request_key", key))
+    return rows[0] if rows else None
+
+
+def _is_creation_key_conflict(exc: Exception) -> bool:
+    """首次创建命中请求键唯一索引（并发同键的另一请求已提交）。"""
+    return "planning_task_creation_key_uq" in str(exc)
+
+
+def create_task(
+    payload: Any, now: datetime | None = None, *,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
     now = now or runtime._now()
     row = validate_task_payload(payload, partial=False)
+    # 幂等内容快照（清单 #9）在服务端缺省注入前按归一化输入构造。
+    request_content = (
+        _creation_request_content(row) if idempotency_key else None)
     _prepare_refresh_definition(row, now)
     context = cycles.PlanningRequestContext(now)
     _validate_window_creation(row, now, context=context)
@@ -478,6 +516,38 @@ def create_task(payload: Any, now: datetime | None = None) -> dict[str, Any]:
     if settle_day is not None:
         row["refresh_generated_through"] = settle_day.isoformat()
     client = runtime._require_client()
+    if idempotency_key:
+        # 结果未知的重试先按请求键收敛（#9）：任务已提交时同键同内容重放
+        # （生成暂时失败由重放补生成恢复，轮次唯一键保证不重复）、同键不同
+        # 内容明确拒绝；首次创建把键、内容与反馈随任务行原子落库，并发同
+        # 键由部分唯一索引收敛到先提交者（失败方重读后走同一重放分支）。
+        existing = _find_task_by_creation_key(client, idempotency_key)
+        if existing is None:
+            row["creation_request_key"] = idempotency_key
+            row["creation_request_content"] = request_content
+            row["creation_feedback"] = {
+                "first_round_skipped": first_round_skipped,
+                "schedule_conflict": schedule_conflict,
+            }
+            try:
+                response = client.table("planning_task").insert(row).execute()
+            except Exception as exc:
+                if not _is_creation_key_conflict(exc):
+                    raise
+                existing = _find_task_by_creation_key(client, idempotency_key)
+                if existing is None:
+                    raise
+            else:
+                created = (response.data or [{}])[0]
+                # 即时生成：新建的待办（含 interval 立即到期）不等后台循环，
+                # 立刻出现在列表。
+                _generate_created_task_quietly(created["id"], now, context)
+                serialized = presentation.serialize_task(created, now)
+                serialized["first_round_skipped"] = first_round_skipped
+                serialized["schedule_conflict"] = schedule_conflict
+                return serialized
+        return _replay_task_creation(
+            client, existing, request_content, idempotency_key, now, context)
     response = client.table("planning_task").insert(row).execute()
     created = (response.data or [{}])[0]
     # 即时生成：新建的待办（含 interval 立即到期）不等后台循环，立刻出现在列表。
@@ -487,6 +557,28 @@ def create_task(payload: Any, now: datetime | None = None) -> dict[str, Any]:
     # 「已创建但存在排程冲突」，两者都不改变任务已保存的事实。
     serialized["first_round_skipped"] = first_round_skipped
     serialized["schedule_conflict"] = schedule_conflict
+    return serialized
+
+
+def _replay_task_creation(
+    client, existing: dict[str, Any], request_content: dict[str, Any],
+    idempotency_key: str, now: datetime, context: cycles.PlanningRequestContext,
+) -> dict[str, Any]:
+    """同键重放：核对内容一致后返回既有任务（重排「同键重试恢复」同型）。"""
+    stored = existing.get("creation_request_content")
+    if stored is None or dict(stored) != request_content:
+        raise common.PlanningError(
+            "request_conflict",
+            "同一请求键已绑定不同的创建内容；请使用新的请求提交新的待办", 409,
+        )
+    # 创建时生成暂时失败（首轮缺失）的重试补一次幂等生成：生成门禁与轮次
+    # 唯一键保证不重复；失败安静记录，等待后台循环。
+    _generate_created_task_quietly(existing["id"], now, context)
+    serialized = presentation.serialize_task(existing, now)
+    feedback = existing.get("creation_feedback") or {}
+    serialized["first_round_skipped"] = bool(feedback.get("first_round_skipped"))
+    serialized["schedule_conflict"] = bool(feedback.get("schedule_conflict"))
+    serialized["idempotent_replay"] = True
     return serialized
 
 
