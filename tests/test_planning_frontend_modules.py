@@ -64,6 +64,9 @@ class PlanningFrontendModulesTests(unittest.TestCase):
     def test_reminder_silent_warmup_dismissal_recovery_and_cleanup(self):
         self._run_group("B7-reminder-ring")
 
+    def test_reminder_playback_identity_and_modal_recovery_entry(self):
+        self._run_group("B8-ring-recovery-identity")
+
     def test_save_refreshes_visible_lists_and_invalidates_hidden_tabs(self):
         self._run_group("C1-visible-refresh")
 

@@ -1,5 +1,5 @@
 // ui.js - shared retro UI components: icons, tags, modal, toast, detail panel
-export const ASSET_VERSION = '20261004-ring-fix1';
+export const ASSET_VERSION = '20261005-ring-fix3';
 
 /* ---------- SVG icons (stroke, no emoji) ---------- */
 const ICON_PATHS = {
@@ -168,7 +168,9 @@ export function modal({ title, body, footer, wide = false, draggable = false, on
     });
     head.addEventListener('pointerup', () => { dragging = false; });
   }
-  return { root, close };
+  // mask 一并返回：调用方可识别“弹窗遮罩内”的按下目标（如提醒恢复入口的
+  // 排除逻辑），不改变既有 root/close 语义
+  return { root, close, mask };
 }
 
 export function confirm(msg, { title = '请确认', okText = '确认', cancelText = '取消', danger = true } = {}) {

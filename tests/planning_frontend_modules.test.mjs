@@ -82,10 +82,19 @@ class AudioFixture {
     this.calls.push({ muted: this.muted, loop: this.loop });
     if (this.behavior === 'blocked') return Promise.reject(new Error('NotAllowedError: play blocked'));
     this.paused = false;
-    if (this.behavior === 'deferred') return new Promise((resolve) => this.pending.push(resolve));
+    if (this.behavior === 'deferred') return new Promise((resolve, reject) => this.pending.push({ resolve, reject }));
     return Promise.resolve();
   }
-  pause() { this.pauses += 1; this.paused = true; }
+  pause() {
+    this.pauses += 1;
+    this.paused = true;
+    // 原生媒体行为（R1 复现前提）：pause 会中断未完成的 play() 并使其拒绝
+    for (const job of this.pending.splice(0)) {
+      const error = new Error('The play() request was interrupted by a call to pause()');
+      error.name = 'AbortError';
+      job.reject(error);
+    }
+  }
 }
 
 class NotificationFixture {
@@ -414,7 +423,7 @@ const checks = {
 
   async 'B7-reminder-ring'() {
     const flushRings = async () => { for (let count = 0; count < 12; count += 1) await Promise.resolve(); };
-    const hint = '浏览器拦截了自动响铃，点一下页面即可恢复';
+    const hint = '浏览器拦截了自动响铃，点击「恢复响铃」按钮即可恢复';
 
     // #28A：无提醒配置时首次触摸只做静音预热——play 全程 muted，无弹窗，
     // 迟到结算自行收尾并还原静音标记
@@ -431,8 +440,8 @@ const checks = {
       assert.equal(reminders.timerAudio.calls[0].muted, true);
       assert.equal(reminders.alarmAudio.paused, false);
       assert.equal(reminders.ringModal, null);
-      reminders.alarmAudio.pending.shift()('');
-      reminders.timerAudio.pending.shift()('');
+      reminders.alarmAudio.pending.shift().resolve('');
+      reminders.timerAudio.pending.shift().resolve('');
       await flushRings();
       assert.equal(reminders.alarmAudio.paused, true);
       assert.equal(reminders.alarmAudio.muted, false);
@@ -441,6 +450,8 @@ const checks = {
     }
 
     // #28B：预热 Promise 迟到结算不会暂停之后开始的真实响铃
+    // （真实起播先 haltAudio：pause 使未结算的预热 play 拒绝，令牌已删，迟到
+    // 结算（此处为拒绝路径）自行失效，不触碰真实响铃）
     {
       const reminders = reminderModule.createPlanningReminder();
       reminders.ensureAudio();
@@ -452,10 +463,6 @@ const checks = {
       assert.equal(reminders.alarmAudio.calls.length, 2);
       assert.equal(reminders.alarmAudio.calls[1].muted, false);
       assert.equal(reminders.alarmAudio.paused, false);
-      reminders.alarmAudio.pending.shift()('');
-      await flushRings();
-      assert.equal(reminders.alarmAudio.paused, false);
-      assert.ok(reminders.ringModal);
       reminders.dispose();
     }
 
@@ -565,6 +572,320 @@ const checks = {
       assert.equal(masks.length - before, 2);
       reminders.dispose();
       assert.equal(masks.slice(before).filter((mask) => !mask.removed).length, 0);
+    }
+  },
+
+  async 'B8-ring-recovery-identity'() {
+    const flushRings = async () => { for (let count = 0; count < 12; count += 1) await Promise.resolve(); };
+    const hint = '浏览器拦截了自动响铃，点击「恢复响铃」按钮即可恢复';
+    const nowIso = () => new Date(Date.now()).toISOString();
+    const recoverButton = () => lastModal().querySelector('[data-act-ring-recover]');
+    const alarmOcc = (id) => ({ id, alarm_start: true, alarm_end: false, timer_minutes: null,
+      est_start: nowIso(), content: '响铃' });
+    const hintToasts = () => toastMessages.filter((m) => m === hint).length;
+
+    // #29-A：真实播放未结算时经过停止按钮 / × / 遮罩 / 路由卸载；pause 中断
+    // 引发的迟到 AbortError 拒绝不重新登记待恢复、不重注册监听、不复活旧响铃
+    for (const route of ['stop-button', 'close-button', 'mask', 'dispose']) {
+      const reminders = reminderModule.createPlanningReminder();
+      reminders.attach();
+      reminders.ensureAudio();
+      reminders.alarmAudio.behavior = 'deferred';
+      reminders.checkAlarms({ progress: [alarmOcc(100)] });
+      await flushRings();
+      assert.ok(reminders.ringModal);
+      assert.equal(reminders.pendingRecovery, null, '播放未结算不预先登记待恢复');
+      const mask = masks.at(-1);
+      if (route === 'stop-button') lastModal().querySelector('[data-act-ring-stop]').onclick();
+      else if (route === 'close-button') lastModal().querySelector('.modal-close').onclick();
+      else if (route === 'mask') maskClick(mask);
+      else reminders.dispose();
+      await flushRings();  // pause 使未结算的 play 迟到拒绝
+      assert.equal(reminders.pendingRecovery, null, '迟到拒绝不登记待恢复');
+      assert.equal(reminders.recoveryHandler, null, '迟到拒绝不重注册恢复监听');
+      assert.equal(reminders.ringModal, null);
+      assert.equal(mask.removed, true);
+      assert.equal(reminders.alarmAudio.paused, true);
+      assert.equal(listenerCount('pointerdown'), route === 'dispose' ? 0 : 1,
+        '只剩未消费的预热手势监听');
+      await gesture();  // 再次触摸页面
+      await flushRings();
+      if (route === 'dispose') {
+        assert.equal(reminders.alarmAudio.calls.length, 1, '卸载后手势无监听，不触发任何播放');
+      } else {
+        assert.equal(reminders.alarmAudio.calls.at(-1).muted, true, '触摸只触发静音预热');
+      }
+      assert.equal(reminders.pendingRecovery, null);
+      assert.equal(reminders.ringModal, null, '旧提醒不复活');
+      reminders.dispose();
+    }
+
+    // #29-B1：旧闹钟播放未结算时被新计时器接管；旧回调拒绝不改写新提醒状态，
+    // 手势不播放旧音轨，不产生两条并播
+    {
+      const reminders = reminderModule.createPlanningReminder();
+      reminders.attach();
+      reminders.ensureAudio();
+      reminders.alarmAudio.behavior = 'deferred';
+      reminders.showRingModal('旧闹钟', '12:00');
+      reminders.showRingModal('新计时器', '12:01', true);  // 接管：pause 中断旧播放
+      await flushRings();
+      assert.equal(reminders.pendingRecovery, null, '旧闹钟迟到拒绝不覆盖新提醒');
+      assert.equal(reminders.recoveryHandler, null);
+      assert.equal(reminders.timerAudio.paused, false);
+      assert.equal(reminders.alarmAudio.paused, true);
+      reminders.alarmAudio.behavior = 'success';
+      await gesture();  // 无待恢复：手势不播放旧闹钟
+      await flushRings();
+      assert.equal(reminders.alarmAudio.paused, true, '旧闹钟不复活');
+      assert.equal(reminders.timerAudio.paused, false, '新计时器持续播放，不并播');
+      reminders.dispose();
+    }
+
+    // #29-B2：旧计时器播放未结算时被新闹钟接管，同样互不污染
+    {
+      const reminders = reminderModule.createPlanningReminder();
+      reminders.ensureAudio();
+      reminders.timerAudio.behavior = 'deferred';
+      reminders.showRingModal('旧计时器', '12:00', true);
+      reminders.showRingModal('新闹钟', '12:01');
+      await flushRings();
+      assert.equal(reminders.pendingRecovery, null);
+      assert.equal(reminders.alarmAudio.paused, false);
+      assert.equal(reminders.timerAudio.paused, true);
+      reminders.dispose();
+    }
+
+    // #29-C：恢复重试在途时主动停止，迟到的重试拒绝不弹过期提示、不复活状态
+    {
+      const reminders = reminderModule.createPlanningReminder();
+      reminders.attach();
+      reminders.ensureAudio();
+      reminders.alarmAudio.behavior = 'blocked';
+      reminders.checkAlarms({ progress: [alarmOcc(101)] });
+      await flushRings();
+      assert.ok(reminders.pendingRecovery);
+      const toastsBefore = hintToasts();
+      reminders.alarmAudio.behavior = 'deferred';
+      const inFlight = gesture();
+      await flushRings();  // 让恢复重试真正进入在途（play 未结算）
+      reminders.stopRinging();  // pause 中断在途重试
+      await flushRings();
+      await inFlight;
+      assert.equal(reminders.pendingRecovery, null);
+      assert.equal(reminders.recoveryHandler, null);
+      assert.equal(reminders.ringModal, null);
+      assert.equal(hintToasts(), toastsBefore, '过期拒绝不重复弹恢复提示');
+      reminders.dispose();
+    }
+
+    // #29-D：恢复重试在途时新提醒接管，旧重试结果不覆盖新提醒状态
+    {
+      const reminders = reminderModule.createPlanningReminder();
+      reminders.attach();
+      reminders.ensureAudio();
+      reminders.alarmAudio.behavior = 'blocked';
+      reminders.checkAlarms({ progress: [alarmOcc(102)] });
+      await flushRings();
+      const toastsBefore = hintToasts();
+      reminders.alarmAudio.behavior = 'deferred';
+      const inFlight = gesture();
+      await flushRings();  // 让恢复重试真正进入在途（play 未结算）
+      reminders.showRingModal('新计时器', '12:01', true);  // 接管并中断旧重试
+      await flushRings();
+      await inFlight;
+      assert.equal(reminders.pendingRecovery, null, '新计时器播放成功，旧重试拒绝不改写');
+      assert.equal(reminders.timerAudio.paused, false);
+      assert.equal(hintToasts(), toastsBefore, '被取代的重试失败不弹过期提示');
+      reminders.dispose();
+    }
+
+    // #29-E：旧提醒被拦截后新音轨接管且慢加载——接管立即取消旧待恢复数据、
+    // 监听与入口；新音轨结算前恢复入口不可用，残留入口与手势都不起播旧音轨
+    {
+      const reminders = reminderModule.createPlanningReminder();
+      reminders.attach();
+      reminders.ensureAudio();
+      reminders.alarmAudio.behavior = 'blocked';
+      reminders.checkAlarms({ progress: [alarmOcc(106)] });
+      await flushRings();
+      assert.equal(recoverButton().hidden, false);
+      reminders.timerAudio.behavior = 'deferred';  // 新音轨慢加载，play 未结算
+      reminders.showRingModal('新计时器', '12:01', true);
+      await flushRings();
+      assert.equal(reminders.pendingRecovery, null, '接管立即取消旧待恢复数据');
+      assert.equal(reminders.recoveryHandler, null, '接管移除旧恢复监听');
+      assert.equal(recoverButton().hidden, true, '新音轨结算前恢复入口隐藏');
+      recoverButton().onclick();  // 残留入口误触也不得恢复被取代音轨
+      await flushRings();
+      assert.equal(reminders.alarmAudio.plays, 1, '旧音轨不因残留入口起播');
+      assert.equal(reminders.alarmAudio.paused, true);
+      reminders.alarmAudio.behavior = 'success';
+      await gesture();  // 页面手势同样不得复活被接管的旧音轨
+      await flushRings();
+      assert.equal(reminders.alarmAudio.paused, true);
+      reminders.timerAudio.pending[0].resolve('');  // 新音轨随后加载完成
+      await flushRings();
+      assert.equal(reminders.timerAudio.paused, false, '新音轨正常播放');
+      assert.equal(reminders.alarmAudio.paused, true, '不并播');
+      reminders.dispose();
+    }
+
+    // #29-F：接管后新音轨也被拦截——只登记当前代次的新音轨，入口仅恢复新音轨
+    {
+      const reminders = reminderModule.createPlanningReminder();
+      reminders.attach();
+      reminders.ensureAudio();
+      reminders.alarmAudio.behavior = 'blocked';
+      reminders.checkAlarms({ progress: [alarmOcc(107)] });
+      await flushRings();
+      reminders.timerAudio.behavior = 'blocked';
+      reminders.showRingModal('新计时器', '12:01', true);
+      await flushRings();
+      assert.equal(reminders.pendingRecovery?.once, true, '新音轨被拦截后登记当前代次音轨');
+      assert.equal(recoverButton().hidden, false, '新音轨被拦截后入口显示');
+      reminders.timerAudio.behavior = 'success';
+      recoverButton().onclick();
+      await flushRings();
+      assert.equal(reminders.timerAudio.paused, false, '按钮只恢复新音轨');
+      assert.equal(reminders.alarmAudio.paused, true, '被取代的旧音轨不并播');
+      reminders.dispose();
+    }
+
+    // #29-G：反方向（旧计时器被拦截→新闹钟慢加载接管）同样成立
+    {
+      const reminders = reminderModule.createPlanningReminder();
+      reminders.attach();
+      reminders.ensureAudio();
+      reminders.timerAudio.behavior = 'blocked';
+      const occ = { id: 108, timer_minutes: 1, status: 'in_progress',
+        actual_start: new Date(Date.now() - 60 * 1000).toISOString(), content: '旧计时器' };
+      reminders.checkAlarms({ progress: [occ] });
+      await flushRings();
+      assert.equal(recoverButton().hidden, false);
+      reminders.alarmAudio.behavior = 'deferred';
+      reminders.showRingModal('新闹钟', '12:01');
+      await flushRings();
+      assert.equal(reminders.pendingRecovery, null, '接管立即取消旧待恢复数据');
+      assert.equal(recoverButton().hidden, true);
+      reminders.alarmAudio.pending[0].resolve('');  // 新闹钟加载完成
+      await flushRings();
+      assert.equal(reminders.alarmAudio.paused, false, '新闹钟正常播放');
+      assert.equal(reminders.timerAudio.paused, true, '旧计时器不并播');
+      reminders.dispose();
+    }
+
+    // #29-H：新待恢复已登记后，旧起播的迟到成功结算不得清空新状态。
+    // 旧 / 新音轨用结算显式控制的替身（pause 不拒绝在途 play），使
+    // 「接管并登记新待恢复 → 旧成功回调晚到」的时序可构造（复审 R2：
+    // 原排列下旧成功先于新拒绝结算，保护被移除时断言仍通过，捕捉不到）
+    {
+      const reminders = reminderModule.createPlanningReminder();
+      reminders.attach();
+      const controlled = (mode) => ({ paused: true, plays: 0, muted: false, currentTime: 0,
+        jobs: [], mode,
+        play() {
+          this.plays += 1;
+          if (this.mode === 'blocked') return Promise.reject(new Error('NotAllowedError'));
+          this.paused = false;
+          return new Promise((resolve, reject) => this.jobs.push({ resolve, reject }));
+        },
+        pause() { this.paused = true; },  // 结算由用例显式控制，不拒绝在途 play
+      });
+      reminders.alarmAudio = controlled('deferred');
+      reminders.alarmAudio.loop = true;
+      reminders.timerAudio = controlled('blocked');
+      reminders.showRingModal('旧闹钟', '12:00');  // 旧起播 play 未结算
+      reminders.showRingModal('新计时器', '12:01', true);  // 接管且新音轨被拦截
+      await flushRings();
+      assert.equal(reminders.pendingRecovery?.once, true, '前置：新音轨被拦截已登记当前代次待恢复');
+      const newEpoch = reminders.ringEpoch;
+      reminders.alarmAudio.jobs[0].resolve();  // 旧成功回调晚于新登记到达
+      await flushRings();
+      assert.equal(reminders.pendingRecovery?.once, true, '迟到成功不清空新提醒待恢复状态');
+      assert.equal(reminders.pendingRecovery.epoch, newEpoch, '待恢复仍属于当前代次');
+      assert.equal(reminders.alarmAudio.paused, true, '旧音轨保持停止');
+      reminders.dispose();
+    }
+
+    // #30-A：起播被拦截后弹窗显示「恢复响铃」入口与一致文案；遮罩区域的按下
+    // 不作为恢复手势（遮罩保持关闭语义，不能先恢复再停止）
+    {
+      const reminders = reminderModule.createPlanningReminder();
+      reminders.attach();
+      reminders.ensureAudio();
+      reminders.alarmAudio.behavior = 'blocked';
+      const occ = alarmOcc(103);
+      const toastsBefore = hintToasts();
+      reminders.checkAlarms({ progress: [occ] });
+      await flushRings();
+      const notifyCount = NotificationFixture.created;
+      const mask = masks.at(-1);
+      assert.ok(reminders.pendingRecovery);
+      assert.equal(recoverButton().hidden, false, '被拦截后显示恢复入口');
+      assert.equal(lastModal().querySelector('[data-ring-hint]').hidden, false, '提示文案同步显示');
+      assert.equal(hintToasts(), toastsBefore + 1, '被拦截时弹出指向恢复入口的提示');
+      assert.ok(reminders.firedKeys.size >= 1);
+      await gesture({ target: mask });  // 遮罩上的按下：交给关闭语义，不重试播放
+      await flushRings();
+      assert.equal(reminders.alarmAudio.plays, 1, '遮罩按下不先恢复');
+      maskClick(mask);
+      await flushRings();
+      assert.equal(mask.removed, true);
+      assert.equal(reminders.alarmAudio.plays, 1, '遮罩关闭只停止，不附带起播');
+      assert.equal(reminders.ringModal, null);
+      reminders.dispose();
+    }
+
+    // #30-B：点击「恢复响铃」恢复循环闹钟，弹窗保留；连续拒绝可继续重试；
+    // 成功后入口隐藏、恢复监听移除，不重复通知
+    {
+      const reminders = reminderModule.createPlanningReminder();
+      reminders.attach();
+      reminders.ensureAudio();
+      reminders.alarmAudio.behavior = 'blocked';
+      reminders.checkAlarms({ progress: [alarmOcc(104)] });
+      await flushRings();
+      const notifyCount = NotificationFixture.created;
+      const maskCount = masks.length;
+      reminders.alarmAudio.behavior = 'blocked';
+      recoverButton().onclick();  // 第一次点击恢复仍被拒
+      await flushRings();
+      assert.ok(reminders.pendingRecovery, '连续拒绝后保留待恢复，可继续重试');
+      assert.equal(recoverButton().hidden, false);
+      reminders.alarmAudio.behavior = 'success';
+      recoverButton().onclick();  // 再次点击恢复成功
+      await flushRings();
+      assert.equal(reminders.alarmAudio.paused, false);
+      assert.equal(reminders.alarmAudio.loop, true, '闹钟持续循环');
+      assert.equal(reminders.pendingRecovery, null);
+      assert.equal(recoverButton().hidden, true, '恢复成功后入口隐藏');
+      assert.equal(lastModal().querySelector('[data-ring-hint]').hidden, true);
+      assert.ok(reminders.ringModal, '恢复后弹窗保留');
+      assert.equal(masks.length, maskCount, '不另开新弹窗');
+      assert.equal(NotificationFixture.created, notifyCount, '不重复通知');
+      assert.equal(listenerCount('pointerdown'), 1, '成功后移除恢复监听');
+      reminders.dispose();
+    }
+
+    // #30-C：计时器被拦截同样经入口恢复，计时器只播一次（不循环）
+    {
+      const reminders = reminderModule.createPlanningReminder();
+      reminders.attach();
+      reminders.ensureAudio();
+      reminders.timerAudio.behavior = 'blocked';
+      const occ = { id: 105, timer_minutes: 1, status: 'in_progress',
+        actual_start: new Date(Date.now() - 60 * 1000).toISOString(), content: '计时器' };
+      reminders.checkAlarms({ progress: [occ] });
+      await flushRings();
+      assert.equal(reminders.pendingRecovery?.once, true, '计时器被拦截登记待恢复');
+      reminders.timerAudio.behavior = 'success';
+      recoverButton().onclick();
+      await flushRings();
+      assert.equal(reminders.timerAudio.paused, false);
+      assert.equal(reminders.timerAudio.loop, false, '计时器只播一次');
+      assert.equal(reminders.pendingRecovery, null);
+      reminders.dispose();
     }
   },
 

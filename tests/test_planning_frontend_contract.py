@@ -264,10 +264,10 @@ class PlanningPageContractTests(unittest.TestCase):
         self.assertIn("'partial'", partial_block)
 
     def test_audio_unlock_on_first_pointerdown(self):
-        # BUG-9：首次手势静音解锁音频；播放被拦时给出提示
+        # BUG-9：首次手势静音解锁音频；播放被拦时给出指向恢复按钮的提示（#30）
         self.assertIn("unlockAudio", self.reminder)
         self.assertIn("pointerdown", self.reminder)
-        self.assertIn("浏览器拦截了自动响铃，点一下页面即可恢复", self.reminder)
+        self.assertIn("浏览器拦截了自动响铃，点击「恢复响铃」按钮即可恢复", self.reminder)
 
     def test_reorder_conflict_recovers_gracefully(self):
         # BUG-10：排列期间列表变化导致确认被拒时，自动刷新并退出排列
