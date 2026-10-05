@@ -264,10 +264,28 @@ class PlanningPageContractTests(unittest.TestCase):
         self.assertIn("'partial'", partial_block)
 
     def test_audio_unlock_on_first_pointerdown(self):
-        # BUG-9：首次手势静音解锁音频；播放被拦时给出指向恢复按钮的提示（#30）
+        # BUG-9：首次手势解锁音频；播放被拦时给出指向恢复按钮的提示（#30）。
+        # #28：进页面与普通触摸绝不播出真实铃声。#33（20261005-ring-fix5）：
+        # WebKit / Safari 按媒体元素管理自动播放授权（授权不跨元素共享）——
+        # 首个手势的静音解锁必须直接发生在业务闹钟 / 计时器元素本人身上
+        # （内联 data URI 静音 WAV，全零采样、结构上不可听，不依赖 muted /
+        # volume 等可被内核忽略的静音手段）；解锁后元素挂真实铃声预加载，
+        # 到点 play 无手势直接放行，「恢复响铃」只作为真实拒绝时的兜底。
         self.assertIn("unlockAudio", self.reminder)
         self.assertIn("pointerdown", self.reminder)
         self.assertIn("浏览器拦截了自动响铃，点击「恢复响铃」按钮即可恢复", self.reminder)
+        self.assertIn("data:audio/wav", self.reminder)
+        self.assertIn("warmBusinessAudio", self.reminder)
+        self.assertIn("armRingSource", self.reminder)
+        # 业务元素创建即挂静音音源：解锁前元素上不存在真实铃声，杜绝手势内
+        # 泄漏真实铃声首帧的任何路径；独立 warmAudio 元素不得再出现
+        self.assertIn("new Audio(SILENT_WAV)", self.reminder)
+        self.assertNotIn("new Audio(ALARM_URL", self.reminder)
+        self.assertNotIn("new Audio(TIMER_URL", self.reminder)
+        self.assertNotIn("warmAudio", self.reminder)
+        self.assertNotIn("prefetchRingAudio", self.reminder)
+        # 解锁成功 / 恢复成功都标记元素已手势授权，重复手势零播放
+        self.assertIn("audio.unlocked = true", self.reminder)
 
     def test_reorder_conflict_recovers_gracefully(self):
         # BUG-10：排列期间列表变化导致确认被拒时，自动刷新并退出排列

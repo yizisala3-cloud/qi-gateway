@@ -97,13 +97,13 @@ async function runPlanningTests(browser, baseUrl, evidenceDir) {
   };
   try {
     await page.goto(`${baseUrl}/__planning_latency__`);
-    await page.addStyleTag({ url: `${baseUrl}/admin/css/style.css?v=20261005-ring-fix3` });
+    await page.addStyleTag({ url: `${baseUrl}/admin/css/style.css?v=20261005-ring-fix5` });
     await page.evaluate(async () => {
       document.documentElement.dataset.theme = 'day';
       const root = document.createElement('main');
       root.id = 'planning-fixture'; root.style.padding = '20px';
       document.body.append(root);
-      window.__planning = (await import('/admin/js/pages/planning.js?v=20261005-ring-fix3')).default;
+      window.__planning = (await import('/admin/js/pages/planning.js?v=20261005-ring-fix5')).default;
       await window.__planning.mount(root);
     });
 

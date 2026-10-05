@@ -1,6 +1,6 @@
 // Instance dialogs: form-local inputs and timeout retry identity stay in their closures.
-import { gw } from '../api.js?v=20261005-ring-fix3';
-import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261005-ring-fix3';
+import { gw } from '../api.js?v=20261005-ring-fix5';
+import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261005-ring-fix5';
 
 export function createPlanningDialogs({
   findOccurrence, getOccurrences, getTasks, openTaskForm,

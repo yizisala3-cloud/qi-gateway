@@ -1,7 +1,7 @@
 // Task creation/edit form. Local submitting/committed state belongs to one opened form.
-import { gw } from '../api.js?v=20261005-ring-fix3';
-import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261005-ring-fix3';
-import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES } from './planning_display.js?v=20261005-ring-fix3';
+import { gw } from '../api.js?v=20261005-ring-fix5';
+import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261005-ring-fix5';
+import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES } from './planning_display.js?v=20261005-ring-fix5';
 
 export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
   const editing = !!task?.id;

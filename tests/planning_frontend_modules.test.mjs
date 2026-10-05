@@ -72,14 +72,16 @@ class Element {
 
 class AudioFixture {
   constructor(url) {
-    this.url = url; this.currentTime = 0; this.plays = 0; this.pauses = 0;
+    this.url = url; this.src = url; this.ringSource = null;
+    this.currentTime = 0; this.plays = 0; this.pauses = 0;
+    this.loads = 0; this.volume = 1; this.preload = '';
     this.muted = false; this.paused = true; this.loop = false;
     // behavior：'success' 立即成功 | 'blocked' 播放被拒 | 'deferred' 由用例手动结算
     this.behavior = 'success'; this.pending = []; this.calls = [];
   }
   play() {
     this.plays += 1;
-    this.calls.push({ muted: this.muted, loop: this.loop });
+    this.calls.push({ src: this.src, muted: this.muted, loop: this.loop, volume: this.volume });
     if (this.behavior === 'blocked') return Promise.reject(new Error('NotAllowedError: play blocked'));
     this.paused = false;
     if (this.behavior === 'deferred') return new Promise((resolve, reject) => this.pending.push({ resolve, reject }));
@@ -95,6 +97,7 @@ class AudioFixture {
       job.reject(error);
     }
   }
+  load() { this.loads += 1; }
 }
 
 class NotificationFixture {
@@ -362,9 +365,13 @@ const checks = {
     reminders.listenForUnload();
     assert.equal(listenerCount('pointerdown'), 1);
     assert.equal(listenerCount('beforeunload'), 1);
-    reminders.unlockAudio();
-    await Promise.resolve();
-    assert.equal(reminders.alarmAudio.loop, true);
+    reminders.unlockAudio();  // #33：解锁直接发生在业务元素本人身上（静音素材）
+    await flush();
+    assert.ok(reminders.alarmAudio.calls[0].src.startsWith('data:audio/wav'), '解锁播放内联静音 WAV');
+    assert.equal(reminders.alarmAudio.ringSource, '/admin/assets/audio/alarm-clock.mp3', '解锁后挂真实铃声预加载');
+    assert.equal(reminders.alarmAudio.loop, true, '闹钟挂源后循环');
+    assert.equal(reminders.alarmAudio.loads, 1, '挂源触发预加载');
+    assert.equal(reminders.timerAudio.ringSource, '/admin/assets/audio/timer-done.ogg');
     const now = Date.parse('2026-10-02T10:00:00+08:00');
     reminders.fireAlarm({ id: 1 }, 'start', '开始', '未来', new Date(now + 1000).toISOString(), now);
     assert.equal(reminders.firedKeys.size, 0);
@@ -400,6 +407,15 @@ const checks = {
     await page.mount(new Element());
     assert.equal(page.reminder, pageReminder);
     assert.ok(page.reminder.firedKeys.has('persist-across-route'));
+    // #33：重挂载（切换页面再回）后触摸同样只在业务元素本人身上做静音解锁
+    // ——播放的是内联静音 WAV，绝不播出真实铃声 URL
+    await gesture();
+    await flush();
+    assert.ok(page.reminder.alarmAudio.calls[0].src.startsWith('data:audio/wav'), '解锁播放静音素材');
+    assert.notEqual(page.reminder.alarmAudio.calls[0].src, '/admin/assets/audio/alarm-clock.mp3', '手势不播出真实闹钟铃声');
+    assert.notEqual(page.reminder.timerAudio.calls[0].src, '/admin/assets/audio/timer-done.ogg', '手势不播出真实计时器铃声');
+    assert.equal(page.reminder.alarmAudio.ringSource, '/admin/assets/audio/alarm-clock.mp3', '解锁后挂真实铃声');
+    assert.equal(page.reminder.timerAudio.ringSource, '/admin/assets/audio/timer-done.ogg');
 
     const input = new Element();
     input.value = 'unsaved';
@@ -425,44 +441,143 @@ const checks = {
     const flushRings = async () => { for (let count = 0; count < 12; count += 1) await Promise.resolve(); };
     const hint = '浏览器拦截了自动响铃，点击「恢复响铃」按钮即可恢复';
 
-    // #28A：无提醒配置时首次触摸只做静音预热——play 全程 muted，无弹窗，
-    // 迟到结算自行收尾并还原静音标记
+    // #28/#33（ring-fix5）：无提醒配置时首次触摸只做静音解锁——解锁直接发生
+    // 在业务闹钟 / 计时器元素本人身上（WebKit 按元素授权），播放的是内联
+    // 静音 WAV 素材（全零采样、结构上不可听），绝不播出真实铃声 URL；无
+    // 弹窗、无误登记待恢复；解锁结算后元素挂上真实铃声预加载（load 不 play）
     {
       const reminders = reminderModule.createPlanningReminder();
       reminders.attach();
-      reminders.ensureAudio();
-      reminders.alarmAudio.behavior = 'deferred';
-      reminders.timerAudio.behavior = 'deferred';
       reminders.checkAlarms({ progress: [{ id: 1, alarm_start: false, alarm_end: false, timer_minutes: null }] });
       await gesture();
-      assert.equal(reminders.alarmAudio.calls.length, 1);
-      assert.equal(reminders.alarmAudio.calls[0].muted, true);
-      assert.equal(reminders.timerAudio.calls[0].muted, true);
-      assert.equal(reminders.alarmAudio.paused, false);
-      assert.equal(reminders.ringModal, null);
-      reminders.alarmAudio.pending.shift().resolve('');
-      reminders.timerAudio.pending.shift().resolve('');
       await flushRings();
-      assert.equal(reminders.alarmAudio.paused, true);
-      assert.equal(reminders.alarmAudio.muted, false);
+      assert.equal(reminders.alarmAudio.plays, 1, '手势只在闹钟元素上播放静音解锁素材');
+      assert.ok(reminders.alarmAudio.calls[0].src.startsWith('data:audio/wav'), '解锁素材为内联静音 WAV');
+      assert.notEqual(reminders.alarmAudio.calls[0].src, '/admin/assets/audio/alarm-clock.mp3', '手势不播出真实闹钟铃声');
+      assert.equal(reminders.timerAudio.plays, 1, '手势只在计时器元素上播放静音解锁素材');
+      assert.ok(reminders.timerAudio.calls[0].src.startsWith('data:audio/wav'));
+      assert.notEqual(reminders.timerAudio.calls[0].src, '/admin/assets/audio/timer-done.ogg', '手势不播出真实计时器铃声');
+      assert.equal(reminders.ringModal, null);
+      assert.equal(reminders.pendingRecovery, null, '静音解锁不进入待恢复');
+      assert.equal(reminders.alarmAudio.ringSource, '/admin/assets/audio/alarm-clock.mp3', '解锁后挂真实铃声');
+      assert.equal(reminders.timerAudio.ringSource, '/admin/assets/audio/timer-done.ogg');
+      assert.equal(reminders.alarmAudio.loads, 1, '解锁结算预加载真实铃声');
+      assert.equal(reminders.alarmAudio.paused, true, '解锁结算收尾');
       assert.equal(reminders.alarmAudio.currentTime, 0);
+      // 已解锁元素重复手势零播放
+      const playsBefore = reminders.alarmAudio.plays;
+      reminders.unlockAudio();
+      await flushRings();
+      assert.equal(reminders.alarmAudio.plays, playsBefore, '已解锁元素重复手势零播放');
       reminders.dispose();
     }
 
-    // #28B：预热 Promise 迟到结算不会暂停之后开始的真实响铃
-    // （真实起播先 haltAudio：pause 使未结算的预热 play 拒绝，令牌已删，迟到
-    // 结算（此处为拒绝路径）自行失效，不触碰真实响铃）
+    // #33：按「媒体元素授权彼此不共享」的 WebKit 模型模拟——元素只有在用户
+    // 手势内成功播放过才允许无手势 play，授权不跨元素共享。首个手势在业务
+    // 元素本人身上完成静音解锁后，到点真实铃声必须无手势直接自动播放，
+    // 不允许落到「恢复响铃」；对照：从未手势播放的元素被模型拒绝
+    {
+      let inGesture = false;
+      const policyAudio = () => ({
+        src: '', ringSource: null, unlocked: false, loop: false,
+        paused: true, plays: 0, calls: [],
+        play() {
+          this.plays += 1;
+          this.calls.push({ src: this.src });
+          if (!inGesture && !this.unlocked) {
+            const error = new Error('NotAllowedError: play blocked');
+            error.name = 'NotAllowedError';
+            return Promise.reject(error);
+          }
+          this.paused = false;
+          if (inGesture) this.unlocked = true;
+          return Promise.resolve();
+        },
+        pause() { this.paused = true; },
+        load() {},
+      });
+      const reminders = reminderModule.createPlanningReminder();
+      reminders.alarmAudio = policyAudio();
+      reminders.timerAudio = policyAudio();
+      inGesture = true;
+      reminders.unlockAudio();  // 首个手势：静音解锁发生在业务元素本人身上
+      inGesture = false;
+      await flushRings();
+      assert.equal(reminders.alarmAudio.unlocked, true, '闹钟元素已获手势授权');
+      assert.equal(reminders.timerAudio.unlocked, true, '计时器元素已获手势授权');
+      assert.equal(reminders.alarmAudio.ringSource, '/admin/assets/audio/alarm-clock.mp3', '解锁后挂真实铃声预加载');
+      const now = Date.now();
+      reminders.checkAlarms({ progress: [{ id: 200, alarm_start: true, alarm_end: false, timer_minutes: null,
+        est_start: new Date(now).toISOString(), content: '响铃' }] });
+      await flushRings();
+      assert.equal(reminders.alarmAudio.paused, false, '到点无手势直接自动播放');
+      assert.equal(reminders.alarmAudio.calls.at(-1).src, '/admin/assets/audio/alarm-clock.mp3', '到点播出真实铃声');
+      assert.equal(reminders.pendingRecovery, null, '不要求「恢复响铃」');
+      assert.equal(toastMessages.includes(hint), false, '正常路径不弹恢复提示');
+      assert.equal(reminders.alarmAudio.loop, true, '闹钟循环');
+      // 计时器到点同样无手势直接自动播放（单次，不循环）
+      reminders.checkAlarms({ progress: [{ id: 201, alarm_start: false, alarm_end: false,
+        timer_minutes: 1, status: 'in_progress',
+        actual_start: new Date(now - 60 * 1000).toISOString(), content: '计时' }] });
+      await flushRings();
+      assert.equal(reminders.timerAudio.paused, false, '计时器到点无手势直接自动播放');
+      assert.equal(reminders.timerAudio.calls.at(-1).src, '/admin/assets/audio/timer-done.ogg', '计时器播出真实铃声');
+      assert.equal(reminders.timerAudio.loop, false, '计时器单次播放');
+      assert.equal(reminders.pendingRecovery, null);
+      reminders.dispose();
+      // 对照：从未手势播放的元素在模型下被拒绝（授权不共享）
+      const stranger = policyAudio();
+      await stranger.play().then(
+        () => assert.fail('未授权元素不应放行'),
+        (error) => assert.equal(error.name, 'NotAllowedError'));
+      assert.equal(stranger.paused, true);
+    }
+
+    // #33：解锁 play 迟到结算不影响真实响铃——真实起播接管（haltAudio）使
+    // 解锁令牌失效，拒绝路径静默失效；真实起播自身的音源挂载与播放不受影响
     {
       const reminders = reminderModule.createPlanningReminder();
       reminders.ensureAudio();
       reminders.alarmAudio.behavior = 'deferred';
-      reminders.unlockAudio();
-      reminders.alarmAudio.behavior = 'success';
-      reminders.showRingModal('真实响铃', '12:00');
+      reminders.unlockAudio();  // 解锁 play 挂起（静音素材）
+      reminders.showRingModal('真实响铃', '12:00');  // 到点真实起播接管
       await flushRings();
-      assert.equal(reminders.alarmAudio.calls.length, 2);
-      assert.equal(reminders.alarmAudio.calls[1].muted, false);
+      assert.ok(reminders.alarmAudio.calls[0].src.startsWith('data:audio/wav'), '解锁播放静音素材');
+      assert.equal(reminders.alarmAudio.calls[1].src, '/admin/assets/audio/alarm-clock.mp3', '真实起播挂真实铃声');
       assert.equal(reminders.alarmAudio.paused, false);
+      reminders.alarmAudio.pending[0].resolve('');  // 真实起播结算
+      await flushRings();
+      assert.equal(reminders.alarmAudio.paused, false);
+      reminders.dispose();
+    }
+
+    // #33：解锁 play 的迟到成功结算不得暂停已接管的真实响铃（显式结算替身：
+    // pause 不拒绝在途 play，使「解锁成功结算晚于真实起播」可构造）
+    {
+      const reminders = reminderModule.createPlanningReminder();
+      reminders.attach();
+      const controlled = () => ({
+        src: '', ringSource: null, unlocked: false, loop: false,
+        paused: true, plays: 0, calls: [], jobs: [],
+        play() {
+          this.plays += 1;
+          this.calls.push({ src: this.src });
+          this.paused = false;
+          return new Promise((resolve) => this.jobs.push(resolve));
+        },
+        pause() { this.paused = true; },  // 结算由用例显式控制，不拒绝在途 play
+        load() {},
+      });
+      reminders.alarmAudio = controlled();
+      reminders.timerAudio = controlled();
+      reminders.unlockAudio();  // 解锁 play 挂起
+      reminders.showRingModal('真实响铃', '12:00');  // 真实起播接管（令牌失效）
+      await flushRings();
+      assert.equal(reminders.alarmAudio.calls[1].src, '/admin/assets/audio/alarm-clock.mp3');
+      assert.equal(reminders.alarmAudio.paused, false, '真实响铃播放中');
+      reminders.alarmAudio.jobs[0]();  // 迟到的解锁成功结算
+      await flushRings();
+      assert.equal(reminders.alarmAudio.paused, false, '迟到解锁结算不暂停真实响铃');
       reminders.dispose();
     }
 
@@ -520,7 +635,9 @@ const checks = {
       reminders.dispose();
     }
 
-    // #30 补充：主动停止后待恢复取消，后续手势只静音预热，不再恢复旧提醒
+    // #30/#33 补充：主动停止后待恢复取消；后续手势对「已挂真实铃声但未解锁」
+    // 的元素（未解锁时的到点尝试先挂了铃声）安全补做静音解锁——解锁播放先把
+    // 音源换回静音素材，绝不播出真实铃声，结算后恢复挂真实铃声
     {
       const reminders = reminderModule.createPlanningReminder();
       reminders.attach();
@@ -530,15 +647,20 @@ const checks = {
       const occ = { id: 9, alarm_start: true, est_start: new Date(now).toISOString(), content: '响铃' };
       reminders.checkAlarms({ progress: [occ] });
       await flushRings();
+      assert.equal(reminders.alarmAudio.ringSource, '/admin/assets/audio/alarm-clock.mp3', '到点尝试已挂真实铃声');
       reminders.alarmAudio.behavior = 'success';
       reminders.stopRinging();
       await flushRings();
       assert.equal(reminders.pendingRecovery, null);
       assert.equal(reminders.ringModal, null);
+      const playsBefore = reminders.alarmAudio.plays;
       await gesture();
       await flushRings();
-      assert.equal(reminders.alarmAudio.calls.at(-1).muted, true);
-      assert.equal(reminders.alarmAudio.paused, true);
+      assert.equal(reminders.alarmAudio.plays, playsBefore + 1, '手势只补做一次静音解锁');
+      assert.ok(reminders.alarmAudio.calls.at(-1).src.startsWith('data:audio/wav'), '解锁播放静音素材，不泄漏真实铃声');
+      assert.notEqual(reminders.alarmAudio.calls.at(-1).src, '/admin/assets/audio/alarm-clock.mp3');
+      assert.equal(reminders.alarmAudio.paused, true, '解锁结算收尾');
+      assert.equal(reminders.alarmAudio.ringSource, '/admin/assets/audio/alarm-clock.mp3', '解锁后恢复挂真实铃声');
       assert.equal(reminders.ringModal, null);
       reminders.dispose();
     }
@@ -601,6 +723,7 @@ const checks = {
       else if (route === 'mask') maskClick(mask);
       else reminders.dispose();
       await flushRings();  // pause 使未结算的 play 迟到拒绝
+      reminders.alarmAudio.behavior = 'success';  // 手势补做的静音解锁可正常结算
       assert.equal(reminders.pendingRecovery, null, '迟到拒绝不登记待恢复');
       assert.equal(reminders.recoveryHandler, null, '迟到拒绝不重注册恢复监听');
       assert.equal(reminders.ringModal, null);
@@ -613,7 +736,10 @@ const checks = {
       if (route === 'dispose') {
         assert.equal(reminders.alarmAudio.calls.length, 1, '卸载后手势无监听，不触发任何播放');
       } else {
-        assert.equal(reminders.alarmAudio.calls.at(-1).muted, true, '触摸只触发静音预热');
+        assert.equal(reminders.alarmAudio.calls.length, 2, '真实起播一次 + 静音解锁一次');
+        assert.ok(reminders.alarmAudio.calls[1].src.startsWith('data:audio/wav'), '手势补做的解锁播放静音素材');
+        assert.notEqual(reminders.alarmAudio.calls[1].src, '/admin/assets/audio/alarm-clock.mp3', '手势不播出真实铃声');
+        assert.equal(reminders.alarmAudio.ringSource, '/admin/assets/audio/alarm-clock.mp3', '解锁后恢复挂真实铃声');
       }
       assert.equal(reminders.pendingRecovery, null);
       assert.equal(reminders.ringModal, null, '旧提醒不复活');
@@ -783,7 +909,7 @@ const checks = {
       const reminders = reminderModule.createPlanningReminder();
       reminders.attach();
       const controlled = (mode) => ({ paused: true, plays: 0, muted: false, currentTime: 0,
-        jobs: [], mode,
+        src: '', ringSource: null, loop: false, jobs: [], mode,
         play() {
           this.plays += 1;
           if (this.mode === 'blocked') return Promise.reject(new Error('NotAllowedError'));
@@ -791,6 +917,7 @@ const checks = {
           return new Promise((resolve, reject) => this.jobs.push({ resolve, reject }));
         },
         pause() { this.paused = true; },  // 结算由用例显式控制，不拒绝在途 play
+        load() {},
       });
       reminders.alarmAudio = controlled('deferred');
       reminders.alarmAudio.loop = true;

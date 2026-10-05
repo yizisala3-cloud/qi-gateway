@@ -15,12 +15,12 @@
 // 一期不实现清单勾选、待办互通与 AI 读写（F01–F03 仅预留稳定身份与
 // 可复用基础接口）。
 
-import { gw } from '../api.js?v=20261005-ring-fix3';
+import { gw } from '../api.js?v=20261005-ring-fix5';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, icon, esc,
-} from '../ui.js?v=20261005-ring-fix3';
-import { createRetroSelectField } from './retro_select.js?v=20261005-ring-fix3';
-import { renderMarkdown } from './memo_markdown.js?v=20261005-ring-fix3';
+} from '../ui.js?v=20261005-ring-fix5';
+import { createRetroSelectField } from './retro_select.js?v=20261005-ring-fix5';
+import { renderMarkdown } from './memo_markdown.js?v=20261005-ring-fix5';
 
 const KIND_LABELS = { pinned: '常驻备忘', note: '随笔' };
 const AUTOSAVE_DELAY_MS = 800;

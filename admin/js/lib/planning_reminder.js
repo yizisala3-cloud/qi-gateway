@@ -1,12 +1,23 @@
 // Reminder state persists across mounts of the cached planning page.
-import { modal, toast, esc, icon } from '../ui.js?v=20261005-ring-fix3';
-import { fmtClock } from './planning_display.js?v=20261005-ring-fix3';
+import { modal, toast, esc, icon } from '../ui.js?v=20261005-ring-fix5';
+import { fmtClock } from './planning_display.js?v=20261005-ring-fix5';
 
 // 闹钟错过太久就静默跳过（只对未来 2 分钟内与刚过期的情况响铃）
 const ALARM_GRACE_MS = 2 * 60 * 1000;
 
 const ALARM_URL = '/admin/assets/audio/alarm-clock.mp3';
 const TIMER_URL = '/admin/assets/audio/timer-done.ogg';
+
+// 首个手势解锁业务元素用的静音素材（#33，20261005-ring-fix5）：内联 data URI
+// 静音 WAV（16-bit PCM 8kHz 单声道 100ms 全零采样），不经网络、无冷加载窗口。
+// WebKit / Safari 的自动播放授权按媒体元素管理：元素本人在用户手势内开始过
+// 播放，之后无手势的 play() 才会放行，授权不跨元素共享。因此首个手势直接在
+// 业务闹钟 / 计时器元素上播放本素材完成各自解锁——素材全零采样，即使内核
+// 忽略任何静音手段也结构上不可听，不存在「静音标记被忽略而泄漏真实铃声」
+// 的路径；解锁结算后把元素音源挂到真实铃声预加载（换源与 load 不需要手势、
+// 不出声），到点起播不被冷加载拖慢。不使用任何独立预热元素——那会在
+// WebKit 下留下「预热元素已授权、业务元素仍被拒」的路径（#33 根因）。
+const SILENT_WAV = 'data:audio/wav;base64,UklGRsQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 
 const RING_BLOCKED_HINT = '浏览器拦截了自动响铃，点击「恢复响铃」按钮即可恢复';
 
@@ -18,9 +29,10 @@ export function createPlanningReminder() {
     ringItems: [],
     firedKeys: new Set(),
     permissionNoticeShown: false,
-    // 预热播放任务表：audio -> 本次预热令牌。结算回调凭令牌判断自己是否仍然
-    // 有效，迟到的预热结算不会误停之后开始的真实响铃（#28）。
-    warmJobs: new Map(),
+    // 在途静音解锁任务表：业务元素 -> 本次解锁令牌。结算回调凭令牌判断自己
+    // 是否仍然有效，迟到的解锁结算不会误停之后开始的真实响铃（#33，同旧
+    // warmJobs 语义，但令牌作用在业务元素本人身上）。
+    unlockJobs: new Map(),
     // 起播被浏览器拦截后待手势恢复的提醒（#30）：{ once, epoch }，epoch 为
     // 登记时的播放代次；重试只作用于当前代次的待恢复（#29）
     pendingRecovery: null,
@@ -33,6 +45,8 @@ export function createPlanningReminder() {
     recoveryAttemptEpoch: null,
     attach() {
       this.requestNotificationPermission();
+      // 进页面不播放任何声音（#28）；首个手势在业务元素本人身上完成静音
+      // 解锁（#33，WebKit 按元素授权），真实铃声到点直接自动播放
       this.audioUnlockHandler = () => this.unlockAudio();
       window.addEventListener('pointerdown', this.audioUnlockHandler, { once: true });
     },
@@ -48,29 +62,51 @@ export function createPlanningReminder() {
     },
 
     unlockAudio() {
-      // 静音预热：play 只为取得自动播放授权，全程 muted 不出声（#28）。
-      // 响铃弹窗存在（正在响或待恢复）时不预热，避免预热回调干扰真实提醒。
+      // 首个手势解锁（#33）：静音初始化直接发生在业务闹钟 / 计时器元素本人
+      // 身上——「已授权元素」必须就是「未来真实响铃元素」，不依赖任何
+      // 「一个元素解锁、其他元素共享授权」的假设；响铃弹窗存在（正在响或
+      // 待恢复）时不预热，避免与手势恢复交叠。
       if (this.ringModal) return;
       this.ensureAudio();
-      const warm = (audio) => {
-        const job = Symbol('warmup');
-        this.warmJobs.set(audio, job);
-        audio.muted = true;
-        audio.play().then(() => {
-          if (this.warmJobs.get(audio) !== job) return;  // 已被真实响铃或停止接管
-          audio.pause();
-          audio.currentTime = 0;
-          audio.muted = false;
-          this.warmJobs.delete(audio);
-        }).catch(() => {
-          if (this.warmJobs.get(audio) !== job) return;
-          this.warmJobs.delete(audio);
-          audio.muted = false;
-          console.warn('[planning_reminder] 静音预热被拒绝，到点响铃可能需要一次页面点击恢复');
-        });
-      };
-      warm(this.alarmAudio);
-      warm(this.timerAudio);
+      this.warmBusinessAudio(this.alarmAudio, ALARM_URL, true);
+      this.warmBusinessAudio(this.timerAudio, TIMER_URL, false);
+    },
+
+    // 业务元素静音解锁（#33）：解锁播放固定使用内联静音 WAV（全零采样，
+    // 结构上不可听，不依赖 muted / volume 等可被内核忽略的静音手段）。即使
+    // 元素此前已被真实铃声占用（未解锁时的到点尝试会先挂上铃声），也先把
+    // 音源换回静音素材再播，杜绝手势内泄漏真实铃声或其首帧；解锁成功后把
+    // 元素挂回自己的真实铃声预加载（换源与 load 不需要手势、不出声）。
+    // 已解锁元素直接跳过，重复手势零播放。
+    warmBusinessAudio(audio, ringUrl, loop) {
+      if (audio.unlocked) return;
+      const job = Symbol('unlock');
+      this.unlockJobs.set(audio, job);
+      audio.loop = false;
+      audio.ringSource = null;
+      audio.src = SILENT_WAV;
+      audio.play().then(() => {
+        if (this.unlockJobs.get(audio) !== job) return;  // 已被真实响铃或停止接管
+        audio.pause();
+        audio.currentTime = 0;
+        audio.unlocked = true;
+        this.unlockJobs.delete(audio);
+        this.armRingSource(audio, ringUrl, loop);
+      }).catch(() => {
+        if (this.unlockJobs.get(audio) !== job) return;
+        this.unlockJobs.delete(audio);
+        console.warn('[planning_reminder] 静音解锁被拒绝，到点响铃可能需要一次页面点击恢复');
+      });
+    },
+
+    // 把元素音源挂到指定真实铃声并预加载；loop 由铃声种类决定：闹钟循环、
+    // 计时器单次。已挂同一铃声时跳过，不重复打断加载。
+    armRingSource(audio, ringUrl, loop) {
+      if (audio.ringSource === ringUrl) return;
+      audio.loop = loop;
+      audio.src = ringUrl;
+      audio.ringSource = ringUrl;
+      try { audio.load(); } catch { /* 预加载失败不影响到点播放 */ }
     },
 
     requestNotificationPermission() {
@@ -86,12 +122,16 @@ export function createPlanningReminder() {
     },
 
     ensureAudio() {
+      // 业务元素创建即挂静音音源（#33）：解锁前元素上不存在真实铃声，杜绝
+      // 任何「手势内短暂播出真实铃声首帧」的路径；真实铃声只在解锁结算或
+      // 到点起播时经 armRingSource 挂载。
       if (!this.alarmAudio) {
-        this.alarmAudio = new Audio(ALARM_URL);
-        this.alarmAudio.loop = true;
+        this.alarmAudio = new Audio(SILENT_WAV);
+        this.alarmAudio.ringSource = null;
       }
       if (!this.timerAudio) {
-        this.timerAudio = new Audio(TIMER_URL);
+        this.timerAudio = new Audio(SILENT_WAV);
+        this.timerAudio.ringSource = null;
       }
     },
 
@@ -180,7 +220,9 @@ export function createPlanningReminder() {
       this.syncRecoveryEntry();
       const epoch = this.ringEpoch;
       const audio = once ? this.timerAudio : this.alarmAudio;
-      audio.muted = false;
+      // 到点起播前先把音源挂到真实铃声（元素未解锁时仍在静音素材上；换源与
+      // load 不需要手势），随后 play；被浏览器拒绝仍走待恢复兜底（#30）
+      this.armRingSource(audio, once ? TIMER_URL : ALARM_URL, !once);
       audio.currentTime = 0;
       audio.play().then(() => {
         if (epoch !== this.ringEpoch) return;  // 已被接管或停止：迟到成功不改写状态
@@ -233,12 +275,14 @@ export function createPlanningReminder() {
       const epoch = this.ringEpoch;
       const audio = pending.once ? this.timerAudio : this.alarmAudio;
       this.ensureAudio();
-      audio.muted = false;
       audio.currentTime = 0;
       this.recoveryAttemptEpoch = epoch;
       try {
         await audio.play();
         if (epoch !== this.ringEpoch) return;  // 期间被接管或停止：迟到结果失效
+        // 恢复播放发生在用户手势内：该元素由此获得手势授权（#33），
+        // 后续手势不再对其重复静音解锁
+        audio.unlocked = true;
         this.pendingRecovery = null;
         this.removeRecoveryListener();
         this.syncRecoveryEntry();
@@ -252,13 +296,13 @@ export function createPlanningReminder() {
     },
 
     haltAudio() {
-      // 停掉当前所有播放（含静音预热）并使预热结算回调失效
+      // 停掉当前所有业务播放，并使在途静音解锁结算失效——解锁的迟到结算
+      // 不得暂停之后开始的真实响铃（#33）
       for (const audio of [this.alarmAudio, this.timerAudio]) {
         if (!audio) continue;
         try { audio.pause(); } catch { /* ignore */ }
         audio.currentTime = 0;
-        audio.muted = false;
-        this.warmJobs.delete(audio);
+        this.unlockJobs.delete(audio);
       }
     },
 
