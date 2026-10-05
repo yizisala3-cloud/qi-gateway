@@ -79,11 +79,14 @@ body {
   line-height: 1.65;
   color: var(--ink);
   /* 全局深绿纸纹：原侧栏底纹铺满整页，主区变成绿底上的漂浮书页。
-     不用 background-attachment: fixed——iOS Safari 对 fixed 背景渲染
-     不可靠；且布局是 100vh 内滚，body 本身不滚动，fixed 没有收益。 */
+     贴图是 1254×1254 方图，侧栏 cover 的实际显示尺寸恒为 100vh×100vh；
+     body 若也用 cover，纹理会随视口宽被拉伸放大而糊掉。这里按侧栏同尺寸
+     100vh 平铺多张，两边颗粒一致。不用 background-attachment: fixed——
+     iOS Safari 对 fixed 背景渲染不可靠；且布局是 100vh 内滚，body 本身
+     不滚动，fixed 没有收益。 */
   background:
     linear-gradient(var(--green-veil), var(--green-veil)),
-    url("/admin/assets/dark-green-paper.png") center / cover no-repeat, var(--green-deep);
+    url("/admin/assets/dark-green-paper.png") center / 100vh 100vh repeat, var(--green-deep);
   -webkit-font-smoothing: antialiased;
 }
 a { color: inherit; text-decoration: none; }
@@ -300,34 +303,37 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
   /* 手机端地址栏收展会改变可视高度，dvh 让书页始终贴合可视区 */
   height: 100dvh;
   position: relative;
-  padding: 18px 22px 22px;
+  /* 绿底只露窄窄一圈（参考用户 2026-10-06 概念图：顶 7 / 右 5 / 底 12 / 左 13）：
+     顶 8 / 左右 10 / 底 10，绿底主要属于左侧栏 */
+  padding: 8px 10px 10px;
 }
-/* 书页左上/右上角外侧的小角饰：复用侧栏顶部角花，右上镜像 */
-.main::before, .main::after {
-  content: "";
-  position: absolute;
-  top: 4px;
-  width: 72px;
-  height: 24px;
-  background: url("/admin/assets/ornaments/top-border-ornament.png") center / contain no-repeat;
-  opacity: 0.5;
-  pointer-events: none;
-}
-.main::before { left: 10px; }
-.main::after { right: 10px; transform: scaleX(-1); }
 .content {
   height: 100%;
   overflow-y: auto;
   padding: 30px 34px 90px;
   background:
+    /* 做旧（2026-10-06）：边缘沉黄 + 两处不对称淡暖斑，rgba 透明度即浓度旋钮 */
+    radial-gradient(120% 90% at 50% 42%, transparent 55%, rgba(128, 102, 48, 0.07) 100%),
+    radial-gradient(240px 180px at 86% 8%, rgba(150, 118, 52, 0.06), transparent 70%),
+    radial-gradient(280px 220px at 8% 94%, rgba(150, 118, 52, 0.05), transparent 70%),
     linear-gradient(var(--paper-veil), var(--paper-veil)),
     url("/admin/assets/ivory-paper.png") center / 620px auto repeat, var(--paper);
   border-radius: 16px;
-  border: 1px solid var(--gold-line);
-  /* 第二圈细金线：outline 跟随圆角，且不会被自身 overflow 裁剪 */
-  outline: 1px solid var(--gold-faint);
-  outline-offset: 5px;
-  box-shadow: 0 12px 32px rgba(8, 14, 9, 0.38), 0 3px 10px rgba(8, 14, 9, 0.28);
+  /* 代码画的"书页叠边"：外围三条线（外金线 + 两条 rgba 分界线 0.4 / 0.3）。
+     前两个 inset 晕影是"书页间阴影"：近边 10px 深晕 + 44px 宽浅晕两个渐变
+     叠加，叠在金线和纸阶之上（inset 首条在最上层），外圈整体比页面中部深、
+     向内自然变浅。不占布局、跟随圆角。 */
+  box-shadow:
+    inset 0 0 10px rgba(96, 80, 44, 0.22),
+    inset 0 0 44px rgba(96, 80, 44, 0.15),
+    inset 0 0 0 1px var(--gold-line),
+    inset 0 0 0 2px var(--paper-solid),
+    inset 0 0 0 3px rgba(143, 122, 63, 0.4),
+    inset 0 0 0 5px var(--paper-solid),
+    inset 0 0 0 6px rgba(143, 122, 63, 0.3),
+    inset 0 0 0 8px var(--paper),
+    0 14px 34px rgba(8, 14, 9, 0.4),
+    0 3px 10px rgba(8, 14, 9, 0.28);
 }
 
 .page-head {
@@ -1152,7 +1158,6 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   /* 抽屉态侧栏同样用 dvh，避免地址栏遮住底部状态栏 */
   .sidebar { height: 100vh; height: 100dvh; }
   .main { padding: 10px; }
-  .main::before, .main::after { display: none; }
   .content { border-radius: 12px; padding: 18px 16px 70px; }
   .page-title { font-size: 23px; }
   .tabs { width: 100%; overflow-x: auto; }
