@@ -124,6 +124,70 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
 }
 .orn-divider--light { --orn-fill: #20342a; }
 
+/* 花枝与延伸杆子在同一 SVG 中，共用素材坐标、透明度与缩放。
+   SVG 的杆子复制 PNG 左缘像素颜色；接口没有渐变猜色或分端偏移。
+   各断点只调整整体比例和构图位置。 */
+.page-head-rule {
+  --phr-s: 0.335;
+  --phr-img: url("/admin/assets/ornaments/wisteria-divider.svg");
+  --phr-original-w: 716;
+  --phr-original-h: 371;
+  --phr-original-stem: 116.5;
+  --phr-right-w: calc(var(--phr-original-w) * 1px * var(--phr-s));
+  height: 12px;
+  background: none;
+}
+.page-head-rule[data-variant="lily3"] {
+  --phr-img: url("/admin/assets/ornaments/lily3-divider.svg");
+  --phr-original-w: 649;
+  --phr-original-h: 228;
+  --phr-original-stem: 122.5;
+}
+.page-head-rule[data-variant] {
+  margin-top: calc(var(--phr-right-w) * var(--phr-original-stem) / var(--phr-original-w) + 2px);
+  margin-bottom: 16px;
+}
+.page-head-rule::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: var(--phr-right-gap, 0px);
+  top: calc(6px - var(--phr-right-w) * var(--phr-original-stem) / var(--phr-original-w));
+  width: auto;
+  height: calc(var(--phr-right-w) * var(--phr-original-h) / var(--phr-original-w));
+  transform: none;
+  background: var(--phr-img) no-repeat right top /
+    calc(var(--phr-right-w) * (16384 + var(--phr-original-w)) / var(--phr-original-w))
+    calc(var(--phr-right-w) * var(--phr-original-h) / var(--phr-original-w));
+  pointer-events: none;
+  z-index: 2;
+}
+.page-head-rule::before {
+  content: "";
+  left: 2px;
+  right: auto;
+  top: 50%;
+  width: 5.5px;
+  height: 5.5px;
+  transform: translateY(-50%) rotate(45deg);
+  border-color: var(--gold-strong);
+  box-shadow: 0 0 0 2.5px var(--gold-strong);
+  z-index: 3;
+}
+
+/* 尺寸随可用宽度增长；位置由实际按钮布局决定。 */
+@media (max-width: 1100px) {
+  .page-head-rule { --phr-s: 0.28; }
+}
+@media (min-width: 769px) {
+  .page-head-rule[data-variant="wisteria"] {
+    --phr-right-w: clamp(193.32px, calc(160px + 5vw - (var(--sidebar-w) + 88px) * 0.05), 239.86px);
+  }
+  .page-head-rule[data-variant="lily3"] {
+    --phr-right-w: clamp(181.72px, calc(152px + 4.25vw - (var(--sidebar-w) + 88px) * 0.0425), 217.415px);
+  }
+}
+
 /* ---------- 布局 ---------- */
 .app { min-height: 100vh; }
 .layout { display: flex; min-height: 100vh; }
@@ -796,12 +860,21 @@ html[data-theme="night"] .tab.active { color: #f0ebd5; }
   display: flex;
   flex-direction: column;
   max-height: calc(100vh - 42px);
-  background: var(--paper-solid);
+  /* 底色对齐用户参考图（今日概览卡，均值 #e5e2d3 草绿米纸）。
+     关键：不能纯色平涂——同色值没有纸纹会显灰不显绿，必须像 .content
+     一样铺纸纹再罩绿色调；2026-10-06 换用户提供的米白纸纹 cream-paper.jpg。 */
+  --detail-tint: rgba(84, 126, 70, 0.15);
+  background:
+    radial-gradient(120% 90% at 50% 42%, transparent 55%, rgba(128, 102, 48, 0.07) 100%),
+    linear-gradient(var(--detail-tint), var(--detail-tint)),
+    url("/admin/assets/cream-paper.jpg") center / 620px auto repeat,
+    var(--paper);
   border: 1px solid var(--gold-faint);
   border-radius: var(--radius);
   box-shadow: var(--shadow-soft);
   overflow: clip;
 }
+html[data-theme="night"] .detail-panel { --detail-tint: rgba(34, 40, 30, 0.92); }
 .detail-head {
   display: flex;
   align-items: flex-start;
@@ -1113,6 +1186,7 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
 /* ---------- 响应式 ---------- */
 @media (max-width: 1100px) {
   .page-with-detail { grid-template-columns: minmax(0, 1fr) !important; }
+  /* 花饰分隔线几何已整体移至「中屏/手机几何」块（分隔线区），此处不再重复 */
   .detail-panel {
     position: fixed;
     top: 0; right: 0; bottom: 0;
@@ -1160,6 +1234,16 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   .main { padding: 10px; }
   .content { border-radius: 12px; padding: 18px 16px 70px; }
   .page-title { font-size: 23px; }
+  /* 手机：保留花枝大小，空位不足时定位器自动靠右。 */
+  .page-head-rule { --phr-s: 0.28; }
+  .page-head-rule[data-variant="wisteria"] {
+    --phr-s: 0.27;
+  }
+  .page-head-rule::before {
+    width: 4.5px;
+    height: 4.5px;
+    box-shadow: 0 0 0 1.8px var(--gold-strong);
+  }
   .tabs { width: 100%; overflow-x: auto; }
   .grid-2, .grid-4 { grid-template-columns: repeat(2, 1fr); }
   .card { padding: 14px 15px; }
@@ -1172,7 +1256,13 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   .content { padding: 16px 14px 56px; }
   .card { padding: 13px 14px; }
   .page-title { font-size: 21px; }
-  .page-head-rule { margin: 14px 0 16px; }
+  .page-head-rule { margin: 14px 0 16px; --phr-s: 0.22; }
+  .page-head-rule[data-variant="wisteria"] { --phr-s: 0.24; }
+  .page-head-rule::before {
+    width: 4px;
+    height: 4px;
+    box-shadow: 0 0 0 1.5px var(--gold-strong);
+  }
   .page-head-actions { gap: 8px; }
   .stat .value { font-size: 21px; }
 }

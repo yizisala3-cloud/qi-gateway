@@ -1,6 +1,6 @@
 // Reminder state persists across mounts of the cached planning page.
-import { modal, toast, esc, icon } from '../ui.js?v=20261005-ring-fix5';
-import { fmtClock } from './planning_display.js?v=20261005-ring-fix5';
+import { modal, toast, esc, icon } from '../ui.js?v=20261007-button-anchored';
+import { fmtClock } from './planning_display.js?v=20261007-button-anchored';
 
 // 闹钟错过太久就静默跳过（只对未来 2 分钟内与刚过期的情况响铃）
 const ALARM_GRACE_MS = 2 * 60 * 1000;
@@ -8,7 +8,7 @@ const ALARM_GRACE_MS = 2 * 60 * 1000;
 const ALARM_URL = '/admin/assets/audio/alarm-clock.mp3';
 const TIMER_URL = '/admin/assets/audio/timer-done.ogg';
 
-// 首个手势解锁业务元素用的静音素材（#33，20261005-ring-fix5）：内联 data URI
+// 首个手势解锁业务元素用的静音素材（#33，20261007-button-anchored）：内联 data URI
 // 静音 WAV（16-bit PCM 8kHz 单声道 100ms 全零采样），不经网络、无冷加载窗口。
 // WebKit / Safari 的自动播放授权按媒体元素管理：元素本人在用户手势内开始过
 // 播放，之后无手势的 play() 才会放行，授权不跨元素共享。因此首个手势直接在

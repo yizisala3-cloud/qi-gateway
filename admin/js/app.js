@@ -1,10 +1,11 @@
 // app.js - shell: login, sidebar, routing, theme, mobile drawers
-import { NAV, ROUTE_INDEX } from './routes.js?v=20261005-ring-fix5';
-import { loading, errorBlock, icon, esc } from './ui.js?v=20261005-ring-fix5';
-import { gw, getToken, setToken, clearToken } from './api.js?v=20261005-ring-fix5';
+import { NAV, ROUTE_INDEX } from './routes.js?v=20261007-button-anchored';
+import { loading, errorBlock, icon, esc } from './ui.js?v=20261007-button-anchored';
+import { gw, getToken, setToken, clearToken } from './api.js?v=20261007-button-anchored';
+import { initHeaderDivider } from './lib/header_divider.js?v=20261007-button-anchored';
 
 const DEFAULT_ROUTE = 'memories';
-const ASSET_VERSION = '20261005-ring-fix5';
+const ASSET_VERSION = '20261007-button-anchored';
 
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);
@@ -13,6 +14,20 @@ function applyTheme(t) {
   if (btn) btn.innerHTML = icon(t === 'night' ? 'sun' : 'moon');
 }
 function initTheme() { applyTheme(localStorage.getItem('qi-theme') === 'night' ? 'night' : 'day'); }
+
+// 页眉花饰分隔线：紫藤花枝（缺省）/ 铃兰花枝，选择持久化在 localStorage，
+// 由配置页的「页眉花饰」卡片循环切换。规则元素在 index.html 静态区，每页共享。
+const DIVIDER_VARIANTS = ['wisteria', 'lily3'];
+function applyDivider(v) {
+  localStorage.setItem('qi-divider', v);
+  const el = document.querySelector('.page-head-rule');
+  if (el) el.dataset.variant = v;
+  return v;
+}
+function initDivider() {
+  const saved = localStorage.getItem('qi-divider');
+  applyDivider(DIVIDER_VARIANTS.includes(saved) ? saved : 'wisteria');
+}
 function isAuthed() { return !!getToken(); }
 
 function showLogin(message = '') {
@@ -66,6 +81,8 @@ async function route() {
   const root = document.getElementById('page-root');
   if (!meta) { location.hash = '#/' + DEFAULT_ROUTE; return; }
   highlight(key);
+  // 花饰定位器按本页按钮的实际位置寻找空位。
+  document.querySelector('.page-head-rule')?.setAttribute('data-page', key);
   document.getElementById('page-crumb').textContent = meta.group || 'qi-dashboard';
   document.getElementById('page-title').textContent = meta.label;
   document.getElementById('page-desc').textContent = meta.desc || '';
@@ -117,6 +134,8 @@ function closeSidebar() {
 
 async function boot() {
   initTheme();
+  initDivider();
+  initHeaderDivider();
   document.getElementById('theme-btn')?.addEventListener('click', () => {
     applyTheme(document.documentElement.getAttribute('data-theme') === 'night' ? 'day' : 'night');
   });
