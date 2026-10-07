@@ -26,7 +26,18 @@ export async function gw(path, opts = {}) {
     } catch {}
     throw new Error(`${resp.status} ${resp.statusText}${detail}`);
   }
-  return resp.json();
+  try {
+    return await resp.json();
+  } catch (error) {
+    // R12（2026-10-07 复审 #12）：2xx 但正文不可解析（截断 / 非法 JSON）——
+    // 保存可能已经成立，这是「结果未知」而不是确定失败。以稳定标记上抛，
+    // 调用方按结果未知提示并沿用原操作身份重试；不得把 SyntaxError 文本
+    // 当失败原因误报「保存失败：Unexpected end of JSON input」。
+    const unknown = new Error('未收到完整的保存结果响应，无法确认保存是否成功');
+    unknown.name = 'ResultUnknownError';
+    unknown.resultUnknown = true;
+    throw unknown;
+  }
 }
 
 function dataPath(table, id = null, params = {}) {

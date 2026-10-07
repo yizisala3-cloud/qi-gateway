@@ -95,6 +95,8 @@ _parse_tod = common._parse_tod
 _tod_str = common._tod_str
 parse_duration_shorthand = common.parse_duration_shorthand
 parse_logged_duration_seconds = common.parse_logged_duration_seconds
+parse_interval_shorthand = common.parse_interval_shorthand
+format_interval_shorthand = common.format_interval_shorthand
 _combine = common._combine
 _minutes_between = common._minutes_between
 _default_boundary_state = cycles._default_boundary_state
@@ -131,6 +133,13 @@ _round_deadline_passed = task_service._round_deadline_passed
 _fixed_interval_anchor_due = task_service._fixed_interval_anchor_due
 _first_round_settlement = task_service._first_round_settlement
 _creation_window_outcome = task_service._creation_window_outcome
+_creation_request_content = task_service._creation_request_content
+_normalize_stored_creation_content = task_service._normalize_stored_creation_content
+_find_task_by_creation_key = task_service._find_task_by_creation_key
+_find_creation_request_tombstone = task_service._find_creation_request_tombstone
+_creation_deleted_result = task_service._creation_deleted_result
+_replay_creation_target = task_service._replay_creation_target
+_is_creation_key_conflict = task_service._is_creation_key_conflict
 create_task = task_service.create_task
 _prepare_refresh_definition = task_service._prepare_refresh_definition
 _should_recompute_after_generation = common._should_recompute_after_generation
@@ -320,15 +329,15 @@ def list_occurrences(
 ) -> list[dict[str, Any]]:
     now = now or runtime._now()
     if status is not None and status not in common.OCCURRENCE_STATUSES:
-        raise common.PlanningError("invalid_payload", f"unknown status: {status}")
+        raise common.PlanningError("invalid_payload", f"未知的状态筛选：{status}")
     if task_type is not None and task_type not in common.TASK_TYPES:
-        raise common.PlanningError("invalid_payload", f"unknown task_type: {task_type}")
+        raise common.PlanningError("invalid_payload", f"未知的待办类型：{task_type}")
     if for_date and schedule_date and for_date != schedule_date:
         raise common.PlanningError("invalid_payload", "for_date 与 schedule_date 筛选条件不一致", 400)
     try:
         limit = max(1, min(common.MAX_LIST_ROWS, int(limit or common.DEFAULT_LIST_ROWS)))
     except (TypeError, ValueError) as exc:
-        raise common.PlanningError("invalid_payload", "limit must be an integer") from exc
+        raise common.PlanningError("invalid_payload", "limit 须为整数") from exc
 
     client = runtime._require_client()
 
@@ -465,7 +474,7 @@ def get_task(task_id: int, now: datetime | None = None) -> dict[str, Any]:
     client = runtime._require_client()
     task = runtime._fetch_task(client, task_id)
     if not task:
-        raise common.PlanningError("not_found", "planning task not found", 404)
+        raise common.PlanningError("not_found", "待办任务不存在", 404)
     return presentation.serialize_task(task, now or runtime._now())
 
 
@@ -474,8 +483,8 @@ def get_occurrence(occurrence_id: int, now: datetime | None = None) -> dict[str,
     client = runtime._require_client()
     occ = runtime._fetch_occurrence(client, occurrence_id)
     if not occ:
-        raise common.PlanningError("not_found", "planning occurrence not found", 404)
+        raise common.PlanningError("not_found", "待办记录不存在", 404)
     task = runtime._fetch_task(client, occ["task_id"])
     if not task:
-        raise common.PlanningError("not_found", "planning task not found", 404)
+        raise common.PlanningError("not_found", "待办任务不存在", 404)
     return presentation.serialize_occurrence(occ, task, now or runtime._now())

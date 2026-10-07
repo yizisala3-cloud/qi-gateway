@@ -192,7 +192,8 @@ def emulate_planning_insert_once_occurrence(db, params):
 
 
 ROUND_DISCARD_TARGET_FIELDS = frozenset({
-    "actual_start", "actual_end", "actual_minutes", "updated_at"})
+    "actual_start", "actual_end", "actual_minutes", "actual_time_source",
+    "updated_at"})
 ROUND_EXPECTED_TASK_FIELDS = frozenset({
     "task_type", "refresh_mode", "refresh_enabled", "is_active",
     "request_state", "content", "time_mode", "estimated_minutes",
@@ -201,7 +202,7 @@ ROUND_EXPECTED_TASK_FIELDS = frozenset({
     "interval_days", "weekdays", "month_days", "target_date",
     "created_at", "refresh_anchor_at",
     "last_handled_at", "refresh_next_due_at", "window_start_tod",
-    "window_end_tod",
+    "window_end_tod", "after_completion_minutes",
 })
 
 
@@ -264,28 +265,67 @@ def _discard_dt(value):
     return value
 
 
-def emulate_planning_discard_task(task_rows, occ_rows, params):
-    """废弃整个任务：锁内关闭全部开放 occurrence + 停用任务（单事务语义）。
+def emulate_planning_discard_task(task_rows, occ_rows, params, *,
+                                  fact_rows=None, tombstone_rows=None):
+    """删除整个任务（§25，2026-10-07）：按执行事实保留全部历史或物理删除。
 
-    与 20261001010000 真库 SQL 同语义（不同步替身会掩盖新分支）：
-    * 可选 pending 目标行事实补齐（actual 字段白名单，原守卫原样）；
-    * 执行中（in_progress 且无 closed_at / handled_at）行在批量关闭前补齐
-      起止与耗时——目标行缺失的起止以补丁值补齐（已有事实让位，补入的
-      开始时间一并落库），其余行以 p_now 收口；耗时一律按最终采用的起止
-      重算（应用层 _minutes_between 契约），不接受 patch 携带的耗时；
-      倒置区间整体拒绝。真库锁扫描覆盖全部开放行并在锁内复核最新版本
-      （扫描后才开始 / 关闭的行各自归位），fake 单线程按最终状态等价仿真。
+    与 20261007010000 真库 SQL 同语义（不同步替身会掩盖新分支）：
+    * 已删除任务（deleted_at 非空）重复删除返回稳定结果，零改写；
+    * 事实判定 = 持久事实门槛（planning_task_completion_fact，经 fact_rows
+      传入）或当前行证据（status='completed' / partial_at 非空）任一成立；
+    * 历史保留分支：可选 pending 目标行事实补齐（actual 字段白名单，
+      含 actual_time_source）→ 执行中行补齐起止 / 耗时（来源 system）→
+      关闭全部开放行（discarded + closed_at）→ 停用 + deleted_at；
+    * 物理删除分支：删除全部实例行 + 完成事实门槛行 + 任务行 + 登记创建
+      请求最小身份（tombstone：request_key / content_digest / deleted_at，
+      经 tombstone_rows——R09：不保存业务正文，摘要由调用方传入
+      p_creation_digest）；
+    * 并发已停用（is_active=false 且未删除）→ RuntimeError（应用层 409）。
+    真库锁扫描覆盖全部行并在锁内复核最新版本，fake 单线程按最终状态
+    等价仿真。返回 {deleted, history_preserved, already_deleted, closed}。
     """
     task = next((r for r in task_rows if r.get("id") == params.get("p_task_id")), None)
     if task is None:
         raise RuntimeError("planning_discard_task: task not found")
-    if not task.get("is_active"):
-        raise RuntimeError("planning_discard_task: task already inactive (concurrent change)")
+    if task.get("deleted_at"):
+        return {"deleted": True, "history_preserved": True,
+                "already_deleted": True, "closed": 0}
     now = params.get("p_now")
     target_patch = params.get("p_target_patch") or {}
     if set(target_patch) - ROUND_DISCARD_TARGET_FIELDS:
         raise RuntimeError(
             "planning_discard_task: target patch contains unsupported field")
+    task_rows_scope = [r for r in occ_rows if r.get("task_id") == task["id"]]
+    has_fact = any(
+        r.get("task_id") == task["id"] for r in (fact_rows or []))
+    has_fact = has_fact or any(
+        r.get("status") == "completed" or r.get("partial_at") is not None
+        for r in task_rows_scope)
+    if not has_fact:
+        # ── 物理删除分支：删实例 + 删门槛 + 删任务 + 登记最小身份 ──────
+        for row in list(occ_rows):
+            if row.get("task_id") == task["id"]:
+                occ_rows.remove(row)
+        if fact_rows is not None:
+            fact_rows[:] = [r for r in fact_rows if r.get("task_id") != task["id"]]
+        task_rows.remove(task)
+        closed = len(task_rows_scope)
+        key = task.get("creation_request_key")
+        if key and tombstone_rows is not None:
+            # 与真库同事务登记一致：同键幂等（on conflict do nothing）；
+            # 只存请求键 + 语义摘要（R09：正文随任务行真正删除）。
+            if not any(r.get("request_key") == key for r in tombstone_rows):
+                tombstone_rows.append({
+                    "request_key": key,
+                    "content_digest": params.get("p_creation_digest") or "",
+                    "task_id": task["id"],
+                    "deleted_at": now,
+                })
+        return {"deleted": True, "history_preserved": False,
+                "already_deleted": False, "closed": closed}
+    # ── 历史保留分支：收口开放行 + 停用 + deleted_at ──────────────────
+    if not task.get("is_active"):
+        raise RuntimeError("planning_discard_task: task already inactive (concurrent change)")
     if params.get("p_target_id") is not None:
         target = next((r for r in occ_rows
                        if r.get("id") == params.get("p_target_id")
@@ -318,13 +358,20 @@ def emulate_planning_discard_task(task_rows, occ_rows, params):
             row["actual_minutes"] = (
                 None if start_dt is None
                 else max(0, round((end_dt - start_dt).total_seconds() / 60)))
+            # 系统收口的结束时间不冒充用户计时（§12.3）。
+            row["actual_time_source"] = "system"
+    closed = 0
     for row in occ_rows:
         if (row.get("task_id") == task["id"]
                 and row.get("status") in ("pending", "in_progress", "deferred", "partial")):
             row["status"] = "discarded"
             row["closed_at"] = now
             row["updated_at"] = now
+            closed += 1
     task["is_active"] = False
+    task["deleted_at"] = now
+    return {"deleted": True, "history_preserved": True,
+            "already_deleted": False, "closed": closed}
 
 
 SPLIT_PART_FIELDS = frozenset({"content", "estimated_minutes"})
@@ -360,10 +407,10 @@ def emulate_planning_split_occurrence(db, params):
                 or not 1 <= part["estimated_minutes"] <= 1440
                 for part in parts)):
         raise RuntimeError("planning_split_occurrence: invalid part item")
-    days = params.get("p_after_completion_days")
-    if days is not None and (not isinstance(days, int)
-                             or isinstance(days, bool)
-                             or not 1 <= days <= 365):
+    minutes = params.get("p_after_completion_minutes")
+    if minutes is not None and (not isinstance(minutes, int)
+                                 or isinstance(minutes, bool)
+                                 or not 1 <= minutes <= 525600):
         raise RuntimeError("planning_split_occurrence: invalid after_completion interval")
     open_states = ("pending", "in_progress", "deferred", "partial")
     round_rows = [row for row in db.rows["planning_occurrence"]
@@ -395,7 +442,7 @@ def emulate_planning_split_occurrence(db, params):
         }
         db.rows["planning_task"].append(new_task)
         created_ids.append(new_task["id"])
-    if days is not None:
+    if minutes is not None:
         round_all = [row for row in db.rows["planning_occurrence"]
                      if row.get("task_id") == task["id"]
                      and row.get("round_key") == params.get("p_round_key")]
@@ -404,7 +451,7 @@ def emulate_planning_split_occurrence(db, params):
             if task.get("is_active"):
                 task["last_handled_at"] = handled.isoformat()
                 task["refresh_next_due_at"] = (
-                    handled + timedelta(days=days)).isoformat()
+                    handled + timedelta(minutes=minutes)).isoformat()
             else:
                 raise RuntimeError(
                     "planning_split_occurrence: task already inactive (concurrent change)")

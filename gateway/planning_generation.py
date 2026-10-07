@@ -293,7 +293,7 @@ def _create_occurrences(
                 "interval_days", "weekdays", "month_days", "target_date",
                 "created_at", "refresh_anchor_at",
                 "last_handled_at", "refresh_next_due_at", "window_start_tod",
-                "window_end_tod",
+                "window_end_tod", "after_completion_minutes",
             )},
         }).execute()
     except Exception as exc:
@@ -612,7 +612,12 @@ def is_daily_cycle_death(row: dict[str, Any], task: dict[str, Any]) -> bool:
 
 
 def _after_completion_due(client, task: dict[str, Any]) -> datetime | None:
-    """Use the latest persisted round, so a failed task-cache write cannot skip a cycle."""
+    """Use the latest persisted round, so a failed task-cache write cannot skip a cycle.
+
+    2026-10-07（§9.5）：下一轮 due = 处理时刻 + after_completion_minutes
+    （分钟权威，1m–365d）——不取整到自然日；同一规划周期内短间隔的多个
+    轮次由 round_key 内嵌的精确 due 时刻区分身份。
+    """
     rows = runtime._rows(client, "planning_occurrence", lambda q: q.eq("task_id", task["id"]).order("id", desc=True))
     latest = max((row for row in rows if row.get("round_key")), key=lambda row: row["id"], default=None)
     if latest is None:
@@ -624,10 +629,12 @@ def _after_completion_due(client, task: dict[str, Any]) -> datetime | None:
                for row in round_rows):
         return None
     handled = max(common._parse_dt(row["handled_at"], "handled_at") for row in round_rows)
-    interval = task.get("interval_days")
-    if not isinstance(interval, int) or not 1 <= interval <= 365:
-        raise common.PlanningError("invalid_task", "处理后刷新间隔必须为 1 至 365 天", 409)
-    return handled + timedelta(days=interval)
+    interval = common._after_completion_interval_minutes(task)
+    if (interval is None
+            or not common.MIN_AFTER_COMPLETION_MINUTES <= interval
+            <= common.MAX_AFTER_COMPLETION_MINUTES):
+        raise common.PlanningError("invalid_task", "处理后刷新间隔无效（须为 1 分钟至 365 天）", 409)
+    return handled + timedelta(minutes=interval)
 
 
 def _reconcile_task_rounds(

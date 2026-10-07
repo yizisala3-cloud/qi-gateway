@@ -38,6 +38,22 @@ def _assert_creation_key_unique(rows, item) -> None:
         raise RuntimeError(CREATION_KEY_VIOLATION)
 
 
+def _mark_completion_fact(rows: dict, row: dict) -> None:
+    """planning_occurrence_completion_fact_guard 触发器仿真（20261007010000）：
+
+    completed 状态或 partial_at 写入的同一语句内登记任务级完成事实门槛
+    （幂等，task_id 主键）；独立小表不触碰任务行，与删除 RPC 的任务行锁
+    不形成反向等待。"""
+    if row.get("status") != "completed" and row.get("partial_at") is None:
+        return
+    task_id = row.get("task_id")
+    if task_id is None:
+        return
+    facts = rows.setdefault("planning_task_completion_fact", [])
+    if not any(f.get("task_id") == task_id for f in facts):
+        facts.append({"task_id": task_id, "first_fact_at": row.get("updated_at")})
+
+
 class CoreQuery:
     def __init__(self, client, table):
         self.client = client
@@ -154,6 +170,8 @@ class CoreQuery:
                 row = dict(item)
                 row["id"] = self.client.next_id(self.table)
                 rows.append(row)
+                if self.table == "planning_occurrence":
+                    _mark_completion_fact(self.client.rows, row)
                 inserted.append(dict(row))
             return SimpleNamespace(data=inserted)
         if self.op == "upsert":
@@ -191,6 +209,8 @@ class CoreQuery:
         if self.op == "update":
             for row in matched:
                 row.update(self.payload)
+                if self.table == "planning_occurrence":
+                    _mark_completion_fact(self.client.rows, row)
         if self.op == "delete":
             for row in matched:
                 rows.remove(row)
@@ -207,6 +227,9 @@ class CoreClient:
             "planning_recompute_state": [
                 {"id": 1, "requested_at": None, "reason": None, "request_token": None}],
             "app_settings": [],
+            # 20261007010000：完成事实门槛与已删除创建操作登记。
+            "planning_task_completion_fact": [],
+            "planning_creation_request": [],
         }
         self._counters = {}
 
@@ -237,10 +260,12 @@ class CoreClient:
             return SimpleNamespace(execute=lambda: SimpleNamespace(data=[]))
         if fn == "planning_discard_task":
             from tests.support.planning_rpc import emulate_planning_discard_task
-            emulate_planning_discard_task(
+            data = emulate_planning_discard_task(
                 self.rows["planning_task"], self.rows["planning_occurrence"],
-                dict(params or {}))
-            return SimpleNamespace(execute=lambda: SimpleNamespace(data=[]))
+                dict(params or {}),
+                fact_rows=self.rows.get("planning_task_completion_fact"),
+                tombstone_rows=self.rows.get("planning_creation_request"))
+            return SimpleNamespace(execute=lambda: SimpleNamespace(data=data))
         if fn == "planning_split_occurrence":
             from tests.support.planning_rpc import emulate_planning_split_occurrence
             data = emulate_planning_split_occurrence(self, dict(params or {}))
@@ -372,6 +397,8 @@ class IdentityQuery:
                     _assert_creation_key_unique(rows, item)
                 row = {**item, "id": self.db.next_id(self.name)}
                 rows.append(row)
+                if self.name == "planning_occurrence":
+                    _mark_completion_fact(self.db.rows, row)
                 inserted.append(dict(row))
             return SimpleNamespace(data=inserted)
         def matches(row):
@@ -398,6 +425,8 @@ class IdentityQuery:
             self.db.writes.append((self.name, dict(self.payload)))
             for row in matched:
                 row.update(self.payload)
+                if self.name == "planning_occurrence":
+                    _mark_completion_fact(self.db.rows, row)
         if self.action == "delete":
             for row in matched:
                 rows.remove(row)
@@ -455,10 +484,12 @@ class IdentityRpcCall:
             emulate_planning_insert_round_occurrence(self.db, self.params)
             return SimpleNamespace(data=[])
         if self.fn == "planning_discard_task":
-            emulate_planning_discard_task(
+            data = emulate_planning_discard_task(
                 self.db.rows["planning_task"], self.db.rows["planning_occurrence"],
-                self.params)
-            return SimpleNamespace(data=[])
+                self.params,
+                fact_rows=self.db.rows.setdefault("planning_task_completion_fact", []),
+                tombstone_rows=self.db.rows.setdefault("planning_creation_request", []))
+            return SimpleNamespace(data=data)
         if self.fn == "planning_split_occurrence":
             data = emulate_planning_split_occurrence(self.db, self.params)
             return SimpleNamespace(data=data)
@@ -494,7 +525,9 @@ class IdentityDatabase:
         self.rows = {"planning_task": [], "planning_occurrence": [],
                      "planning_recompute_state": [
                          {"id": 1, "requested_at": None, "reason": None,
-                          "request_token": None}]}
+                          "request_token": None}],
+                     "planning_task_completion_fact": [],
+                     "planning_creation_request": []}
         self.counters, self.writes = {}, []
 
     def next_id(self, name):

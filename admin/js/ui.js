@@ -1,5 +1,5 @@
 // ui.js - shared retro UI components: icons, tags, modal, toast, detail panel
-export const ASSET_VERSION = '20261007-button-anchored';
+export const ASSET_VERSION = '20261007-planning-batch3';
 
 /* ---------- SVG icons (stroke, no emoji; object entries = fill icons with own viewBox) ---------- */
 const ICON_PATHS = {

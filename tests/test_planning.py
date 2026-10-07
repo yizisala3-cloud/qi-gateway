@@ -112,7 +112,13 @@ class TaskValidationTests(_Base):
         # 2026-10-01（§32.45）：once 的 target_date 为可选项，不再属于类型
         # 必填字段（无日期常驻语义见 test_planning_creation_first_round）。
         cases = [
-            ({"task_type": "interval", "content": "x"}, "interval_days"),
+            # 2026-10-07（§9.5）：interval 的间隔权威按刷新模式分流——
+            # 未选模式先报模式必选；选 after_completion 未填间隔报间隔必填。
+            ({"task_type": "interval", "content": "x",
+              "estimated_minutes": 30}, "刷新模式"),
+            ({"task_type": "interval", "content": "x",
+              "estimated_minutes": 30,
+              "refresh_mode": "after_completion"}, "间隔"),
             ({"task_type": "weekly", "content": "x", "weekdays": []}, "weekdays"),
             ({"task_type": "monthly", "content": "x", "month_days": []}, "month_days"),
         ]
@@ -159,7 +165,7 @@ class TaskValidationTests(_Base):
                              "estimated_minutes": 30, field: "12:00"},
                             self.NOW,
                         )
-                    self.assertIn("unsupported fields", str(raised.exception))
+                    self.assertIn("不支持的字段", str(raised.exception))
 
         self.run_with(run)
 
@@ -644,18 +650,21 @@ class StatusTransitionTests(_Base):
         self.run_with(run)
 
     def test_discarded_repeating_instance_stops_future_refresh(self):
-        """BUG-1：重复型条目「废弃」= 整个待办不再执行，次日不再生成。"""
+        """BUG-1：重复型条目「删除」= 整个待办不再执行，次日不再生成。
+
+        2026-10-07（§25 / D01）：该任务从无完成 / 部分完成事实——删除走
+        物理删除分支：任务与实例行真实消失，次日不再生成。"""
         def run(client):
             self.create_task(client, cursor_date="2026-09-19")
             planning.generate_due(self.NOW)
             occ = client.rows["planning_occurrence"][0]
-            planning.set_occurrence_status(occ["id"], {"status": "discarded"}, self.NOW)
-            # 任务被停用，其余开放实例一并关闭
-            self.assertFalse(client.rows["planning_task"][0]["is_active"])
-            self.assertTrue(all(
-                row["status"] not in planning.OPEN_STATUSES
-                for row in client.rows["planning_occurrence"]
-            ))
+            result = planning.set_occurrence_status(
+                occ["id"], {"status": "discarded"}, self.NOW)
+            # 无完成事实 → 物理删除：任务与实例行真实消失
+            self.assertTrue(result.get("deleted"))
+            self.assertFalse(result.get("history_preserved"))
+            self.assertEqual(client.rows["planning_task"], [])
+            self.assertEqual(client.rows["planning_occurrence"], [])
             # 次日不再生成
             next_day = self.NOW + timedelta(days=1)
             self.assertEqual(planning.generate_due(next_day)["created"], 0)

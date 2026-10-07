@@ -1240,7 +1240,13 @@ def test_patch_cannot_clear_estimated_minutes_on_idle_reactivate():
     # 有效值更新不受影响。
     with Context() as c:
         task = c.create("idle", at(24, 10), estimated_minutes=30)
+        # §25（2026-10-07）：播种完成事实走历史保留分支；再清除删除标记
+        # 模拟迁移前旧停用行（重新启用入口只对旧停用行保留）。
+        c.db.rows.setdefault("planning_task_completion_fact", []).append(
+            {"task_id": task["id"]})
         planning.update_task(task["id"], {"is_active": False}, at(24, 10, 30))
+        _row = next(r for r in c.db.rows["planning_task"] if r["id"] == task["id"])
+        _row["deleted_at"] = None
         with pytest.raises(planning.PlanningError) as error:
             planning.update_task(
                 task["id"], {"is_active": True, "estimated_minutes": None}, at(24, 11))

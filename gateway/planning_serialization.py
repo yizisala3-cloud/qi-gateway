@@ -87,6 +87,10 @@ def serialize_occurrence(occ: dict[str, Any], task: dict[str, Any], now: datetim
         # 完成耗时手填（2026-10-01 确认，§12.3）：独立秒粒度字段，与自动
         # actual_* 并存互不覆盖；NULL = 未手填（展示回退预估并标注预估）。
         "actual_logged_seconds": occ.get("actual_logged_seconds"),
+        # 实际起止来源（2026-10-07，§12.3 三层展示）：'user'=用户开始 /
+        # 结束 / 补填（可作自动实际耗时来源）；'system'=系统收口或提前完成
+        # 合成同刻（不得冒充实测）；NULL=旧数据来源不明（展示回退预估）。
+        "actual_time_source": occ.get("actual_time_source"),
         # 有效耗时单一权威语义（N5）：显式区间优先，与排程同源；任务定义
         # 修改只影响未来轮次。
         "estimated_minutes": common._effective_minutes(occ, task),
@@ -123,9 +127,15 @@ def serialize_task(task: dict[str, Any], now: datetime) -> dict[str, Any]:
         "refresh_next_due_at": task.get("refresh_next_due_at"),
         "refresh_enabled": task.get("refresh_enabled"),
         "refresh_generated_through": task.get("refresh_generated_through"),
+        # 删除标记（§25，2026-10-07）：非空 = 用户明确删除（区别于暂停刷新
+        # 等其他停用）；有事实者任务行保留为历史归档载体。
+        "deleted_at": task.get("deleted_at"),
         "request_state": task.get("request_state"),
         "request_est_start": task.get("request_est_start"),
         "interval_days": task.get("interval_days"),
+        # 处理后刷新间隔唯一权威（§9.5）：分钟；fixed_interval 仍用
+        # interval_days，本列为 NULL。
+        "after_completion_minutes": task.get("after_completion_minutes"),
         "weekdays": task.get("weekdays"),
         "month_days": task.get("month_days"),
         "target_date": task.get("target_date"),

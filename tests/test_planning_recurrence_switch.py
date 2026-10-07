@@ -413,6 +413,10 @@ def test_rule_change_and_deactivate_keeps_deactivation_semantics():
                         interval_days=3)
         planning.generate_due(at(24, 11))
         assert len(c.rows) == 2
+        # §25（2026-10-07）：播种完成事实 → 停用走历史保留分支（本测试
+        # 关注停用语义与规则编辑交互，非删除分支）。
+        c.db.rows.setdefault("planning_task_completion_fact", []).append(
+            {"task_id": task["id"]})
         with pytest.raises(planning.PlanningError) as error:
             planning.update_task(
                 task["id"], {"interval_days": 1, "is_active": False}, at(28, 11))

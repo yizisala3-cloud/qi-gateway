@@ -1,25 +1,25 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
 // 数据按需加载：今日看板保留 30 秒提醒轮询，首次/失效切入时刷新可见列表。
-import { gw } from '../api.js?v=20261007-button-anchored';
+import { gw } from '../api.js?v=20261007-planning-batch3';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, esc,
   createDetailPanel,
-} from '../ui.js?v=20261007-button-anchored';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261007-button-anchored';
-import { createRetroSelectField } from '../lib/retro_select.js?v=20261007-button-anchored';
+} from '../ui.js?v=20261007-planning-batch3';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261007-planning-batch3';
+import { createRetroSelectField } from '../lib/retro_select.js?v=20261007-planning-batch3';
 import {
   TASK_TYPE_LABELS, TASK_TYPES, STATUS_META, CLOSED_STATUSES,
-  fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty,
+  fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty, formatIntervalMinutes,
   itemMeta, isClosedOcc, formatLoggedDuration, durationText, durationDetailRows,
   itemBadges, itemHtml,
-} from '../lib/planning_display.js?v=20261007-button-anchored';
-import { openTaskForm } from '../lib/planning_task_form.js?v=20261007-button-anchored';
-import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261007-button-anchored';
-import { createPlanningSort } from '../lib/planning_sort.js?v=20261007-button-anchored';
-import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261007-button-anchored';
-import { createPlanningMemo } from '../lib/planning_memo.js?v=20261007-button-anchored';
-import { createPlanningReads } from '../lib/planning_reads.js?v=20261007-button-anchored';
+} from '../lib/planning_display.js?v=20261007-planning-batch3';
+import { openTaskForm } from '../lib/planning_task_form.js?v=20261007-planning-batch3';
+import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261007-planning-batch3';
+import { createPlanningSort } from '../lib/planning_sort.js?v=20261007-planning-batch3';
+import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261007-planning-batch3';
+import { createPlanningMemo } from '../lib/planning_memo.js?v=20261007-planning-batch3';
+import { createPlanningReads } from '../lib/planning_reads.js?v=20261007-planning-batch3';
 
 // 部分完成属于开放生命周期：实例仍在「进度中」，直到「已全部完成」才关闭
 const OPEN_STATUSES = ['pending', 'in_progress', 'deferred', 'partial'];
@@ -745,6 +745,10 @@ export default {
     parts.push(`<button class="btn btn-secondary btn-sm" data-act="task-edit" data-id="${task.id}">${icon('edit')}编辑</button>`);
     if (task.is_active) {
       parts.push(`<button class="btn btn-danger-line btn-sm" data-act="task-discard" data-id="${task.id}">${icon('x')}删除待办</button>`);
+    } else if (task.deleted_at) {
+      // §25（2026-10-07）：已删除的待办不提供恢复入口（后端同样拒绝）；
+      // 有执行事实者的历史仍可在列表与出现记录中查看。
+      parts.push(`<span class="muted text-sm">已删除</span>`);
     } else if (task.request_state === 'superseded') {
       // H2/I6：被取代的重排请求为终态，不提供重新启用入口
       parts.push(`<span class="muted text-sm">已被取代的重排请求</span>`);
@@ -756,6 +760,9 @@ export default {
       badges: `<div class="tag-row">${tag(esc(TASK_TYPE_LABELS[task.task_type] || ''), 'gold')}${task.refresh_enabled === false && task.is_active ? tag('刷新已暂停', 'slate') : ''}${task.is_active ? '' : tag('已删除', 'red')}</div>`,
       html: `
         <div class="kv"><span class="k">重复规则</span><span class="v">${esc(taskTypeSummary(task))}</span></div>
+        ${task.task_type === 'interval' && task.refresh_mode === 'after_completion'
+          ? `<div class="kv"><span class="k">刷新间隔</span><span class="v">${esc(formatIntervalMinutes(task.after_completion_minutes))}（完成后起算，精确到分钟）</span></div>` : ''}
+        ${task.deleted_at ? `<div class="kv"><span class="k">删除时间</span><span class="v">${fmtDue(task.deleted_at)}</span></div>` : ''}
         <div class="kv"><span class="k">可安排时段</span><span class="v">${(task.window_start_tod || task.window_end_tod)
           ? `${esc(task.window_start_tod || '无')} ～ ${esc(task.window_end_tod || '无')}${(task.window_start_tod && task.window_end_tod && task.window_end_tod < task.window_start_tod) ? '（结束在次日）' : ''}`
           : '未设置（正常自动排程）'}</span></div>
@@ -869,8 +876,13 @@ export default {
         if (!(await confirm('确认「此次不执行」？只关闭这一次出现，不影响后续刷新。', { danger: false }))) return;
         await post('/status', { status: 'discarded_this' });
       } else if (act === 'discard') {
-        if (!(await confirm('确认删除？该待办后续不再自动出现。'))) return;
-        await post('/status', { status: 'discarded' });
+        // §25（2026-10-07）：实例入口的「删除待办」与任务入口同一删除事务
+        // （按执行事实保留历史或物理删除）；响应携带删除结果。
+        if (!(await confirm('确认删除？该待办后续不再自动出现。有完成记录的待办会保留全部历史。'))) return;
+        const result = await post('/status', { status: 'discarded' });
+        toast(result?.history_preserved === false
+          ? '待办已删除：从未有过完成记录，相关业务记录已清除'
+          : '待办已删除：完成历史已保留');
       } else if (act === 'edit-time') return this.askEditTime(id);
       else if (act === 'backfill') return this.askBackfill(id);
       else if (act === 'split') return this.askSplit(id);
@@ -909,13 +921,18 @@ export default {
         if (task) this.openTaskForm(task);
         return;
       } else if (act === 'discard') {
-        if (!(await confirm('删除整个待办？后续不再刷新，当天未完成的实例也会关闭。'))) return;
-        await gw(`/admin/api/planning/tasks/${id}`, {
+        // §25（2026-10-07）：删除按执行事实分流——有完成 / 部分完成 /
+        // 中空阶段完成事实者保留全部历史；从无事实者真实删除任务与相关
+        // 业务实例。确认文案与响应 toast 表达两种结果。
+        if (!(await confirm('删除整个待办？后续不再刷新。有完成记录的待办会保留全部历史；从未完成过的待办将连同相关记录一起清除。'))) return;
+        const result = await gw(`/admin/api/planning/tasks/${id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ is_active: false }),
         });
-        toast('待办已删除');
+        toast(result?.history_preserved === false
+          ? '待办已删除：从未有过完成记录，相关业务记录已清除'
+          : '待办已删除：完成历史已保留，可继续在历史中查看');
       } else if (act === 'enable') {
         await gw(`/admin/api/planning/tasks/${id}`, {
           method: 'PATCH',

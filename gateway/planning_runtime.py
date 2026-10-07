@@ -60,27 +60,40 @@ def _task_map(client, task_ids: set[int]) -> dict[int, dict[str, Any]]:
 
 def _discard_task_atomically(client, task_id: int, now: datetime,
                              target_id: int | None = None,
-                             target_patch: dict[str, Any] | None = None) -> None:
-    """废弃整个任务 = 跨 task + occurrence 的原子命令（最终验收修复问题 5）：
-    `planning_discard_task` 在单个数据库事务内锁任务行 → 单语句关闭全部
-    开放 occurrence（中空同轮两阶段同语句命中）→ 单语句停用任务；任一
-    失败整体回滚。仅已知的并发停用拒绝映射为 409；数据库故障向上传播。"""
+                             target_patch: dict[str, Any] | None = None,
+                             creation_digest: str | None = None) -> dict[str, Any]:
+    """删除整个任务 = 跨 task + occurrence 的原子命令（§25，2026-10-07）：
+    `planning_discard_task` 在单个数据库事务内锁任务行 → 按 id 升序锁全部
+    实例行 → 锁内按执行事实判定（有完成 / 部分完成事实者收口开放实例并
+    保留全部历史；无事实者物理删除任务与实例并登记创建请求身份）；任一
+    失败整体回滚。返回 ``{deleted, history_preserved, already_deleted,
+    closed}``。仅已知的并发删除拒绝映射为 409；数据库故障向上传播。
+
+    ``creation_digest``（R09，2026-10-07 复审 #9）：任务行创建快照的规范化
+    语义摘要（sha256，调用方按不可变的 ``creation_request_content`` 计算）。
+    物理删除分支只把它随请求键登记进 tombstone——业务正文随任务行真正
+    删除，登记表不保存完整内容。"""
     try:
-        client.rpc("planning_discard_task", {
+        response = client.rpc("planning_discard_task", {
             "p_task_id": task_id, "p_now": common._iso(now),
             "p_target_id": target_id,
             "p_target_patch": target_patch,
+            "p_creation_digest": creation_digest,
         }).execute()
+        data = getattr(response, "data", None)
+        if isinstance(data, list):
+            data = data[0] if data else {}
+        return data if isinstance(data, dict) else {}
     except common.PlanningError:
         raise
     except Exception as exc:
         if getattr(exc, "code", None) == common.CONCURRENCY_ERRCODE                 or "task already inactive" in str(exc):
             raise common.PlanningError(
                 "concurrent_modified",
-                "该待办已被并发操作废弃，本次操作未执行", 409,
+                "该待办已被并发操作删除，本次操作未执行", 409,
             ) from exc
         # 基础设施失败（连接 / 非预期约束 / RPC 缺失）必须用户可见，不伪装成功。
         raise common.PlanningError(
             "database_unavailable",
-            "停用待办暂时无法完成，请稍后重试", 503,
+            "删除待办暂时无法完成，请稍后重试", 503,
         ) from exc

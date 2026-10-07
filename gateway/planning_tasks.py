@@ -4,6 +4,8 @@ Task changes affect future rounds; old-rule closeout precedes the task write.
 The synchronous generation path shares the runtime lock with task edits."""
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
@@ -44,7 +46,7 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
     不受影响；保存校验见 :func:`_validate_template_window_constraints`。
     """
     if not isinstance(payload, dict):
-        raise common.PlanningError("invalid_payload", "request body must be a JSON object")
+        raise common.PlanningError("invalid_payload", "请求内容必须是 JSON 对象")
 
     allowed = {
         "content", "task_type", "interval_days", "weekdays", "month_days",
@@ -55,12 +57,16 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
         "alarm_start", "alarm_end", "timer_minutes", "is_active",
         "refresh_mode", "refresh_anchor_at", "refresh_enabled",
         "window_start_tod", "window_end_tod",
+        # 处理后刷新间隔（§9.5，2026-10-07）：API 接收原始时长文本
+        # （after_completion_interval），后端权威解析为分钟；也接受已归一
+        # 的整数分钟字段。两键不得同请求携带冲突值。
+        "after_completion_interval", "after_completion_minutes",
     }
     unknown = set(payload) - allowed
     if unknown:
-        raise common.PlanningError("invalid_payload", f"unsupported fields: {', '.join(sorted(unknown))}")
+        raise common.PlanningError("invalid_payload", f"不支持的字段：{', '.join(sorted(unknown))}")
     if not payload and not partial:
-        raise common.PlanningError("invalid_payload", "request body is empty")
+        raise common.PlanningError("invalid_payload", "请求内容不能为空")
 
     result: dict[str, Any] = {}
     if "content" in payload or not partial:
@@ -71,14 +77,14 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
     if task_type is not None or not partial:
         text = str(task_type or "").strip().casefold()
         if text not in common.TASK_TYPES:
-            raise common.PlanningError("invalid_payload", f"task_type must be one of {', '.join(common.TASK_TYPES)}")
+            raise common.PlanningError("invalid_payload", f"待办类型必须是：{'、'.join(common.TASK_TYPES)}")
         result["task_type"] = text
     effective_type: str | None = result.get("task_type")
 
     if "refresh_mode" in payload:
         mode = payload["refresh_mode"]
         if not isinstance(mode, str):
-            raise common.PlanningError("invalid_payload", "refresh_mode must be a string")
+            raise common.PlanningError("invalid_payload", "刷新方式必须是文本")
         result["refresh_mode"] = mode
     if "refresh_anchor_at" in payload:
         raw = payload["refresh_anchor_at"]
@@ -91,6 +97,26 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
 
     if "interval_days" in payload:
         result["interval_days"] = common._clean_int(payload.get("interval_days"), "interval_days", lo=1, hi=3650)
+    if "after_completion_interval" in payload:
+        raw = payload.get("after_completion_interval")
+        result["after_completion_minutes"] = (
+            common.parse_interval_shorthand(raw, "after_completion_interval")
+            if raw is not None else None)
+    if "after_completion_minutes" in payload:
+        minutes = payload.get("after_completion_minutes")
+        if "after_completion_interval" in payload and minutes is not None:
+            raise common.PlanningError(
+                "invalid_payload",
+                "after_completion_interval 与 after_completion_minutes 不能同时提交", 400)
+        if minutes is not None:
+            if isinstance(minutes, bool) or not isinstance(minutes, int) or not (
+                common.MIN_AFTER_COMPLETION_MINUTES <= minutes
+                <= common.MAX_AFTER_COMPLETION_MINUTES
+            ):
+                raise common.PlanningError(
+                    "invalid_payload",
+                    "after_completion_minutes 必须为 1 至 525600 的整数分钟", 400)
+            result["after_completion_minutes"] = minutes
     if "weekdays" in payload:
         result["weekdays"] = common._clean_int_list(payload.get("weekdays"), "weekdays", lo=0, hi=6)
     if "month_days" in payload:
@@ -101,14 +127,28 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
     if effective_type and not partial:
         # 2026-10-01（§32.45）：单次目标日期为可选项——once 不再要求
         # target_date；空日期表达「未指定日期、常驻显示」，不得自动补今天。
-        requirements = {
-            "interval": ("interval_days",),
-            "weekly": ("weekdays",),
-            "monthly": ("month_days",),
-        }
-        for field in requirements.get(effective_type, ()):
-            if result.get(field) is None:
-                raise common.PlanningError("invalid_payload", f"{field} is required for {effective_type} tasks")
+        if effective_type == "weekly" and result.get("weekdays") is None:
+            raise common.PlanningError("invalid_payload", "每周待办必须选择星期")
+        if effective_type == "monthly" and result.get("month_days") is None:
+            raise common.PlanningError("invalid_payload", "每月待办必须填写日期")
+        if effective_type == "interval":
+            # 间隔权威按刷新模式分流（§9.5）：fixed_interval 用 interval_days
+            # 天数轴；after_completion 用 after_completion_minutes 时长
+            # （1m–365d，d/h/m 文本已解析为分钟）。旧调用以 interval_days
+            # 天数表达 after_completion 间隔的，按 days×1440 等价换算
+            # （§9.5「旧整数天数据等价于对应的 d 值」，存储仍单一权威）。
+            mode = result.get("refresh_mode")
+            if mode == "after_completion":
+                if (result.get("after_completion_minutes") is None
+                        and result.get("interval_days") is None):
+                    raise common.PlanningError(
+                        "invalid_payload",
+                        "处理后刷新间隔不能为空：请填写 1d、2h、30m 或 1d1h1m（纯数字按天）", 400)
+                if result.get("after_completion_minutes") is None:
+                    result["after_completion_minutes"] = result["interval_days"] * 1440
+                    result["interval_days"] = None
+            elif mode == "fixed_interval" and result.get("interval_days") is None:
+                raise common.PlanningError("invalid_payload", "固定间隔待办必须填写间隔天数")
         if effective_type == "once":
             # 省略与显式 NULL 等价：落库显式 NULL（不依赖列默认值、不补今天）。
             result.setdefault("target_date", None)
@@ -116,7 +156,7 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
     if "time_mode" in payload:
         mode = str(payload.get("time_mode") or "").strip().casefold()
         if mode not in common.TIME_MODES:
-            raise common.PlanningError("invalid_payload", "time_mode must be duration or explicit")
+            raise common.PlanningError("invalid_payload", "时间模式必须是 duration 或 explicit")
         result["time_mode"] = mode
 
     if "estimated_minutes" in payload:
@@ -198,13 +238,13 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
                 "invalid_payload", "显式起止已停用：请改用预计耗时与可安排时段", 400,
             )
         if not result.get("estimated_minutes"):
-            raise common.PlanningError("invalid_payload", "estimated_minutes is required for duration tasks")
+            raise common.PlanningError("invalid_payload", "仅耗时待办必须填写预计耗时")
         if result.get("is_hollow"):
             for field in (
                 "hollow_start_minutes", "hollow_wait_minutes", "hollow_end_minutes",
             ):
                 if not result.get(field):
-                    raise common.PlanningError("invalid_payload", f"{field} is required for hollow tasks")
+                    raise common.PlanningError("invalid_payload", f"中空待办必须填写 {field}")
             if not (result.get("hollow_start_content") or result.get("content")):
                 raise common.PlanningError("invalid_payload", "hollow_start_content is required for hollow tasks")
             if not (result.get("hollow_end_content") or result.get("content")):
@@ -464,7 +504,8 @@ def _creation_window_outcome(
 
 # 创建幂等内容快照字段（清单 #9）：取校验归一化后的用户语义输入。
 # ``weekdays`` / ``month_days`` 经 ``_clean_int_list`` 排序去重、时刻经
-# ``_tod_str`` 归一化、耗时简写解析为整数分钟，同义写法视为同内容；
+# ``_tod_str`` 归一化、耗时简写解析为整数分钟、处理后刷新间隔解析为分钟
+# （``1`` 与 ``1d`` 同义），同义写法视为同内容；
 # 服务端注入的缺省（固定间隔 anchor=当前时刻、created_at 等）不参与
 # 内容比对——两次相同意图在不同时刻创建的缺省不同不构成「不同内容」。
 _CREATION_CONTENT_FIELDS = (
@@ -472,6 +513,7 @@ _CREATION_CONTENT_FIELDS = (
     "window_start_tod", "window_end_tod",
     "interval_days", "weekdays", "month_days", "target_date",
     "refresh_mode", "refresh_enabled", "refresh_anchor_at",
+    "after_completion_minutes",
     "is_hollow", "hollow_start_content", "hollow_start_minutes",
     "hollow_wait_minutes", "hollow_wait_note", "hollow_end_content",
     "hollow_end_minutes",
@@ -498,10 +540,122 @@ def _creation_request_content(row: dict[str, Any]) -> dict[str, Any]:
     return content
 
 
+def _normalize_stored_creation_content(stored: Any) -> dict[str, Any] | None:
+    """旧版本快照兼容（§6.2 / 清单 #9 残留；R05，2026-10-07 复审 #5）：
+    按旧快照自身格式做语义等价归一，不能用任务当前定义还原历史请求
+    （任务可能已编辑）。
+
+    * **投影到当前字段集合**（R05 修复）：旧版快照缺键（如
+      ``after_completion_minutes``）补 None、多出的历史键剔除——旧实现只
+      补三个缺省键，daily / once / fixed 快照与新格式形状仍不同，升级后
+      原键原内容重试被误报 409；
+    * 旧版缺省 ``refresh_enabled`` 未存 → 显式 true（语义一致；显式 false
+      与 true 仍为真实差异）；
+    * 旧版缺省 ``refresh_mode`` 为 null → 按快照内的任务类型补齐派生缺省
+      （类型派生缺省与同值显式模式一致）；
+    * after_completion 旧快照以 ``interval_days`` 天数承载间隔 → 等价换算
+      为分钟（``3`` ≙ ``3d`` ≙ 4320m），并清空天数键与当前快照形状对齐。
+    """
+    if stored is None or not isinstance(stored, dict):
+        return stored
+    content = {field: stored.get(field) for field in _CREATION_CONTENT_FIELDS}
+    if content.get("refresh_enabled") is None:
+        content["refresh_enabled"] = True
+    if content.get("refresh_mode") is None:
+        content["refresh_mode"] = _SEMANTIC_REFRESH_MODE_DEFAULTS.get(
+            content.get("task_type"))
+    if (content.get("refresh_mode") == "after_completion"
+            and content.get("after_completion_minutes") is None):
+        days = content.get("interval_days")
+        if isinstance(days, int) and not isinstance(days, bool):
+            content["after_completion_minutes"] = days * 1440
+            content["interval_days"] = None
+    return content
+
+
+def _creation_content_digest(stored: Any) -> str | None:
+    """创建请求内容的规范化语义摘要（R09，2026-10-07 复审 #9）：sha256
+    of canonical JSON。
+
+    物理删除把任务行携带的创建快照正文真正删除，登记表只保留本摘要——
+    同键重放按摘要比对（同内容 → 已删除结果；不同内容 → 409）。摘要必须
+    与 :func:`_normalize_stored_creation_content` 同一归一口径（旧快照先
+    投影 / 补缺省 / 天数换算再摘要），两侧同形才可比。SQL 的 jsonb::text
+    键序（长度优先）与 Python canonical JSON（字典序）不一致，摘要只能在
+    应用层计算后传入删除 RPC，不能在库内对 jsonb 计算。
+    """
+    normalized = _normalize_stored_creation_content(stored)
+    if not isinstance(normalized, dict):
+        return None
+    payload = json.dumps(normalized, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _find_task_by_creation_key(client, key: str) -> dict[str, Any] | None:
     rows = runtime._rows(
         client, "planning_task", lambda q: q.eq("creation_request_key", key))
     return rows[0] if rows else None
+
+
+def _find_creation_request_tombstone(client, key: str) -> dict[str, Any] | None:
+    """已删除创建操作登记（§30.7）：物理删除的带键任务在这里保留请求身份。"""
+    rows = runtime._rows(
+        client, "planning_creation_request", lambda q: q.eq("request_key", key))
+    return rows[0] if rows else None
+
+
+def _creation_deleted_result() -> dict[str, Any]:
+    """同键重放命中已删除操作的稳定结果（§30.7 / C06）：不复建任务、
+    不补建实例，明确表达「旧操作已删除，请发起新的创建」。"""
+    return {
+        "creation_request_deleted": True,
+        "idempotent_replay": True,
+        "message": "该次创建对应的待办已删除；如需再次创建，请发起新的创建操作",
+    }
+
+
+def _replay_creation_target(
+    client, existing: dict[str, Any] | None, tombstone: dict[str, Any] | None,
+    request_content: dict[str, Any] | None, idempotency_key: str, now,
+) -> dict[str, Any] | None:
+    """同键请求的身份收敛：返回重放结果；无既有身份时返回 None 放行首次创建。
+
+    收敛顺序（R3）：任务行在存续期间承载请求身份 → 优先按键查任务；
+    物理删除后任务行消失 → 查已删除登记（tombstone）。两条路径都区分
+    「同内容重放 / 已删除结果」与「不同内容 409」，绝不悄悄覆盖或新建。
+
+    R14（2026-10-07 复审 #14）：历史保留分支的已删除任务（deleted_at 非空
+    但任务行留存）同样先做原创建内容语义比较——真实不同内容 409、同内容
+    才返回已删除结果，与物理删除登记分支同一收敛顺序（旧实现该分支先返回
+    已删除结果、跳过内容核对，两个删除分支不一致）。
+
+    R09（2026-10-07 复审 #9）：物理删除登记只存语义摘要（sha256）——同键
+    重放按摘要比对；摘要缺失 / 不可核对（空串）按内容冲突 409 收敛，不放行
+    复建。
+    """
+    if existing is not None:
+        if existing.get("deleted_at"):
+            stored = _normalize_stored_creation_content(
+                existing.get("creation_request_content"))
+            if stored is None or request_content is None or dict(stored) != request_content:
+                raise common.PlanningError(
+                    "request_conflict",
+                    "同一请求键已绑定不同的创建内容；请使用新的请求提交新的待办", 409,
+                )
+            return _creation_deleted_result()
+        return _replay_task_creation(
+            client, existing, request_content, idempotency_key, now)
+    if tombstone is not None:
+        request_digest = _creation_content_digest(request_content)
+        if (request_digest is not None
+                and tombstone.get("content_digest") == request_digest):
+            return _creation_deleted_result()
+        raise common.PlanningError(
+            "request_conflict",
+            "同一请求键已绑定不同的创建内容；请使用新的请求提交新的待办", 409,
+        )
+    return None
 
 
 def _is_creation_key_conflict(exc: Exception) -> bool:
@@ -524,10 +678,16 @@ def create_task(
         # 稳定输入归一与按键核对只依赖请求内容，命中同键同内容即按
         # 重放 / 恢复契约返回，不重新用当前时间否认已成立的创建；
         # 首次创建（未命中）才执行依赖 now 与当前配置的准入。
+        # §30.7（2026-10-07）：任务行不存在时核对已删除登记——物理删除的
+        # 带键任务按「已删除结果」收敛，同键不同内容 409，绝不复建。
         existing = _find_task_by_creation_key(client, idempotency_key)
-        if existing is not None:
-            return _replay_task_creation(
-                client, existing, request_content, idempotency_key, now)
+        tombstone = (
+            _find_creation_request_tombstone(client, idempotency_key)
+            if existing is None else None)
+        replay = _replay_creation_target(
+            client, existing, tombstone, request_content, idempotency_key, now)
+        if replay is not None:
+            return replay
     _prepare_refresh_definition(row, now)
     context = cycles.PlanningRequestContext(now)
     _validate_window_creation(row, now, context=context)
@@ -543,7 +703,7 @@ def create_task(
     if idempotency_key:
         # 首次创建把键、内容与反馈随任务行原子落库；并发同键由部分唯一
         # 索引收敛到先提交者（失败方重读后走同一重放分支，R3：不再过
-        # 时效准入）。
+        # 时效准入；先提交者若已被删除，按登记收敛为已删除结果）。
         row["creation_request_key"] = idempotency_key
         row["creation_request_content"] = request_content
         row["creation_feedback"] = {
@@ -556,10 +716,16 @@ def create_task(
             if not _is_creation_key_conflict(exc):
                 raise
             existing = _find_task_by_creation_key(client, idempotency_key)
-            if existing is None:
+            tombstone = (
+                _find_creation_request_tombstone(client, idempotency_key)
+                if existing is None else None)
+            if existing is None and tombstone is None:
                 raise
-            return _replay_task_creation(
-                client, existing, request_content, idempotency_key, now)
+            replay = _replay_creation_target(
+                client, existing, tombstone, request_content, idempotency_key, now)
+            if replay is None:
+                raise
+            return replay
         created = (response.data or [{}])[0]
         # 即时生成：新建的待办（含 interval 立即到期）不等后台循环，
         # 立刻出现在列表。
@@ -590,7 +756,7 @@ def _replay_task_creation(
     成立的创建不因重试时刻被重新否认，内容核对先于一切时效判定；
     同键不同内容明确拒绝（409），不静默合并。
     """
-    stored = existing.get("creation_request_content")
+    stored = _normalize_stored_creation_content(existing.get("creation_request_content"))
     if stored is None or dict(stored) != request_content:
         raise common.PlanningError(
             "request_conflict",
@@ -625,8 +791,52 @@ def _prepare_refresh_definition(row: dict[str, Any], now: datetime, current: dic
         validate_task_refresh_mode(task_type, mode)
     except ValueError as exc:
         raise common.PlanningError("invalid_payload", "刷新模式与待办类型不匹配", 400) from exc
-    if mode == "after_completion" and not 1 <= (combined.get("interval_days") or 0) <= 365:
-        raise common.PlanningError("invalid_payload", "处理后刷新间隔必须为 1 至 365 天", 400)
+    if mode == "after_completion":
+        # 间隔唯一权威 = after_completion_minutes（§9.5，2026-10-07）：
+        # interval_days 在 after_completion 行上必须为空，双列不能各自变化
+        # 造成两个真实间隔；fixed_interval 继续使用 interval_days 天数轴。
+        # R06（2026-10-07 复审 #6）：间隔解析以**本次请求的显式输入**优先
+        # ——先归一本次 PATCH / 创建输入，再回退旧任务行；旧实现先合并
+        # 旧任务再取合并后的分钟值，导致「旧分钟吞掉本次天数修改」（
+        # PATCH interval_days:3 在 after_completion_minutes=1440 的任务上
+        # 返回成功却仍是 1440、interval_days 被置空）。旧调用 / 旧任务行以
+        # interval_days 天数表达的，按 days×1440 等价换算（「1」≙「1d」≙
+        # 1440m，语义不变）；两键同请求且不等价 → 明确拒绝，不静默取舍。
+        if current is None:
+            # 创建路径：validate_task_payload 已把 interval_days 换算为分钟。
+            minutes = row.get("after_completion_minutes")
+        else:
+            patch_minutes = row.get("after_completion_minutes")
+            patch_days = row.get("interval_days")
+            if (patch_minutes is not None and patch_days is not None
+                    and patch_days * 1440 != patch_minutes):
+                raise common.PlanningError(
+                    "invalid_payload",
+                    "after_completion_minutes 与 interval_days 不能同时提交"
+                    "不同的间隔值；请只填写一个间隔", 400,
+                )
+            if patch_minutes is not None:
+                minutes = patch_minutes
+            elif patch_days is not None:
+                minutes = patch_days * 1440
+            else:
+                minutes = current.get("after_completion_minutes")
+                if minutes is None and isinstance(current.get("interval_days"), int) \
+                        and not isinstance(current.get("interval_days"), bool):
+                    minutes = current["interval_days"] * 1440
+        if isinstance(minutes, bool) or not isinstance(minutes, int) or not (
+            common.MIN_AFTER_COMPLETION_MINUTES <= minutes
+            <= common.MAX_AFTER_COMPLETION_MINUTES
+        ):
+            raise common.PlanningError(
+                "invalid_payload",
+                "处理后刷新间隔必须为 1 分钟至 365 天的有效时长"
+                "（如 30m、2h、1d1h1m；纯数字按天）", 400,
+            )
+        row["after_completion_minutes"] = minutes
+        row["interval_days"] = None
+    elif combined.get("task_type") == "interval" and not 1 <= (combined.get("interval_days") or 0) <= 3650:
+        raise common.PlanningError("invalid_payload", "固定间隔必须为 1 至 3650 天", 400)
     row["refresh_mode"] = mode
     mode_changed = current is not None and current.get("refresh_mode") != mode
     if mode_changed:
@@ -649,10 +859,13 @@ def _prepare_refresh_definition(row: dict[str, Any], now: datetime, current: dic
         row["refresh_next_due_at"] = None
     elif mode_changed:
         row["refresh_next_due_at"] = None
-    elif mode == "after_completion" and "interval_days" in row:
+    elif mode == "after_completion" and "after_completion_minutes" in row:
+        # 编辑间隔后基于既有合法处理基准重算下一到期；基准缺失保持空
+        # （生成侧从轮次行 handled_at 自愈），不改写历史处理时间。
         handled = combined.get("last_handled_at")
         row["refresh_next_due_at"] = (
-            common._iso(common._parse_dt(handled, "last_handled_at") + timedelta(days=combined["interval_days"]))
+            common._iso(common._parse_dt(handled, "last_handled_at")
+                        + timedelta(minutes=row["after_completion_minutes"]))
             if handled else None
         )
     if combined.get("is_fixed") and not combined.get("est_start_tod"):
@@ -809,10 +1022,10 @@ def _update_task(task_id: int, payload: Any, now: datetime | None = None) -> dic
     client = runtime._require_client()
     task = runtime._fetch_task(client, task_id)
     if not task:
-        raise common.PlanningError("not_found", "planning task not found", 404)
+        raise common.PlanningError("not_found", "待办任务不存在", 404)
     row = validate_task_payload(payload, partial=True)
     if not row:
-        raise common.PlanningError("invalid_payload", "no writable fields supplied")
+        raise common.PlanningError("invalid_payload", "没有可修改的字段")
     if any(field in row and row[field] != task.get(field) for field in
            ("task_type", "refresh_mode", "refresh_anchor_at")):
         existing = runtime._rows(client, "planning_occurrence", lambda q: q.eq("task_id", task_id).limit(1))
@@ -881,6 +1094,12 @@ def _update_task(task_id: int, payload: Any, now: datetime | None = None) -> dic
 
     # 废弃整个任务：终止后续刷新，并关闭所有仍开放的出现实例。
     reactivated = bool(row.get("is_active")) and not task.get("is_active")
+    if reactivated and task.get("deleted_at"):
+        # §25（2026-10-07，D09）：已删除的待办不得经旧 is_active=true 恢复
+        # ——删除只终止刷新与展示，历史保留分支也不提供恢复入口。
+        raise common.PlanningError(
+            "invalid_transition", "已删除的待办不能恢复；如需相同待办请重新创建", 409,
+        )
     if reactivated and task.get("request_state") == "superseded":
         # H2/I6：被取代的重排请求是终态，不得通过普通启用入口复活。
         raise common.PlanningError(
@@ -906,20 +1125,31 @@ def _update_task(task_id: int, payload: Any, now: datetime | None = None) -> dic
             "invalid_payload",
             "停用待办不能与其它修改同时提交：请单独执行停用操作", 400,
         )
-    if row.get("is_active") is False and task.get("is_active"):
-        # 最终 Debug（问题 1A）：停用/废弃整个任务 = 单事务命令——复用
-        # planning_discard_task（锁任务行 → 单语句关闭全部开放 occurrence
-        # → 单语句停用任务，任一失败整体回滚）。occurrence 关闭不再发生于
-        # 事务之外；is_active 由 RPC 写入，主任务更新不再重复该字段。
-        runtime._discard_task_atomically(client, task_id, now)
+    if row.get("is_active") is False and (task.get("is_active") or task.get("deleted_at")):
+        # §25（2026-10-07）：删除整个任务 = 单事务命令——复用
+        # planning_discard_task（锁任务行 → 锁全部实例 → 锁内按执行事实
+        # 判定：有完成/部分完成事实者收口开放实例并保留全部历史；无事实者
+        # 物理删除任务与实例并登记创建请求身份；任一失败整体回滚）。
+        # occurrence 关闭 / 物理删除不再发生于事务之外。
+        # R09：创建快照正文随任务行物理删除；登记表只保留规范化语义摘要
+        # （creation_request_content 创建后不可变，锁前读取即权威）。
+        discard_result = runtime._discard_task_atomically(
+            client, task_id, now,
+            creation_digest=_creation_content_digest(
+                task.get("creation_request_content")))
         # 停用命令已在 RPC 内完成全部写入。这里不得再发普通 UPDATE：即使
-        # 只写 updated_at，失败也会造成 API 报错而任务实际已停用。
-        # 批次 6 收尾（BUG B）：停用关闭了开放实例、从排程释放时间槽——
-        # 成功后必须登记重算请求，让后续实例填补释放的槽位；登记是
-        # post-commit side effect，失败不伪装成停用失败（quiet）。
+        # 只写 updated_at，失败也会造成 API 报错而任务实际已删除。
+        # 批次 6 收尾（BUG B）：删除释放的时间槽——成功后必须登记重算
+        # 请求；登记是 post-commit side effect，失败不伪装成删除失败（quiet）。
         recompute._request_recompute_quietly("task_discarded", now)
-        updated = {**task, "is_active": False, "updated_at": common._iso(now)}
-        return presentation.serialize_task(updated, now)
+        # 删除响应必须表达「业务记录已清除」或「已删除，历史已保留」，
+        # 不依赖已不存在的任务行序列化成功结果（§5.2 / D01）。
+        return {
+            "id": task_id,
+            "deleted": True,
+            "history_preserved": bool(discard_result.get("history_preserved", True)),
+            "closed_occurrences": int(discard_result.get("closed") or 0),
+        }
 
     row["updated_at"] = common._iso(now)
     # 批次 6 一轮 Review BLOCKER 1（2026-09-28 user 裁决）：recurrence 规则
@@ -1018,19 +1248,36 @@ def _ensure_type_requirements(task: dict[str, Any]) -> None:
 
     2026-10-01（§32.45）：once 的 target_date 为可选项，不再属于必填；
     无日期 once 的窗口组合约束由 :func:`_validate_once_date_window_pair`
-    在合并视图上单独执行。"""
+    在合并视图上单独执行。2026-10-07（§9.5）：interval 类型的间隔权威按
+    刷新模式分流——after_completion 用分钟（1m–365d），fixed_interval 沿用
+    interval_days 天数。"""
     task_type = task.get("task_type")
-    requirements = {
-        "interval": ("interval_days",),
-        "weekly": ("weekdays",),
-        "monthly": ("month_days",),
-    }
-    for field in requirements.get(task_type, ()):
-        value = task.get(field)
-        if value is None or (isinstance(value, list) and not value):
-            raise common.PlanningError("invalid_payload", f"{field} is required for {task_type} tasks")
+    if task_type == "interval":
+        if task.get("refresh_mode") == "after_completion":
+            minutes = task.get("after_completion_minutes")
+            if isinstance(minutes, bool) or not isinstance(minutes, int) or not (
+                common.MIN_AFTER_COMPLETION_MINUTES <= minutes
+                <= common.MAX_AFTER_COMPLETION_MINUTES
+            ):
+                raise common.PlanningError(
+                    "invalid_payload",
+                    "处理后刷新间隔无效：请填写 1d、2h、30m 或 1d1h1m（纯数字按天）", 400,
+                )
+        else:
+            value = task.get("interval_days")
+            if value is None or (isinstance(value, bool) or not isinstance(value, int)
+                                 or not 1 <= value <= 3650):
+                raise common.PlanningError("invalid_payload", "固定间隔待办必须填写间隔天数")
+    elif task_type == "weekly":
+        weekdays = task.get("weekdays")
+        if weekdays is None or (isinstance(weekdays, list) and not weekdays):
+            raise common.PlanningError("invalid_payload", "每周待办必须选择星期")
+    elif task_type == "monthly":
+        month_days = task.get("month_days")
+        if month_days is None or (isinstance(month_days, list) and not month_days):
+            raise common.PlanningError("invalid_payload", "每月待办必须填写日期")
     if task.get("time_mode") == "explicit" and not task.get("est_start_tod"):
-        raise common.PlanningError("invalid_payload", "est_start_tod is required for explicit time mode")
+        raise common.PlanningError("invalid_payload", "旧显式起止待办必须保留预估开始时间")
     if task.get("time_mode") == "explicit" and not (
         task.get("est_end_tod") or task.get("estimated_minutes")
     ):

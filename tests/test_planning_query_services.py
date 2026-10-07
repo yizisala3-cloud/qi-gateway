@@ -72,7 +72,7 @@ def test_orphan_occurrence_returns_task_404_without_sampling_clock(query_context
         response = http.get("/admin/api/planning/occurrences/2", headers=AUTH)
     assert response.status_code == 404
     assert response.json() == {
-        "error": "planning task not found", "error_code": "not_found",
+        "error": "待办任务不存在", "error_code": "not_found",
     }
     clock.assert_not_called()
 

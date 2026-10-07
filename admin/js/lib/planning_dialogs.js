@@ -1,6 +1,6 @@
 // Instance dialogs: form-local inputs and timeout retry identity stay in their closures.
-import { gw } from '../api.js?v=20261007-button-anchored';
-import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261007-button-anchored';
+import { gw } from '../api.js?v=20261007-planning-batch3';
+import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261007-planning-batch3';
 
 export function createPlanningDialogs({
   findOccurrence, getOccurrences, getTasks, openTaskForm,

@@ -1,7 +1,7 @@
 // Task creation/edit form. Local submitting/committed state belongs to one opened form.
-import { gw } from '../api.js?v=20261007-button-anchored';
-import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261007-button-anchored';
-import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES } from './planning_display.js?v=20261007-button-anchored';
+import { gw } from '../api.js?v=20261007-planning-batch3';
+import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261007-planning-batch3';
+import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261007-planning-batch3';
 
 export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
   const editing = !!task?.id;
@@ -36,8 +36,13 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
             <label class="inline"><input type="radio" name="pf-refresh-mode" value="fixed_interval" ${value('refresh_mode') === 'fixed_interval' ? 'checked' : ''}> 固定间隔（固定时间轴）</label>
           </div>
         </div>
-        <div class="field"><label>间隔天数（1-3650）</label>
+        <div class="field" id="pf-ac-block"><label>处理后刷新间隔</label>
+          <input type="text" id="pf-ac-interval" value="${esc(value('after_completion_minutes') ? formatIntervalMinutes(value('after_completion_minutes')) : '')}" placeholder="如 1d、2h、30m、1d1h1m">
+          <p class="muted text-sm">无单位按天；d（天）、h（小时）、m（分钟）可组合，最短 1 分钟，最长 365 天。</p>
+        </div>
+        <div class="field" id="pf-fi-block" hidden><label>间隔天数（1-3650）</label>
           <input type="number" id="pf-interval-days" min="1" max="3650" value="${esc(value('interval_days', 1))}"></div>
+        <div id="pf-interval-error" hidden></div>
       </div>
       <div data-type-block="weekly" style="display:none">
         <div class="field"><label>每周几出现（可多选）</label><div class="tag-row">${weekdayChecks}</div></div>
@@ -112,8 +117,22 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
     });
     root.querySelector('#pf-hollow-block').style.display =
       root.querySelector('#pf-hollow').checked ? '' : 'none';
+    syncRefreshModeBlocks();
     syncOnceWindow();
   };
+  // §9.5（2026-10-07）：间隔输入按刷新方式分流——after_completion 用
+  // d/h/m 时长文本（纯数字按天），fixed_interval 沿用天数轴。
+  const syncRefreshModeBlocks = () => {
+    const checked = root.querySelector('input[name="pf-refresh-mode"]:checked');
+    const afterCompletion = checked && checked.value === 'after_completion';
+    const acBlock = root.querySelector('#pf-ac-block');
+    const fiBlock = root.querySelector('#pf-fi-block');
+    if (acBlock) acBlock.hidden = !afterCompletion;
+    if (fiBlock) fiBlock.hidden = !!afterCompletion;
+  };
+  root.querySelectorAll('input[name="pf-refresh-mode"]').forEach((radio) => {
+    radio.addEventListener('change', syncRefreshModeBlocks);
+  });
   // §30.6（2026-10-01）：单次目标日期可选；未填日期时最早开始／最晚完成
   // 控件不可设置，并说明常驻语义（前后端都拒绝空日期 + 非空窗口组合）。
   const residentNote = root.querySelector('#pf-resident-note');
@@ -195,6 +214,35 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
     submitBtn.textContent = editing ? '正在保存…' : '正在创建…';
     createdTask = null;
     try {
+      // R11（2026-10-07 复审 #11，用户指定优先弹窗）：编辑已带间隔的
+      // after_completion 待办时清空间隔输入——保存请求会省略间隔字段，
+      // 底层「省略 = 保留原值」语义与表单反馈不一致（旧实现静默沿用旧
+      // 间隔却提示「待办已保存」）。保存前明确告知将保留原间隔；取消则
+      // 停留表单补填、不发保存请求。创建无旧值不弹（空值由后端必填
+      // 校验就近拒绝，不宣称已保存）；正常填写不重复弹窗。
+      if (editing
+          && root.querySelector('input[name="pf-refresh-mode"]:checked')?.value === 'after_completion'
+          && !root.querySelector('#pf-ac-interval').value.trim()
+          && task?.after_completion_minutes) {
+        const keep = await confirm(
+          `未填写刷新间隔，保存后将保留原间隔（${formatIntervalMinutes(task.after_completion_minutes)}）。`
+          + '如需修改间隔请返回补填（如 1d、2h、30m、1d1h1m）；确认保留请继续保存。',
+          { title: '请确认', okText: '保留原间隔并保存', cancelText: '返回补填', danger: false });
+        if (!keep) {
+          submitting = false;
+          submitBtn.disabled = false;
+          submitBtn.textContent = '保存';
+          const area = root.querySelector('#pf-interval-error');
+          if (area) {
+            area.hidden = false;
+            area.innerHTML = errorBlock(
+              '未填写刷新间隔：本次未保存。请填写间隔（如 1d、2h、30m）后重新提交，'
+              + `或确认保留原间隔（${formatIntervalMinutes(task.after_completion_minutes)}）。`);
+            area.scrollIntoView({ block: 'nearest' });
+          }
+          return;
+        }
+      }
       const type = typeSelect.value;
       const body = {
         content: root.querySelector('#pf-content').value.trim(),
@@ -215,9 +263,16 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
         if (windowEnd) body.window_end_tod = windowEnd;
       }
       if (type === 'interval') {
-        body.interval_days = Number(root.querySelector('#pf-interval-days').value) || null;
         const refreshMode = root.querySelector('input[name="pf-refresh-mode"]:checked');
         if (refreshMode) body.refresh_mode = refreshMode.value;
+        if (refreshMode?.value === 'after_completion') {
+          // §9.5：原始时长文本交后端权威解析（1d/2h/30m/1d1h1m，纯数字
+          // 按天）；前端不做二次口径判断，错误就近展示在间隔字段。
+          const intervalText = root.querySelector('#pf-ac-interval').value.trim();
+          if (intervalText) body.after_completion_interval = intervalText;
+        } else {
+          body.interval_days = Number(root.querySelector('#pf-interval-days').value) || null;
+        }
       }
       if (type === 'weekly') {
         body.weekdays = [...root.querySelectorAll('[data-weekday]:checked')].map((el) => Number(el.value));
@@ -270,20 +325,53 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
     } catch (error) {
       // 提交/API 阶段失败：先解锁恢复按钮再提示，提示自身异常不得
       // 卡死提交资格（user 仍可修改后重新提交）。错误按字段就近呈现：
-      // 目标日期类错误进 once 区，可安排时段及其余错误进时段区。
+      // 目标日期类错误进 once 区，间隔类错误进间隔区，其余进时段区。
       submitting = false;
       submitBtn.disabled = false;
       submitBtn.textContent = editing ? '保存' : '创建';
-      const message = String(error.message || '');
+      let message = String(error.message || '');
+      // §36.1（2026-10-07）：网络故障无法确定是否保存时，明确说「保存
+      // 结果暂时无法确认」并沿用原创建操作键重试（键绑定本次表单意图，
+      // 服务端按操作身份收敛，不会重复建任务）——不能声称「肯定没保存」。
+      // R12（2026-10-07 复审 #12）：2xx 成功响应的正文截断 / 非法 JSON 由
+      // 共享 gw() 以 ResultUnknownError（resultUnknown 标记）上抛——保存
+      // 可能已经成立，同样按结果未知提示，不得把 SyntaxError 文本当失败
+      // 原因误报「保存失败：Unexpected end of JSON input」。
+      const networkUnknown = !message
+        || error?.resultUnknown
+        || error?.name === 'ResultUnknownError'
+        || /failed to fetch|networkerror|load failed|timeout|timed out|network/i.test(message);
+      if (networkUnknown && !editing) {
+        message = '未收到保存结果，请重试确认；系统会按本次操作避免重复创建';
+      } else if (networkUnknown && editing) {
+        message = '未收到保存结果，请重试确认';
+      }
       const area = root.querySelector(
         message.includes('目标日期') || message.includes('单次待办已生成')
-          ? '#pf-once-error' : '#pf-window-error');
+          ? '#pf-once-error'
+          : (message.includes('间隔') || message.includes('after_completion'))
+            ? '#pf-interval-error' : '#pf-window-error');
       if (area) {
         area.hidden = false;
         area.innerHTML = errorBlock(esc(message));
         area.scrollIntoView({ block: 'nearest' });
       }
-      toast(`保存失败：${error.message}`, 'err');
+      toast(`保存失败：${message}`, 'err');
+      return;
+    }
+    // §30.7（2026-10-07）：重试命中的是「已删除的旧创建操作」——本次操作
+    // 已经完结（任务曾创建、后被删除），服务端不复建。表单进入终态并
+    // 明确提示：再次创建需重新发起新的创建（新键）。
+    if (createdTask?.creation_request_deleted) {
+      committed = true;
+      submitting = false;
+      submitBtn.disabled = true;
+      submitBtn.textContent = '已结束';
+      toast(createdTask.message || '该次创建对应的待办已删除；如需再次创建，请重新发起新的创建操作', 'warn');
+      try { close(); } catch (error) {
+        globalThis.console?.error({ location: 'planning_task_form.closeAfterDeletedReplay',
+          stack: error.stack, error, taskId: task?.id });
+      }
       return;
     }
     // 服务器已保存：进入不可逆终态。此后任何 UI 后处理异常都不得

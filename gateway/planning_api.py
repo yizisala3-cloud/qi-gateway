@@ -44,32 +44,54 @@ def _run(fn, *args, **kwargs):
     return asyncio.to_thread(fn, *args, **kwargs)
 
 
+def _is_schema_mismatch(exc: Exception) -> bool:
+    """可可靠分类的「数据库结构未升级」故障（§36.1）：缺列 / 缺表 / PostgREST
+    schema 缓存不识别新字段。只在证据明确时使用，不能所有 500 都说缺迁移。"""
+    text = str(exc)
+    lowered = text.casefold()
+    if getattr(exc, "sqlstate", None) == "42703" or getattr(exc, "code", None) == "42703":
+        return True
+    markers = (
+        "does not exist",                      # PostgreSQL 缺列 / 缺关系
+        "could not find the",                  # PostgREST 不识别的列（PGRST204）
+        "schema cache",                        # PostgREST schema 缓存过期
+        "relation \"planning_",                # 缺表
+    )
+    return any(marker in lowered for marker in markers)
+
+
 async def _dispatch(
     request: Request, fn, *args, created: bool = False, **kwargs,
 ) -> JSONResponse:
     if not _authorized(request):
-        return _error("unauthorized", 401, "unauthorized")
+        return _error("未登录或令牌无效", 401, "unauthorized")
     try:
         result = await _run(fn, *args, **kwargs)
         return JSONResponse(result, status_code=201 if created else 200)
     except planning.PlanningError as exc:
         return _error(str(exc), exc.status_code, exc.code, exc.details)
     except ValueError as exc:
-        return _error(f"invalid query or payload value: {exc}", 400, "invalid_payload")
+        return _error(f"请求参数无效：{exc}", 400, "invalid_payload")
     except Exception as exc:
         log.exception("Planning API failure: %s %s", request.method, request.url.path)
-        return _error(f"unexpected planning failure: {type(exc).__name__}", 500, "internal_error")
+        # §36.1（2026-10-07）：页面中文为主，不把 ``APIError`` 等内部异常
+        # 类名当唯一解释；原异常与堆栈只在后台日志，敏感内容不出网。
+        if _is_schema_mismatch(exc):
+            return _error(
+                "操作失败：数据库尚未完成升级，请联系管理员", 500, "schema_not_migrated")
+        return _error(
+            "操作失败：服务暂时出现异常，请稍后重试", 500, "internal_error")
 
 
 async def _dispatch_json(
     request: Request, fn, *args, created: bool = False, **kwargs,
 ) -> JSONResponse:
     if not _authorized(request):
-        return _error("unauthorized", 401, "unauthorized")
+        return _error("未登录或令牌无效", 401, "unauthorized")
     try:
         payload = await request.json()
     except Exception:
-        return _error("request body must be valid JSON", 400, "invalid_json")
+        return _error("请求内容必须是合法的 JSON", 400, "invalid_json")
     return await _dispatch(request, fn, *args, payload, created=created, **kwargs)
 
 
@@ -79,14 +101,16 @@ async def _dispatch_json_optional(
     """带可选 JSON body 的端点：无 body / 空 body 视为 ``{}``（既有契约——
     ``/finish`` 原本无 body 仍可用）；body 存在但非法 JSON 才拒绝。"""
     if not _authorized(request):
-        return _error("unauthorized", 401, "unauthorized")
+        return _error("未登录或令牌无效", 401, "unauthorized")
     raw = await request.body()
     if not raw or not raw.strip():
         return await _dispatch(request, fn, *args, {}, created=created)
     try:
         payload = json.loads(raw)
     except Exception:
-        return _error("request body must be valid JSON", 400, "invalid_json")
+        # R13（2026-10-07 复审 #13，低优先级修复）：可选 body 端点的非法
+        # JSON 与 _dispatch_json 同口径中文提示（旧实现此处为英文）。
+        return _error("请求内容必须是合法的 JSON", 400, "invalid_json")
     return await _dispatch(request, fn, *args, payload, created=created)
 
 
@@ -126,10 +150,11 @@ async def task_item(request: Request) -> JSONResponse:
 
 async def task_complete_early(request: Request) -> JSONResponse:
     if not _authorized(request):
-        return _error("unauthorized", 401, "unauthorized")
+        # R13（低优先级修复）：独立鉴权分支与 _dispatch 同口径中文提示。
+        return _error("未登录或令牌无效", 401, "unauthorized")
     key = request.headers.get("Idempotency-Key")
     if not key:
-        return _error("Idempotency-Key is required", 400, "invalid_payload")
+        return _error("缺少 Idempotency-Key 请求头", 400, "invalid_payload")
     return await _dispatch(request, planning.complete_task_early, request.path_params["task_id"],
                            idempotency_key=key)
 
@@ -165,10 +190,11 @@ async def occurrence_status(request: Request) -> JSONResponse:
 
 async def occurrence_reschedule_timeout(request: Request) -> JSONResponse:
     if not _authorized(request):
-        return _error("unauthorized", 401, "unauthorized")
+        # R13（低优先级修复）：独立鉴权分支与 _dispatch 同口径中文提示。
+        return _error("未登录或令牌无效", 401, "unauthorized")
     key = request.headers.get("Idempotency-Key")
     if not key:
-        return _error("Idempotency-Key is required", 400, "invalid_payload")
+        return _error("缺少 Idempotency-Key 请求头", 400, "invalid_payload")
     return await _dispatch_json(
         request, planning.reschedule_timeout_as_new, request.path_params["occurrence_id"],
         idempotency_key=key, created=True,

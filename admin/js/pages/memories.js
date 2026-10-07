@@ -1,5 +1,5 @@
 // pages/memories.js - 记忆管理：记忆库 + 审核申请
-import { createMemoryBrowser } from './_memory_browser.js?v=20261007-button-anchored';
+import { createMemoryBrowser } from './_memory_browser.js?v=20261007-planning-batch3';
 
 export default {
   browser: null,

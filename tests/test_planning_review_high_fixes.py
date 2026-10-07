@@ -163,11 +163,27 @@ def test_high1_occurrence_freeze_unaffected_by_template_edit():
 
 # ── HIGH #4：重新启用按「重新启用时的 boundary」重校验 ───────────────
 
+def _legacy_inactive(c, task_id):
+    """模拟迁移前的旧停用行：is_active=false 且无 deleted_at（本批删除
+    一律写删除标记且不可恢复；重新启用入口只对旧停用行保留）。"""
+    row = next(r for r in c.db.rows["planning_task"] if r["id"] == task_id)
+    row["deleted_at"] = None
+    row["is_active"] = False
+
+
 def test_high4_reenable_rejected_after_boundary_moved():
     with Context() as c:
         t = c.create("daily", at(24, 10), estimated_minutes=30,
                      window_start_tod="10:00", window_end_tod="14:00")
+        # §25（2026-10-07）：播种完成事实 → 删除走历史保留分支（任务行
+        # 保留，重新启用语义可测；无事实者物理删除）。
+        c.db.rows.setdefault("planning_task_completion_fact", []).append(
+            {"task_id": t["id"]})
         planning.update_task(t["id"], {"is_active": False}, at(24, 11))
+        # §25（2026-10-07）：删除一律写 deleted_at 且不得恢复；「重新启用」
+        # 入口只对迁移前的旧停用行（is_active=false 且无删除标记）保留——
+        # 清除删除标记模拟旧停用行，保留 boundary 复验路径的覆盖。
+        _legacy_inactive(c, t["id"])
         # boundary 06:00 → 12:00：inactive 任务不参与扫描，保存成功
         planning.set_cycle_settings({"refresh_boundary_time": "12:00"}, at(24, 12))
         # 重新启用：窗口 10:00–14:00 跨新 boundary → 拒绝
@@ -188,7 +204,13 @@ def test_high4_window_fixed_then_reenable_succeeds_and_generation_resolves():
     with Context() as c:
         t = c.create("daily", at(24, 10), estimated_minutes=30,
                      window_start_tod="10:00", window_end_tod="14:00")
+        c.db.rows.setdefault("planning_task_completion_fact", []).append(
+            {"task_id": t["id"]})
         planning.update_task(t["id"], {"is_active": False}, at(24, 11))
+        # §25（2026-10-07）：删除一律写 deleted_at 且不得恢复；「重新启用」
+        # 入口只对迁移前的旧停用行（is_active=false 且无删除标记）保留——
+        # 清除删除标记模拟旧停用行，保留 boundary 复验路径的覆盖。
+        _legacy_inactive(c, t["id"])
         planning.set_cycle_settings({"refresh_boundary_time": "12:00"}, at(24, 12))
         # 修正窗口为 14:00–16:00 → 重新启用成功
         planning.update_task(
@@ -218,7 +240,13 @@ def test_high4_single_sided_reenable_needs_no_crossing_check():
     with Context() as c:
         t = c.create("daily", at(24, 10), estimated_minutes=30,
                      window_start_tod="10:00", window_end_tod=None)
+        c.db.rows.setdefault("planning_task_completion_fact", []).append(
+            {"task_id": t["id"]})
         planning.update_task(t["id"], {"is_active": False}, at(24, 11))
+        # §25（2026-10-07）：删除一律写 deleted_at 且不得恢复；「重新启用」
+        # 入口只对迁移前的旧停用行（is_active=false 且无删除标记）保留——
+        # 清除删除标记模拟旧停用行，保留 boundary 复验路径的覆盖。
+        _legacy_inactive(c, t["id"])
         planning.set_cycle_settings({"refresh_boundary_time": "12:00"}, at(24, 12))
         result = planning.update_task(t["id"], {"is_active": True}, at(24, 13))
         assert result["is_active"] is True

@@ -60,6 +60,12 @@ _FIXED_EXPIRING_MODES = ("fixed_interval", "fixed_weekday", "fixed_monthday")
 EARLY_DEDUPE_WINDOW = timedelta(minutes=30)
 
 
+# 处理后刷新（after_completion）间隔的分钟权威范围（§9.5，2026-10-07）：
+# 至少 1 分钟，总量沿用原上限 365 天。fixed_interval 固定轴不使用本范围。
+MIN_AFTER_COMPLETION_MINUTES = 1
+MAX_AFTER_COMPLETION_MINUTES = 365 * 1440
+
+
 MAX_CONTENT_LENGTH = 500
 
 
@@ -85,6 +91,11 @@ _TIME_WITH_SECONDS_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d):([0-5]\d)$")
 
 
 _SHORTHAND_RE = re.compile(r"^(?:(\d+)\s*h)?(?:(\d+)\s*m)?(?:(\d+)\s*s)?$")
+
+
+# 处理后刷新间隔简写（§9.5，2026-10-07）：d→h→m 固定顺序、单位不重复；
+# 乱序（1m1d）、重复（1d1d）、小数（1.5h）与未知单位由整体不匹配拒绝。
+_INTERVAL_SHORTHAND_RE = re.compile(r"^(?:(\d+)\s*d)?(?:(\d+)\s*h)?(?:(\d+)\s*m)?$")
 
 
 PLANNING_BOUNDARY_STATE_KEY = "planning.refresh_boundary_state"
@@ -125,9 +136,9 @@ def _parse_dt(value: Any, field: str = "datetime") -> datetime:
         try:
             parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
         except ValueError as exc:
-            raise PlanningError("invalid_payload", f"{field} must be an ISO datetime") from exc
+            raise PlanningError("invalid_payload", f"{field} 须为合法的时间（ISO 格式）") from exc
     else:
-        raise PlanningError("invalid_payload", f"{field} is required")
+        raise PlanningError("invalid_payload", f"{field} 不能为空")
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=_CST)
     return parsed.astimezone(_CST)
@@ -140,8 +151,8 @@ def _parse_date(value: Any, field: str) -> date:
         try:
             return date.fromisoformat(value.strip())
         except ValueError as exc:
-            raise PlanningError("invalid_payload", f"{field} is not a real date") from exc
-    raise PlanningError("invalid_payload", f"{field} must be YYYY-MM-DD")
+            raise PlanningError("invalid_payload", f"{field} 不是真实存在的日期") from exc
+    raise PlanningError("invalid_payload", f"{field} 须为 YYYY-MM-DD 格式的日期")
 
 
 def _parse_tod(value: Any, field: str) -> time:
@@ -159,9 +170,9 @@ def _parse_tod(value: Any, field: str) -> time:
         if match:
             hour, minute, second = text.split(":")
             if int(second) != 0:
-                raise PlanningError("invalid_payload", f"{field} must be HH:MM")
+                raise PlanningError("invalid_payload", f"{field} 须为 HH:MM 格式的时刻")
             return time(int(hour), int(minute))
-    raise PlanningError("invalid_payload", f"{field} must be HH:MM")
+    raise PlanningError("invalid_payload", f"{field} 须为 HH:MM 格式的时刻")
 
 
 def _tod_str(value: Any, field: str) -> str | None:
@@ -174,7 +185,7 @@ def parse_duration_shorthand(value: Any, field: str) -> int:
     秒数进位到分钟（最少 1 分钟），与前端展示一致。
     """
     if isinstance(value, bool):
-        raise PlanningError("invalid_payload", f"{field} must be minutes or shorthand")
+        raise PlanningError("invalid_payload", f"{field} 须为分钟数或时长简写")
     if isinstance(value, int):
         minutes = value
     elif isinstance(value, str):
@@ -184,13 +195,13 @@ def parse_duration_shorthand(value: Any, field: str) -> int:
         else:
             match = _SHORTHAND_RE.match(text)
             if not match or not any(match.groups()):
-                raise PlanningError("invalid_payload", f"{field} shorthand must be like 1h30m")
+                raise PlanningError("invalid_payload", f"{field} 格式：分钟数，或 1h / 30m / 1h30m 简写")
             hours, mins, secs = (int(g) if g else 0 for g in match.groups())
             minutes = -(-((hours * 60 + mins) * 60 + secs) // 60)
     else:
-        raise PlanningError("invalid_payload", f"{field} must be minutes or shorthand")
+        raise PlanningError("invalid_payload", f"{field} 须为分钟数或时长简写")
     if not 1 <= minutes <= 1440:
-        raise PlanningError("invalid_payload", f"{field} must be between 1 and 1440 minutes")
+        raise PlanningError("invalid_payload", f"{field} 须在 1 至 1440 分钟之间")
     return minutes
 
 
@@ -232,6 +243,86 @@ def parse_logged_duration_seconds(value: Any, field: str = "actual_logged_durati
     return total
 
 
+def parse_interval_shorthand(value: Any, field: str = "after_completion_interval") -> int:
+    """处理后刷新间隔（§9.5，2026-10-07 确认）：``1``/``1d``/``2h``/``30m``
+    /``1d1h1m``/``1h30m``，**纯数字默认天**——与预计耗时简写的「无后缀默认
+    分钟」语义严格区分，不得混用解析器。
+
+    接受首尾空格与大小写归一；单位按 ``d→h→m`` 顺序且不重复（乱序
+    ``1m1d``、重复 ``1d1d``、小数 ``1.5h``、负数、零、空、未知单位一律
+    拒绝）。返回整分钟：1 分钟 ≤ 总时长 ≤ 365 天（既有上限的精度扩展）。
+    """
+    if isinstance(value, bool):
+        raise PlanningError(
+            "invalid_payload",
+            f"{field} 格式不正确：请填写 1d、2h、30m 或 1d1h1m；纯数字按天",
+        )
+    if isinstance(value, int):
+        days = value
+    elif isinstance(value, str):
+        text = value.strip().casefold().replace(" ", "")
+        if text.isdigit():
+            days = int(text)
+        else:
+            match = _INTERVAL_SHORTHAND_RE.match(text)
+            if not match or not any(match.groups()):
+                raise PlanningError(
+                    "invalid_payload",
+                    f"{field} 格式不正确：请填写 1d、2h、30m 或 1d1h1m；纯数字按天",
+                )
+            d, h, m = (int(g) if g else 0 for g in match.groups())
+            minutes = d * 1440 + h * 60 + m
+            if not MIN_AFTER_COMPLETION_MINUTES <= minutes <= MAX_AFTER_COMPLETION_MINUTES:
+                raise PlanningError(
+                    "invalid_payload",
+                    f"{field} 最短 1 分钟，总时长不超过 365 天",
+                )
+            return minutes
+    else:
+        raise PlanningError(
+            "invalid_payload",
+            f"{field} 格式不正确：请填写 1d、2h、30m 或 1d1h1m；纯数字按天",
+        )
+    minutes = days * 1440
+    if not MIN_AFTER_COMPLETION_MINUTES <= minutes <= MAX_AFTER_COMPLETION_MINUTES:
+        raise PlanningError(
+            "invalid_payload",
+            f"{field} 最短 1 分钟，总时长不超过 365 天",
+        )
+    return minutes
+
+
+def format_interval_shorthand(minutes: int | None) -> str:
+    """after_completion 分钟数的规范简写回显（如 1440→``1d``、1501→
+    ``1d1h1m``）；与 :func:`parse_interval_shorthand` 互为逆运算。"""
+    if not isinstance(minutes, int) or minutes <= 0:
+        return ""
+    days, rest = divmod(minutes, 1440)
+    hours, mins = divmod(rest, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if mins or not parts:
+        parts.append(f"{mins}m")
+    return "".join(parts)
+
+
+def _after_completion_interval_minutes(task: dict[str, Any]) -> int | None:
+    """after_completion 间隔的统一读取口径（§9.5）：``after_completion_minutes``
+    分钟权威优先；旧任务行 / 迁移回填前以 ``interval_days`` 天数表达的按
+    days×1440 等价换算（「3」≙「3d」≙ 4320m）。双列同时有值时以分钟为准。
+    返回 None 表示间隔缺失（调用方按各自契约拒绝）。"""
+    minutes = task.get("after_completion_minutes")
+    if isinstance(minutes, int) and not isinstance(minutes, bool):
+        return minutes
+    days = task.get("interval_days")
+    if isinstance(days, int) and not isinstance(days, bool):
+        return days * 1440
+    return None
+
+
 def _combine(for_date: date, tod: time) -> datetime:
     return datetime.combine(for_date, tod, tzinfo=_CST)
 
@@ -248,11 +339,11 @@ def _clean_text(value: Any, field: str, *, required: bool, maximum: int) -> str 
     elif isinstance(value, str):
         text = value.strip()
     else:
-        raise PlanningError("invalid_payload", f"{field} must be a string")
+        raise PlanningError("invalid_payload", f"{field} 须为文本")
     if required and not text:
-        raise PlanningError("invalid_payload", f"{field} is required")
+        raise PlanningError("invalid_payload", f"{field} 不能为空")
     if len(text) > maximum:
-        raise PlanningError("invalid_payload", f"{field} must not exceed {maximum} characters")
+        raise PlanningError("invalid_payload", f"{field} 不能超过 {maximum} 个字符")
     return text or None
 
 
@@ -260,9 +351,9 @@ def _clean_int(value: Any, field: str, *, lo: int, hi: int) -> int | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
-        raise PlanningError("invalid_payload", f"{field} must be an integer")
+        raise PlanningError("invalid_payload", f"{field} 须为整数")
     if not lo <= value <= hi:
-        raise PlanningError("invalid_payload", f"{field} must be between {lo} and {hi}")
+        raise PlanningError("invalid_payload", f"{field} 须在 {lo} 至 {hi} 之间")
     return value
 
 
@@ -270,7 +361,7 @@ def _clean_bool(value: Any, field: str, default: bool = False) -> bool:
     if value is None:
         return default
     if not isinstance(value, bool):
-        raise PlanningError("invalid_payload", f"{field} must be a boolean")
+        raise PlanningError("invalid_payload", f"{field} 须为布尔值")
     return value
 
 
@@ -280,12 +371,12 @@ def _clean_int_list(value: Any, field: str, *, lo: int, hi: int) -> list[int] | 
     if not isinstance(value, list) or any(
         isinstance(v, bool) or not isinstance(v, int) for v in value
     ):
-        raise PlanningError("invalid_payload", f"{field} must be an array of integers")
+        raise PlanningError("invalid_payload", f"{field} 须为整数数组")
     if any(not lo <= v <= hi for v in value):
-        raise PlanningError("invalid_payload", f"{field} values must be between {lo} and {hi}")
+        raise PlanningError("invalid_payload", f"{field} 的取值须在 {lo} 至 {hi} 之间")
     unique = sorted(set(value))
     if not unique:
-        raise PlanningError("invalid_payload", f"{field} must not be empty")
+        raise PlanningError("invalid_payload", f"{field} 不能为空数组")
     return unique
 
 
@@ -345,7 +436,7 @@ def _should_recompute_after_generation(result: Any) -> bool:
 
 SCHEDULE_FIELDS = {
     "task_type", "interval_days", "weekdays", "month_days", "target_date",
-    "refresh_mode", "refresh_anchor_at",
+    "refresh_mode", "refresh_anchor_at", "after_completion_minutes",
     "time_mode", "estimated_minutes",
     "window_start_tod", "window_end_tod",
     "hollow_start_minutes", "hollow_wait_minutes", "hollow_end_minutes",
@@ -472,7 +563,7 @@ def _compute_actual_minutes(occ: dict[str, Any]) -> int | None:
     start = _parse_dt(actual_start, "actual_start")
     end = _parse_dt(actual_end, "actual_end")
     if end < start:
-        raise PlanningError("invalid_payload", "actual_end must not precede actual_start")
+        raise PlanningError("invalid_payload", "实际结束时间不能早于实际开始时间")
     return _minutes_between(start, end)
 
 

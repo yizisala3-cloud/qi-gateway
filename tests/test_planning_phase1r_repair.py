@@ -334,6 +334,10 @@ def test_correction_from_unhandled_discard_records_handling_at_correction_time()
     with Context() as c:
         c.create("interval", at(24), refresh_mode="after_completion", interval_days=3)
         occ = c.rows[0]
+        # §25（2026-10-07）：播种完成事实 → 删除走历史保留分支（无事实者
+        # 物理删除，不再产生可更正的关闭历史）。
+        c.db.rows.setdefault("planning_task_completion_fact", []).append(
+            {"task_id": occ["task_id"]})
         planning_occurrences.set_occurrence_status(occ["id"], {"status": "discarded"}, at(24, 9))
         assert occ.get("handled_at") is None
         assert c.db.rows["planning_task"][0]["is_active"] is False

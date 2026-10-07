@@ -50,6 +50,34 @@ def _add_actual_staleness_guards(query, occ: dict[str, Any], row: dict[str, Any]
     return query
 
 
+def _actual_source_after_patch(occ: dict[str, Any], row: dict[str, Any], *,
+                               end_user: bool, start_user: bool) -> str | None:
+    """实际起止来源的完整可信判定（R07，2026-10-07 复审 #7，低优先级修复）。
+
+    行级来源只有一列，无法区分每端来源——用**等效完整可信判断**替代全量
+    数据模型改造：只有以下情形才把来源写为 ``'user'``：
+
+    * 双端均由本次用户输入 / 用户动作写入（完整用户配对）；
+    * 用户写入一端而另一端缺失（配对不完整——来源暂不参与展示，后续补齐
+      另一端时沿用 user，两步补填的完整用户配对仍成立）；
+    * 既有来源已是 ``'user'``（用户修正自己配对中的另一端）。
+
+    其余情形（用户只改一端、另一端是 system 收口 / 来源不明的既有值）保留
+    原来源——混合配对不冒充可信实测（§12.3：自动实际耗时只信完整 user
+    起止）。返回 None 表示调用方按自身语义决定（系统收口写 system / 不写）。
+    """
+    merged = {**occ, **row}
+    if end_user and start_user:
+        return "user"
+    if end_user and merged.get("actual_start") is None:
+        return "user"
+    if start_user and merged.get("actual_end") is None:
+        return "user"
+    if end_user or start_user:
+        return occ.get("actual_time_source")
+    return None
+
+
 def _hollow_display_patch(occ: dict[str, Any], patch: dict[str, Any], now: datetime) -> dict[str, Any] | None:
     """同轮两阶段的展示周期字段（批次 6 一轮 Review BLOCKER 3：写前计算，
     不再单独写库——由调用方并入原子写入）。"""
@@ -339,12 +367,12 @@ def _shift_sibling_phase(
 def set_occurrence_status(occurrence_id: int, payload: Any, now: datetime | None = None) -> dict[str, Any]:
     now = now or runtime._now()
     if not isinstance(payload, dict):
-        raise common.PlanningError("invalid_payload", "request body must be a JSON object")
+        raise common.PlanningError("invalid_payload", "请求内容必须是 JSON 对象")
     target = str(payload.get("status") or "").strip().casefold()
     if target not in common.OCCURRENCE_STATUSES:
-        raise common.PlanningError("invalid_payload", f"status must be one of {', '.join(common.OCCURRENCE_STATUSES)}")
+        raise common.PlanningError("invalid_payload", f"状态必须是：{'、'.join(common.OCCURRENCE_STATUSES)}")
     if target == "timeout":
-        raise common.PlanningError("invalid_payload", "timeout is assigned by the system only")
+        raise common.PlanningError("invalid_payload", "超时状态只能由系统标记")
     # 完成耗时手填（2026-10-01 确认，§12.3）：校验前置（写前完整校验纪律），
     # 手填值存独立 actual_logged_seconds，不覆盖自动 actual_* 事实。
     logged_seconds = common.parse_logged_duration_seconds(
@@ -354,12 +382,12 @@ def set_occurrence_status(occurrence_id: int, payload: Any, now: datetime | None
     client = runtime._require_client()
     occ = runtime._fetch_occurrence(client, occurrence_id)
     if not occ:
-        raise common.PlanningError("not_found", "planning occurrence not found", 404)
+        raise common.PlanningError("not_found", "待办记录不存在", 404)
     if not occ.get("round_key"):
         raise common.PlanningError("legacy_instance", "旧实例须在受控升级后处理", 409)
     task = runtime._fetch_task(client, occ["task_id"])
     if not task:
-        raise common.PlanningError("not_found", "planning task not found", 404)
+        raise common.PlanningError("not_found", "待办任务不存在", 404)
     current = occ["status"]
 
     new_start_raw = payload.get("est_start")
@@ -386,17 +414,17 @@ def set_occurrence_status(occurrence_id: int, payload: Any, now: datetime | None
         if current == "timeout":
             pass  # 超时后此次不执行视为一种废弃处理路径
         elif current not in common.OPEN_STATUSES and current not in common.CLOSED_STATUSES:
-            raise common.PlanningError("invalid_transition", f"cannot discard_this from {current}", 422)
+            raise common.PlanningError("invalid_transition", f"当前状态（{current}）不能执行「此次不执行」", 422)
     if target == "deferred":
         if current not in ("pending", "in_progress", "partial"):
-            raise common.PlanningError("invalid_transition", f"cannot defer from {current}", 422)
+            raise common.PlanningError("invalid_transition", f"当前状态（{current}）不能延后", 422)
         if not new_start:
-            raise common.PlanningError("invalid_payload", "deferring requires est_start", 422)
+            raise common.PlanningError("invalid_payload", "延后必须指定新的执行时间", 422)
     if target == "in_progress" and current not in ("pending", "deferred", "partial"):
-        raise common.PlanningError("invalid_transition", f"cannot start from {current}", 422)
+        raise common.PlanningError("invalid_transition", f"当前状态（{current}）不能开始执行", 422)
     if target == "partial" and current not in ("pending", "in_progress", "partial", "deferred"):
         raise common.PlanningError(
-            "invalid_transition", f"cannot record partial completion from {current}", 422,
+            "invalid_transition", f"当前状态（{current}）不能记录部分完成", 422,
         )
     if target == "completed" and current not in (
         "pending", "in_progress", "partial", "deferred", "completed",
@@ -404,7 +432,7 @@ def set_occurrence_status(occurrence_id: int, payload: Any, now: datetime | None
     ):
         # discarded → completed 属于关闭态之间的历史标签更正（B5 双向）；
         # 无处理事实的历史以更正时刻记录 handled_at（见 newly_handled）。
-        raise common.PlanningError("invalid_transition", f"cannot complete from {current}", 422)
+        raise common.PlanningError("invalid_transition", f"当前状态（{current}）不能标记完成", 422)
 
     # 重复型任务的「废弃」= 整个待办不再执行（需求 4d）。判定前移——
     # 废弃命令（跨 task + occurrence）在主写入前以原子 RPC 执行
@@ -454,6 +482,9 @@ def set_occurrence_status(occurrence_id: int, payload: Any, now: datetime | None
 
     if target == "in_progress" and not occ.get("actual_start"):
         row["actual_start"] = common._iso(now)
+        # 用户点「开始」：真实计时来源 = user（§12.3；配合 actual_end 一起
+        # 构成可信自动实际耗时）。
+        row["actual_time_source"] = "user"
 
     closing = target in common.CLOSED_STATUSES
     # handled_at 是历史处理事实：完整处理（含把无处理事实的关闭历史更正为
@@ -469,14 +500,30 @@ def set_occurrence_status(occurrence_id: int, payload: Any, now: datetime | None
             row["closed_at"] = common._iso(now)
         if newly_handled:
             row["handled_at"] = common._iso(now)
-        if payload.get("actual_end"):
+        # R07（低优先级修复）：端点写入与来源判定分离——用户显式提供 /
+        # 完成动作写入的端点按 user 候选，但「单端 user + 另一端 system /
+        # 来源不明」的混合配对不整体提升为 user（§12.3 只信完整 user 起止）。
+        end_user = bool(payload.get("actual_end"))
+        if end_user:
             row["actual_end"] = common._iso(common._parse_dt(payload["actual_end"], "actual_end"))
         elif not occ.get("actual_end"):
             row["actual_end"] = common._iso(now)
-        if payload.get("actual_start"):
+            # 完成 = 用户点「结束/完成」的真实时刻；此次不执行 / 废弃是
+            # 用户决定不执行的时刻——不是执行结束事实，来源标记 system，
+            # 不得被当作可信自动计时（A05：合成时间不冒充实测）。
+            end_user = target == "completed"
+        start_user = bool(payload.get("actual_start"))
+        if start_user:
             row["actual_start"] = common._iso(common._parse_dt(payload["actual_start"], "actual_start"))
         merged = {**occ, **row}
         row["actual_minutes"] = common._compute_actual_minutes(merged)
+        if end_user or start_user or "actual_end" in row:
+            source = _actual_source_after_patch(
+                occ, row, end_user=end_user, start_user=start_user)
+            if source is None:
+                # 无用户端点的系统收口（此次不执行 / 废弃补终点）。
+                source = "system"
+            row["actual_time_source"] = source
         if logged_seconds is not None:
             if sibling_row is not None:
                 # 中空同轮两阶段写经 round RPC 硬白名单（无本字段）——手填
@@ -488,33 +535,52 @@ def set_occurrence_status(occurrence_id: int, payload: Any, now: datetime | None
             row["actual_logged_seconds"] = logged_seconds
     else:
         row["closed_at"] = None
-        if payload.get("actual_start"):
+        # R07：开放状态流转携带的实际起止补填同样按完整可信判定来源。
+        start_user = bool(payload.get("actual_start"))
+        end_user = bool(payload.get("actual_end"))
+        if start_user:
             row["actual_start"] = common._iso(common._parse_dt(payload["actual_start"], "actual_start"))
-        if payload.get("actual_end"):
+        if end_user:
             row["actual_end"] = common._iso(common._parse_dt(payload["actual_end"], "actual_end"))
         if "actual_start" in row or "actual_end" in row:
             merged = {**occ, **row}
             row["actual_minutes"] = common._compute_actual_minutes(merged)
+            source = _actual_source_after_patch(
+                occ, row, end_user=end_user, start_user=start_user)
+            if source is not None:
+                row["actual_time_source"] = source
 
     if discarding_whole_task:
-        # 最终 Debug（问题 1B）：废弃整个任务 = 单事务命令。目标行的关闭
-        # 事实（actual_end / actual_minutes / actual_start——废弃命令成功
-        # 必须产生的结果）作为 RPC 输入在同一事务内写入；RPC commit 后
-        # 不再有事务外补写（fact 更新失败 = 整个废弃回滚，task 不会已被
-        # 停用）。closed_at / status 由 RPC 的批量关闭覆盖。
+        # §25（2026-10-07）：删除整个任务 = 单事务命令（planning_discard_task
+        # 按执行事实保留全部历史或物理删除任务与实例）。目标行的关闭事实
+        # （actual_end / actual_minutes / actual_start——废弃命令成功必须
+        # 产生的结果，来源 = system 收口）作为 RPC 输入在同一事务内写入；
+        # RPC commit 后不再有事务外补写（fact 更新失败 = 整个删除回滚，
+        # 任务不会被半删除）。closed_at / status 由 RPC 的批量关闭覆盖。
         target_facts = {key: row[key] for key in
-                        ("actual_start", "actual_end", "actual_minutes")
+                        ("actual_start", "actual_end", "actual_minutes",
+                         "actual_time_source")
                         if key in row}
         target_facts["updated_at"] = common._iso(now)
-        runtime._discard_task_atomically(client, task["id"], now,
-                                 target_id=occ["id"], target_patch=target_facts)
-        # 批次 6 收尾（BUG B）：整任务废弃提前 return，绕过了下方 closing
-        # 分支——废弃释放的时间槽必须由一次重算重新分配；登记为 post-commit
-        # side effect，失败不伪装成废弃失败（quiet，可观测日志兜底）。
+        # R09：创建快照正文随任务行物理删除，登记表只保留规范化语义摘要
+        # （creation_request_content 创建后不可变，锁前读取即权威）。
+        discard_result = runtime._discard_task_atomically(
+            client, task["id"], now,
+            target_id=occ["id"], target_patch=target_facts,
+            creation_digest=task_service._creation_content_digest(
+                task.get("creation_request_content")))
+        # 删除释放的时间槽必须由一次重算重新分配；登记为 post-commit
+        # side effect，失败不伪装成删除失败（quiet，可观测日志兜底）。
         recompute._request_recompute_quietly("task_discarded", now)
-        task = {**task, "is_active": False}
-        refreshed = runtime._fetch_occurrence(client, occurrence_id) or {**occ, **row}
-        return presentation.serialize_occurrence(refreshed, task, now)
+        # 响应表达删除结果（§5.2）：物理删除后实例行已不存在，不序列化
+        # 已删除行伪装成功。
+        return {
+            "id": occurrence_id,
+            "task_id": task["id"],
+            "deleted": True,
+            "history_preserved": bool(discard_result.get("history_preserved", True)),
+            "closed_occurrences": int(discard_result.get("closed") or 0),
+        }
 
     if sibling_row is not None:
         # 最终修复（问题 2）：中空同轮两阶段（目标行状态流转 + 兄弟行时间
@@ -548,9 +614,15 @@ def set_occurrence_status(occurrence_id: int, payload: Any, now: datetime | None
         if all(item["status"] in ("completed", "discarded_this") and item.get("handled_at")
                for item in round_rows):
             handled = max(common._parse_dt(item["handled_at"], "handled_at") for item in round_rows)
+            interval = common._after_completion_interval_minutes(task)
+            if interval is None or not (
+                common.MIN_AFTER_COMPLETION_MINUTES <= interval
+                <= common.MAX_AFTER_COMPLETION_MINUTES
+            ):
+                raise common.PlanningError("invalid_task", "处理后刷新间隔无效，无法推进下一轮", 409)
             client.table("planning_task").update({
                 "last_handled_at": common._iso(handled),
-                "refresh_next_due_at": common._iso(handled + timedelta(days=task["interval_days"])),
+                "refresh_next_due_at": common._iso(handled + timedelta(minutes=interval)),
                 "updated_at": common._iso(now),
             }).eq("id", task["id"]).execute()
 
@@ -592,7 +664,7 @@ def patch_occurrence(occurrence_id: int, payload: Any, now: datetime | None = No
     """
     now = now or runtime._now()
     if not isinstance(payload, dict):
-        raise common.PlanningError("invalid_payload", "request body must be a JSON object")
+        raise common.PlanningError("invalid_payload", "请求内容必须是 JSON 对象")
     allowed = {"est_start", "est_end", "actual_start", "actual_end", "partial_note", "is_fixed",
                "window_start_at", "window_end_at"}
     unknown = set(payload) - allowed
@@ -613,12 +685,12 @@ def patch_occurrence(occurrence_id: int, payload: Any, now: datetime | None = No
     client = runtime._require_client()
     occ = runtime._fetch_occurrence(client, occurrence_id)
     if not occ:
-        raise common.PlanningError("not_found", "planning occurrence not found", 404)
+        raise common.PlanningError("not_found", "待办记录不存在", 404)
     if not occ.get("round_key"):
         raise common.PlanningError("legacy_instance", "旧实例须在受控升级后处理", 409)
     task = runtime._fetch_task(client, occ["task_id"])
     if not task:
-        raise common.PlanningError("not_found", "planning task not found", 404)
+        raise common.PlanningError("not_found", "待办任务不存在", 404)
 
     # ── 校验与补丁计算（零写入） ──────────────────────────────────
     main_row: dict[str, Any] = {"updated_at": common._iso(now)}
@@ -672,6 +744,16 @@ def patch_occurrence(occurrence_id: int, payload: Any, now: datetime | None = No
         main_row["actual_end"] = common._iso(common._parse_dt(payload["actual_end"], "actual_end")) if payload["actual_end"] else None
     if "actual_start" in main_row or "actual_end" in main_row:
         main_row["actual_minutes"] = common._compute_actual_minutes({**occ, **main_row})
+        # R07（低优先级修复，2026-10-07 复审 #7）：用户补填 / 修正实际起止
+        # 的来源按**完整可信判定**（_actual_source_after_patch）——双端同
+        # 请求补填、另一端缺失、或既有来源已是 user 才写 user；只改一端而
+        # 另一端是 system 收口 / 来源不明的既有值时保留原来源，混合配对
+        # 不冒充可信实测（旧实现任一端补丁都把整对端点提升为 user）。
+        source = _actual_source_after_patch(
+            occ, main_row,
+            end_user="actual_end" in payload, start_user="actual_start" in payload)
+        if source is not None:
+            main_row["actual_time_source"] = source
 
     # ── 写入阶段（全部校验已通过） ────────────────────────────────
     if est_edited or window_edited:
@@ -721,14 +803,14 @@ def split_occurrence(occurrence_id: int, payload: Any, now: datetime | None = No
     """
     now = now or runtime._now()
     if not isinstance(payload, dict):
-        raise common.PlanningError("invalid_payload", "request body must be a JSON object")
+        raise common.PlanningError("invalid_payload", "请求内容必须是 JSON 对象")
     parts = payload.get("parts")
     if not isinstance(parts, list) or not 1 <= len(parts) <= 10:
-        raise common.PlanningError("invalid_payload", "parts must be an array of 1-10 items")
+        raise common.PlanningError("invalid_payload", "拆分项必须是 1～10 个")
     normalized = []
     for part in parts:
         if not isinstance(part, dict):
-            raise common.PlanningError("invalid_payload", "parts items must be objects")
+            raise common.PlanningError("invalid_payload", "拆分项必须是对象")
         content = common._clean_text(part.get("content"), "parts.content", required=True, maximum=common.MAX_CONTENT_LENGTH)
         minutes = common.parse_duration_shorthand(part.get("estimated_minutes", 30), "parts.estimated_minutes")
         normalized.append({"content": content, "estimated_minutes": minutes})
@@ -736,7 +818,7 @@ def split_occurrence(occurrence_id: int, payload: Any, now: datetime | None = No
     client = runtime._require_client()
     occ = runtime._fetch_occurrence(client, occurrence_id)
     if not occ:
-        raise common.PlanningError("not_found", "planning occurrence not found", 404)
+        raise common.PlanningError("not_found", "待办记录不存在", 404)
     if not occ.get("round_key"):
         raise common.PlanningError("legacy_instance", "旧实例须在受控升级后处理", 409)
     if occ.get("status") not in common.OPEN_STATUSES:
@@ -745,7 +827,7 @@ def split_occurrence(occurrence_id: int, payload: Any, now: datetime | None = No
         )
     task = runtime._fetch_task(client, occ["task_id"])
     if not task:
-        raise common.PlanningError("not_found", "planning task not found", 404)
+        raise common.PlanningError("not_found", "待办任务不存在", 404)
 
     # 原子拆分（#1，迁移 20261002030000 RPC）：条件关闭、1～10 个单次待办
     # 创建与 after_completion 基准推进在**同一数据库事务**内完成，任一失败
@@ -753,14 +835,16 @@ def split_occurrence(occurrence_id: int, payload: Any, now: datetime | None = No
     # 中途 INSERT 失败会留下「原轮已关闭 + 部分任务」的不可重试半状态。
     # 锁内基准推进（语句 6）与旧「关闭后读行再写」同语义：全部轮次行均有
     # handled_at 时按 max(handled_at) 推进，基准缺失时 _after_completion_due
-    # 仍可从轮次行自愈。
-    after_completion_days = None
+    # 仍可从轮次行自愈。2026-10-07（§9.5）：基准间隔改用分钟权威。
+    after_completion_minutes = None
     if (task["task_type"] == "interval"
             and task.get("refresh_mode") == "after_completion"
             and task.get("is_active")):
-        interval = task.get("interval_days")
-        if isinstance(interval, int) and 1 <= interval <= 365:
-            after_completion_days = interval
+        interval = common._after_completion_interval_minutes(task)
+        if (interval is not None
+                and common.MIN_AFTER_COMPLETION_MINUTES <= interval
+                <= common.MAX_AFTER_COMPLETION_MINUTES):
+            after_completion_minutes = interval
     try:
         response = client.rpc("planning_split_occurrence", {
             "p_task_id": task["id"],
@@ -772,7 +856,7 @@ def split_occurrence(occurrence_id: int, payload: Any, now: datetime | None = No
                  "estimated_minutes": part["estimated_minutes"]}
                 for part in normalized
             ],
-            "p_after_completion_days": after_completion_days,
+            "p_after_completion_minutes": after_completion_minutes,
         }).execute()
     except common.PlanningError:
         raise
@@ -868,7 +952,13 @@ def _repair_after_completion_baseline(
     if not all(row.get("handled_at") for row in round_rows):
         return
     handled = max(common._parse_dt(row["handled_at"], "handled_at") for row in round_rows)
-    expected_due = handled + timedelta(days=task.get("interval_days") or 0)
+    interval = common._after_completion_interval_minutes(task)
+    if interval is None or not (
+        common.MIN_AFTER_COMPLETION_MINUTES <= interval
+        <= common.MAX_AFTER_COMPLETION_MINUTES
+    ):
+        return
+    expected_due = handled + timedelta(minutes=interval)
     if (task.get("last_handled_at") == common._iso(handled)
             and task.get("refresh_next_due_at") == common._iso(expected_due)):
         return
@@ -896,20 +986,22 @@ def complete_task_early(
     client = runtime._require_client()
     task = runtime._fetch_task(client, task_id)
     if not task:
-        raise common.PlanningError("not_found", "planning task not found", 404)
+        raise common.PlanningError("not_found", "待办任务不存在", 404)
     if task["task_type"] not in ("interval", "weekly", "monthly"):
         raise common.PlanningError(
-            "invalid_transition", "only refreshable tasks support early completion", 422,
+            "invalid_transition", "只有间歇 / 每周 / 每月待办支持提前完成", 422,
         )
     if not task.get("is_active"):
-        raise common.PlanningError("invalid_transition", "task is discarded", 422)
+        raise common.PlanningError("invalid_transition", "该待办已删除，不能提前完成", 422)
     if task.get("refresh_mode") not in EARLY_CAPABLE_MODES:
         raise common.PlanningError("unclassified_task", "旧间歇任务须在受控升级中分类", 409)
-    interval = task.get("interval_days")
+    interval = common._after_completion_interval_minutes(task)
     if task["refresh_mode"] == "after_completion" and (
-        not isinstance(interval, int) or not 1 <= interval <= 365
+        interval is None
+        or not common.MIN_AFTER_COMPLETION_MINUTES <= interval
+        <= common.MAX_AFTER_COMPLETION_MINUTES
     ):
-        raise common.PlanningError("invalid_payload", "interval_days is missing", 422)
+        raise common.PlanningError("invalid_payload", "处理后刷新间隔无效，请先修正间隔配置", 422)
     if task.get("is_hollow"):
         raise common.PlanningError("invalid_round", "中空待办提前处理需由完整轮次承载", 409)
     if idempotency_key:
@@ -1018,6 +1110,9 @@ def complete_task_early(
             "actual_start": common._iso(now),
             "actual_end": common._iso(now),
             "actual_minutes": 0,
+            # 提前完成合成的同刻起止是兼容数据，不是用户计时（§12.3）：
+            # 标记 system，展示侧不得据此宣称实际执行 0m。
+            "actual_time_source": "system",
             "status": "completed",
             "sort_order": task["id"] * 10,
             "is_fixed": False,
@@ -1092,7 +1187,7 @@ def complete_task_early(
     if task["refresh_mode"] == "after_completion":
         client.table("planning_task").update({
             "last_handled_at": common._iso(now),
-            "refresh_next_due_at": common._iso(now + timedelta(days=interval)),
+            "refresh_next_due_at": common._iso(now + timedelta(minutes=interval)),
             "updated_at": common._iso(now),
         }).eq("id", task_id).execute()
     return result

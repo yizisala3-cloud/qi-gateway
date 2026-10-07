@@ -1113,6 +1113,10 @@ def test_update_task_deactivate_is_single_atomic_rpc():
         c.create("daily", at(24, 10), estimated_minutes=30, **HOLLOW)
         start, end = _hollow_round(c)
         task_id = c.db.rows["planning_task"][0]["id"]
+        # §25（2026-10-07）：播种完成事实 → 删除走历史保留分支（本测试
+        # 关注 RPC 原子性而非分支选择）。
+        c.db.rows.setdefault("planning_task_completion_fact", []).append(
+            {"task_id": task_id})
         events = []
         import test_planning_phase1a as p1a
         original_rpc = p1a._Database.rpc
@@ -1154,6 +1158,8 @@ def test_update_task_deactivate_failure_leaves_no_half_state():
         c.create("daily", at(24, 10), estimated_minutes=30, **HOLLOW)
         start, end = _hollow_round(c)
         task_id = c.db.rows["planning_task"][0]["id"]
+        c.db.rows.setdefault("planning_task_completion_fact", []).append(
+            {"task_id": task_id})
         import test_planning_phase1a as p1a
         original_query = p1a._Query.execute
 
@@ -1352,6 +1358,8 @@ def test_update_task_deactivate_rpc_failure_atomic():
         c.create("daily", at(24, 10), estimated_minutes=30, **HOLLOW)
         start, end = _hollow_round(c)
         task_id = c.db.rows["planning_task"][0]["id"]
+        c.db.rows.setdefault("planning_task_completion_fact", []).append(
+            {"task_id": task_id})
         import test_planning_phase1a as p1a
         original_rpc = p1a._Database.rpc
 
@@ -1523,6 +1531,8 @@ def test_pure_deactivation_registers_recompute_request():
         c.create("daily", at(24, 10), estimated_minutes=30)
         occ = c.rows[0]
         task_id = c.db.rows["planning_task"][0]["id"]
+        c.db.rows.setdefault("planning_task_completion_fact", []).append(
+            {"task_id": task_id})
         calls = _record_recompute(c)
         planning.update_task(task_id, {"is_active": False}, at(24, 12))
         assert calls == [("task_discarded", planning._iso(at(24, 12)))]
@@ -1537,6 +1547,8 @@ def test_whole_task_discard_registers_recompute_request():
     with Context() as c:
         c.create("daily", at(24, 10), estimated_minutes=30)
         occ = c.rows[0]
+        c.db.rows.setdefault("planning_task_completion_fact", []).append(
+            {"task_id": occ["task_id"]})
         calls = _record_recompute(c)
         planning.set_occurrence_status(occ["id"], {"status": "discarded"}, at(24, 12))
         assert calls == [("task_discarded", planning._iso(at(24, 12)))]
@@ -1575,6 +1587,8 @@ def test_recompute_after_discard_uses_released_slot():
         assert [r["est_start"] for r in rows] == [
             iso(24, 8, 30), iso(24, 9, 30), iso(24, 10, 30)]
         _record_recompute(c)
+        c.db.rows.setdefault("planning_task_completion_fact", []).append(
+            {"task_id": rows[1]["task_id"]})
         planning.set_occurrence_status(rows[1]["id"], {"status": "discarded"}, at(24, 9))
         assert rows[1]["status"] == "discarded"
         planning.trigger_recompute(at(24, 9))
@@ -1591,6 +1605,8 @@ def test_discard_succeeds_when_recompute_enqueue_fails(caplog):
         c.create("daily", at(24, 10), estimated_minutes=30)
         occ = c.rows[0]
         task_id = c.db.rows["planning_task"][0]["id"]
+        c.db.rows.setdefault("planning_task_completion_fact", []).append(
+            {"task_id": task_id})
 
         def failing_request(reason, now=None):
             raise RuntimeError("simulated enqueue failure")
@@ -1598,12 +1614,16 @@ def test_discard_succeeds_when_recompute_enqueue_fails(caplog):
         planning_recompute.request_recompute = failing_request
         with caplog.at_level("WARNING", logger="gateway.planning"):
             result = planning.update_task(task_id, {"is_active": False}, at(24, 12))
-        assert result["is_active"] is False
+        # §25（2026-10-07）：删除响应表达结果（历史已保留），不依赖任务行。
+        assert result["deleted"] is True
+        assert result["history_preserved"] is True
         assert c.db.rows["planning_task"][0]["is_active"] is False
         assert occ["status"] == "discarded"
         assert any("重算请求登记失败" in record.message for record in caplog.records)
         c.create("daily", at(24, 10), estimated_minutes=30)
         occ2 = c.rows[-1]
+        c.db.rows.setdefault("planning_task_completion_fact", []).append(
+            {"task_id": occ2["task_id"]})
         planning.set_occurrence_status(occ2["id"], {"status": "discarded"}, at(24, 13))
         assert occ2["status"] == "discarded"
         assert c.db.rows["planning_task"][1]["is_active"] is False

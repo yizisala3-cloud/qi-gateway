@@ -1,5 +1,5 @@
 // Planning display helpers: argument-only formatting and HTML; no DOM or network writes.
-import { tag, icon, esc } from '../ui.js?v=20261007-button-anchored';
+import { tag, icon, esc } from '../ui.js?v=20261007-planning-batch3';
 
 export const TASK_TYPE_LABELS = {
   daily: '每日', interval: '间歇', weekly: '每周', monthly: '每月', once: '单次', idle: '闲时',
@@ -48,7 +48,9 @@ export function fmtDue(iso) {
 export function taskTypeSummary(task) {
   switch (task.task_type) {
     case 'daily': return '每天出现';
-    case 'interval': return `每 ${task.interval_days || '?'} 天（完成后起算）`;
+    case 'interval': return task.refresh_mode === 'after_completion'
+      ? `完成后 ${formatIntervalMinutes(task.after_completion_minutes)} 刷新`
+      : `每 ${task.interval_days || '?'} 天（固定时间轴）`;
     case 'weekly': {
       const days = (task.weekdays || []).map((d) => `周${WEEKDAY_NAMES[d] ?? d}`);
       return days.length ? days.join('、') : '每周（未选星期）';
@@ -104,11 +106,40 @@ export function formatLoggedDuration(seconds) {
   return parts.join('');
 }
 
+// after_completion 间隔的规范简写（§9.5，与后端 parse/format 互逆）：
+// 1440 → 1d，1501 → 1d1h1m，30 → 30m。
+export function formatIntervalMinutes(minutes) {
+  if (!Number.isInteger(minutes) || minutes <= 0) return '?';
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const mins = minutes % 60;
+  const parts = [];
+  if (days) parts.push(`${days}d`);
+  if (hours) parts.push(`${hours}h`);
+  if (mins || !parts.length) parts.push(`${mins}m`);
+  return parts.join('');
+}
+
+// 可信自动实际耗时（§12.3 三层优先级第二层）：用户开始 / 结束 / 补填
+// （actual_time_source === 'user'）且起止齐全。系统收口（废弃补终点）、
+// 提前完成合成同刻（source === 'system'）与来源不明的旧记录（null）都
+// 不冒充实测；0 分钟是有效值（真实短耗时舍入），用 != null 判空。
+function trustedAutoMinutes(occ) {
+  if (occ.actual_time_source !== 'user') return null;
+  if (!occ.actual_start || !occ.actual_end) return null;
+  if (occ.actual_minutes == null) return null;
+  return occ.actual_minutes;
+}
+
 export function durationText(occ) {
   if (isClosedOcc(occ)) {
+    // 三层优先级（2026-10-07 §12.3）：手填 → 可信真实起止自动耗时 →
+    // 明确标注的预估；列表与详情同一口径。
     if (occ.actual_logged_seconds != null) {
       return `实际耗时 ${formatLoggedDuration(occ.actual_logged_seconds)}`;
     }
+    const auto = trustedAutoMinutes(occ);
+    if (auto != null) return `实际耗时 ${auto}m`;
     return occ.estimated_minutes ? `预估耗时 ${occ.estimated_minutes}m` : '';
   }
   const parts = [];
@@ -122,6 +153,11 @@ export function durationDetailRows(occ) {
     if (occ.actual_logged_seconds != null) {
       return '<div class="kv"><span class="k">实际耗时</span><span class="v">'
         + `${formatLoggedDuration(occ.actual_logged_seconds)}</span></div>`;
+    }
+    const auto = trustedAutoMinutes(occ);
+    if (auto != null) {
+      return '<div class="kv"><span class="k">实际耗时</span><span class="v">'
+        + `${auto}m</span></div>`;
     }
     return '<div class="kv"><span class="k">预估耗时</span><span class="v">'
       + `${occ.estimated_minutes ? occ.estimated_minutes + 'm' : '-'}</span></div>`;

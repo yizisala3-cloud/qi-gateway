@@ -1,6 +1,6 @@
 // pages/logs.js - 日志：真实空状态，接口尚未接入
-import { icon } from '../ui.js?v=20261007-button-anchored';
-import { empty } from '../ui.js?v=20261007-button-anchored';
+import { icon } from '../ui.js?v=20261007-planning-batch3';
+import { empty } from '../ui.js?v=20261007-planning-batch3';
 
 export default {
   async mount(root) {
