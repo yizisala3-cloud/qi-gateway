@@ -27,10 +27,25 @@ export function initHeaderDivider() {
 
   function update() {
     frame = 0;
+    if (rule.dataset.variant === 'straight') {
+      rule.style.removeProperty('--phr-right-gap');
+      return;
+    }
     const page = rule.dataset.page;
     const geometry = FLOWERS[rule.dataset.variant] || FLOWERS.wisteria;
     const bounds = rule.getBoundingClientRect();
     if (!bounds.width) return;
+
+    if (rule.dataset.variant === 'wisteria' || rule.dataset.variant === 'lily3') {
+      const imageHeight = parseFloat(getComputedStyle(rule, '::after').height);
+      const pixelRatio = window.devicePixelRatio || 1;
+      const finialWidth = imageHeight * 117 / geometry.height;
+      const edge = Math.round((bounds.left + finialWidth) * pixelRatio) / pixelRatio - bounds.left;
+      const value = `${edge}px`;
+      if (rule.style.getPropertyValue('--phr-finial-edge') !== value) {
+        rule.style.setProperty('--phr-finial-edge', value);
+      }
+    }
 
     const tabs = root.querySelector('.tabs');
     const toolbar = root.querySelector('.toolbar');

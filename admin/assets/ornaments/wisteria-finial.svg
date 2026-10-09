@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="149" height="371" viewBox="0 0 149 371">
+  <defs>
+    <linearGradient id="olive" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7d713e" />
+      <stop offset="0.46" stop-color="#796b3b" />
+      <stop offset="1" stop-color="#685d31" />
+    </linearGradient>
+    <image id="stem-pixels" width="1" height="371" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAFzCAYAAAD/iGP3AAAARklEQVR4nGNgGAWjgGjABKFyo4X4mH785m9h+vePJZXp1++/f5j+/f/PwsTJzvyTiYWZsReiLi2NgZV4w0fBKBgFo2AIAQDd2w9C/eA1xQAAAABJRU5ErkJggg==" />
+  </defs>
+  <svg x="64" width="85" height="371" viewBox="0 0 1 371" preserveAspectRatio="none" overflow="hidden">
+    <use href="#stem-pixels" />
+  </svg>
+  <g transform="translate(0 94.5625) scale(1.21875)">
+    <path transform="translate(2 18) scale(1.2) translate(-2 -18)" fill="url(#olive)" fill-rule="evenodd" d="M2 18 C14.4 16.2 23.1 11.3 30 2 C37.4 11.6 46 16.5 60 17 C45.9 19.4 37.1 24.8 30 34 C22.9 24.6 13.8 19.3 2 18 Z M30 12.3 L36.4 18 L30 23.7 L23.6 18 Z" />
+  </g>
+</svg>

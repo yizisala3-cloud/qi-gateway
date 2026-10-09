@@ -130,6 +130,9 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
 .page-head-rule {
   --phr-s: 0.335;
   --phr-img: url("/admin/assets/ornaments/wisteria-divider.svg");
+  --phr-finial-img: url("/admin/assets/ornaments/wisteria-finial.svg");
+  --phr-finial-w: 44px;
+  --phr-finial-h: 18px;
   --phr-original-w: 716;
   --phr-original-h: 371;
   --phr-original-stem: 116.5;
@@ -138,19 +141,29 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
   background: none;
 }
 .page-head-rule[data-variant="lily3"] {
-  --phr-img: url("/admin/assets/ornaments/lily3-divider.svg");
+  --phr-img: url("/admin/assets/ornaments/lily3-divider.svg?v=20261009-seamless-pixels");
+  --phr-finial-img: url("/admin/assets/ornaments/lily3-finial.svg?v=20261009-seamless-pixels");
   --phr-original-w: 649;
   --phr-original-h: 228;
   --phr-original-stem: 122.5;
+  --phr-finial-w: calc(var(--phr-right-w) * 117 / 649);
 }
-.page-head-rule[data-variant] {
+.page-head-rule[data-variant="wisteria"] {
+  --phr-img: url("/admin/assets/ornaments/wisteria-divider.svg?v=20261009-seamless-pixels");
+  --phr-finial-img: url("/admin/assets/ornaments/wisteria-finial.svg?v=20261009-seamless-pixels");
+  /* 整图中菱纹主体高 39px；与 371px 高的花枝共用缩放倍率。 */
+  --phr-finial-w: calc(var(--phr-right-w) * 117 / 716);
+  --phr-finial-h: calc(var(--phr-right-w) * 43.875 / 716);
+}
+.page-head-rule[data-variant="wisteria"],
+.page-head-rule[data-variant="lily3"] {
   margin-top: calc(var(--phr-right-w) * var(--phr-original-stem) / var(--phr-original-w) + 2px);
   margin-bottom: 16px;
 }
 .page-head-rule::after {
   content: "";
   position: absolute;
-  left: 8px;
+  left: calc(var(--phr-finial-w) - 4px);
   right: var(--phr-right-gap, 0px);
   top: calc(6px - var(--phr-right-w) * var(--phr-original-stem) / var(--phr-original-w));
   width: auto;
@@ -164,20 +177,46 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
 }
 .page-head-rule::before {
   content: "";
-  left: 2px;
+  left: 0;
   right: auto;
   top: 50%;
-  width: 5.5px;
-  height: 5.5px;
-  transform: translateY(-50%) rotate(45deg);
-  border-color: var(--gold-strong);
-  box-shadow: 0 0 0 2.5px var(--gold-strong);
+  width: var(--phr-finial-w);
+  height: var(--phr-finial-h);
+  transform: translateY(-50%);
+  border: 0;
+  box-shadow: none;
+  background: var(--phr-finial-img) no-repeat center / contain;
+  pointer-events: none;
   z-index: 3;
+}
+
+/* 两款花饰的接口共用各自花枝的坐标和线杆像素；分界落在设备像素上。 */
+.page-head-rule[data-variant="wisteria"]::before,
+.page-head-rule[data-variant="lily3"]::before {
+  width: var(--phr-finial-edge, var(--phr-finial-w));
+  height: calc(var(--phr-right-w) * var(--phr-original-h) / var(--phr-original-w));
+  top: calc(6px - var(--phr-right-w) * var(--phr-original-stem) / var(--phr-original-w));
+  transform: none;
+  background-position: left top;
+  background-size: calc(var(--phr-right-w) * 149 / var(--phr-original-w)) 100%;
+}
+.page-head-rule[data-variant="wisteria"]::after,
+.page-head-rule[data-variant="lily3"]::after {
+  left: var(--phr-finial-edge, var(--phr-finial-w));
+}
+
+/* 直线样式沿用金色细线，不显示花枝和菱形。 */
+.page-head-rule[data-variant="straight"] {
+  background: linear-gradient(var(--gold-strong), var(--gold-strong)) left center / 100% 1px no-repeat;
+}
+.page-head-rule[data-variant="straight"]::before,
+.page-head-rule[data-variant="straight"]::after {
+  display: none;
 }
 
 /* 尺寸随可用宽度增长；位置由实际按钮布局决定。 */
 @media (max-width: 1100px) {
-  .page-head-rule { --phr-s: 0.28; }
+  .page-head-rule { --phr-s: 0.28; --phr-finial-w: 38px; --phr-finial-h: 16px; }
 }
 @media (min-width: 769px) {
   .page-head-rule[data-variant="wisteria"] {
@@ -202,8 +241,14 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
   display: flex;
   flex-direction: column;
   background:
+    /* 暖褐色旧痕融进原有纸纹，边缘沉暗，中央保留深绿。 */
+    radial-gradient(ellipse 170px 310px at 78% 87%, rgba(118, 94, 43, 0.22), transparent 72%),
+    radial-gradient(ellipse 150px 240px at 14% 59%, rgba(112, 90, 46, 0.15), transparent 74%),
+    radial-gradient(ellipse 130px 190px at 64% 18%, rgba(125, 104, 60, 0.09), transparent 72%),
+    radial-gradient(ellipse 85% 80% at 48% 46%, transparent 40%, rgba(10, 20, 11, 0.32) 100%),
     linear-gradient(var(--green-veil), var(--green-veil)),
     url("/admin/assets/dark-green-paper.png") center / cover no-repeat, var(--green-deep);
+  box-shadow: inset 0 0 12px rgba(15, 22, 12, 0.38), inset 0 0 42px rgba(101, 82, 39, 0.16);
   z-index: 50;
 }
 .sidebar::before, .sidebar::after {
@@ -254,7 +299,8 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
 }
 .sidebar-orn-fancy { display: block; width: 74%; height: auto; margin: -16px auto -14px; pointer-events: none; }
 
-.sidebar-nav { flex: 1; overflow-y: auto; padding: 6px 16px 10px 24px; min-height: 0; position: relative; z-index: 3; }
+/* 导航底图覆盖侧栏边框，避免金线穿过选中按钮。 */
+.sidebar-nav { flex: 1; overflow-y: auto; padding: 6px 16px 10px 24px; min-height: 0; position: relative; z-index: 5; }
 .nav-group-title {
   font-size: 10px;
   letter-spacing: 0.35em;
@@ -297,6 +343,11 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
   z-index: 1;
   line-height: 0;
   pointer-events: none;
+  /* 图与旧纸底色沿上下、左右两向渐隐，消除矩形叠层的硬边。 */
+  mask-image:
+    linear-gradient(180deg, transparent, #000 28%, #000 90%, rgba(0, 0, 0, 0.35)),
+    linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent);
+  mask-composite: intersect;
 }
 .sidebar-art-viewport img {
   position: absolute;
@@ -307,19 +358,40 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
   width: auto;
   max-width: none;
   display: block;
+  filter: saturate(1.08) contrast(0.98) brightness(1.04);
+}
+.sidebar-art-viewport::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: url("/admin/assets/sidebar-stilllife-desk-user-version.png") center bottom / auto 100% no-repeat;
+  /* 小尺寸叶片轻微平滑，保留纹理并柔化轮廓硬边。 */
+  filter: hue-rotate(14deg) saturate(1.08) contrast(0.94) brightness(0.72) blur(0.55px);
+  mask-image: radial-gradient(ellipse 28% 48% at 62% 30%, #000 35%, transparent 82%);
+  pointer-events: none;
+}
+.sidebar-art-viewport::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  background: radial-gradient(ellipse at 42% 82%, rgba(116, 93, 43, 0.09), transparent 70%);
+  mix-blend-mode: multiply;
+  pointer-events: none;
 }
 .candle-glow {
   position: absolute;
-  z-index: 0;
-  left: 29.5%;
-  top: 46%;
-  width: 120px;
-  height: 120px;
+  z-index: 2;
+  left: 27.5%;
+  top: 45%;
+  width: 72px;
+  height: 90px;
   transform: translate(-50%, -50%);
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(255, 171, 64, 0.5) 0%, rgba(255, 140, 40, 0.18) 38%, transparent 70%);
-  filter: blur(16px);
-  opacity: 0.42;
+  background: radial-gradient(ellipse, rgba(255, 238, 176, 0.58), rgba(255, 183, 74, 0.28) 28%, rgba(248, 145, 41, 0.08) 52%, transparent 72%);
+  filter: blur(8px);
+  opacity: 0.7;
   mix-blend-mode: screen;
   pointer-events: none;
 }
@@ -1239,11 +1311,6 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   .page-head-rule[data-variant="wisteria"] {
     --phr-s: 0.27;
   }
-  .page-head-rule::before {
-    width: 4.5px;
-    height: 4.5px;
-    box-shadow: 0 0 0 1.8px var(--gold-strong);
-  }
   .tabs { width: 100%; overflow-x: auto; }
   .grid-2, .grid-4 { grid-template-columns: repeat(2, 1fr); }
   .card { padding: 14px 15px; }
@@ -1256,13 +1323,8 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   .content { padding: 16px 14px 56px; }
   .card { padding: 13px 14px; }
   .page-title { font-size: 21px; }
-  .page-head-rule { margin: 14px 0 16px; --phr-s: 0.22; }
+  .page-head-rule { margin: 14px 0 16px; --phr-s: 0.22; --phr-finial-w: 34px; --phr-finial-h: 14px; }
   .page-head-rule[data-variant="wisteria"] { --phr-s: 0.24; }
-  .page-head-rule::before {
-    width: 4px;
-    height: 4px;
-    box-shadow: 0 0 0 1.5px var(--gold-strong);
-  }
   .page-head-actions { gap: 8px; }
   .stat .value { font-size: 21px; }
 }

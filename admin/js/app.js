@@ -15,9 +15,9 @@ function applyTheme(t) {
 }
 function initTheme() { applyTheme(localStorage.getItem('qi-theme') === 'night' ? 'night' : 'day'); }
 
-// 页眉花饰分隔线：紫藤花枝（缺省）/ 铃兰花枝，选择持久化在 localStorage，
+// 页眉分隔线：紫藤花枝（缺省）/ 铃兰花枝 / 直线，选择持久化在 localStorage，
 // 由配置页的「页眉花饰」卡片循环切换。规则元素在 index.html 静态区，每页共享。
-const DIVIDER_VARIANTS = ['wisteria', 'lily3'];
+const DIVIDER_VARIANTS = ['wisteria', 'lily3', 'straight'];
 function applyDivider(v) {
   localStorage.setItem('qi-divider', v);
   const el = document.querySelector('.page-head-rule');

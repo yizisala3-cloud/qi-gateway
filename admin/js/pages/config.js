@@ -99,11 +99,11 @@ export default {
       const limitControl = `${limitTag}
         <input type="number" id="recent-limit-input" min="1" max="100" step="1" ${limitKnown ? `value="${this.recentChatLimit}"` : 'disabled'} style="width:76px" aria-label="近期对话注入条数">
         <button class="btn btn-secondary btn-sm" data-act="save-recent-limit" ${limitKnown ? '' : 'disabled'}>保存</button>`;
-      // 花饰分隔线二选一：紫藤花枝 / 铃兰花枝（与 app.js 的 DIVIDER_VARIANTS 对应）
-      const dividerVariant = ['wisteria', 'lily3'].includes(localStorage.getItem('qi-divider'))
+      // 分隔线三种样式（与 app.js 的 DIVIDER_VARIANTS 对应）
+      const dividerVariant = ['wisteria', 'lily3', 'straight'].includes(localStorage.getItem('qi-divider'))
         ? localStorage.getItem('qi-divider')
         : 'wisteria';
-      const dividerName = { wisteria: '紫藤花枝', lily3: '铃兰花枝' }[dividerVariant];
+      const dividerName = { wisteria: '紫藤花枝', lily3: '铃兰花枝', straight: '直线' }[dividerVariant];
       root.innerHTML = `
         <div class="grid grid-2">
           <div class="card">
@@ -179,7 +179,7 @@ export default {
               <span class="tag tag-green" id="divider-tag">${dividerName}</span>
               <button class="btn btn-secondary btn-sm" data-act="toggle-divider" style="margin-left:8px">切换样式</button>
             </span></div>
-            <p class="muted text-sm" style="margin:6px 0 0">切换每页标题下的花枝分隔线：紫藤花枝 / 铃兰花枝。点一下立即生效，选择保存在本机浏览器。</p>
+            <p class="muted text-sm" style="margin:6px 0 0">切换每页标题下的分隔线：紫藤花枝 / 铃兰花枝 / 直线。点一下立即生效，选择保存在本机浏览器。</p>
           </div>
         </div>
         <p class="muted text-sm mt16">本页全部信息来自网关真实接口（/health、/status、连续感状态、Eventide 设置、上下文注入设置、规划周期）。API Key 只显示“已配置 / 未配置”，密钥值不出现在前端。</p>`;
@@ -399,12 +399,12 @@ export default {
     }
   },
 
-  // 页眉花饰分隔线切换：紫藤花枝 → 铃兰花枝 循环，纯本地偏好。
+  // 页眉分隔线切换：紫藤花枝 → 铃兰花枝 → 直线循环，纯本地偏好。
   // 规则元素在 index.html 静态区（.page-head-rule），改 data-variant 即换素材；
   // 启动时 app.js 的 initDivider() 会按 localStorage 恢复上次选择。
   toggleDivider() {
-    const order = ['wisteria', 'lily3'];
-    const names = { wisteria: '紫藤花枝', lily3: '铃兰花枝' };
+    const order = ['wisteria', 'lily3', 'straight'];
+    const names = { wisteria: '紫藤花枝', lily3: '铃兰花枝', straight: '直线' };
     const cur = order.includes(localStorage.getItem('qi-divider')) ? localStorage.getItem('qi-divider') : 'wisteria';
     const next = order[(order.indexOf(cur) + 1) % order.length];
     localStorage.setItem('qi-divider', next);
