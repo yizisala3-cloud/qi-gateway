@@ -148,3 +148,39 @@ cp .env.example .env
 # 编辑 .env 填入实际值
 uvicorn gateway.main:app --reload --port 8000
 ```
+
+## 测试
+
+依赖安装：
+
+```bash
+pip install -r requirements.txt -r requirements-test.txt   # 快速测试
+pip install -r requirements-test-pg.txt                    # 追加真实 PostgreSQL 套件（可选）
+```
+
+三种运行方式：
+
+```bash
+pytest            # 快速测试：默认入口，约半分钟。真实 PostgreSQL 测试自动跳过
+pytest --db       # 完整测试：追加真实 PostgreSQL 套件（等价于设置全部 QIGATEWAY_* 门控变量）
+pytest -m "not database"        # 非数据库测试，无需安装真库栈
+```
+
+按分类筛选（marker 由 conftest.py 自动标注；纯前端文件按文件标注，混合文件按测试类标注，后端用例不会随前端筛选被排除）：
+
+```bash
+pytest -m database --db   # 只跑真实 PostgreSQL 测试
+pytest -m frontend        # 前端行为、语法、契约与资源检查（行为测试使用 Node / quickjs）
+pytest -m "not frontend"  # 其余测试
+```
+
+Node 行为测试需要 PATH 中的 `node`，或已安装的 `nodejs-bin`；缺少运行时会明确跳过。quickjs 由 `requirements-test.txt` 安装。`frontend` 包含源码契约与资源检查，不代表浏览器端到端验收。
+
+真实 PostgreSQL 测试说明：
+
+- 用 `pgserver` 包在临时目录启动一次性 PostgreSQL + pgvector 实例，连接 URI 来自该实例，不使用 Supabase 连接配置；导入网关模块仍会读取环境配置。首次补齐时区数据时会将 tzdata 文件复制到 pgserver 安装目录，后续运行复用。
+- `--db` 等价于设置 `QIGATEWAY_PG_MIGRATION_TEST`、`QIGATEWAY_PG_PLANNING_TEST`、`QIGATEWAY_PG_MEMO_TEST`、`QIGATEWAY_ADMIN_MEMORY_PG_TEST` 四个门控变量；已显式导出的变量优先，可单独控制某个套件。
+- `--db` 在启动阶段检查 pgserver、psycopg，以及已持久化的 Asia/Shanghai 时区文件或可导入的 tzdata；缺少这些前置依赖时直接报错并提示安装命令。显式设置为 `0` 的门控变量仍会让对应套件跳过。
+- 跳过原因默认显示（pytest.ini 的 `-rs`）：不加 `--db` 的每次运行都会列出如何启用真库测试。
+
+另有一个未接入 pytest 的浏览器验收脚本 `tests/frontend_planning_create_latency.browser.cjs`（导出 `runPlanningTests`，需外部 Playwright harness 与本地预览服务驱动）；本仓库未安装 Playwright，需要时另行接入，勿与 quickjs/Node 前端测试混淆。

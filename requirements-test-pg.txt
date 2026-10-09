@@ -1,0 +1,12 @@
+# 真实 PostgreSQL 测试（pytest --db）的可选重依赖，按需安装：
+#
+#     pip install -r requirements-test.txt          # 快速测试
+#     pip install -r requirements-test-pg.txt       # 追加真库套件
+#
+# pgserver 在临时目录启动一次性 PostgreSQL + pgvector 实例，测试绝不
+# 连接任何生产数据库（不读取 SUPABASE_URL 等配置）。
+pgserver>=0.1.4
+psycopg[binary]>=3.1
+# pgserver 的 PostgreSQL 不附带 IANA 时区文件，而迁移函数体使用
+# Asia/Shanghai；测试的 _ensure_pg_timezone_data 会从本包复制 tzfile。
+tzdata

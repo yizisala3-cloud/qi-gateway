@@ -1,4 +1,10 @@
 # 测试依赖：生产网关（Dockerfile 安装 requirements.txt）不需要安装。
+# 本文件覆盖默认快速测试（pytest）；真实 PostgreSQL 套件（pytest --db）
+# 的可选重依赖见 requirements-test-pg.txt。
+# pytest 本体：测试运行器。测试全部是 unittest 风格（异步用
+# IsolatedAsyncioTestCase，pytest 原生支持，不需要 pytest-asyncio）。
+# 2026-10 实际验证版本 9.1.1。
+pytest>=8
 # quickjs 让前端纯函数模块（admin/js/lib/absorb_display.js）在无 Node 环境
 # 下被测试真实执行；未安装时相关测试明确 skip。
 quickjs>=1.19 ; python_version >= "3.8"

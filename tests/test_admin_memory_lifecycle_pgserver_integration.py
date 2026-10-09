@@ -80,8 +80,8 @@ class AdminMemoryLifecycleOnPostgresTests(unittest.TestCase):
             raise unittest.SkipTest("pgserver + psycopg are not installed")
         if os.environ.get("QIGATEWAY_ADMIN_MEMORY_PG_TEST") != "1":
             raise unittest.SkipTest(
-                "set QIGATEWAY_ADMIN_MEMORY_PG_TEST=1 to run the real "
-                "PostgreSQL lifecycle migration test"
+                "set QIGATEWAY_ADMIN_MEMORY_PG_TEST=1 (or run pytest --db) to "
+                "run the real PostgreSQL lifecycle migration test"
             )
         cls.pgdata = Path(tempfile.mkdtemp(prefix="qigate-adminmem-"))
         cls.server = None

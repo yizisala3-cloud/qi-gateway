@@ -353,8 +353,8 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
             raise unittest.SkipTest("pgserver + psycopg are not installed")
         if os.environ.get("QIGATEWAY_PG_PLANNING_TEST") != "1":
             raise unittest.SkipTest(
-                "set QIGATEWAY_PG_PLANNING_TEST=1 to run the real PostgreSQL "
-                "planning invariant test"
+                "set QIGATEWAY_PG_PLANNING_TEST=1 (or run pytest --db) to run "
+                "the real PostgreSQL planning invariant test"
             )
         cls.pgdata = Path(tempfile.mkdtemp(prefix="qigate-planning-pg-"))
         cls.server = None

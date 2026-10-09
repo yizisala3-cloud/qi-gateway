@@ -306,8 +306,8 @@ class RuminationMigrationOnPostgresTests(unittest.TestCase):
             raise unittest.SkipTest("pgserver + psycopg are not installed")
         if os.environ.get("QIGATEWAY_PG_MIGRATION_TEST") != "1":
             raise unittest.SkipTest(
-                "set QIGATEWAY_PG_MIGRATION_TEST=1 to run the real "
-                "PostgreSQL migration execution test"
+                "set QIGATEWAY_PG_MIGRATION_TEST=1 (or run pytest --db) to run "
+                "the real PostgreSQL migration execution test"
             )
         cls.pgdata = Path(tempfile.mkdtemp(prefix="qigate-rumination-"))
         cls.server = None
