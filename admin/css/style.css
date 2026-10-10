@@ -92,6 +92,14 @@ body {
 a { color: inherit; text-decoration: none; }
 h1, h2, h3, h4 { margin: 0; font-weight: 600; }
 ::selection { background: rgba(154, 130, 72, 0.32); }
+/* 装饰素材不进入正文选区，避免透明图片的矩形外框被选区染色。 */
+img[alt=""],
+img[aria-hidden="true"],
+.sidebar .medallion,
+.sidebar-art-viewport {
+  -webkit-user-select: none;
+  user-select: none;
+}
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--gold-faint); border-radius: 6px; border: 2px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-thumb:hover { background: var(--gold-line); background-clip: content-box; }
@@ -338,7 +346,7 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
   left: 10px;
   right: 10px;
   bottom: 11px;
-  height: min(160px, calc(100vh - 610px));
+  height: clamp(0px, calc(100vh - 610px), 160px);
   overflow: hidden;
   z-index: 1;
   line-height: 0;
@@ -380,20 +388,89 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
   mix-blend-mode: multiply;
   pointer-events: none;
 }
+.candle-scene {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  height: 100%;
+  width: auto;
+  aspect-ratio: 1536 / 1024;
+  transform: translateX(-50%);
+  z-index: 2;
+  pointer-events: none;
+  /* 火焰与补底共用原图坐标，矮窗缩高时仍与灯芯对齐。 */
+  --candle-x: 29.752604%; /* 457 / 1536 */
+  --candle-duration: 3.8s;
+}
+.candle-scene .candle-repair {
+  left: 0;
+  width: 100%;
+  transform: none;
+  /* 仅补掉原火苗及亮核；不替换生成图中变亮的植物和书本。 */
+  mask-image: radial-gradient(ellipse 4.24% 8.01% at var(--candle-x) 44.92%, #000 70%, transparent 100%);
+}
+.candle-flame {
+  position: absolute;
+  left: var(--candle-x);
+  bottom: 50%; /* 灯芯端点 (457, 512)，而非裁切窗口的百分比。 */
+  width: 2.453926%; /* viewBox 120 × 312，显示高度为原图的 98px。 */
+  height: 9.570313%;
+  display: block;
+  overflow: hidden;
+  z-index: 1;
+  transform: translateX(-50%);
+  transform-origin: 50% 100%;
+  opacity: 0.94;
+  mix-blend-mode: screen;
+  filter: drop-shadow(0 0 0.65px rgba(255, 211, 125, 0.55));
+  animation: candle-flame-flicker var(--candle-duration) ease-in-out infinite;
+  pointer-events: none;
+}
 .candle-glow {
   position: absolute;
   z-index: 2;
-  left: 27.5%;
-  top: 45%;
-  width: 72px;
-  height: 90px;
+  left: var(--candle-x);
+  top: 45.5%;
+  width: 30%;
+  height: 56.25%;
   transform: translate(-50%, -50%);
   border-radius: 50%;
   background: radial-gradient(ellipse, rgba(255, 238, 176, 0.58), rgba(255, 183, 74, 0.28) 28%, rgba(248, 145, 41, 0.08) 52%, transparent 72%);
   filter: blur(8px);
   opacity: 0.7;
   mix-blend-mode: screen;
+  animation: candle-glow-flicker var(--candle-duration) ease-in-out infinite;
   pointer-events: none;
+}
+/* 不等间隔、小幅变化；火焰底端始终钉在灯芯上。 */
+@keyframes candle-flame-flicker {
+  0%, 100% { transform: translateX(-50%) rotate(-1deg) scale(0.97, 1); opacity: 0.94; }
+  14% { transform: translateX(-50%) rotate(2deg) scale(1.02, 0.95); opacity: 0.88; }
+  23% { transform: translateX(-50%) rotate(-2.5deg) scale(0.95, 1.06); opacity: 1; }
+  37% { transform: translateX(-50%) rotate(1deg) scale(1.04, 0.98); opacity: 0.92; }
+  44% { transform: translateX(-50%) rotate(-1.5deg) scale(0.96, 1.04); opacity: 0.98; }
+  58% { transform: translateX(-50%) rotate(2.5deg) scale(1.02, 0.93); opacity: 0.86; }
+  71% { transform: translateX(-50%) rotate(-2deg) scale(0.95, 1.07); opacity: 1; }
+  83% { transform: translateX(-50%) rotate(0.5deg) scale(1.03, 0.98); opacity: 0.91; }
+  92% { transform: translateX(-50%) rotate(-1.5deg) scale(0.98, 1.03); opacity: 0.97; }
+}
+@keyframes candle-glow-flicker {
+  0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 0.7; }
+  14% { transform: translate(-50%, -50%) scale(0.97); opacity: 0.62; }
+  23% { transform: translate(-50%, -50%) scale(1.035); opacity: 0.77; }
+  37% { transform: translate(-50%, -50%) scale(0.99); opacity: 0.68; }
+  44% { transform: translate(-50%, -50%) scale(1.025); opacity: 0.75; }
+  58% { transform: translate(-50%, -50%) scale(0.965); opacity: 0.59; }
+  71% { transform: translate(-50%, -50%) scale(1.04); opacity: 0.78; }
+  83% { transform: translate(-50%, -50%) scale(0.985); opacity: 0.66; }
+  92% { transform: translate(-50%, -50%) scale(1.015); opacity: 0.73; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .candle-flame, .candle-glow { animation: none; }
+}
+@media (max-width: 768px) {
+  .sidebar:not(.open) .candle-flame,
+  .sidebar:not(.open) .candle-glow { animation-play-state: paused; }
 }
 .sidebar .ornament-bottom {
   position: absolute;
