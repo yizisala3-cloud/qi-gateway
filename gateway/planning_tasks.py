@@ -878,16 +878,37 @@ def _generate_created_task_quietly(
     """Create the new task's due round immediately, then schedule the whole cycle."""
     with runtime._maintenance_lock:
         try:
-            result = generation.generate_task(task_id, now, context=context)
+            # BUG-10：quiet 作用域让内层捕获（generate_task 内部 log.exception
+            # 并返回 errors）把 outcome 标成 committed_side_effect_failed。
+            with generation.quiet_generation_scope():
+                result = generation.generate_task(task_id, now, context=context)
         except Exception:
-            log.exception("planning 新任务同步生成失败（等待后台循环重试）: task=%s", task_id)
+            log.exception(
+                "planning 新任务同步生成失败（等待后台循环重试）: task=%s", task_id,
+                extra={"evt": {
+                    "module": "planning", "operation": "generate_created_task",
+                    "error_code": "quiet_generate_failed",
+                    "message_zh": "待办已保存，但新任务轮次生成失败，将由维护流程重试",
+                    "outcome": "committed_side_effect_failed",
+                    "safe_context": {"task_id": task_id},
+                }},
+            )
             return
         if not common._should_recompute_after_generation(result):
             return
         try:
             recompute._recompute_for_cycle(now, context.cycle)
         except Exception:
-            log.exception("planning 新任务同步重算失败: task=%s", task_id)
+            log.exception(
+                "planning 新任务同步重算失败: task=%s", task_id,
+                extra={"evt": {
+                    "module": "planning", "operation": "recompute_created_task",
+                    "error_code": "quiet_recompute_failed",
+                    "message_zh": "待办已保存，但同步重算失败，将由维护流程重试",
+                    "outcome": "committed_side_effect_failed",
+                    "safe_context": {"task_id": task_id},
+                }},
+            )
 
 
 def _generate_due_quietly(client, now: datetime) -> None:
@@ -902,10 +923,20 @@ def _generate_due_quietly(client, now: datetime) -> None:
     """
     with runtime._maintenance_lock:
         try:
-            result = generation.generate_due(now)
+            # BUG-10：同 _generate_created_task_quietly——内层单任务捕获据此
+            # 区分「已保存后的补生成失败」与后台维护失败。
+            with generation.quiet_generation_scope():
+                result = generation.generate_due(now)
         except Exception as exc:
             log.warning(
                 "planning 同步生成失败（等待后台循环重试）: error=%s", type(exc).__name__,
+                exc_info=exc,
+                extra={"evt": {
+                    "module": "planning", "operation": "generate_due",
+                    "error_code": "quiet_generate_failed",
+                    "message_zh": "待办已保存，但同步补生成失败，将由维护流程重试",
+                    "outcome": "committed_side_effect_failed",
+                }},
             )
             return
         if not common._should_recompute_after_generation(result):
@@ -913,7 +944,16 @@ def _generate_due_quietly(client, now: datetime) -> None:
         try:
             recompute.recompute_today(now)
         except Exception as exc:
-            log.warning("planning 同步重算失败: error=%s", type(exc).__name__)
+            log.warning(
+                "planning 同步重算失败: error=%s", type(exc).__name__,
+                exc_info=exc,
+                extra={"evt": {
+                    "module": "planning", "operation": "recompute_today",
+                    "error_code": "quiet_recompute_failed",
+                    "message_zh": "待办已保存，但同步重算失败，将由维护流程重试",
+                    "outcome": "committed_side_effect_failed",
+                }},
+            )
 
 
 def _close_out_recurrence_before_switch(client, old_task: dict[str, Any], now: datetime) -> None:

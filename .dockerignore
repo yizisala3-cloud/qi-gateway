@@ -1,0 +1,38 @@
+# BUG-28：Docker 构建上下文排除规则。.gitignore 不控制 Docker 上下文——
+# 含 .env 的本地目录执行 COPY . . 会把凭证复制进镜像层。凭证由运行环境
+# 注入，不进入镜像层 / 构建日志；禁止先复制进镜像再在下一层删除。
+# 运行必要资源（gateway / admin / requirements / supabase 迁移）保留。
+
+# 凭证与环境材料（最高优先级红线）
+.env
+.env.*
+*.env
+.env.local
+.env.production
+
+# 版本控制与本地工作区状态
+.git
+.gitignore
+.gitattributes
+.zcodeignore
+.pytest_cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 虚拟环境与依赖缓存
+.venv/
+venv/
+env/
+node_modules/
+
+# 本地运行 / 预览 / 测试产物（运行时不需要）
+*.log
+preview-server.*.log
+tests/
+tools/
+deploy/
+conftest.py
+pytest.ini
+requirements-test.txt
+requirements-test-pg.txt

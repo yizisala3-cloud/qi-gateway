@@ -3,6 +3,7 @@
 保留聊天代理、Eventide、待办和记忆任务。
 """
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 
 import httpx
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route, Mount
@@ -28,7 +30,18 @@ from .memory_rumination import run_rumination_digest_if_due
 from .admin_api import admin_api_routes
 from .admin_memory_api import admin_memory_routes
 from .context_admin_api import context_admin_routes
+from .credential_api import credential_api_routes
 from .eventide_admin_api import eventide_admin_routes
+from .log_api import log_api_routes
+from .log_settings import log_settings_routes
+from .logging_events import (
+    GatewayLogMiddleware,
+    credential_scope,
+    emit_error,
+    provider_label,
+    record_task_exception,
+    scrub_error_text,
+)
 from .memo_api import memo_api_routes
 from .memory_digest_api import memory_digest_routes
 from .memory_request_api import memory_request_routes
@@ -47,6 +60,8 @@ from .request_context import (
     message_text,
 )
 from . import db
+from . import logging_events
+from . import log_settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,6 +69,11 @@ logging.basicConfig(
     force=True,
 )
 log = logging.getLogger("gateway")
+# §36 日志批次：聊天 / 规划循环 / 记忆循环使用独立子 logger，采集层按
+# logger 名归类模块；平台输出格式不变。
+chat_log = logging.getLogger("gateway.chat")
+planning_log = logging.getLogger("gateway.planning")
+memory_log = logging.getLogger("gateway.memory")
 
 bg_executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="gw-bg")
 http_client: httpx.AsyncClient | None = None
@@ -69,7 +89,22 @@ def track_task(coro):
     task = asyncio.create_task(coro)
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
+    # §36：后台 task 的漏网异常必须被实际读取（L07）——协程内部已捕获的
+    # 异常不会传播到这里，只有无人处理时才记录，不会重复计数。
+    task.add_done_callback(_log_task_exception)
     return task
+
+
+def _log_task_exception(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    try:
+        exc = task.exception()
+    except Exception:
+        return
+    if exc is None:
+        return
+    record_task_exception(getattr(task, "get_name", lambda: "task")(), exc)
 
 
 def verify_token(request: Request) -> bool:
@@ -147,9 +182,15 @@ async def persist_chat_records(user_text: str, assistant_text: str):
         except Exception as exc:
             # assistant_id 取自现有协议（MEMORY_ASSISTANT_ID 或从 chat_messages
             # 自动发现）。取不到时明确跳过并记日志，不伪造身份。
-            log.warning(
+            chat_log.warning(
                 "聊天原文保存跳过: persist_chat_records | 无法确定 assistant_id | error=%s",
                 type(exc).__name__,
+                extra={"evt": {
+                    "module": "chat", "operation": "chat_persist",
+                    "error_code": "chat_persist_skipped",
+                    "message_zh": "聊天回复已返回，但原文保存被跳过",
+                    "outcome": "committed_side_effect_failed",
+                }},
             )
             return
         if user_text.strip():
@@ -160,7 +201,15 @@ async def persist_chat_records(user_text: str, assistant_text: str):
     try:
         await asyncio.to_thread(_job)
     except Exception as exc:
-        log.error("聊天原文保存异常: persist_chat_records | error=%s", type(exc).__name__)
+        chat_log.error(
+            "聊天原文保存异常: persist_chat_records | error=%s", type(exc).__name__,
+            extra={"evt": {
+                "module": "chat", "operation": "chat_persist",
+                "error_code": "chat_persist_failed",
+                "message_zh": "聊天回复已返回，但原文保存失败",
+                "outcome": "committed_side_effect_failed",
+            }},
+        )
 
 
 async def daily_task_loop():
@@ -178,7 +227,7 @@ async def daily_task_loop():
                 # Continuity failures must never prevent the independent daily
                 # heat-decay check below from running.
                 result = None
-                log.exception("连续感自动总结检查失败: %s", type(exc).__name__)
+                memory_log.exception("连续感自动总结检查失败: %s", type(exc).__name__)
             if result:
                 _last_digest_run = {
                     key: result.get(key)
@@ -201,7 +250,7 @@ async def daily_task_loop():
                 )
             except Exception as exc:
                 rumination_result = None
-                log.exception("反刍连续感调度检查失败: %s", type(exc).__name__)
+                memory_log.exception("反刍连续感调度检查失败: %s", type(exc).__name__)
             if rumination_result:
                 log.info(
                     "反刍运行完成: trigger=%s status=%s batches=%s op_counts=%s",
@@ -218,7 +267,7 @@ async def daily_task_loop():
                 if decay_result.get("status") in {"succeeded", "already_ran"}:
                     _last_heat_decay_date = today
                 else:
-                    log.warning(
+                    memory_log.warning(
                         "热度衰减将在下一次调度检查时重试: status=%s reason=%s",
                         decay_result.get("status"),
                         decay_result.get("reason", ""),
@@ -226,7 +275,7 @@ async def daily_task_loop():
         except asyncio.CancelledError:
             break
         except Exception as e:
-            log.exception("记忆任务调度器异常: %s", e)
+            memory_log.exception("记忆任务调度器异常: %s", e)
             await asyncio.sleep(300)
 
 
@@ -251,11 +300,11 @@ async def planning_loop():
                     continue
                 log.debug("规划维护完成: %s", result)
             except Exception:
-                log.exception("规划维护循环异常")
+                planning_log.exception("规划维护循环异常")
         except asyncio.CancelledError:
             break
         except Exception as e:
-            log.exception("规划管理调度器异常: %s", e)
+            planning_log.exception("规划管理调度器异常: %s", e)
             await asyncio.sleep(30)
 
 
@@ -272,8 +321,11 @@ async def chat_completions(request: Request):
     user_text = extract_last_user_text(messages)
     history_turns = extract_recent_turns(messages)
 
+    # §36：run_in_executor 不复制 contextvars，显式携带请求日志上下文，
+    # 使 build_context 内的 warn/error 能关联本次请求的 request_id。
+    ctx = contextvars.copy_context()
     full_context = await loop.run_in_executor(
-        bg_executor, build_context, user_text, history_turns
+        bg_executor, ctx.run, build_context, user_text, history_turns
     )
     todo_feedback = build_todo_feedback_guidance(user_text)
     if todo_feedback:
@@ -301,47 +353,104 @@ async def chat_completions(request: Request):
         )
     is_stream = body.get("stream", False)
 
+    # TASK-02：在实际调用边界绑定聊天上游凭证身份——作用域内的失败事件
+    # 携带 key_ref / 用途 / 安全上游，同功能不同密钥正确分组。
+    chat_credential = credential_scope(
+        "chat", provider_label(cfg.UPSTREAM_BASE_URL), cfg.UPSTREAM_API_KEY
+    )
+
     if not is_stream:
-        try:
-            resp = await http_client.post(
-                upstream_url, headers=headers, json=body,
-                timeout=httpx.Timeout(cfg.UPSTREAM_READ_TIMEOUT, connect=10.0),
+        with chat_credential:
+            try:
+                resp = await http_client.post(
+                    upstream_url, headers=headers, json=body,
+                    timeout=httpx.Timeout(cfg.UPSTREAM_READ_TIMEOUT, connect=10.0),
+                )
+            except httpx.TimeoutException as exc:
+                # §36：超时分支此前无日志（返回 504 却查不到原因）。保留真实
+                # 异常对象（BUG-18）：ReadTimeout / ConnectTimeout 类型与堆栈可查。
+                emit_error(
+                    "chat", "chat_completions", "upstream_timeout", "聊天转发请求超时",
+                    exc=exc, outcome="failed",
+                    safe_context={"timeout_seconds": int(cfg.UPSTREAM_READ_TIMEOUT)},
+                )
+                return JSONResponse({"error": "upstream timeout"}, status_code=504)
+            except Exception as e:
+                emit_error(
+                    "chat", "chat_completions", "upstream_connect_error",
+                    "聊天上游连接失败", exc=e, outcome="failed",
+                )
+                return JSONResponse({"error": "upstream error"}, status_code=502)
+        if resp.status_code < 200 or resp.status_code >= 300:
+            # §36：上游非成功响应此前透传无日志；4xx 记警告、5xx 记错误。
+            emit_error(
+                "chat", "chat_completions", "upstream_status_error",
+                "聊天上游返回错误状态",
+                level="ERROR" if resp.status_code >= 500 else "WARNING",
+                outcome="degraded", upstream_status=resp.status_code,
             )
-        except httpx.TimeoutException:
-            return JSONResponse({"error": "upstream timeout"}, status_code=504)
-        except Exception as e:
-            log.error(f"upstream error: {e}")
-            return JSONResponse({"error": "upstream error"}, status_code=502)
         assistant_text = extract_assistant_reply_text(resp.status_code, resp.content)
         if assistant_text:
             track_task(persist_chat_records(user_text, assistant_text))
-        return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
+        if 200 <= resp.status_code < 300:
+            return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
+        # BUG-26：上游错误正文可能回显凭证 / 敏感正文——出口清洗后返回，
+        # 保留状态码与 JSON 结构；成功响应（2xx）绝不改动。
+        error_body = resp.content.decode("utf-8", errors="replace")
+        cleaned_body = scrub_error_text(error_body, 8000)
+        return Response(
+            content=cleaned_body.encode("utf-8"),
+            status_code=resp.status_code,
+            media_type="application/json",
+        )
 
     async def stream_generator():
         collected: list[str] = []
         completed = False
         try:
-            async with http_client.stream(
-                "POST", upstream_url, headers=headers, json=body,
-                timeout=httpx.Timeout(cfg.UPSTREAM_READ_TIMEOUT, connect=10.0),
-            ) as resp:
-                if resp.status_code != 200:
-                    error_body = await resp.aread()
-                    yield f"data: {json.dumps({'error': error_body.decode()[:500]})}\n\n"
-                    return
-                async for line in resp.aiter_lines():
-                    if not line:
-                        continue
-                    delta = stream_delta_text(line)
-                    if delta:
-                        collected.append(delta)
-                    yield f"{line}\n\n"
+            with chat_credential:
+                async with http_client.stream(
+                    "POST", upstream_url, headers=headers, json=body,
+                    timeout=httpx.Timeout(cfg.UPSTREAM_READ_TIMEOUT, connect=10.0),
+                ) as resp:
+                    if resp.status_code != 200:
+                        # §36：SSE 上游非成功响应——HTTP 200 已发出或即将发出，
+                        # 只能记录流内错误，不能改写状态码。
+                        error_body = await resp.aread()
+                        emit_error(
+                            "chat", "chat_stream", "upstream_status_error",
+                            "聊天流式上游返回错误状态",
+                            level="ERROR" if resp.status_code >= 500 else "WARNING",
+                            outcome="degraded", upstream_status=resp.status_code,
+                        )
+                        # BUG-26：SSE 错误正文出口清洗（先清洗后截断）。
+                        cleaned = scrub_error_text(
+                            error_body.decode("utf-8", errors="replace"), 500
+                        )
+                        yield f"data: {json.dumps({'error': cleaned})}\n\n"
+                        return
+                    async for line in resp.aiter_lines():
+                        if not line:
+                            continue
+                        delta = stream_delta_text(line)
+                        if delta:
+                            collected.append(delta)
+                        yield f"{line}\n\n"
             completed = True
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as exc:
+            emit_error(
+                "chat", "chat_stream", "stream_timeout", "聊天流式读取超时",
+                exc=exc, outcome="failed",
+            )
             yield f"data: {json.dumps({'error': 'upstream read timeout'})}\n\n"
         except Exception as e:
-            log.error(f"stream error: {e}")
-            yield f"data: {json.dumps({'error': str(e)[:200]})}\n\n"
+            emit_error(
+                "chat", "chat_stream", "stream_interrupted",
+                "聊天流式输出中断", exc=e, outcome="failed",
+            )
+            # BUG-26：中断异常文本出口清洗（先清洗后截断）。
+            cleaned = scrub_error_text(str(e), 200)
+            yield f"data: {json.dumps({'error': cleaned})}\n\n"
         if completed and collected:
             assistant_text = "".join(collected).strip()
             if assistant_text:
@@ -401,6 +510,9 @@ _admin_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
 @asynccontextmanager
 async def lifespan(app):
     global http_client
+    # 管理页保存的采集开关先恢复；未配置默认关闭，读取失败也关闭。
+    await asyncio.to_thread(log_settings.startup)
+    log_settings_task = asyncio.create_task(log_settings.watch_settings())
     http_client = httpx.AsyncClient(
         http2=True,
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
@@ -419,6 +531,9 @@ async def lifespan(app):
         planning_task.cancel()
         await http_client.aclose()
         bg_executor.shutdown(wait=False)
+        # §36：先停止接收新事件，再做有时间上限的 flush；绝不因日志队列
+        # 阻止网关关闭。
+        await log_settings.stop_watcher(log_settings_task)
         log.info("网关关闭")
 
 
@@ -431,7 +546,10 @@ _routes = [
 _routes.extend(admin_api_routes)
 _routes.extend(admin_memory_routes)
 _routes.extend(context_admin_routes)
+_routes.extend(credential_api_routes)
 _routes.extend(eventide_admin_routes)
+_routes.extend(log_api_routes)
+_routes.extend(log_settings_routes)
 _routes.extend(memory_digest_routes)
 _routes.extend(memory_request_routes)
 _routes.extend(memory_review_routes)
@@ -457,5 +575,9 @@ if os.path.isdir(_admin_dir):
 # deliberately last so it cannot shadow gateway, admin, memory, or todo paths.
 _routes.append(Mount("/", app=memory_mcp_http_app, name="memory-mcp"))
 
-app = Starlette(routes=_routes, lifespan=lifespan)
+app = Starlette(
+    routes=_routes,
+    lifespan=lifespan,
+    middleware=[Middleware(GatewayLogMiddleware)],
+)
 

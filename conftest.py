@@ -23,6 +23,7 @@ PG_GATE_VARS = (
     "QIGATEWAY_PG_PLANNING_TEST",
     "QIGATEWAY_PG_MEMO_TEST",
     "QIGATEWAY_ADMIN_MEMORY_PG_TEST",
+    "QIGATEWAY_PG_LOG_TEST",
 )
 
 # 文件名含 pgserver 的测试文件在真实 PostgreSQL 上执行（既有命名惯例）。
@@ -32,6 +33,7 @@ DATABASE_MARKER_FILE_KEYWORD = "pgserver"
 # （Node 或 quickjs）。没有统一命名惯例，按文件名维护；新增此类测试时
 # 把文件名加进来。
 FRONTEND_MARKER_FILES = frozenset({
+    "test_gateway_log_frontend.py",
     "test_absorb_display_js.py",
     "test_admin_memory_form_logic.py",
     "test_memo_bugfix_20261003.py",

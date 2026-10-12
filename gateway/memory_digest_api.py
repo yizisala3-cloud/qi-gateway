@@ -10,6 +10,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .config import cfg
+from .logging_events import scrub_error_text
 from .memory_continuity import (
     ContinuityPipelineError,
     get_continuity_status,
@@ -51,8 +52,9 @@ async def digest_status(request: Request):
         result = await asyncio.to_thread(get_digest_status)
         return JSONResponse(result)
     except Exception as exc:
+        # BUG-26：意外异常原文不回传（详情进脱敏日志链），固定安全摘要。
         log.exception("Failed to read digest status")
-        return _error(f"{type(exc).__name__}: {str(exc)[:500]}", 500)
+        return _error("总结状态读取失败：服务暂时出现异常，请稍后重试", 500)
 
 
 async def digest_runs(request: Request):
@@ -64,7 +66,7 @@ async def digest_runs(request: Request):
         return JSONResponse({"data": result})
     except Exception as exc:
         log.exception("Failed to read digest runs")
-        return _error(f"{type(exc).__name__}: {str(exc)[:500]}", 500)
+        return _error("总结运行记录读取失败：服务暂时出现异常，请稍后重试", 500)
 
 
 async def _run_digest(request: Request, trigger: str, mode: str):
@@ -85,12 +87,13 @@ async def _run_digest(request: Request, trigger: str, mode: str):
     except DigestPipelineError as exc:
         status = 503 if exc.code == "analysis_not_configured" else 422
         return JSONResponse(
-            {"error": str(exc), "error_code": exc.code},
+            # BUG-26：管线错误文本出口清洗（保留错误码与协议）。
+            {"error": scrub_error_text(str(exc), 500), "error_code": exc.code},
             status_code=status,
         )
     except Exception as exc:
         log.exception("Memory digest request failed")
-        return _error(f"{type(exc).__name__}: {str(exc)[:500]}", 500)
+        return _error("总结执行失败：服务暂时出现异常，请稍后重试", 500)
 
 
 async def digest_preview(request: Request):
@@ -130,7 +133,8 @@ async def continuity_shadow_preview(request: Request):
             "analysis_not_configured", "database_unavailable", "source_read_failed",
         } else 422
         return JSONResponse(
-            {"error": str(exc), "error_code": exc.code},
+            # BUG-26：管线错误文本出口清洗（保留错误码与状态）。
+            {"error": scrub_error_text(str(exc), 500), "error_code": exc.code},
             status_code=status,
         )
     except Exception:
@@ -143,7 +147,8 @@ async def continuity_shadow_preview(request: Request):
 
 def _continuity_error(exc: ContinuityPipelineError) -> JSONResponse:
     return JSONResponse(
-        {"error": str(exc), "error_code": exc.code},
+        # BUG-26：管线错误文本出口清洗（保留错误码与状态）。
+        {"error": scrub_error_text(str(exc), 500), "error_code": exc.code},
         status_code=exc.status_code,
     )
 
@@ -195,7 +200,8 @@ async def continuity_skip_blocked(request: Request):
 
 def _rumination_error(exc: RuminationPipelineError) -> JSONResponse:
     return JSONResponse(
-        {"error": str(exc), "error_code": exc.code},
+        # BUG-26：管线错误文本出口清洗（保留错误码与状态）。
+        {"error": scrub_error_text(str(exc), 500), "error_code": exc.code},
         status_code=exc.status_code,
     )
 

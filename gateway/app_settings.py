@@ -85,7 +85,16 @@ def _load_enabled(key: str) -> bool:
     raw = db.load_app_setting(key)
     if raw is db.APP_SETTING_QUERY_FAILED:
         # 查询异常或 Supabase 不可用：fail-open，保持注入现状。
-        log.warning("app_settings 开关读取失败，按开启处理（fail-open）")
+        # BUG-10：降级记录（主请求继续），不标 failed。
+        log.warning(
+            "app_settings 开关读取失败，按开启处理（fail-open）",
+            extra={"evt": {
+                "module": "system", "operation": "load_app_setting",
+                "error_code": "app_setting_read_failed",
+                "message_zh": "应用设置读取降级，按默认值继续",
+                "outcome": "degraded", "safe_context": {"data_source": "app_settings"},
+            }},
+        )
         enabled = True
     else:
         enabled = _parse_enabled(raw)
@@ -140,7 +149,15 @@ def get_recent_chat_injection_limit() -> int:
 
     raw = db.load_app_setting(RECENT_CHAT_LIMIT_KEY)
     if raw is db.APP_SETTING_QUERY_FAILED:
-        log.warning("app_settings 注入条数读取失败，按默认 10 处理（fail-open）")
+        log.warning(
+            "app_settings 注入条数读取失败，按默认 10 处理（fail-open）",
+            extra={"evt": {
+                "module": "system", "operation": "load_app_setting",
+                "error_code": "app_setting_read_failed",
+                "message_zh": "应用设置读取降级，按默认值继续",
+                "outcome": "degraded", "safe_context": {"data_source": "app_settings"},
+            }},
+        )
         limit = _RECENT_CHAT_LIMIT_DEFAULT
     else:
         parsed = _parse_limit(raw)

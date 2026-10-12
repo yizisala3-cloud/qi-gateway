@@ -19,7 +19,7 @@ export const NAV = [
     title: '系统',
     items: [
       { key: 'config', icon: 'gear', label: '配置', desc: '网关与依赖组件的真实状态' },
-      { key: 'logs', icon: 'journal', label: '日志', desc: '运行日志查询（暂未接入）' },
+      { key: 'logs', icon: 'journal', label: '日志', desc: '全网关报错日志查询' },
     ],
   },
 ];

@@ -131,7 +131,8 @@ class MemoryBrowserContractTests(unittest.TestCase):
         # modal 关闭是被其父节点（body）整体移除，modal 内部无 childList
         # 变化；清理观察必须挂在 body 上（辅助断言，主验为浏览器验收）。
         form = FORM.read_text(encoding="utf-8")
-        self.assertIn("rootObserver.observe(document.body, { childList: true });", form)
+        self.assertIn("rootObserver.observe(document.body, { childList: true, subtree: true });", form)
+        self.assertIn("clearTimeout(listenerTimer);", form)
         self.assertNotIn("observer.observe(host,", form)
         self.assertIn("if (!document.contains(anchor)) closeRetroTimePop();", form)
 

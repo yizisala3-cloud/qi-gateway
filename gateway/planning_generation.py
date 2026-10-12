@@ -5,8 +5,10 @@ continues to use guarded database RPCs and isolates failures per task."""
 from __future__ import annotations
 
 import logging
+import threading
+from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any
+from typing import Any, Iterator
 
 from .planning_domain import (
     BUSINESS_TIMEZONE,
@@ -28,6 +30,66 @@ from . import planning_runtime as runtime
 from . import planning_cycles as cycles
 
 log = logging.getLogger("gateway.planning")
+
+
+# ── quiet 语义标记（BUG-10） ──────────────────────────────────────
+# post-commit 入口（_generate_created_task_quietly / _generate_due_quietly）
+# 在调用前进入本作用域：内层真正捕获异常的主记录者据此把 outcome 标成
+# committed_side_effect_failed——主操作已提交，失败的是后置生成步骤。
+# 线程本地：维护循环（后台线程）与请求线程的 quiet 调用互不串扰。
+_quiet_scope = threading.local()
+
+
+@contextmanager
+def quiet_generation_scope() -> Iterator[None]:
+    previous = getattr(_quiet_scope, "active", False)
+    _quiet_scope.active = True
+    try:
+        yield
+    finally:
+        _quiet_scope.active = previous
+
+
+def _generation_failure_evt(operation: str, task_id: Any) -> dict[str, Any]:
+    """生成失败的 evt extra：quiet 作用域内标「已提交后失败」（BUG-10）。"""
+    if getattr(_quiet_scope, "active", False):
+        return {
+            "module": "planning", "operation": operation,
+            "error_code": "quiet_generate_failed",
+            "message_zh": "待办已保存，但轮次生成失败，将由维护流程重试",
+            "outcome": "committed_side_effect_failed",
+            "safe_context": {"task_id": task_id},
+        }
+    return {
+        "module": "planning", "operation": operation,
+        "error_code": "generate_task_failed",
+        "message_zh": "规划轮次生成失败",
+        "outcome": "failed",
+        "safe_context": {"task_id": task_id},
+    }
+
+
+def _cleanup_failure_evt(task_id: Any) -> dict[str, Any]:
+    """固定轮到期清理失败的 evt extra（BUG-10）。
+
+    quiet 作用域内的清理失败同样是「主操作已提交后的后置失败」——与生成
+    失败各自独立记录，但都不得标成主业务失败；非 quiet 维护路径保持 failed。
+    """
+    if getattr(_quiet_scope, "active", False):
+        return {
+            "module": "planning", "operation": "expire_fixed_rounds",
+            "error_code": "quiet_cleanup_failed",
+            "message_zh": "待办已保存，但固定轮次到期清理失败，将由维护流程重试",
+            "outcome": "committed_side_effect_failed",
+            "safe_context": {"task_id": task_id},
+        }
+    return {
+        "module": "planning", "operation": "expire_fixed_rounds",
+        "error_code": "cleanup_failed",
+        "message_zh": "规划固定轮次到期清理失败",
+        "outcome": "failed",
+        "safe_context": {"task_id": task_id},
+    }
 
 
 # ── 出现实例生成（只依据任务定义与规则游标） ──────────────────────
@@ -805,9 +867,12 @@ def _reconcile_task_rounds(
                     except Exception:
                         if generation_error is None:
                             raise
+                        # BUG-10：quiet 作用域内的清理失败同样标「已提交后
+                        # 失败」——独立异常分别记录，不误报主操作失败。
                         log.exception(
                             "planning 固定到期清理失败（原始生成异常继续传播）: task=%s",
-                            task["id"])
+                            task["id"],
+                            extra={"evt": _cleanup_failure_evt(task["id"])})
     _carry_open_rounds(client, task, today, now)
     if legacy_definition:
         log.warning("planning 旧显式任务定义停止生成新轮次: task=%s", task["id"])
@@ -841,7 +906,11 @@ def generate_task(
     except Exception as exc:
         # A task may have committed occurrences before a later step failed.
         # Preserve the error signal so the caller still recomputes those rows.
-        log.exception("planning 新任务生成失败: task=%s", task_id)
+        # BUG-10：内层捕获是主记录者——quiet 作用域内标「已提交后失败」。
+        log.exception(
+            "planning 新任务生成失败: task=%s", task_id,
+            extra={"evt": _generation_failure_evt("generate_task", task_id)},
+        )
         result["errors"] = [{"task_id": task_id, "error": type(exc).__name__}]
     else:
         result.update(created=created, timed_out=timed_out)
@@ -874,7 +943,12 @@ def generate_due(now: datetime | None = None) -> dict[str, Any]:
                 client, task, cycle, now, configured, transition, absorbed, daily_enabled,
             )
         except Exception as exc:
-            log.exception("planning 单任务生成失败: task=%s", task["id"])
+            # BUG-10：单任务粒度的内层捕获同样是主记录者；quiet 作用域内
+            # （写操作后的同步补生成）标「已提交后失败」，维护循环保持 failed。
+            log.exception(
+                "planning 单任务生成失败: task=%s", task["id"],
+                extra={"evt": _generation_failure_evt("generate_due", task["id"])},
+            )
             errors.append({"task_id": task["id"], "error": type(exc).__name__})
             continue
         created += task_created

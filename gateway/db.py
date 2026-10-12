@@ -96,6 +96,18 @@ def get_client_status() -> dict[str, Any]:
     }
 
 
+def _safe_error_summary(exc: Exception) -> str:
+    """异常的安全摘要：类型 + 结构化错误码；不嵌入自由正文。
+
+    str(exc) 可能含 Failing row / Key=(…) 行值回显（§5.1 正文红线），
+    消息里只放类型与错误码；完整堆栈经采集层脱敏后随 exc_info 落库。
+    """
+    code = getattr(exc, "code", None) or getattr(exc, "sqlstate", None)
+    if isinstance(code, str) and code:
+        return f"{type(exc).__name__} code={code}"
+    return type(exc).__name__
+
+
 def safe_query(fn):
     """装饰器：Supabase 查询容错 + 一次重试。"""
     def wrapper(*args, **kwargs):
@@ -103,10 +115,29 @@ def safe_query(fn):
             try:
                 return fn(*args, **kwargs)
             except Exception as e:
+                summary = _safe_error_summary(e)
                 if attempt == 0:
-                    log.warning(f"Supabase 查询重试: {fn.__name__} | {e}")
+                    log.warning(
+                        "Supabase 查询重试: %s | %s", fn.__name__, summary,
+                        extra={"evt": {
+                            "module": "database", "operation": fn.__name__,
+                            "error_code": "db_query_failed",
+                            "message_zh": "数据库查询失败，正在重试",
+                            "outcome": "degraded", "safe_context": {"attempts": 1},
+                        }},
+                    )
                 else:
-                    log.error(f"Supabase 查询失败: {fn.__name__} | {e}")
+                    # BUG-18：最终失败附真实异常对象（类型 + 脱敏堆栈可查）。
+                    log.error(
+                        "Supabase 查询失败: %s | %s", fn.__name__, summary,
+                        exc_info=e,
+                        extra={"evt": {
+                            "module": "database", "operation": fn.__name__,
+                            "error_code": "db_query_failed",
+                            "message_zh": "数据库查询失败，已按容错逻辑返回空结果",
+                            "outcome": "degraded", "safe_context": {"attempts": 2},
+                        }},
+                    )
                     return None
     return wrapper
 
@@ -152,6 +183,12 @@ def save_chat_message(
         "content": content,
         "created_at": datetime.now(_CST).strftime("%Y-%m-%d %H:%M:%S.%f"),
     }
+    _persist_evt = {
+        "module": "database", "operation": "save_chat_message",
+        "error_code": "db_write_failed",
+        "message_zh": "聊天回复已返回，但原文保存失败",
+        "outcome": "committed_side_effect_failed",
+    }
     try:
         client = get_client()
         if not client:
@@ -159,6 +196,7 @@ def save_chat_message(
                 "聊天原文保存失败: save_chat_message | role=%s | assistant_id=%s | "
                 "conversation_id=%s | Supabase 客户端不可用 | attempts=1",
                 role, bool(assistant_id), bool(conversation_id),
+                extra={"evt": {**_persist_evt, "error_code": "db_unavailable"}},
             )
             return False
         client.table("chat_messages").insert(payload).execute()
@@ -168,6 +206,7 @@ def save_chat_message(
             "聊天原文保存失败: save_chat_message | role=%s | assistant_id=%s | "
             "conversation_id=%s | error=%s | attempts=1（无幂等键，不重试）",
             role, bool(assistant_id), bool(conversation_id), type(exc).__name__,
+            extra={"evt": _persist_evt},
         )
         return False
 

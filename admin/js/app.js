@@ -1,11 +1,12 @@
 // app.js - shell: login, sidebar, routing, theme, mobile drawers
-import { NAV, ROUTE_INDEX } from './routes.js?v=20261007-planning-batch3';
-import { loading, errorBlock, icon, esc } from './ui.js?v=20261007-planning-batch3';
-import { gw, getToken, setToken, clearToken } from './api.js?v=20261007-planning-batch3';
-import { initHeaderDivider } from './lib/header_divider.js?v=20261007-planning-batch3';
+import { NAV, ROUTE_INDEX } from './routes.js?v=20261012-unified-selects';
+import { loading, errorBlock, icon, esc } from './ui.js?v=20261012-unified-selects';
+import { gw, getToken, setToken, clearToken } from './api.js?v=20261012-unified-selects';
+import { initHeaderDivider } from './lib/header_divider.js?v=20261012-unified-selects';
+import { initRetroSelects } from './lib/retro_select.js?v=20261012-unified-selects';
 
 const DEFAULT_ROUTE = 'memories';
-const ASSET_VERSION = '20261007-planning-batch3';
+const ASSET_VERSION = '20261012-unified-selects';
 
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);
@@ -136,6 +137,7 @@ async function boot() {
   initTheme();
   initDivider();
   initHeaderDivider();
+  initRetroSelects();
   document.getElementById('theme-btn')?.addEventListener('click', () => {
     applyTheme(document.documentElement.getAttribute('data-theme') === 'night' ? 'day' : 'night');
   });

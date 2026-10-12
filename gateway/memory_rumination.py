@@ -27,6 +27,7 @@ import httpx
 
 from .config import cfg
 from .db import get_client
+from .logging_events import credential_scope, provider_label, scrub_error_text
 from .memory_continuity_schema import (
     ContinuityDataError,
     validate_continuity_data,
@@ -1912,63 +1913,67 @@ def _call_rumination_model(model_input: str) -> str:
             "The rumination model provider is not fully configured",
             503,
         )
-    url = f"{base_url.rstrip('/')}/chat/completions"
-    request_body = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": RUMINATION_SYSTEM_PROMPT},
-            {"role": "user", "content": model_input},
-        ],
-        "response_format": {"type": "json_object"},
-        "max_tokens": cfg.RUMINATION_MAX_TOKENS,
-        "temperature": 0.1,
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    try:
-        with httpx.Client(timeout=120.0) as client:
-            response = client.post(url, headers=headers, json=request_body)
-            if response.status_code == 400:
-                excerpt = response.text[:500].casefold()
-                if "response_format" in excerpt or "json_object" in excerpt:
-                    request_body.pop("response_format", None)
-                    response = client.post(url, headers=headers, json=request_body)
-    except Exception as exc:
-        raise RuminationPipelineError(
-            "model_request_failed",
-            f"Rumination model request failed: {type(exc).__name__}",
-        ) from exc
+    # TASK-02：实际 SDK 调用边界绑定反刍**实际生效**凭证（RUMINATION_*
+    # 逐项回退 CONTINUITY_*，_model_config 已解析）——失败事件归属真正
+    # 使用的那把密钥，不按模块或全局配置猜测。
+    with credential_scope("rumination", provider_label(base_url), api_key):
+        url = f"{base_url.rstrip('/')}/chat/completions"
+        request_body = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": RUMINATION_SYSTEM_PROMPT},
+                {"role": "user", "content": model_input},
+            ],
+            "response_format": {"type": "json_object"},
+            "max_tokens": cfg.RUMINATION_MAX_TOKENS,
+            "temperature": 0.1,
+        }
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            with httpx.Client(timeout=120.0) as client:
+                response = client.post(url, headers=headers, json=request_body)
+                if response.status_code == 400:
+                    excerpt = response.text[:500].casefold()
+                    if "response_format" in excerpt or "json_object" in excerpt:
+                        request_body.pop("response_format", None)
+                        response = client.post(url, headers=headers, json=request_body)
+        except Exception as exc:
+            raise RuminationPipelineError(
+                "model_request_failed",
+                f"Rumination model request failed: {type(exc).__name__}",
+            ) from exc
 
-    if response.status_code != 200:
-        raise RuminationPipelineError(
-            "model_http_error",
-            f"Rumination model returned HTTP {response.status_code}",
-        )
-    try:
-        payload = response.json()
-        choice = payload["choices"][0]
-        message = choice.get("message") if isinstance(choice, dict) else None
-        output = message.get("content") if isinstance(message, dict) else None
-    except Exception as exc:
-        raise RuminationPipelineError(
-            "model_response_error", "Rumination model response shape is invalid",
-        ) from exc
-    if not isinstance(output, str) or not output.strip():
-        detail = _response_diagnostic(response.status_code, choice, message, payload)
-        if isinstance(choice, dict) and choice.get("finish_reason") == "length":
-            log.error("Rumination output budget exhausted before final content: %s", detail)
+        if response.status_code != 200:
+            raise RuminationPipelineError(
+                "model_http_error",
+                f"Rumination model returned HTTP {response.status_code}",
+            )
+        try:
+            payload = response.json()
+            choice = payload["choices"][0]
+            message = choice.get("message") if isinstance(choice, dict) else None
+            output = message.get("content") if isinstance(message, dict) else None
+        except Exception as exc:
+            raise RuminationPipelineError(
+                "model_response_error", "Rumination model response shape is invalid",
+            ) from exc
+        if not isinstance(output, str) or not output.strip():
+            detail = _response_diagnostic(response.status_code, choice, message, payload)
+            if isinstance(choice, dict) and choice.get("finish_reason") == "length":
+                log.error("Rumination output budget exhausted before final content: %s", detail)
+                raise RuminationPipelineError(
+                    "model_response_error",
+                    "Rumination output budget exhausted before final content; raise RUMINATION_MAX_TOKENS",
+                )
+            log.error("Rumination model returned no final content: %s", detail)
             raise RuminationPipelineError(
                 "model_response_error",
-                "Rumination output budget exhausted before final content; raise RUMINATION_MAX_TOKENS",
+                f"Rumination model response shape is invalid ({detail})",
             )
-        log.error("Rumination model returned no final content: %s", detail)
-        raise RuminationPipelineError(
-            "model_response_error",
-            f"Rumination model response shape is invalid ({detail})",
-        )
-    return output
+        return output
 
 
 # ---------------------------------------------------------------------------
@@ -2051,7 +2056,9 @@ def _mark_failed(run_id: int, code: str, message: str) -> None:
             .update({
                 "status": "failed",
                 "error_code": code,
-                "error_message": message[:2000],
+                # BUG-27：失败消息入库前清洗（SDK 异常 / 上游错误可能携带
+                # 凭证或正文回显），先清洗后截断。
+                "error_message": scrub_error_text(message, 2000),
                 "completed_at": _now().isoformat(),
                 "heartbeat_at": None,
             })
@@ -2246,7 +2253,8 @@ def run_rumination_digest(trigger: str = "rumination_manual") -> dict[str, Any]:
         return {
             "status": "failed",
             "error_code": exc.code,
-            "error_message": str(exc),
+            # BUG-26：返回给管理页的自由错误文本出口清洗。
+            "error_message": scrub_error_text(str(exc), 2000),
             "batch": {
                 "first_message_id": batch[0],
                 "last_message_id": batch[1],
@@ -2475,7 +2483,11 @@ def _public_run(run: dict[str, Any]) -> dict[str, Any]:
         "op_counts", "error_code", "error_message", "started_at", "completed_at",
         "created_at",
     }
-    return {key: run.get(key) for key in allowed}
+    result = {key: run.get(key) for key in allowed}
+    # BUG-27：读取投影出口统一清洗——旧敏感样本展示层保护，不改写历史。
+    if result.get("error_message"):
+        result["error_message"] = scrub_error_text(result["error_message"], 2000)
+    return result
 
 
 def list_rumination_runs(limit: int = 20, assistant_id: str | None = None) -> list[dict[str, Any]]:

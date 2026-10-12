@@ -20,6 +20,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import Field
 
 from .config import cfg
+from .logging_events import emit_error
 from .memory_requests import MemoryRequestError, create_memory_request
 from .memory_review import list_reviewable_memory_requests, review_ai_memory_request
 
@@ -31,6 +32,16 @@ memory_mcp = MCPServer(
     version="1.1.0",
 )
 
+# continuity_type → MCP 工具名（BUG-04 采集事件保留工具名）。
+_TOOL_NAME_BY_TYPE = {
+    "moment": "remember_moment",
+    "thread": "remember_thread",
+    "inside_joke": "remember_inside_joke",
+    "episode": "propose_episode",
+    "profile": "propose_profile",
+    "interaction_rule": "propose_interaction_rule",
+}
+
 
 def _assistant_id() -> str:
     assistant_id = cfg.MEMORY_ASSISTANT_ID.strip()
@@ -41,6 +52,32 @@ def _assistant_id() -> str:
 
 def _tool_error(exc: MemoryRequestError) -> ToolError:
     return ToolError(f"{exc.code}: {exc}")
+
+
+def _record_tool_failure(tool_name: str, exc: BaseException) -> None:
+    """MCP 工具的服务端依赖故障采集（BUG-04）。
+
+    SDK 把工具异常转成 HTTP 200 + isError 结果，HTTP 边界兜底永远看不到
+    5xx——真正的服务端 / 依赖失败必须在这里记录。预期业务校验
+    （MemoryRequestError 4xx：invalid_payload / invalid_review / 409 冲突等）
+    不升级；只有基础设施失败（status_code >= 500）与意外异常记 ERROR，
+    保留工具名、稳定错误码与原始异常链。协议与返回值不变。
+    """
+    if isinstance(exc, MemoryRequestError):
+        if getattr(exc, "status_code", 400) < 500:
+            return  # 预期业务拒绝：保持原级别与协议，不进报错日志
+        emit_error(
+            "memory", f"mcp_{tool_name}", exc.code or "mcp_tool_failed",
+            "记忆工具服务端依赖故障",
+            exc=exc.__cause__ or exc, outcome="failed",
+            safe_context={"reason_code": exc.code},
+        )
+        return
+    emit_error(
+        "memory", f"mcp_{tool_name}", "mcp_tool_failed",
+        "记忆工具服务端处理出现意外异常",
+        exc=exc, outcome="failed",
+    )
 
 
 _COMMON_RULES = (
@@ -182,7 +219,15 @@ async def _submit_typed_memory(
             assistant_id=_assistant_id(),
         )
     except MemoryRequestError as exc:
+        tool_name = _TOOL_NAME_BY_TYPE.get(continuity_type, "memory_tool")
+        _record_tool_failure(tool_name, exc)
         raise _tool_error(exc) from exc
+    except Exception as exc:
+        # SDK 会把异常转成 HTTP 200 + isError 结果（BUG-04）：先补采集再
+        # 原样上抛，MCP 协议与客户端可见行为不变。
+        tool_name = _TOOL_NAME_BY_TYPE.get(continuity_type, "memory_tool")
+        _record_tool_failure(tool_name, exc)
+        raise
 
 
 @memory_mcp.tool(
@@ -645,7 +690,12 @@ async def review_memory_requests(
             review_ai_memory_request, assistant_id, request_id, payload
         )
     except MemoryRequestError as exc:
+        _record_tool_failure("review_memory_requests", exc)
         raise _tool_error(exc) from exc
+    except Exception as exc:
+        # BUG-04：list / review 的依赖故障同样被 SDK 包成 HTTP 200 + isError。
+        _record_tool_failure("review_memory_requests", exc)
+        raise
 
 
 class MCPBearerAuth:

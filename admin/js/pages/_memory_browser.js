@@ -1,13 +1,13 @@
 // pages/_memory_browser.js - shared library/requests browser with detail panel
-import { gw, query, update, count, esc } from '../api.js?v=20261007-planning-batch3';
+import { gw, query, update, count, esc } from '../api.js?v=20261012-unified-selects';
 import {
   loading, empty, errorBlock, banner, tag, heatTag, impTag, pagerHtml,
   toast, modal, confirm, delegate, icon, fmtDate, createDetailPanel,
-} from '../ui.js?v=20261007-planning-batch3';
-import { openMemoryForm } from './_memory_form.js?v=20261007-planning-batch3';
-import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20261007-planning-batch3';
+} from '../ui.js?v=20261012-unified-selects';
+import { openMemoryForm } from './_memory_form.js?v=20261012-unified-selects';
+import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20261012-unified-selects';
 
-export const ASSET_VERSION = '20261007-planning-batch3';
+export const ASSET_VERSION = '20261012-unified-selects';
 
 const PAGE_SIZE = 20;
 const REQ_FETCH_LIMIT = 100;

@@ -13,6 +13,7 @@ from typing import Any
 
 from .config import cfg
 from .db import get_client
+from .logging_events import scrub_error_text
 from .memory_continuity_shadow import (
     DEFAULT_MAX_CHARS,
     ShadowPreviewError,
@@ -376,14 +377,19 @@ def _public_run(run: dict[str, Any]) -> dict[str, Any]:
         "extracted_count", "inserted_count", "model_name", "preview_memories",
         "error_code", "error_message", "started_at", "completed_at", "created_at",
     }
-    return {key: run.get(key) for key in allowed}
+    result = {key: run.get(key) for key in allowed}
+    # BUG-27：读取投影出口统一清洗——旧敏感样本展示层保护，不改写历史。
+    if result.get("error_message"):
+        result["error_message"] = scrub_error_text(result["error_message"], 2000)
+    return result
 
 
 def _mark_failed(run_id: int, code: str, message: str) -> dict[str, Any]:
     payload = {
         "status": "failed",
         "error_code": code,
-        "error_message": message[:2000],
+        # BUG-27：失败消息入库前清洗（SDK 异常 / 上游错误可能携带凭证）。
+        "error_message": scrub_error_text(message, 2000),
         "completed_at": _now().isoformat(),
         "heartbeat_at": None,
     }

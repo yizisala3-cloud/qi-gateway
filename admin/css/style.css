@@ -1692,6 +1692,21 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
    替换原生 select 弹层，机制同复古时间选择器
    ========================================================= */
 
+.retro-select-native { position: relative; display: block; min-width: 0; }
+.toolbar .retro-select-native { width: auto; min-width: 130px; max-width: 100%; }
+.retro-time-time .retro-select-native { width: 72px; }
+/* 保留原 select 的表单/校验语义，但移出可见和键盘操作层。 */
+select.retro-select-source {
+  position: absolute;
+  width: 1px !important;
+  min-width: 0 !important;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  clip-path: inset(50%);
+  pointer-events: none;
+}
 .retro-select-field {
   display: flex;
   align-items: center;
@@ -1709,11 +1724,14 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 .retro-select-field:hover,
-.retro-select-field:focus-visible {
+.retro-select-field:focus-visible,
+.retro-select.is-open .retro-select-field {
   border-color: var(--gold);
   box-shadow: 0 0 0 3px var(--gold-soft);
   outline: none;
 }
+.retro-select-field:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
+.retro-select-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .retro-select-field .ico {
   width: 15px;
   height: 15px;
@@ -1729,11 +1747,14 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   min-width: 148px;
   max-height: min(320px, calc(100vh - 16px));
   overflow-y: auto;
-  background: var(--paper-solid);
+  background: linear-gradient(var(--gold-soft), transparent 80%), var(--paper-solid);
   border: 1px solid var(--gold-line);
   border-radius: var(--radius);
-  box-shadow: var(--shadow-lift);
-  padding: 6px;
+  box-shadow: inset 0 0 0 3px var(--paper-solid), inset 0 0 0 4px var(--gold-faint), var(--shadow-lift);
+  padding: 8px;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--gold-line) transparent;
   color: var(--ink);
   font-family: var(--font);
   user-select: none;
@@ -1742,24 +1763,35 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   gap: 2px;
 }
 .retro-select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  flex: none;
   border: none;
   background: transparent;
   font-family: inherit;
   font-size: 13px;
   color: var(--ink);
   text-align: left;
-  padding: 7px 10px;
+  padding: 9px 10px;
+  min-height: 36px;
+  overflow-wrap: anywhere;
   border-radius: 6px;
   cursor: pointer;
 }
-.retro-select-option:hover,
-.retro-select-option:focus-visible { background: var(--gold-soft); outline: none; }
+.retro-select-option:hover { background: var(--gold-soft); }
+.retro-select-option:focus-visible { background: var(--gold-soft); outline: 1px solid var(--gold); outline-offset: -2px; }
+.retro-select-option:disabled { opacity: 0.45; cursor: not-allowed; }
+.retro-select-check { display: inline-flex; flex: none; opacity: 0; }
+.retro-select-check .ico { width: 14px; height: 14px; }
+.retro-select-option.is-selected .retro-select-check { opacity: 1; }
 .retro-select-option.is-selected {
   background: var(--green-ink);
   color: var(--paper-solid);
 }
 .retro-select-option.is-selected:hover,
-.retro-select-option.is-selected:focus-visible { background: var(--green-mid); }
+.retro-select-option.is-selected:focus-visible { background: var(--green-ink); }
 
 /* ---------- 规划管理（一期） ---------- */
 /* 可安排时段：与「目标日期」同款的全宽复古时间字段（上下排布） */

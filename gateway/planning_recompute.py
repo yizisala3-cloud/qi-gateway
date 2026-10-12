@@ -271,6 +271,12 @@ def _request_recompute_quietly(reason: str, now: datetime) -> None:
         log.warning(
             "planning 主业务提交后重算请求登记失败（等待手动重算或后续触发兜底）: reason=%s error=%s",
             reason, type(exc).__name__,
+            extra={"evt": {
+                "module": "planning", "operation": "request_recompute",
+                "error_code": "quiet_recompute_failed",
+                "message_zh": "待办已保存，但重算请求登记失败，将由维护流程兜底",
+                "outcome": "committed_side_effect_failed",
+            }},
         )
 
 

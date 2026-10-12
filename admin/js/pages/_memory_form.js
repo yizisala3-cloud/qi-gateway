@@ -1,12 +1,12 @@
 // pages/_memory_form.js - 手工新增 / 完整编辑 / 修改类型 共用动态表单
 // 六类连续感结构全部由本模块的中文动态表单生成，用户永不直接编辑 JSON；
 // 普通标签与召回标签是两套独立控件；召回向量和 content_hash 均由服务端维护。
-import { gw, esc } from '../api.js?v=20261007-planning-batch3';
-import { modal, confirm, toast, icon } from '../ui.js?v=20261007-planning-batch3';
+import { gw, esc } from '../api.js?v=20261012-unified-selects';
+import { modal, confirm, toast, icon } from '../ui.js?v=20261012-unified-selects';
 import {
   toDatetimeLocal, fromDatetimeLocal, nowShanghaiLocalInput, stableJson,
   buildEditPatch, isSameMinute, mergeContinuityForSubmit, continuityEquals,
-} from './_memory_patch.js?v=20261007-planning-batch3';
+} from './_memory_patch.js?v=20261012-unified-selects';
 
 /* ---------- 枚举与字段定义 ---------- */
 
@@ -606,17 +606,19 @@ function openRetroTimePop(anchor, input, apply) {
   // 视口变化后固定定位不再贴合字段，直接关闭，避免弹层漂移出屏；
   // 打开瞬间的 scrollIntoView 自身引发的滚动豁免 300ms，否则弹层刚开即关。
   const openedAt = Date.now();
-  const onViewportChange = () => {
+  const onViewportChange = (event) => {
+    if (event.type === 'scroll' && pop.contains(event.target)) return;
     if (Date.now() - openedAt < 300) return;
     closeRetroTimePop();
   };
   const cleanup = () => {
+    clearTimeout(listenerTimer);
     document.removeEventListener('mousedown', onOutside);
     document.removeEventListener('keydown', onKey);
     window.removeEventListener('resize', onViewportChange);
     window.removeEventListener('scroll', onViewportChange, true);
   };
-  setTimeout(() => {
+  const listenerTimer = setTimeout(() => {
     document.addEventListener('mousedown', onOutside);
     document.addEventListener('keydown', onKey);
     window.addEventListener('resize', onViewportChange);
@@ -624,14 +626,11 @@ function openRetroTimePop(anchor, input, apply) {
   });
   pop._cleanup = cleanup;
 
-  // 外层表单关闭时，modal 是被其父节点（document.body）整体移除的——
-  // modal 自身内部没有 childList 变化，监听 modal 无法发现关闭。
-  // 这里观察 body 的直接子级变动：modal mask 被移除必然触发一次回调，
-  // 届时宿主按钮已离开文档，立即回收弹层与其全局监听。
+  // 同时覆盖弹窗关闭与动态字段的嵌套重绘。
   const rootObserver = new MutationObserver(() => {
     if (!document.contains(anchor)) closeRetroTimePop();
   });
-  rootObserver.observe(document.body, { childList: true });
+  rootObserver.observe(document.body, { childList: true, subtree: true });
   const prevCleanup = pop._cleanup;
   pop._cleanup = () => { prevCleanup(); rootObserver.disconnect(); };
 }

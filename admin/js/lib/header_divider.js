@@ -69,7 +69,7 @@ export function initHeaderDivider() {
     if (!EDGE_PAGES.has(page)) {
       const controls = tabs
         ? [...tabs.querySelectorAll('button')]
-        : [...(toolbar?.querySelectorAll('button, select, input') || [])];
+        : [...(toolbar?.querySelectorAll('button, select:not(.retro-select-source), input') || [])];
       const rectangles = controls.map(visibleRect).filter(Boolean);
       if (rectangles.length) {
         const firstTop = Math.min(...rectangles.map(rect => rect.top));
@@ -83,7 +83,7 @@ export function initHeaderDivider() {
 
         // A refresh button can occupy the same toolbar to the right of the tabs.
         const neighbours = tabs && toolbar?.contains(tabs)
-          ? [...toolbar.querySelectorAll('button, select, input')]
+          ? [...toolbar.querySelectorAll('button, select:not(.retro-select-source), input')]
               .filter(element => !tabs.contains(element))
               .map(visibleRect).filter(Boolean)
               .filter(rect => Math.abs(rect.top - firstTop) < 8 && rect.left >= controlRight)

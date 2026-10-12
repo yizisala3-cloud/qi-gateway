@@ -16,6 +16,7 @@ import httpx
 
 from .config import cfg
 from .db import get_client
+from .logging_events import credential_scope, provider_label
 from .memory_continuity_schema import AUTOMATIC_TYPES, SCHEMA_VERSION, THREAD_STATES, ContinuityDataError, validate_continuity_data
 
 log = logging.getLogger("gateway.memory_continuity_shadow")
@@ -502,61 +503,66 @@ def extract_continuity_candidates(
     if not _continuity_analysis_configured():
         raise ShadowPreviewError("analysis_not_configured", "The continuity model provider is not configured")
 
-    url = f"{cfg.CONTINUITY_BASE_URL.rstrip('/')}/chat/completions"
-    request_body = {
-        "model": cfg.CONTINUITY_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"<chat_log>\n{conversation}\n</chat_log>"},
-        ],
-        "response_format": {"type": "json_object"},
-        "max_tokens": cfg.CONTINUITY_MAX_TOKENS,
-        "temperature": 0.1,
-    }
-    headers = {
-        "Authorization": f"Bearer {cfg.CONTINUITY_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    try:
-        with httpx.Client(timeout=60.0) as client:
-            response = client.post(url, headers=headers, json=request_body)
-            if response.status_code == 400:
-                excerpt = response.text[:500].casefold()
-                if "response_format" in excerpt or "json_object" in excerpt:
-                    request_body.pop("response_format", None)
-                    response = client.post(url, headers=headers, json=request_body)
-    except Exception as exc:
-        raise ShadowPreviewError(
-            "model_request_failed", f"Shadow model request failed: {type(exc).__name__}"
-        ) from exc
+    # TASK-02：实际 SDK 调用边界绑定 CONTINUITY 凭证身份——连续感快速
+    # 路径与 Shadow Preview 共用同一把独立密钥，失败事件按实际调用归属。
+    with credential_scope(
+        "continuity", provider_label(cfg.CONTINUITY_BASE_URL), cfg.CONTINUITY_API_KEY
+    ):
+        url = f"{cfg.CONTINUITY_BASE_URL.rstrip('/')}/chat/completions"
+        request_body = {
+            "model": cfg.CONTINUITY_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"<chat_log>\n{conversation}\n</chat_log>"},
+            ],
+            "response_format": {"type": "json_object"},
+            "max_tokens": cfg.CONTINUITY_MAX_TOKENS,
+            "temperature": 0.1,
+        }
+        headers = {
+            "Authorization": f"Bearer {cfg.CONTINUITY_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        try:
+            with httpx.Client(timeout=60.0) as client:
+                response = client.post(url, headers=headers, json=request_body)
+                if response.status_code == 400:
+                    excerpt = response.text[:500].casefold()
+                    if "response_format" in excerpt or "json_object" in excerpt:
+                        request_body.pop("response_format", None)
+                        response = client.post(url, headers=headers, json=request_body)
+        except Exception as exc:
+            raise ShadowPreviewError(
+                "model_request_failed", f"Shadow model request failed: {type(exc).__name__}"
+            ) from exc
 
-    if response.status_code != 200:
-        raise ShadowPreviewError("model_http_error", f"Shadow model returned HTTP {response.status_code}")
-    try:
-        payload = response.json()
-        choice = payload["choices"][0]
-        message = choice.get("message") if isinstance(choice, dict) else None
-        output = message.get("content") if isinstance(message, dict) else None
-    except Exception as exc:
-        raise ShadowPreviewError("model_response_error", "Shadow model response shape is invalid") from exc
-    if not isinstance(output, str) or not output.strip():
-        # Empty content with a 200 is a real failure (e.g. the provider spent
-        # the whole budget on reasoning_content). Never treat it as success,
-        # never parse reasoning_content as candidates, and keep the same
-        # error code while making the cause locatable in logs.
-        detail = _response_diagnostic(response.status_code, choice, message, payload)
-        if isinstance(choice, dict) and choice.get("finish_reason") == "length":
-            log.error("Continuity model output budget exhausted before final content: %s", detail)
+        if response.status_code != 200:
+            raise ShadowPreviewError("model_http_error", f"Shadow model returned HTTP {response.status_code}")
+        try:
+            payload = response.json()
+            choice = payload["choices"][0]
+            message = choice.get("message") if isinstance(choice, dict) else None
+            output = message.get("content") if isinstance(message, dict) else None
+        except Exception as exc:
+            raise ShadowPreviewError("model_response_error", "Shadow model response shape is invalid") from exc
+        if not isinstance(output, str) or not output.strip():
+            # Empty content with a 200 is a real failure (e.g. the provider spent
+            # the whole budget on reasoning_content). Never treat it as success,
+            # never parse reasoning_content as candidates, and keep the same
+            # error code while making the cause locatable in logs.
+            detail = _response_diagnostic(response.status_code, choice, message, payload)
+            if isinstance(choice, dict) and choice.get("finish_reason") == "length":
+                log.error("Continuity model output budget exhausted before final content: %s", detail)
+                raise ShadowPreviewError(
+                    "model_response_error",
+                    "Continuity output budget exhausted before final content; raise CONTINUITY_MAX_TOKENS or match the provider's maximum output limit",
+                )
+            log.error("Continuity model returned no final content: %s", detail)
             raise ShadowPreviewError(
                 "model_response_error",
-                "Continuity output budget exhausted before final content; raise CONTINUITY_MAX_TOKENS or match the provider's maximum output limit",
+                f"Shadow model response shape is invalid ({detail})",
             )
-        log.error("Continuity model returned no final content: %s", detail)
-        raise ShadowPreviewError(
-            "model_response_error",
-            f"Shadow model response shape is invalid ({detail})",
-        )
-    return parse_shadow_output(output, evidence_times)
+        return parse_shadow_output(output, evidence_times)
 
 
 def _extract_shadow_candidates(

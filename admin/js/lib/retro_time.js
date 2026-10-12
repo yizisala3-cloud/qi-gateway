@@ -5,7 +5,7 @@
 //   date：只显示月历 + 清除/今天，产出 YYYY-MM-DD
 //   time：隐藏月历，只留时/分 + 清除/确定，产出 HH:MM（tod 字符串，后端不变）
 // 样式复用 style.css 的 .retro-time-*；input 上挂 _applyRetroValue 供外部程序化清空。
-import { icon } from '../ui.js?v=20261007-planning-batch3';
+import { icon } from '../ui.js?v=20261012-unified-selects';
 
 let activeRetroTimePop = null;
 
@@ -347,12 +347,13 @@ export function openRetroTimePop(anchor, input, apply, mode = 'datetime', align 
     closeRetroTimePop();
   };
   const cleanup = () => {
+    clearTimeout(listenerTimer);
     document.removeEventListener('mousedown', onOutside);
     document.removeEventListener('keydown', onKey);
     window.removeEventListener('resize', onViewportChange);
     window.removeEventListener('scroll', onViewportChange, true);
   };
-  setTimeout(() => {
+  const listenerTimer = setTimeout(() => {
     document.addEventListener('mousedown', onOutside);
     document.addEventListener('keydown', onKey);
     window.addEventListener('resize', onViewportChange);
@@ -365,7 +366,7 @@ export function openRetroTimePop(anchor, input, apply, mode = 'datetime', align 
   const rootObserver = new MutationObserver(() => {
     if (!document.contains(anchor)) closeRetroTimePop();
   });
-  rootObserver.observe(document.body, { childList: true });
+  rootObserver.observe(document.body, { childList: true, subtree: true });
   const prevCleanup = pop._cleanup;
   pop._cleanup = () => { prevCleanup(); rootObserver.disconnect(); };
 }

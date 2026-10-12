@@ -8,6 +8,7 @@
 [4] 短期上下文 chat_messages 最近 N 条（可关，N 可配）
 """
 import asyncio
+import contextvars
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -21,6 +22,17 @@ from . import eventide_bridge
 log = logging.getLogger("gateway.context")
 
 _executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="ctx")
+
+
+def _submit(fn, *args):
+    """提交内层数据源任务：复制提交线程的上下文（BUG-09）。
+
+    ThreadPoolExecutor.submit 不传播 ContextVar——外层 run_in_executor 的
+    copy_context 只包住 build_context 本身，内层线程会丢请求日志上下文。
+    每次提交独立 copy，并发请求不会复用同一个 Context 对象串 ID。
+    """
+    ctx = contextvars.copy_context()
+    return _executor.submit(ctx.run, fn, *args)
 
 # 时间戳展示时区：与 db.py / eventide_admin_api.py 的挂钟约定一致（Asia/Shanghai）。
 _CST = timezone(timedelta(hours=8))
@@ -56,7 +68,19 @@ def build_eventide_context() -> str:
         return card or ""
 
     except Exception as e:
-        log.error(f"Eventide context 构建失败: {e}")
+        # 数据源失败按降级记录（BUG-10）：主请求（聊天）继续，不标 failed。
+        # BUG-18：捕获点必须把原异常交给主记录者（exc_info），事件才有
+        # 真实异常类型与调用帧；只写 type(e).__name__ 会丢根因与堆栈。
+        log.error(
+            "Eventide context 构建失败: %s", type(e).__name__,
+            exc_info=e,
+            extra={"evt": {
+                "module": "context", "operation": "build_eventide_context",
+                "error_code": "context_source_failed",
+                "message_zh": "Eventide 身体状态数据源降级，聊天请求继续",
+                "outcome": "degraded", "safe_context": {"data_source": "eventide"},
+            }},
+        )
         return ""
 
 
@@ -106,7 +130,16 @@ def build_recent_chat_context(limit: int = 10) -> str:
 
         return "\n".join(lines)
     except Exception as e:
-        log.error(f"短期上下文构建失败: {e}")
+        log.error(
+            "短期上下文构建失败: %s", type(e).__name__,
+            exc_info=e,
+            extra={"evt": {
+                "module": "context", "operation": "build_recent_chat_context",
+                "error_code": "context_source_failed",
+                "message_zh": "短期对话数据源降级，聊天请求继续",
+                "outcome": "degraded", "safe_context": {"data_source": "recent_chat"},
+            }},
+        )
         return ""
 
 
@@ -123,7 +156,7 @@ def build_context(user_message: str = "", history_turns=None) -> str:
                        只用当前消息。
     """
     futures = {
-        "persona": _executor.submit(load_persona),
+        "persona": _submit(load_persona),
     }
     results: dict[str, str] = {}
 
@@ -134,7 +167,7 @@ def build_context(user_message: str = "", history_turns=None) -> str:
     # 任务里再读会绕开 fail-open 缓存的预期时序，也让"读几次库"变得
     # 不可推理。近期对话开关关闭时干脆不提交任务：连 db 读取都不会发生。
     if app_settings.is_recent_chat_injection_enabled():
-        futures["recent_chat"] = _executor.submit(
+        futures["recent_chat"] = _submit(
             build_recent_chat_context,
             app_settings.get_recent_chat_injection_limit(),
         )
@@ -143,7 +176,7 @@ def build_context(user_message: str = "", history_turns=None) -> str:
 
     # 开关关闭时干脆不提交 eventide 任务：连 db 读取都不会发生。
     if app_settings.is_eventide_injection_enabled():
-        futures["eventide"] = _executor.submit(build_eventide_context)
+        futures["eventide"] = _submit(build_eventide_context)
     else:
         results["eventide"] = ""
 
@@ -151,7 +184,16 @@ def build_context(user_message: str = "", history_turns=None) -> str:
         try:
             results[name] = future.result(timeout=8.0) or ""
         except Exception as e:
-            log.warning(f"context 数据源 {name} 超时或失败: {e}")
+            log.warning(
+                "context 数据源 %s 超时或失败: %s", name, type(e).__name__,
+                exc_info=e,
+                extra={"evt": {
+                    "module": "context", "operation": "build_context",
+                    "error_code": "context_source_failed",
+                    "message_zh": "上下文数据源降级，聊天请求继续",
+                    "outcome": "degraded", "safe_context": {"data_source": name},
+                }},
+            )
             results[name] = ""
 
     # 记忆搜索
@@ -165,7 +207,16 @@ def build_context(user_message: str = "", history_turns=None) -> str:
             loop.close()
             memories_text = format_memories_for_injection(memories)
         except Exception as e:
-            log.warning(f"记忆搜索失败: {e}")
+            log.warning(
+                "记忆搜索失败: %s", type(e).__name__,
+                exc_info=e,
+                extra={"evt": {
+                    "module": "context", "operation": "build_context",
+                    "error_code": "context_source_failed",
+                    "message_zh": "记忆搜索降级，聊天请求继续",
+                    "outcome": "degraded", "safe_context": {"data_source": "memory_search"},
+                }},
+            )
 
     # 按固定顺序拼装：时间 → 人设 → 身体 → 记忆 → 近期对话。
     parts = []

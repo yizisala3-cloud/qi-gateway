@@ -51,10 +51,26 @@ def load_persona() -> str:
         log.debug("人设已加载（%d 字符）", len(content))
         return content
 
-    # 读取失败时用缓存兜底
+    # 读取失败时用缓存兜底（BUG-10：降级记录，主请求继续，不标 failed）
     if _cache is not None:
-        log.warning("人设读取失败，使用缓存")
+        log.warning(
+            "人设读取失败，使用缓存",
+            extra={"evt": {
+                "module": "persona", "operation": "load_persona",
+                "error_code": "context_source_failed",
+                "message_zh": "人设数据源降级，使用缓存继续",
+                "outcome": "degraded", "safe_context": {"data_source": "persona"},
+            }},
+        )
         return _cache
 
-    log.warning("人设读取失败且无缓存")
+    log.warning(
+        "人设读取失败且无缓存",
+        extra={"evt": {
+            "module": "persona", "operation": "load_persona",
+            "error_code": "context_source_failed",
+            "message_zh": "人设数据源降级，本次不注入人设",
+            "outcome": "degraded", "safe_context": {"data_source": "persona"},
+        }},
+    )
     return ""

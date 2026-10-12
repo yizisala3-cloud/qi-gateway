@@ -1,5 +1,5 @@
 // Planning display helpers: argument-only formatting and HTML; no DOM or network writes.
-import { tag, icon, esc } from '../ui.js?v=20261007-planning-batch3';
+import { tag, icon, esc } from '../ui.js?v=20261012-unified-selects';
 
 export const TASK_TYPE_LABELS = {
   daily: '每日', interval: '间歇', weekly: '每周', monthly: '每月', once: '单次', idle: '闲时',

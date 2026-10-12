@@ -269,8 +269,11 @@ async def admin_collection(request: Request):
     except ValueError as exc:
         return _error(str(exc), 400)
     except Exception as exc:
+        # BUG-26：意外异常的原文（SDK 错误 / 上游正文）不回传客户端——
+        # 详情已由 log.exception 进入脱敏日志链，可在日志页按 X-Request-ID
+        # 排查；这里只返回固定安全摘要。
         log.exception("Admin collection operation failed: table=%s", table)
-        return _error(str(exc), 500)
+        return _error("操作失败：服务暂时出现异常，请稍后重试", 500)
 
 
 async def admin_item(request: Request):
@@ -314,8 +317,9 @@ async def admin_item(request: Request):
     except ValueError as exc:
         return _error(str(exc), 400)
     except Exception as exc:
+        # BUG-26：同上——意外异常原文不回传，固定安全摘要。
         log.exception("Admin item operation failed: table=%s id=%s", table, row_id)
-        return _error(str(exc), 500)
+        return _error("操作失败：服务暂时出现异常，请稍后重试", 500)
 
 
 admin_api_routes = [

@@ -26,6 +26,7 @@
 | 变量 | 说明 |
 |------|------|
 | `GATEWAY_TOKEN` | 网关鉴权 token（手机客户端填的 API Key） |
+| `GATEWAY_LOG_ENABLED` | 未保存配置页设置时的日志收集默认值，默认 `false`；上线保持关闭 |
 | `UPSTREAM_BASE_URL` | 聊天上游地址，默认 `https://api.deepseek.com/v1` |
 | `UPSTREAM_API_KEY` | DeepSeek API Key，只通过部署环境变量配置 |
 | `UPSTREAM_MODEL` | 默认 `deepseek-v4-pro`；配置后统一覆盖客户端传入的模型名 |
@@ -81,8 +82,19 @@
 | `/admin/api/eventide/settings` | GET / PUT | Dashboard 读取/切换身体状态注入开关（网关 Token） |
 | `/admin/api/eventide/body` | GET | Dashboard 读取 Eventide 身体状态（只读，网关 Token） |
 | `/admin/api/context/settings` | GET / PUT | Dashboard 读取/设置上下文注入（近期对话开关与条数、时间戳开关）（网关 Token） |
+| `/admin/api/logs/settings` | GET / PUT | 配置页持久化日志收集开关（网关 Token）；关闭仍可查历史日志 |
 | `/health` | GET | 健康检查（无需鉴权） |
 | `/status` | GET | 网关状态（需鉴权） |
+
+## 日志收集开关
+
+配置页“功能开关 → 日志收集”默认关闭，保存到现有 `app_settings` 表的
+`gateway_log.collect_enabled`，无需新增迁移。保存成功后当前实例立即生效，
+其他实例每 30 秒同步一次；重启恢复已保存的选择。关闭停止接收新事件，已收集
+事件按原有时限收尾，历史日志仍可查询。数据库不可用或保存值非法时关闭采集；
+保存失败显示错误，不伪装成功。首次上线不设置 `GATEWAY_LOG_ENABLED=true`，
+且不预先写入开启值。已登记的日志与密钥查看缺陷仍待后续修复，关闭采集不代表
+这些缺陷已经解决。
 
 ## 身体状态注入开关
 

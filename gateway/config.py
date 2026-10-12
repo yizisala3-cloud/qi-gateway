@@ -74,6 +74,38 @@ class Config:
     # OrangeChat todo tools. This token is independent from every other token.
     TODO_PLUGIN_TOKEN: str = os.getenv("TODO_PLUGIN_TOKEN", "")
     TODO_REQUEST_RATE_LIMIT: int = int(os.getenv("TODO_REQUEST_RATE_LIMIT", "60"))
+    # ── 全网关报错日志（§36 独立批次） ─────────────────────────────
+    # 未保存页面设置时的采集默认值：默认关闭。管理页设置持久化到
+    # app_settings，运行时由 log_settings 同步；关闭后仍可查询历史日志。
+    GATEWAY_LOG_ENABLED: bool = (
+        os.getenv("GATEWAY_LOG_ENABLED", "false").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    # 采集最低级别：WARNING / ERROR / CRITICAL。不默认采集 INFO/DEBUG。
+    GATEWAY_LOG_MIN_LEVEL: str = (os.getenv("GATEWAY_LOG_MIN_LEVEL", "WARNING") or "WARNING").strip().upper()
+    # 有界内存队列与批量写入参数。
+    GATEWAY_LOG_QUEUE_MAX: int = _clamped_env_int("GATEWAY_LOG_QUEUE_MAX", 2000, 100, 50000)
+    GATEWAY_LOG_BATCH_MAX: int = _clamped_env_int("GATEWAY_LOG_BATCH_MAX", 50, 1, 200)
+    # 写入失败时的内存重试上限（事件数）；超过后按 spool 配置降级。
+    GATEWAY_LOG_RETRY_PENDING_MAX: int = _clamped_env_int("GATEWAY_LOG_RETRY_PENDING_MAX", 500, 0, 5000)
+    # 建议默认 30 天保留（用户未逐项确认的工程默认值，可调整）。
+    GATEWAY_LOG_RETENTION_DAYS: int = _clamped_env_int("GATEWAY_LOG_RETENTION_DAYS", 30, 1, 365)
+    # 本地 spool 目录：留空 = 不启用（容器临时盘不承诺跨重建保留）。
+    # 配置后按「先脱敏、限文件数、限总字节」落盘，恢复后按 event_id 幂等补写。
+    GATEWAY_LOG_SPOOL_DIR: str = os.getenv("GATEWAY_LOG_SPOOL_DIR", "").strip()
+    GATEWAY_LOG_SPOOL_MAX_FILES: int = _clamped_env_int("GATEWAY_LOG_SPOOL_MAX_FILES", 200, 1, 10000)
+    GATEWAY_LOG_SPOOL_MAX_BYTES: int = _clamped_env_int("GATEWAY_LOG_SPOOL_MAX_BYTES", 52428800, 1048576, 1073741824)
+    # 正常关闭时的 flush 时间上限（秒）：到时未写完的事件按 spool 配置
+    # 降级或计入丢弃，绝不无限阻塞网关关闭。
+    GATEWAY_LOG_FLUSH_TIMEOUT: float = max(0.5, min(60.0, float(os.getenv("GATEWAY_LOG_FLUSH_TIMEOUT", "5") or 5)))
+    # 实例 / 部署版本的非敏感标识（多实例排查用；默认取容器主机名）。
+    GATEWAY_INSTANCE_ID: str = os.getenv("GATEWAY_INSTANCE_ID", "").strip()
+    GATEWAY_RELEASE_ID: str = os.getenv("GATEWAY_RELEASE_ID", "").strip()
+    # TASK-02：密钥标识生成秘密。独立服务端值（建议 ≥32 字节安全随机值），
+    # 只用于 HMAC-SHA-256 计算 key_ref；不复用 GATEWAY_TOKEN / 上游密钥 /
+    # 公开盐，永不进入浏览器、日志、平台输出或构建上下文。缺失或短于
+    # 32 字节时密钥标识明确不可用（不兜底），业务与安全日志照常运行。
+    GATEWAY_KEY_REF_SECRET: str = os.getenv("GATEWAY_KEY_REF_SECRET", "").strip()
 
     @property
     def supabase_server_key(self) -> str:
