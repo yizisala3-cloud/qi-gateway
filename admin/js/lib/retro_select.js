@@ -1,6 +1,6 @@
 // 共享纸面下拉：手动字段与页面原有单选 select 共用同一浮层。
 // 原 select 保留 id/name/options/value、校验及业务监听；展示按钮不提交表单。
-import { esc, icon } from '../ui.js?v=20261012-unified-selects';
+import { esc, icon } from '../ui.js?v=20261012-sort-immediate';
 
 let activeRetroSelectPop = null;
 let popSequence = 0;

@@ -4,8 +4,86 @@ These support behavioural tests; PostgreSQL suites verify real transactions.
 """
 
 from datetime import datetime, time, timedelta
+from copy import deepcopy
 
 from gateway import planning
+
+
+def emulate_planning_save_order(db, params):
+    """Behaviour adapter; SQL rollback and contention are tested on PostgreSQL."""
+    ids = params['p_order']
+    rows = db.rows['planning_occurrence']
+    current = [r for r in rows if r.get('display_cycle_date') == params['p_cycle_date']
+               and r.get('status') in planning.OPEN_STATUSES]
+    if sorted(ids) != sorted(r['id'] for r in current):
+        raise RuntimeError('planning_save_order: inputs changed (members)')
+    if sorted(current, key=lambda r: r['id']) != sorted(params['p_expected'], key=lambda r: r['id']):
+        raise RuntimeError('planning_save_order: inputs changed (occurrences)')
+    tasks = [t for t in db.rows['planning_task'] if t['id'] in {r['task_id'] for r in current}]
+    if sorted(tasks, key=lambda r: r['id']) != sorted(params['p_tasks'], key=lambda r: r['id']):
+        raise RuntimeError('planning_save_order: inputs changed (tasks)')
+    result = {'saved': len(ids), 'recompute_enabled': params['p_recompute_enabled']}
+    requests = db.rows.setdefault('planning_reorder_request', [])
+    key = params.get('p_request_key')
+    replay = next((r for r in requests if r['request_key'] == key), None) if key else None
+    if replay:
+        if replay['ordered_ids'] != ids:
+            raise RuntimeError('planning_save_order: inputs changed (request reused)')
+        return deepcopy(replay['result'])
+    for index, occ_id in enumerate(ids):
+        row = next(r for r in current if r['id'] == occ_id)
+        row.update(sort_order=index, updated_at=params['p_now'])
+    if params['p_recompute_enabled']:
+        emulate_planning_request_recompute(db.rows['planning_recompute_state'],
+                                           {'p_reason': 'reorder', 'p_requested_at': params['p_now']})
+    if key:
+        requests.append({'request_key': key, 'ordered_ids': deepcopy(ids), 'result': deepcopy(result)})
+    return result
+
+
+def emulate_planning_save_order_with_schedule(db, params):
+    """Reuse the order and recompute adapters within the new outer transaction."""
+    requests = db.rows.setdefault('planning_reorder_request', [])
+    key = params.get('p_request_key')
+    replay = next((r for r in requests if r['request_key'] == key), None) if key else None
+    if replay:
+        if replay['ordered_ids'] != params['p_order']:
+            raise RuntimeError('planning_save_order: inputs changed (request reused)')
+        return {**deepcopy(replay['result']), 'replayed': True}
+    originals = [(row, deepcopy(row)) for table in (
+        'planning_occurrence', 'planning_recompute_state', 'planning_reorder_request')
+        for row in db.rows[table]]
+    try:
+        emulate_planning_save_order(db, {**params, 'p_request_key': None, 'p_recompute_enabled': False})
+        written = []
+        estimates = []
+        if params['p_recompute_enabled']:
+            state = db.rows['planning_recompute_state'][0]
+            token = state.get('request_token')
+            positions = {occ_id: index for index, occ_id in enumerate(params['p_order'])}
+            if params['p_singles'] or params['p_rounds']:
+                expected = [{**{field: row.get(field) for field in RECOMPUTE_EXPECTED_FIELDS},
+                             'sort_order': positions[row['id']]} for row in params['p_expected']]
+                written = emulate_planning_recompute_batch(db, {
+                    'p_expected': expected, 'p_singles': params['p_singles'], 'p_rounds': params['p_rounds'],
+                })
+            emulate_planning_clear_recompute_mark(db.rows['planning_recompute_state'], {'p_request_token': token})
+            by_id = {row['id']: row for row in db.rows['planning_occurrence']}
+            fields = ('id', 'est_start', 'est_end', 'nominal_start', 'estimated_time_source',
+                      'fixed_source', 'schedule_managed', 'is_fixed')
+            estimates = [{field: by_id[occ_id].get(field) for field in fields} for occ_id in params['p_order']]
+        elif params['p_singles'] or params['p_rounds']:
+            raise RuntimeError('planning_save_order_with_schedule: automatic recompute disabled')
+        result = {'saved': len(params['p_order']), 'recompute_enabled': params['p_recompute_enabled'],
+                  'schedule_applied': params['p_recompute_enabled'], 'updated': len(written), 'estimates': estimates}
+        if key:
+            requests.append({'request_key': key, 'ordered_ids': deepcopy(params['p_order']), 'result': deepcopy(result)})
+        return result
+    except BaseException:
+        for row, original in originals:
+            row.clear()
+            row.update(original)
+        raise
 
 
 # 批次 6 二轮：planning_patch_occurrence_round（迁移 20260928020000）的 fake

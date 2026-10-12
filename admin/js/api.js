@@ -20,11 +20,19 @@ export async function gw(path, opts = {}) {
   const resp = await fetch(window.location.origin + path, { ...opts, headers });
   if (!resp.ok) {
     let detail = '';
+    let payload = null;
     try {
       const body = await resp.json();
+      payload = body;
       detail = body.error ? `: ${body.error}` : '';
-    } catch {}
-    throw new Error(`${resp.status} ${resp.statusText}${detail}`);
+    } catch (error) {
+      detail = ': 未收到完整的错误说明';
+    }
+    const error = new Error(`${resp.status} ${resp.statusText}${detail}`);
+    error.code = payload?.error_code;
+    error.details = payload?.details;
+    error.status = resp.status;
+    throw error;
   }
   try {
     return await resp.json();

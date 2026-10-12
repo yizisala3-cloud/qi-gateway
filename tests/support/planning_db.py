@@ -13,6 +13,8 @@ from .planning_rpc import (
     emulate_planning_request_recompute,
     emulate_planning_clear_recompute_mark,
     emulate_planning_update_cycle_boundary,
+    emulate_planning_save_order,
+    emulate_planning_save_order_with_schedule,
 )
 
 
@@ -224,6 +226,7 @@ class CoreClient:
         self.rows = {
             "planning_task": [],
             "planning_occurrence": [],
+            "planning_reorder_request": [],
             "planning_recompute_state": [
                 {"id": 1, "requested_at": None, "reason": None, "request_token": None}],
             "app_settings": [],
@@ -238,6 +241,12 @@ class CoreClient:
         return self._counters[table]
 
     def rpc(self, fn, params=None):
+        if fn == 'planning_save_order':
+            data = emulate_planning_save_order(self, dict(params or {}))
+            return SimpleNamespace(execute=lambda: SimpleNamespace(data=data))
+        if fn == 'planning_save_order_with_schedule':
+            data = emulate_planning_save_order_with_schedule(self, dict(params or {}))
+            return SimpleNamespace(execute=lambda: SimpleNamespace(data=data))
         # 批次 6 二轮：round 原子补丁 RPC 的 fake 仿真（复用 phase1a 的
         # 共享实现；真库语义由 pgserver 套件验证）。
         from tests.support.planning_rpc import (emulate_planning_round_patch,
@@ -456,6 +465,10 @@ class IdentityRpcCall:
 
     def execute(self):
         rows = self.db.rows["planning_task"]
+        if self.fn == 'planning_save_order':
+            return SimpleNamespace(data=emulate_planning_save_order(self.db, self.params))
+        if self.fn == 'planning_save_order_with_schedule':
+            return SimpleNamespace(data=emulate_planning_save_order_with_schedule(self.db, self.params))
         task_id = self.params.get("p_task_id")
         row = next((r for r in rows if r.get("id") == task_id), None)
         now = self.params.get("p_now")
@@ -522,7 +535,7 @@ class IdentityRpcCall:
 
 class IdentityDatabase:
     def __init__(self):
-        self.rows = {"planning_task": [], "planning_occurrence": [],
+        self.rows = {"planning_task": [], "planning_occurrence": [], "planning_reorder_request": [],
                      "planning_recompute_state": [
                          {"id": 1, "requested_at": None, "reason": None,
                           "request_token": None}],

@@ -1,6 +1,6 @@
 // Instance dialogs: form-local inputs and timeout retry identity stay in their closures.
-import { gw } from '../api.js?v=20261012-unified-selects';
-import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261012-unified-selects';
+import { gw } from '../api.js?v=20261012-sort-immediate';
+import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261012-sort-immediate';
 
 export function createPlanningDialogs({
   findOccurrence, getOccurrences, getTasks, openTaskForm,

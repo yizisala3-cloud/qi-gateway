@@ -104,6 +104,8 @@ var __result = null, __error = null;
   });
   const makePlainEl = () => ({
     innerHTML: '',
+    classList: { add() {} },
+    insertAdjacentHTML(position, html) { this.innerHTML += html; },
     style: {},
     setAttribute() {},
     addEventListener() {},
@@ -119,7 +121,8 @@ var __result = null, __error = null;
       .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
     const fields = {
       '[data-editor-kind]': makePlainEl(),
-      '[data-editor-tags]': { innerHTML: '', querySelectorAll: () => [] },
+      '[data-editor-tags]': { innerHTML: '', querySelectorAll: () => [],
+        insertAdjacentHTML(position, html) { this.innerHTML += html; }, querySelector: () => makePlainEl() },
       '[data-editor-title]': makeField(decode(titleMatch ? titleMatch[1] : '')),
       '[data-editor-content]': makeField(decode(contentMatch ? contentMatch[1] : '')),
       '[data-save-status]': { innerHTML: '', querySelector: () => null },
@@ -130,6 +133,7 @@ var __result = null, __error = null;
       'button': makePlainEl(),
     };
     const root = {
+      classList: { add() {} },
       fields,
       querySelector: (sel) => fields[sel] || makePlainEl(),
       querySelectorAll: () => [],

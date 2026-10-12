@@ -15,12 +15,12 @@
 // 一期不实现清单勾选、待办互通与 AI 读写（F01–F03 仅预留稳定身份与
 // 可复用基础接口）。
 
-import { gw } from '../api.js?v=20261012-unified-selects';
+import { gw } from '../api.js?v=20261012-sort-immediate';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, icon, esc,
-} from '../ui.js?v=20261012-unified-selects';
-import { createRetroSelectField } from './retro_select.js?v=20261012-unified-selects';
-import { renderMarkdown } from './memo_markdown.js?v=20261012-unified-selects';
+} from '../ui.js?v=20261012-sort-immediate';
+import { createRetroSelectField } from './retro_select.js?v=20261012-sort-immediate';
+import { renderMarkdown } from './memo_markdown.js?v=20261012-sort-immediate';
 
 const KIND_LABELS = { pinned: '常驻备忘', note: '随笔' };
 const AUTOSAVE_DELAY_MS = 800;
@@ -417,7 +417,7 @@ function startHandleDrag(e, handle, list, item, onMoved) {
 
 /* ═══════════════ 主模块 ═══════════════ */
 
-export function createPlanningMemo() {
+export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } = {}) {
   const memo = {
     root: null,
     body: null,
@@ -426,6 +426,14 @@ export function createPlanningMemo() {
     view: 'board',            // board | tag | search | archived | trash
     board: null,
     tags: [],
+    tagsStatus: 'unloaded',
+    tagsError: null,
+    _tagsRevision: 0,
+    _tagsPending: null,
+    _tagsLoadedAt: 0,
+    _disposed: false,
+    _readerSeq: 0,
+    _readerId: null,
     filterTagId: '',          // '' 全部 | 'untagged' | 数字
     activeTagId: null,        // 标签详情当前标签（'untagged' 或数字）
     searchQuery: '',
@@ -447,6 +455,7 @@ export function createPlanningMemo() {
     _pendingRefresh: false,   // 写入已提交但看板刷新未确认：暂不放行下一次拖动（BUG-06）
 
     async mount(root) {
+      this._disposed = false;
       this.root = root;
       root.innerHTML = `
         <div class="memo-toolbar">
@@ -521,6 +530,12 @@ export function createPlanningMemo() {
       // 推进构建代数（BUG-12）：在途的草稿恢复确认/打开流程在下一个
       // await 返回后复核失败，不再创建旧编辑框或清草稿
       this._epoch += 1;
+      this._disposed = true;
+      this._readerSeq += 1;
+      this._readerId = null;
+      this.invalidateTags();
+      this.tags = [];
+      this.tagsStatus = 'unloaded';
       if (this.searchTimer) clearTimeout(this.searchTimer);
       this.searchTimer = null;
       if (this.pagehideHandler) {
@@ -547,6 +562,48 @@ export function createPlanningMemo() {
 
     /* ---------- 数据 ---------- */
 
+    invalidateTags() {
+      this._tagsRevision += 1;
+      this._tagsLoadedAt = 0;
+    },
+
+    prefetchTags({ fresh = false } = {}) {
+      if (this._disposed) return Promise.resolve(false);
+      if (this._tagsPending?.revision === this._tagsRevision) return this._tagsPending.promise;
+      if (!fresh && this.tagsStatus === 'ready' && Date.now() - this._tagsLoadedAt < 60000) {
+        return Promise.resolve(true);
+      }
+      const revision = ++this._tagsRevision;
+      const epoch = this._epoch;
+      const pending = { revision, promise: null };
+      this._tagsPending = pending;
+      this.tagsStatus = 'loading';
+      this.tagsError = null;
+      this.renderEditorTags();
+      pending.promise = (async () => {
+        try {
+          const tags = await gw('/admin/api/memo/tags');
+          if (this._disposed || epoch !== this._epoch || revision !== this._tagsRevision) return false;
+          if (!Array.isArray(tags)) throw new Error('标签列表响应无效');
+          this.tags = tags;
+          this.tagsStatus = 'ready';
+          this._tagsLoadedAt = Date.now();
+          this.mountFilter();
+          this.renderEditorTags();
+          return true;
+        } catch (error) {
+          if (this._disposed || epoch !== this._epoch || revision !== this._tagsRevision) return false;
+          this.tagsStatus = 'error';
+          this.tagsError = error;
+          this.renderEditorTags();
+          return false;
+        } finally {
+          if (this._tagsPending === pending) this._tagsPending = null;
+        }
+      })();
+      return pending.promise;
+    },
+
     /** 视图切换统一入口：使在途的旧视图加载失效（F10）。
      *  reload / renderLifecycleList 以 seq 识别过期响应。 */
     switchView(view) {
@@ -569,13 +626,11 @@ export function createPlanningMemo() {
     async reload({ silent = false } = {}) {
       const seq = ++this.seq;
       try {
-        const [board, tags] = await Promise.all([
-          gw('/admin/api/memo/board'),
-          gw('/admin/api/memo/tags'),
-        ]);
+        const boardRequest = gw('/admin/api/memo/board');
+        this.prefetchTags({ fresh: true });
+        const board = await boardRequest;
         if (seq !== this.seq || !this.root) return false;
         this.board = board;
-        this.tags = tags;
         // 上一次重排/模式写入的待确认刷新到此完成（BUG-06）：缓存已反映
         // 服务端最新顺序，恢复放行下一次拖动
         if (this._pendingRefresh) {
@@ -876,44 +931,64 @@ export function createPlanningMemo() {
     },
 
     async openReader(id) {
+      const seq = ++this._readerSeq;
+      const epoch = this._epoch;
+      const owner = beginReader?.(id);
+      const current = () => !this._disposed && this.root && epoch === this._epoch
+        && seq === this._readerSeq && (!isReaderCurrent || isReaderCurrent(owner));
+      this._readerId = id;
       let entry;
       try {
         entry = await this.fetchEntry(id);
       } catch (error) {
-        toast(`读取失败：${error.message}`, 'err');
+        if (current()) toast(`读取失败：${error.message}`, 'err');
         return;
       }
-      const tagsHtml = (entry.tags || []).map((t) => tag(esc(t.name), 'slate')).join('');
-      const { root, close } = modal({
-        title: esc(entry.title || '备忘录'),
-        wide: true,
-        body: `
-          <div class="tag-row" style="margin-bottom:10px">
-            ${tag(KIND_LABELS[entry.kind] || entry.kind, entry.kind === 'pinned' ? 'gold' : 'muted')}
-            ${tagsHtml}
-            <span class="muted text-sm">更新于 ${esc((entry.updated_at || '').replace('T', ' ').slice(0, 16))}</span>
-          </div>
-          <div class="memo-md">${renderMarkdown(entry.content || '')}</div>`,
-        footer: `
-          <button class="btn btn-primary" data-reader-edit data-id="${entry.id}">${icon('edit')}编辑</button>
-          ${entry.status === 'active' ? `
-            <button class="btn btn-secondary" data-reader-archive data-id="${entry.id}">${icon('archive')}归档</button>
-            <button class="btn btn-danger-line" data-reader-delete data-id="${entry.id}">${icon('x')}删除</button>` : ''}
-          <button class="btn btn-quiet" data-reader-close>关闭</button>`,
-      });
-      root.querySelector('[data-reader-close]').onclick = close;
-      root.addEventListener('click', (ev) => {
-        const el = ev.target.closest('[data-reader-edit],[data-reader-archive],[data-reader-delete]');
-        if (!el) return;
-        if (el.hasAttribute('data-reader-edit')) {
+      if (!current() || !showReader) return;
+      this._readerCurrent = current;
+      this._refreshReaderContent = (entry) => {
+        if (!current()) return;
+        const tagsHtml = (entry.tags || []).map((t) => tag(esc(t.name), 'slate')).join('');
+        const reader = showReader(owner, {
+          title: esc(entry.title || '备忘录'),
+          html: `
+            <div class="tag-row" style="margin-bottom:10px">
+              ${tag(KIND_LABELS[entry.kind] || entry.kind, entry.kind === 'pinned' ? 'gold' : 'muted')}
+              ${tagsHtml}
+              <span class="muted text-sm">更新于 ${esc((entry.updated_at || '').replace('T', ' ').slice(0, 16))}</span>
+            </div>
+            <div class="memo-md">${renderMarkdown(entry.content || '')}</div>`,
+          actions: `
+            <button class="btn btn-primary" data-reader-edit data-id="${entry.id}">${icon('edit')}编辑</button>
+            ${entry.status === 'active' ? `
+              <button class="btn btn-secondary" data-reader-archive data-id="${entry.id}">${icon('archive')}归档</button>
+              <button class="btn btn-danger-line" data-reader-delete data-id="${entry.id}">${icon('x')}删除</button>` : ''}
+            <button class="btn btn-quiet" data-reader-close>关闭</button>`,
+        });
+        if (!reader) return;
+        const { root, close } = reader;
+        root.querySelector('[data-reader-close]').onclick = () => {
+          this._readerSeq += 1;
+          this._readerId = null;
           close();
-          this.openEditor(entry.id);
-        } else if (el.hasAttribute('data-reader-archive')) {
-          this.lifecycleEntry(entry.id, 'archive', close);
-        } else if (el.hasAttribute('data-reader-delete')) {
-          this.lifecycleEntry(entry.id, 'delete', close);
-        }
-      });
+        };
+        // Assign handlers to each render's buttons; the sidebar has no accumulating listeners.
+        root.querySelectorAll('[data-reader-edit],[data-reader-archive],[data-reader-delete]').forEach((button) => {
+          button.onclick = (ev) => {
+            if (!current()) return;
+            const el = ev.target.closest('[data-reader-edit],[data-reader-archive],[data-reader-delete]');
+            if (!el) return;
+            if (el.hasAttribute('data-reader-edit')) {
+              this.openEditor(entry.id);
+            } else if (el.hasAttribute('data-reader-archive')) {
+              this.lifecycleEntry(entry.id, 'archive', () => { if (current()) close(); });
+            } else if (el.hasAttribute('data-reader-delete')) {
+              this.lifecycleEntry(entry.id, 'delete', () => { if (current()) close(); });
+            }
+          };
+        });
+      };
+      this._refreshReaderContent(entry);
     },
 
     async lifecycleEntry(id, action, closeReader = null) {
@@ -1006,9 +1081,16 @@ export function createPlanningMemo() {
         '确认删除该标签？只解除分类关系，内容不会被删除；失去标签的内容会进入「未分类」。',
         { danger: true, okText: '删除标签', cancelText: '取消' },
       ))) return;
+      const epoch = this._epoch;
+      this.invalidateTags();
       try {
         await gw(`/admin/api/memo/tags/${tagId}/delete`, { method: 'POST' });
         toast('标签已删除');
+        if (this._disposed || epoch !== this._epoch) return;
+        this.invalidateTags();
+        this.tags = this.tags.filter((t) => t.id !== tagId);
+        this.editor?.selectedTagIds.delete(tagId);
+        this.renderEditorTags();
         this.switchView('board');
         this.activeTagId = null;
         // 被删的正是当前筛选项（BUG-09）：同步清掉筛选身份，否则剩余
@@ -1186,6 +1268,7 @@ export function createPlanningMemo() {
       // 单实例守卫必须覆盖「打开在途」：连点新建/编辑只产出第一个编辑器，
       // 两次 fetch 各建一个弹窗会让模块只管住后一个（F01）。
       if (this.editor || this._openingEditor) return;
+      this.prefetchTags();
       this._openingEditor = true;
       const epoch = this._epoch;
       this.fetchEntryOrBlank(entryId).then((seed) => {
@@ -1349,8 +1432,35 @@ export function createPlanningMemo() {
           <button class="btn btn-primary" data-editor-close>${icon('check')}完成</button>`,
       });
       editor.modal = { root, close };
+      root.classList.add('memo-editor');
       this.editor = editor;
       this._saveState = { status: 'idle', error: null };
+      // A soft keyboard can shrink the visual viewport without changing dvh.
+      // Keep this editor's mask and footer inside the visible area, and remove
+      // its listeners through the same close path used by disposal.
+      const viewport = window.visualViewport;
+      if (viewport) {
+        const mask = root.parentElement;
+        const fitEditor = () => {
+          const style = getComputedStyle(mask);
+          const padding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+          mask.style.top = `${viewport.offsetTop}px`;
+          mask.style.bottom = 'auto';
+          mask.style.height = `${viewport.height}px`;
+          root.style.maxHeight = `${Math.max(0, viewport.height - padding)}px`;
+          root.style.setProperty('--memo-viewport-height', `${viewport.height}px`);
+        };
+        viewport.addEventListener('resize', fitEditor);
+        viewport.addEventListener('scroll', fitEditor);
+        window.addEventListener('resize', fitEditor);
+        editor.modal.close = () => {
+          viewport.removeEventListener('resize', fitEditor);
+          viewport.removeEventListener('scroll', fitEditor);
+          window.removeEventListener('resize', fitEditor);
+          close();
+        };
+        fitEditor();
+      }
 
       // 每个编辑会话独立的自动保存泵：send 与 onChange 都闭包绑定本会话，
       // 请求自带身份、响应只回写本会话——旧编辑器的迟到保存改不了新
@@ -1411,7 +1521,13 @@ export function createPlanningMemo() {
           <input type="checkbox" data-tag-chip value="${t.id}" ${editor.selectedTagIds.has(t.id) ? 'checked' : ''}>
           <span>${esc(t.name)}</span>
         </label>`).join('')
-        : '<span class="muted text-sm">还没有标签，可在下方添加</span>';
+        : (this.tagsStatus === 'ready' ? '<span class="muted text-sm">还没有标签，可在下方添加</span>' : '');
+      if (this.tagsStatus === 'loading' || this.tagsStatus === 'unloaded') {
+        host.insertAdjacentHTML('beforeend', '<span class="muted text-sm" role="status">标签加载中…正文可立即编辑</span>');
+      } else if (this.tagsStatus === 'error') {
+        host.insertAdjacentHTML('beforeend', `<span class="muted text-sm">标签读取失败：${esc(this.tagsError?.message || '')}</span><button type="button" class="btn btn-secondary btn-sm" data-tags-retry>重试标签</button>`);
+        host.querySelector('[data-tags-retry]').onclick = () => this.prefetchTags({ fresh: true });
+      }
       host.querySelectorAll('[data-tag-chip]').forEach((chip) => {
         chip.addEventListener('change', () => {
           const id = Number(chip.value);
@@ -1426,12 +1542,14 @@ export function createPlanningMemo() {
     addEditorTag() {
       const editor = this.editor;
       if (!editor) return;
+      const epoch = this._epoch;
       const input = editor.modal.root.querySelector('[data-new-tag-name]');
       const name = input.value.trim();
       if (!name) {
         toast('请输入标签名称', 'warn');
         return;
       }
+      this.invalidateTags();
       // 标签创建登记为本会话在途操作（BUG-05）：完成按钮先等它落定再走
       // 保存排空，「添加后立即完成」不再把标签留在未关联状态；迟到的
       // 落定只作用于本会话对象，不碰已关闭/新开的编辑器。
@@ -1442,9 +1560,12 @@ export function createPlanningMemo() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name }),
           });
-          if (!this.tags.some((t) => t.id === created.id)) this.tags.push(created);
           editor.selectedTagIds.add(created.id);
-          input.value = '';
+          if (input.value.trim() === name) input.value = '';
+          if (this._disposed || epoch !== this._epoch) return true;
+          if (!this.tags.some((t) => t.id === created.id)) this.tags.push(created);
+          this.invalidateTags();
+          this.tagsStatus = 'ready';
           // 迟到的落定只作用于本会话（BUG-05）：编辑器已关闭/被替换时
           // 不得重绘、更不得把脏标记打到当前编辑器上——那会给无关会话
           // 额外发一次保存。会话仍打开时（含关闭等待中）标记脏，让标签
@@ -1455,9 +1576,11 @@ export function createPlanningMemo() {
             this.markEditorDirty();
           }
           if (created.existed) toast(`标签「${created.name}」已存在，已直接选用`);
+          this.prefetchTags({ fresh: true });
           return true;
         } catch (error) {
           toast(`添加标签失败：${error.message}`, 'err');
+          if (!this._disposed && epoch === this._epoch) this.prefetchTags({ fresh: true });
           return false;
         }
       })();
@@ -1556,6 +1679,7 @@ export function createPlanningMemo() {
         // 误判为跨设备冲突。响应只回写闭包里的本会话，旧会话的迟到响应
         // 改不到新编辑器（F01 隔离保持）。
         editor.version = saved.content_version;
+        if (this.editor === editor && this._readerId === saved.id) this.refreshReader(saved.id);
         return saved;
       }
 
@@ -1587,6 +1711,22 @@ export function createPlanningMemo() {
         return { suppressSaved: true };
       }
       return applied ? saved : { ...saved, applied: false };
+    },
+
+    refreshReader(id) {
+      // Keep selection identity: refreshing must never select an item after navigation.
+      const seq = this._readerSeq;
+      const refreshSeq = this._readerRefreshSeq = (this._readerRefreshSeq || 0) + 1;
+      const epoch = this._epoch;
+      this.fetchEntry(id).then((entry) => {
+        if (this._disposed || epoch !== this._epoch || seq !== this._readerSeq || this._readerId !== id
+            || refreshSeq !== this._readerRefreshSeq || !this._readerCurrent?.()) return;
+        // Parent's owner still decides whether the same memo is visible.
+        this._refreshReaderContent?.(entry);
+      }).catch((error) => {
+        if (!this._disposed && epoch === this._epoch && seq === this._readerSeq
+            && refreshSeq === this._readerRefreshSeq && this._readerCurrent?.()) toast(`内容已保存，阅读详情更新失败：${error.message}`, 'warn');
+      });
     },
 
     async _discardJustCreated(saved) {

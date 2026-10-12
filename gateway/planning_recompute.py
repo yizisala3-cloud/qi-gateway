@@ -5,6 +5,7 @@ are preserved. Manual estimate edits resolve cycles through the cycle service.""
 from __future__ import annotations
 
 import logging
+from uuid import UUID
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -134,27 +135,15 @@ def recompute_today(now: datetime | None = None) -> dict[str, Any]:
     return _recompute_for_cycle(now, cycles._current_cycle(now))
 
 
-def _recompute_for_cycle(now: datetime, cycle: PlanningCycle) -> dict[str, Any]:
-    """Recompute the complete cycle using the caller's request-local boundary."""
-    today = cycle.key
-    client = runtime._require_client()
-    open_rows = runtime._rows(
-        client, "planning_occurrence",
-        lambda q: q.eq("display_cycle_date", today.isoformat()).in_("status", list(common.OPEN_STATUSES)),
-    )
-    if not open_rows:
-        return {"updated": 0, "at": common._iso(now), "conflicts": []}
-    tasks = runtime._task_map(client, {row["task_id"] for row in open_rows})
-    result = scheduler.compute_schedule(open_rows, tasks, now)
-    if result.conflicts:
-        log.info("planning 重算冲突: count=%s date=%s",
-                 len(result.conflicts), today.isoformat())
-        return {"updated": 0, "at": common._iso(now), "conflicts": result.conflicts}
-    placed = result.placed
-    updated = 0
+def _recompute_write_payload(
+    open_rows: list[dict[str, Any]], placed: dict[int, tuple[datetime, datetime]],
+    now: datetime,
+) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]]]:
+    """Share estimate ownership, changed-row counting and hollow-round writes."""
+    by_id = {row["id"]: row for row in open_rows}
     pending_rows: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
     for occ_id, (start, end) in placed.items():
-        occ = next(row for row in open_rows if row["id"] == occ_id)
+        occ = by_id[occ_id]
         old_start = common._parse_dt(occ["est_start"], "est_start") if occ.get("est_start") else None
         old_end = common._parse_dt(occ["est_end"], "est_end") if occ.get("est_end") else None
         if old_start == start and old_end == end and occ.get("estimated_time_source") == "automatic":
@@ -172,9 +161,41 @@ def _recompute_for_cycle(now: datetime, cycle: PlanningCycle) -> dict[str, Any]:
             rounds.setdefault((occ["task_id"], occ["round_key"]), []).append((occ, patch))
         else:
             singles.append((occ, patch))
+    singles_payload = [{"id": occ["id"], **patch} for occ, patch in singles]
+    rounds_payload: list[dict[str, Any]] = []
+    for entries in rounds.values():
+        if len(entries) >= 2:
+            (target, target_patch), (sibling, sibling_patch) = entries[0], entries[1]
+            rounds_payload.append({
+                "target_id": target["id"], "sibling_id": sibling["id"],
+                "target_patch": target_patch, "sibling_patch": sibling_patch,
+            })
+        else:
+            occ, patch = entries[0]
+            singles_payload.append({"id": occ["id"], **patch})
+    return len(pending_rows), singles_payload, rounds_payload
+
+
+def _recompute_for_cycle(now: datetime, cycle: PlanningCycle) -> dict[str, Any]:
+    """Recompute the complete cycle using the caller's request-local boundary."""
+    today = cycle.key
+    client = runtime._require_client()
+    open_rows = runtime._rows(
+        client, "planning_occurrence",
+        lambda q: q.eq("display_cycle_date", today.isoformat()).in_("status", list(common.OPEN_STATUSES)),
+    )
+    if not open_rows:
+        return {"updated": 0, "at": common._iso(now), "conflicts": []}
+    tasks = runtime._task_map(client, {row["task_id"] for row in open_rows})
+    result = scheduler.compute_schedule(open_rows, tasks, now)
+    if result.conflicts:
+        log.info("planning 重算冲突: count=%s date=%s",
+                 len(result.conflicts), today.isoformat())
+        return {"updated": 0, "at": common._iso(now), "conflicts": result.conflicts}
+    pending_count, singles_payload, rounds_payload = _recompute_write_payload(open_rows, result.placed, now)
     stale_skipped = 0
     updated = 0
-    if pending_rows:
+    if pending_count:
         # 整批事务 + 完整计算输入复核（#6，迁移 20261002040000 RPC）：
         # * expected 快照覆盖**全部参与计算行**（不只待写行）——固定槽、其它
         #   行状态 / 排序、成员集合任一在读取后漂移 = 整次计算输入失效；
@@ -185,20 +206,6 @@ def _recompute_for_cycle(now: datetime, cycle: PlanningCycle) -> dict[str, Any]:
         #   不留「部分行新排程、部分行旧排程」的混合状态）；
         # * 基础设施失败如实向上传播，不伪装成功（最终修复问题 6）。
         expected = [_recompute_expected_snapshot(row) for row in open_rows]
-        singles_payload: list[dict[str, Any]] = []
-        rounds_payload: list[dict[str, Any]] = []
-        for occ, patch in singles:
-            singles_payload.append({"id": occ["id"], **patch})
-        for entries in rounds.values():
-            if len(entries) >= 2:
-                (target, target_patch), (sibling, sibling_patch) = entries[0], entries[1]
-                rounds_payload.append({
-                    "target_id": target["id"], "sibling_id": sibling["id"],
-                    "target_patch": target_patch, "sibling_patch": sibling_patch,
-                })
-            else:
-                occ, patch = entries[0]
-                singles_payload.append({"id": occ["id"], **patch})
         try:
             response = client.rpc("planning_apply_recompute_batch", {
                 "p_expected": expected,
@@ -210,7 +217,7 @@ def _recompute_for_cycle(now: datetime, cycle: PlanningCycle) -> dict[str, Any]:
         except Exception as exc:
             if common._is_rpc_concurrency_rejection(exc):
                 log.info("planning 重算因并发状态变化整批放弃: %s", exc)
-                stale_skipped = len(pending_rows)
+                stale_skipped = pending_count
             else:
                 raise
         else:
@@ -347,14 +354,33 @@ def trigger_recompute(now: datetime | None = None) -> dict[str, Any]:
 
 # ── 排列保存 ──────────────────────────────────────────────────────
 
-def save_order(ordered_ids: list[int], now: datetime | None = None) -> dict[str, Any]:
+def save_order(ordered_ids: list[int], now: datetime | None = None, *,
+               request_key: str | None = None,
+               expected_order: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     now = now or runtime._now()
-    today = cycles._current_cycle(now).key
-    if not isinstance(ordered_ids, list) or not all(isinstance(v, int) for v in ordered_ids):
+    if not isinstance(ordered_ids, list) or not all(type(v) is int and v > 0 for v in ordered_ids):
         raise common.PlanningError("invalid_payload", "order must be an array of occurrence ids")
     if len(set(ordered_ids)) != len(ordered_ids):
         raise common.PlanningError("invalid_payload", "order contains duplicate ids")
     client = runtime._require_client()
+    if request_key is not None:
+        try:
+            request_key = str(UUID(request_key))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise common.PlanningError("invalid_payload", "排序请求身份无效") from exc
+        replay = runtime._rows(client, "planning_reorder_request",
+                               lambda q: q.eq("request_key", request_key).limit(1))
+        if replay:
+            if replay[0]["ordered_ids"] != ordered_ids:
+                raise common.PlanningError("concurrent_modified", "排序请求身份已用于另一顺序", 409)
+            return {**replay[0]["result"], "replayed": True}
+    settings = db.load_app_settings((common.PLANNING_BOUNDARY_STATE_KEY,
+                                    common.PLANNING_AUTO_RECOMPUTE_ENABLED_KEY))
+    if any(value is db.APP_SETTING_QUERY_FAILED for value in settings.values()):
+        raise common.PlanningError("database_unavailable", "排序配置暂时无法读取", 503)
+    boundary, transition, _ = cycles._parse_boundary_state(
+        settings[common.PLANNING_BOUNDARY_STATE_KEY], now)
+    today = cycles.planning_cycle_at(now, boundary, transition).key
     open_rows = runtime._rows(
         client, "planning_occurrence",
         lambda q: q.eq("display_cycle_date", today.isoformat()).in_("status", list(common.OPEN_STATUSES)),
@@ -366,6 +392,15 @@ def save_order(ordered_ids: list[int], now: datetime | None = None) -> dict[str,
     missing = [occ_id for occ_id in by_id if occ_id not in set(ordered_ids)]
     if missing:
         raise common.PlanningError("invalid_payload", "order must include every open occurrence of today")
+    if expected_order is not None:
+        expected = [{"id": row["id"], "sort_order": row.get("sort_order", 0),
+                     "status": row["status"]} for row in open_rows]
+        if (not isinstance(expected_order, list)
+                or any(not isinstance(row, dict) or set(row) != {"id", "sort_order", "status"}
+                       for row in expected_order)
+                or sorted(expected_order, key=lambda row: str(row["id"]))
+                != sorted(expected, key=lambda row: str(row["id"]))):
+            raise common.PlanningError("concurrent_modified", "待办状态或顺序已改变，请刷新后重新排列", 409)
 
     # 中空待办的结束阶段必须排在其开始阶段之后。
     position = {occ_id: index for index, occ_id in enumerate(ordered_ids)}
@@ -380,20 +415,44 @@ def save_order(ordered_ids: list[int], now: datetime | None = None) -> dict[str,
                 None,
             )
             if start_occ and position[occ_id] < position[start_occ["id"]]:
-                raise common.PlanningError("invalid_payload", "hollow end phase must stay after its start phase")
+                raise common.PlanningError("schedule_conflict", "中空待办的结束阶段必须排在开始阶段之后", 409)
 
-    for occ_id, index in position.items():
-        client.table("planning_occurrence").update({
-            "sort_order": index, "updated_at": common._iso(now),
-        }).eq("id", occ_id).execute()
-    request_recompute("reorder", now)
-    return {"saved": len(ordered_ids)}
+    tasks = runtime._task_map(client, {row["task_id"] for row in open_rows})
+    if len(tasks) != len({row["task_id"] for row in open_rows}):
+        raise common.PlanningError("concurrent_modified", "待办定义已改变，请刷新后重试", 409)
+    candidate = [{**row, "sort_order": position[row["id"]]} for row in open_rows]
+    schedule = scheduler.compute_schedule(candidate, tasks, now)
+    if schedule.conflicts:
+        raise common.PlanningError("schedule_conflict", "此顺序存在排程冲突，尚未保存", 409,
+                                   {"conflicts": schedule.conflicts})
+    enabled_raw = settings[common.PLANNING_AUTO_RECOMPUTE_ENABLED_KEY]
+    enabled = enabled_raw if isinstance(enabled_raw, bool) else True
+    _, singles, rounds = _recompute_write_payload(open_rows, schedule.placed, now) if enabled else (0, [], [])
+    try:
+        response = client.rpc("planning_save_order_with_schedule", {
+            "p_order": ordered_ids, "p_cycle_date": today.isoformat(),
+            "p_expected": open_rows, "p_tasks": list(tasks.values()),
+            "p_settings": settings, "p_now": common._iso(now),
+            "p_request_key": request_key, "p_recompute_enabled": enabled,
+            "p_singles": singles, "p_rounds": rounds,
+        }).execute()
+        return response.data
+    except Exception as exc:
+        if (getattr(exc, "code", None) == common.CONCURRENCY_ERRCODE
+                or getattr(exc, "sqlstate", None) == common.CONCURRENCY_ERRCODE
+                or "planning_save_order: inputs changed" in str(exc)):
+            raise common.PlanningError("concurrent_modified",
+                                       "待办列表、顺序或配置已改变，本次排序未保存，请刷新后重试", 409) from exc
+        log.exception("planning 排序事务失败: cycle=%s count=%s request_key=%s",
+                      today, len(ordered_ids), request_key)
+        raise
 
 
 def save_order_from_payload(payload: Any, now: datetime | None = None) -> dict[str, Any]:
     if not isinstance(payload, dict) or "order" not in payload:
         raise common.PlanningError("invalid_payload", "order is required")
-    return save_order(payload["order"], now)
+    return save_order(payload["order"], now, request_key=payload.get("request_key"),
+                      expected_order=payload.get("expected_order"))
 
 
 def _manual_estimate_patch(

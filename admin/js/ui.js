@@ -1,5 +1,5 @@
 // ui.js - shared retro UI components: icons, tags, modal, toast, detail panel
-export const ASSET_VERSION = '20261012-unified-selects';
+export const ASSET_VERSION = '20261012-sort-immediate';
 
 /* ---------- SVG icons (stroke, no emoji; object entries = fill icons with own viewBox) ---------- */
 const ICON_PATHS = {
@@ -212,7 +212,7 @@ export function delegate(root, actions) {
 }
 
 /* ---------- detail panel (right column / mobile drawer) ---------- */
-export function createDetailPanel(host) {
+export function createDetailPanel(host, { fitViewport = false } = {}) {
   host.insertAdjacentHTML('beforeend', `
     <aside class="detail-panel" aria-label="详情栏">
       <div class="detail-head">
@@ -242,6 +242,30 @@ export function createDetailPanel(host) {
   const expand = () => host.classList.remove('detail-collapsed');
   const openDrawer = () => { expand(); host.classList.add('detail-open'); };
   const closeDrawer = () => host.classList.remove('detail-open');
+  let viewportFrame = null;
+  const updateViewport = () => {
+    viewportFrame = null;
+    if (!fitViewport || !panel.isConnected) return;
+    const viewport = window.visualViewport;
+    const height = viewport?.height || window.innerHeight;
+    const top = viewport?.offsetTop || 0;
+    if (mq.matches) {
+      panel.style.setProperty('--detail-viewport-top', `${top}px`);
+      panel.style.setProperty('--detail-available', `${height}px`);
+    } else {
+      panel.style.setProperty('--detail-available', `${Math.max(0, top + height - panel.getBoundingClientRect().top - 12)}px`);
+    }
+  };
+  const scheduleViewport = () => {
+    if (fitViewport && viewportFrame === null) viewportFrame = requestAnimationFrame(updateViewport);
+  };
+  if (fitViewport) {
+    window.addEventListener('resize', scheduleViewport);
+    window.addEventListener('scroll', scheduleViewport, true);
+    window.visualViewport?.addEventListener('resize', scheduleViewport);
+    window.visualViewport?.addEventListener('scroll', scheduleViewport);
+    scheduleViewport();
+  }
 
   panel.querySelector('.detail-collapse').addEventListener('click', () => {
     if (mq.matches) closeDrawer(); else host.classList.add('detail-collapsed');
@@ -262,6 +286,23 @@ export function createDetailPanel(host) {
       expand();
       bodyEl.scrollTop = 0;
       if (mq.matches) openDrawer();
+      scheduleViewport();
+    },
+    reset() {
+      titleEl.innerHTML = '';
+      badgesEl.innerHTML = '';
+      bodyEl.innerHTML = empty('未选择条目', '点击左侧列表中的卡片查看详情');
+      footEl.innerHTML = '';
+      bodyEl.scrollTop = 0;
+      closeDrawer();
+      scheduleViewport();
+    },
+    dispose() {
+      if (viewportFrame !== null) cancelAnimationFrame(viewportFrame);
+      window.removeEventListener('resize', scheduleViewport);
+      window.removeEventListener('scroll', scheduleViewport, true);
+      window.visualViewport?.removeEventListener('resize', scheduleViewport);
+      window.visualViewport?.removeEventListener('scroll', scheduleViewport);
     },
     closeDrawer,
     isOpenMobile: () => host.classList.contains('detail-open'),

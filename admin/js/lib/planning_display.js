@@ -1,5 +1,5 @@
 // Planning display helpers: argument-only formatting and HTML; no DOM or network writes.
-import { tag, icon, esc } from '../ui.js?v=20261012-unified-selects';
+import { tag, icon, esc } from '../ui.js?v=20261012-sort-immediate';
 
 export const TASK_TYPE_LABELS = {
   daily: '每日', interval: '间歇', weekly: '每周', monthly: '每月', once: '单次', idle: '闲时',
@@ -76,7 +76,8 @@ export function miniEmpty(msg) {
 
 export function itemMeta(occ) {
   const parts = [];
-  if (occ.est_start || occ.est_end) parts.push(`预估 ${fmtRange(occ.est_start, occ.est_end)}`);
+  if (occ.time_updating) parts.push('预估时间更新中…');
+  else if (occ.est_start || occ.est_end) parts.push(`预估 ${fmtRange(occ.est_start, occ.est_end)}`);
   if (occ.actual_start || occ.actual_end) {
     parts.push(`实际 ${fmtRange(occ.actual_start, occ.actual_end)}`);
   }

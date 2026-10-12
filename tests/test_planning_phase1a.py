@@ -769,8 +769,16 @@ class PlanningIdentityPathTests(unittest.TestCase):
              "phase_group": group_b, "phase": "end", "status": "pending",
              "display_cycle_date": "2026-09-24"},
         ]
-        with mock.patch.object(planning_recompute, "request_recompute"):
-            self.assertEqual(planning.save_order([4, 1], self.now), {"saved": 2})
+        self.db.rows["planning_task"] = [{"id": 7, "time_mode": "duration",
+            "estimated_minutes": 10, "hollow_start_minutes": 10,
+            "hollow_end_minutes": 10, "hollow_wait_minutes": 30}]
+        for row in self.db.rows["planning_occurrence"]:
+            row.update(sort_order=row["id"], planned_minutes=10, schedule_managed=True,
+                       is_fixed=False, fixed_source=None, estimated_time_source="unassigned")
+        result = planning.save_order([4, 1], self.now)
+        self.assertEqual(result["saved"], 2)
+        self.assertTrue(result["recompute_enabled"])
+        self.assertTrue(result["schedule_applied"])
 
     def test_old_scheduler_phase_lookup_is_scoped_to_business_round(self):
         task = {"id": 7, "time_mode": "duration", "estimated_minutes": 10,

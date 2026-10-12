@@ -289,7 +289,7 @@ class PlanningPageContractTests(unittest.TestCase):
 
     def test_reorder_conflict_recovers_gracefully(self):
         # BUG-10：排列期间列表变化导致确认被拒时，自动刷新并退出排列
-        self.assertIn("order must include every open occurrence", self.sorter)
+        self.assertIn("error.code === 'concurrent_modified'", self.sorter)
         self.assertIn("待办列表有变化，请重新进入排列", self.sorter)
 
     def test_manual_recompute_button(self):
@@ -313,7 +313,7 @@ class PlanningPageContractTests(unittest.TestCase):
             "`/admin/api/planning/tasks/${taskId}`",
             "timer_minutes: timer || null",
             "alarm_start: host.querySelector('[data-alarm-start]').checked",
-            "if (fresh) this.showOccurrenceDetail(fresh);",
+            "if (fresh && this.selectionIsCurrent(owner)) this.showOccurrenceDetail(fresh);",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.page)
@@ -426,7 +426,7 @@ class PlanningPageContractTests(unittest.TestCase):
 
     def test_reorder_toast_respects_auto_recompute_switch(self):
         # 自动重算关闭时不得提示「等待自动重算」（需求 16.3）
-        self.assertIn("getBoard()?.recompute?.enabled === false", self.sorter)
+        self.assertIn("saved?.recompute_enabled ?? getBoard()?.recompute?.enabled", self.sorter)
         self.assertIn("自动重算已关闭", self.sorter)
 
     def test_task_form_sends_window_clear_values(self):
@@ -618,7 +618,7 @@ class PlanningPageContractTests(unittest.TestCase):
             "if (el) el.disabled = false;",
             # 操作成功后以服务端数据重绘详情（页面刷新后状态同样来自持久化）
             "const fresh = this.tasks.find((t) => t.id === id);",
-            "if (fresh) this.showTaskDetail(fresh);",
+            "if (fresh && this.selectionIsCurrent(owner)) this.showTaskDetail(fresh);",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.page)

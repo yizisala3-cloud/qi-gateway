@@ -984,7 +984,7 @@ def test_discard_rpc_failure_leaves_everything_unchanged():
 def test_recompute_sort_order_drift_skips_and_preserves_mark():
     # 问题 3：A 按 A→B 算出 09:00/09:30；持久化阶段用户 save_order 改为
     # B→A → sort_order 漂移 → 条件写未命中 → 旧结果全部放弃（updated=0、
-    # stale_skipped=2）；重算等待标记不被清除；下一次 recompute 按 B→A
+    # stale_skipped=2）；排序提交后新到的请求标记不被清除；下一次 recompute 按 B→A
     # 生成新时间。
     with Context() as c:
         c.create("daily", at(24, 10), estimated_minutes=30)
@@ -1003,15 +1003,16 @@ def test_recompute_sort_order_drift_skips_and_preserves_mark():
             result = original_estimate(start, end, source=source, fixed_source=fixed_source)
             if not order_state["saved"]:
                 order_state["saved"] = True
-                # 用户并发：save_order 改为 B→A（产生新排序）；其
-                # request_recompute 在 Context 中被 mock，此处直接写状态行
-                # 模拟并发产生的新重算请求标记
+                # 用户并发：save_order 改为 B→A 并立即保存新时间；
+                # request_recompute 在 Context 中被 mock，此处直接写状态行，
+                # 模拟排序提交后新到的编辑重算请求。
                 planning.save_order([task_b["id"], task_a["id"]], at(24, 12))
+                order_state["estimates"] = {row["id"]: (row["est_start"], row["est_end"])
+                                            for row in (row_a, row_b)}
                 state_row["requested_at"] = planning._iso(at(24, 12))
-                state_row["reason"] = "reorder"
+                state_row["reason"] = "edit"
             return result
 
-        est_before = {"a": row_a["est_start"], "b": row_b["est_start"]}
         planning_common._estimate_patch = patch_then_reorder
         try:
             result = planning_recompute.recompute_today(at(24, 13))
@@ -1019,9 +1020,11 @@ def test_recompute_sort_order_drift_skips_and_preserves_mark():
             planning_common._estimate_patch = original_estimate
         assert result["updated"] == 0
         assert result.get("stale_skipped") == 2
-        # 旧结果不得落库（est 保持读取时的值）
-        assert row_a["est_start"] == est_before["a"]
-        assert row_b["est_start"] == est_before["b"]
+        # 排序确认立即更新时间；迟到的旧计算不得覆盖这次新提交。
+        assert row_b["est_start"] == planning._iso(at(24, 12))
+        assert row_a["est_start"] == planning._iso(at(24, 12, 30))
+        for row in (row_a, row_b):
+            assert (row["est_start"], row["est_end"]) == order_state["estimates"][row["id"]]
         # 新重算请求仍然保留（未被 stale recompute 清掉）
         assert state_row["requested_at"] == planning._iso(at(24, 12))
         # 下一次 recompute 按 B→A 正常生成：B 先于 A
@@ -1034,7 +1037,7 @@ def test_recompute_hollow_round_sort_order_drift_skips_whole_round():
     # #13 复现 A：两个中空待办按 A→B 算出排程；持久化阶段用户 save_order
     # 把完整顺序改为 B→A → 中空 expected 快照此前不含 sort_order，旧结果
     # （A 在前）仍全部写入且无 stale_skipped。修复后快照携带两阶段排序：
-    # 两轮旧结果整体放弃（updated=0、stale_skipped=4），原 est 不变；
+    # 两轮旧结果整体放弃（updated=0、stale_skipped=4），新排序已提交的 est 不变；
     # 下一次重算按 B→A 生成新时间。
     with Context() as c:
         c.create("daily", at(24, 10), estimated_minutes=30, **HOLLOW)
@@ -1045,8 +1048,6 @@ def test_recompute_hollow_round_sort_order_drift_skips_whole_round():
         a_start, a_end = rows_by[(task_a["id"], "start")], rows_by[(task_a["id"], "end")]
         b_start, b_end = rows_by[(task_b["id"], "start")], rows_by[(task_b["id"], "end")]
         assert a_start["sort_order"] < b_start["sort_order"]  # 初始 A 在前
-        est_before = {r["id"]: (r["est_start"], r["est_end"])
-                      for r in (a_start, a_end, b_start, b_end)}
 
         order_state = {"saved": False}
         original_estimate = planning_common._estimate_patch
@@ -1059,6 +1060,8 @@ def test_recompute_hollow_round_sort_order_drift_skips_whole_round():
                 planning.save_order(
                     [b_start["id"], b_end["id"], a_start["id"], a_end["id"]],
                     at(24, 12))
+                order_state["estimates"] = {r["id"]: (r["est_start"], r["est_end"])
+                                            for r in (a_start, a_end, b_start, b_end)}
             return result
 
         planning_common._estimate_patch = patch_then_reorder
@@ -1070,7 +1073,8 @@ def test_recompute_hollow_round_sort_order_drift_skips_whole_round():
         assert result["updated"] == 0
         assert result.get("stale_skipped") == 4
         for row in (a_start, a_end, b_start, b_end):
-            assert (row["est_start"], row["est_end"]) == est_before[row["id"]]
+            assert (row["est_start"], row["est_end"]) == order_state["estimates"][row["id"]]
+        assert b_start["est_start"] == planning._iso(at(24, 12))
         # 下一次重算按 B→A 正常生成：B 先于 A（B.end 等待收口后游标 17:00，
         # A.start 从 17:00 起）。
         planning_recompute.recompute_today(at(24, 15))

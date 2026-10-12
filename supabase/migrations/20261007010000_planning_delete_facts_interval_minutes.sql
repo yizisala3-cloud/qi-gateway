@@ -154,6 +154,11 @@ update public.planning_task
    and after_completion_minutes is null
    and interval_days is not null;
 
+-- 旧约束要求 after_completion 的 interval_days 非空，必须在清空旧列前
+-- 移除。同一事务随后安装分钟约束；安装失败时字段和回填整体回滚。
+alter table public.planning_task
+    drop constraint if exists planning_task_after_completion_interval_check;
+
 update public.planning_task
    set interval_days = null
  where refresh_mode = 'after_completion'
@@ -163,8 +168,6 @@ update public.planning_task
 -- 视为通过——after_completion 行的分钟必须显式非空且在 1–525600。存量
 -- 校验失败（既有 after_completion 行两列皆空）会让本迁移显式失败，暴露
 -- 需人工处理的异常数据，不为部署方便猜测间隔回填。
-alter table public.planning_task
-    drop constraint if exists planning_task_after_completion_interval_check;
 alter table public.planning_task
     add constraint planning_task_after_completion_interval_check
     check ((refresh_mode is distinct from 'after_completion')

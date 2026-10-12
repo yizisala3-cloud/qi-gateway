@@ -4956,5 +4956,116 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
         self.assertEqual(str(due), "2026-09-24 11:30:00+08:00")
 
 
+class PlanningIntervalUpgradeOnPostgresTests(unittest.TestCase):
+    """Replay the minute migration against populated legacy day-based tasks."""
+
+    MIGRATION_NAME = "20261007010000_planning_delete_facts_interval_minutes.sql"
+
+    @classmethod
+    def setUpClass(cls):
+        if not _STACK_AVAILABLE:
+            raise unittest.SkipTest("pgserver + psycopg are not installed")
+        if os.environ.get("QIGATEWAY_PG_PLANNING_TEST") != "1":
+            raise unittest.SkipTest("set QIGATEWAY_PG_PLANNING_TEST=1")
+        cls.tempdir = tempfile.TemporaryDirectory(prefix="qigate-interval-upgrade-")
+        cls.server = None
+        cls.conn = None
+        cls.addClassCleanup(cls._cleanup)
+        _ensure_pg_timezone_data()
+        cls.server = pgserver.get_server(Path(cls.tempdir.name), cleanup_mode="stop")
+        cls.conn = psycopg.connect(cls.server.get_uri(), autocommit=True)
+        cls.conn.execute("create role anon nologin;"
+                         "create role authenticated nologin;"
+                         "create role service_role nologin bypassrls;")
+
+    @classmethod
+    def _cleanup(cls):
+        try:
+            if cls.conn is not None:
+                cls.conn.close()
+        finally:
+            try:
+                if cls.server is not None:
+                    cls.server.cleanup()
+            finally:
+                cls.tempdir.cleanup()
+
+    def setUp(self):
+        self.conn.execute("drop schema public cascade; create schema public;"
+                          "create table public.app_settings (key text primary key,"
+                          " value jsonb, updated_at timestamptz default now());")
+        for path in sorted(MIGRATIONS_DIR.glob("*planning*.sql")):
+            if path.name < self.MIGRATION_NAME:
+                self.conn.execute(path.read_text(encoding="utf-8"))
+
+    def _seed(self, mode, days):
+        return self.conn.execute(
+            "insert into public.planning_task"
+            " (content,task_type,time_mode,estimated_minutes,refresh_mode,"
+            " interval_days,refresh_anchor_at) values"
+            " ('migration fixture','interval','duration',15,%s,%s,"
+            " case when %s='fixed_interval' then"
+            " '2026-10-05T07:00:00+08:00'::timestamptz else null end)"
+            " returning id", (mode, days, mode),
+        ).fetchone()[0]
+
+    def _upgrade(self):
+        self.conn.execute(
+            (MIGRATIONS_DIR / self.MIGRATION_NAME).read_text(encoding="utf-8"))
+
+    def test_populated_legacy_tasks_convert_and_new_constraint_enforces_minutes(self):
+        converted = [(self._seed("after_completion", days), days * 1440)
+                     for days in (1, 2, 365)]
+        fixed_id = self._seed("fixed_interval", 3)
+        self._upgrade()
+        for task_id, minutes in converted:
+            with self.subTest(minutes=minutes):
+                self.assertEqual(self.conn.execute(
+                    "select interval_days,after_completion_minutes"
+                    " from public.planning_task where id=%s", (task_id,),
+                ).fetchone(), (None, minutes))
+        self.assertEqual(self.conn.execute(
+            "select interval_days,after_completion_minutes"
+            " from public.planning_task where id=%s", (fixed_id,),
+        ).fetchone(), (3, None))
+        for invalid in (None, 0, 525601):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(psycopg.errors.CheckViolation) as failure:
+                    self.conn.execute(
+                        "update public.planning_task set after_completion_minutes=%s"
+                        " where id=%s", (invalid, converted[0][0]))
+                self.assertEqual(failure.exception.diag.constraint_name,
+                                 "planning_task_after_completion_interval_check")
+
+    def test_complete_migration_can_be_replayed_without_changing_intervals(self):
+        task_id = self._seed("after_completion", 2)
+        self._upgrade()
+        self._upgrade()
+        self.assertEqual(self.conn.execute(
+            "select interval_days,after_completion_minutes"
+            " from public.planning_task where id=%s", (task_id,),
+        ).fetchone(), (None, 2880))
+
+    def test_invalid_legacy_interval_rolls_back_the_entire_upgrade(self):
+        # Model corrupt historical data while preserving the new migration's
+        # requirement to reject unknown intervals instead of inventing one.
+        self.conn.execute("alter table public.planning_task drop constraint"
+                          " planning_task_after_completion_interval_check")
+        task_id = self._seed("after_completion", None)
+        with self.assertRaises(psycopg.errors.CheckViolation):
+            self._upgrade()
+        self.conn.execute("rollback")
+        self.assertIsNone(self.conn.execute(
+            "select to_regclass('public.planning_creation_request')").fetchone()[0])
+        self.assertFalse(self.conn.execute(
+            "select exists(select 1 from information_schema.columns"
+            " where table_schema='public' and table_name='planning_task'"
+            " and column_name='after_completion_minutes')").fetchone()[0])
+        self.assertEqual(self.conn.execute(
+            "select interval_days from public.planning_task where id=%s",
+            (task_id,),
+        ).fetchone(), (None,))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,25 +1,25 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
 // 数据按需加载：今日看板保留 30 秒提醒轮询，首次/失效切入时刷新可见列表。
-import { gw } from '../api.js?v=20261012-unified-selects';
+import { gw } from '../api.js?v=20261012-sort-immediate';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, esc,
   createDetailPanel,
-} from '../ui.js?v=20261012-unified-selects';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261012-unified-selects';
-import { createRetroSelectField } from '../lib/retro_select.js?v=20261012-unified-selects';
+} from '../ui.js?v=20261012-sort-immediate';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261012-sort-immediate';
+import { createRetroSelectField } from '../lib/retro_select.js?v=20261012-sort-immediate';
 import {
   TASK_TYPE_LABELS, TASK_TYPES, STATUS_META, CLOSED_STATUSES,
   fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty, formatIntervalMinutes,
   itemMeta, isClosedOcc, formatLoggedDuration, durationText, durationDetailRows,
   itemBadges, itemHtml,
-} from '../lib/planning_display.js?v=20261012-unified-selects';
-import { openTaskForm } from '../lib/planning_task_form.js?v=20261012-unified-selects';
-import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261012-unified-selects';
-import { createPlanningSort } from '../lib/planning_sort.js?v=20261012-unified-selects';
-import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261012-unified-selects';
-import { createPlanningMemo } from '../lib/planning_memo.js?v=20261012-unified-selects';
-import { createPlanningReads } from '../lib/planning_reads.js?v=20261012-unified-selects';
+} from '../lib/planning_display.js?v=20261012-sort-immediate';
+import { openTaskForm } from '../lib/planning_task_form.js?v=20261012-sort-immediate';
+import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261012-sort-immediate';
+import { createPlanningSort } from '../lib/planning_sort.js?v=20261012-sort-immediate';
+import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261012-sort-immediate';
+import { createPlanningMemo } from '../lib/planning_memo.js?v=20261012-sort-immediate';
+import { createPlanningReads } from '../lib/planning_reads.js?v=20261012-sort-immediate';
 
 // 部分完成属于开放生命周期：实例仍在「进度中」，直到「已全部完成」才关闭
 const OPEN_STATUSES = ['pending', 'in_progress', 'deferred', 'partial'];
@@ -49,6 +49,11 @@ export default {
   loadedTabs: null, // 仅用于备忘录的按需挂载
 
   async mount(root) {
+    this.selected = null;
+    this.reorderMode = false;
+    this.board = null;
+    this.tasks = [];
+    this.occurrences = [];
     this.root = root;
     this.reads = createPlanningReads();
     this.readErrors = new Map();
@@ -64,9 +69,9 @@ export default {
       loadTasks: () => this.loadTasks({ fresh: true }),
       loadOccurrences: () => this.loadOccurrences({ fresh: true }),
     });
-    this.sort ||= createPlanningSort({
-      getRoot: () => this.root,
-      getProgressList: () => this.progressList,
+    this.sort = createPlanningSort({
+      getRoot: () => this.reads === mountedReads ? this.root : null,
+      getProgressList: () => this.reads === mountedReads ? this.progressList : null,
       getBoard: () => this.board,
       getActiveTab: () => this.activeTab,
       getActiveSection: () => this.activeSection,
@@ -75,7 +80,26 @@ export default {
       loadToday: () => this.loadToday({ fresh: true }),
       getReorderMode: () => this.reorderMode,
       setReorderMode: (enabled) => { this.reorderMode = enabled; },
+      invalidateToday: () => { if (this.reads === mountedReads) mountedReads.invalidate(['today']); },
+      onSaved: (ids, result, applyCandidate = true) =>
+        this.orderSaved(ids, result, applyCandidate && this.reads === mountedReads),
     });
+    this.memo = createPlanningMemo({
+      beginReader: (id) => {
+        this.clearSelection();
+        this.selected = { kind: 'memo', id };
+        return { selected: this.selected, reads: this.reads, tab: this.activeTab };
+      },
+      isReaderCurrent: (owner) => this.selectionIsCurrent(owner) && this.activeTab === 'memo',
+      showReader: (owner, content) => {
+        if (!this.selectionIsCurrent(owner)) return null;
+        this.detail.render(content);
+        return { root: this.detail.el, close: () => {
+          if (this.selectionIsCurrent(owner)) this.clearSelection();
+        } };
+      },
+    });
+    this.memo.prefetchTags();
     this.activeTab = 'today';
     this.activeSection = 'progress';
     root.innerHTML = `
@@ -104,6 +128,7 @@ export default {
               <button class="btn btn-primary btn-sm" data-act="confirm-reorder">${icon('check')}确认</button>
               <button class="btn btn-danger-line btn-sm" data-act="cancel-reorder">${icon('x')}撤销</button>
             </div>
+            <div class="banner banner-danger" data-reorder-feedback role="alert" hidden></div>
           </div>
 
           <div class="plan-region" id="planning-today" data-panel="today">
@@ -198,7 +223,7 @@ export default {
       </div>`;
 
     const actionRoot = root.querySelector('#planning-layout');
-    this.detail = createDetailPanel(actionRoot);
+    this.detail = createDetailPanel(actionRoot, { fitViewport: true });
     this.progressList = root.querySelector('#planning-progress');
     actionRoot.addEventListener('click', (e) => {
       if (this.reads === mountedReads) this.handleItemClick(e);
@@ -255,6 +280,7 @@ export default {
 
   switchTab(tab) {
     if (!tab || tab === this.activeTab || !this.root) return;
+    this.clearSelection();
     if (this.reorderMode) {
       // 排列模式只在「当前待办」页签内有效，切走即退出并还原列表
       this.exitReorder();
@@ -275,7 +301,6 @@ export default {
       if (!this.loadedTabs.has('memo')) {
         // 备忘录数据按需加载；编辑器中的未保存内容由模块自身生命周期承接
         this.loadedTabs.add('memo');
-        this.memo ||= createPlanningMemo();
         this.memo.mount(this.root.querySelector('[data-memo-root]'));
       } else {
         // 已挂载过的备忘录重返（BUG-08）：首次读取失败不能被当成已加载，
@@ -331,6 +356,9 @@ export default {
   },
 
   unmount() {
+    this.clearSelection();
+    this.sort?.exitReorder();
+    this.detail?.dispose();
     this.reads?.dispose();
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = null;
@@ -374,10 +402,12 @@ export default {
   },
 
   loadToday(options = {}) {
+    if (this.reorderMode) return Promise.resolve(true);
     return this.loadList('today', {
       ...options,
       request: () => gw('/admin/api/planning/today'),
       apply: (board) => {
+        if (this.reorderMode) return;
         this.board = board;
         this.renderBoard();
         this.reminder.checkAlarms(board);
@@ -529,7 +559,7 @@ export default {
       banner.innerHTML = '';
     }
 
-    if (this.selected?.kind === 'occ') {
+    if (this.selected?.kind === 'occ' && this.activeTab === 'today') {
       const occ = this.findOccurrence(this.selected.id);
       // 轮询保护：详情栏内有用户修改过但尚未保存的输入（闹钟/计时器）时，
       // 跳过本轮详情重绘，不覆盖未保存内容（保存/切换后自然恢复刷新）
@@ -585,6 +615,10 @@ export default {
           ${task.is_active ? '' : tag('已删除', 'red')}
         </div></div>
       </div>`).join('');
+    if (this.activeTab === 'all' && this.selected?.kind === 'task') {
+      const task = this.tasks.find((t) => t.id === this.selected.id);
+      if (task) this.showTaskDetail(task);
+    }
   },
 
   renderOccurrences() {
@@ -609,9 +643,24 @@ export default {
           ${this.itemBadges(occ)}
         </div></div>
       </div>`).join('');
+    if (this.activeTab === 'all' && this.selected?.kind === 'occ' && !this.detailHasUnsavedInput()) {
+      const occ = this.occurrences.find((o) => o.id === this.selected.id);
+      if (occ) this.showOccurrenceDetail(occ);
+    }
   },
 
   /* ---------- 详情栏 ---------- */
+
+  clearSelection() {
+    this.selected = null;
+    this.root?.querySelectorAll('.plan-item.selected').forEach((el) => el.classList.remove('selected'));
+    this.detail?.reset();
+  },
+
+  selectionIsCurrent(owner) {
+    return !!owner && !!this.root && this.reads === owner.reads
+      && this.selected === owner.selected && this.activeTab === owner.tab;
+  },
 
   select(kind, id) {
     this.selected = { kind, id };
@@ -626,6 +675,8 @@ export default {
   },
 
   async showOccurrenceDetail(occ) {
+    if (!this.detail || this.selected?.kind !== 'occ' || this.selected.id !== occ.id
+        || !['today', 'all'].includes(this.activeTab)) return;
     this.markSelected(`[data-occ="${occ.id}"], [data-occ-all="${occ.id}"]`);
     const actions = this.occurrenceActions(occ);
     this.detail.render({
@@ -634,7 +685,7 @@ export default {
       html: `
         <div class="kv"><span class="k">原始规划周期</span><span class="v">${esc(occ.schedule_date || occ.for_date)}</span></div>
         ${occ.display_cycle_date ? `<div class="kv"><span class="k">当前展示周期</span><span class="v">${esc(occ.display_cycle_date)}</span></div>` : ''}
-        <div class="kv"><span class="k">预估时间</span><span class="v">${fmtRange(occ.est_start, occ.est_end)}</span></div>
+        <div class="kv"><span class="k">预估时间</span><span class="v">${occ.time_updating ? '更新中…' : fmtRange(occ.est_start, occ.est_end)}</span></div>
         ${(occ.window_start_at || occ.window_end_at) ? `<div class="kv"><span class="k">可安排时段</span><span class="v">${[
           occ.window_start_at ? `不早于 ${fmtClock(occ.window_start_at)}` : '',
           occ.window_end_at ? `最晚完成 ${fmtClock(occ.window_end_at)}` : '',
@@ -644,15 +695,14 @@ export default {
         ${occ.is_limited ? `<div class="kv"><span class="k">限时截止</span><span class="v">${fmtClock(occ.deadline_at)}</span></div>` : ''}
         ${occ.partial_note ? `<div class="kv kv-block"><span class="k">部分完成说明</span><span class="v">${esc(occ.partial_note)}</span></div>` : ''}
         ${occ.partial_at ? `<div class="kv"><span class="k">部分完成时间</span><span class="v">${fmtDue(occ.partial_at)}</span></div>` : ''}
-        <div class="kv kv-block"><span class="k">提醒</span><span class="v">
+        <div class="kv kv-block"><span class="k">提醒</span><div class="v plan-alarm-controls">
           <div class="tag-row" data-alarm-controls data-task-id="${occ.task_id}">
             <label class="inline"><input type="checkbox" data-alarm-start ${occ.alarm_start ? 'checked' : ''}> 开始闹钟</label>
             <label class="inline"><input type="checkbox" data-alarm-end ${occ.alarm_end ? 'checked' : ''}> 结束闹钟</label>
             <input type="text" data-timer-input placeholder="计时器，如 1h30m" value="${esc(occ.timer_minutes ?? '')}" style="width:130px">
             <button class="btn btn-secondary btn-sm" data-act="occ-save-alarm" data-id="${occ.id}">${icon('check')}保存提醒</button>
           </div>
-          <p class="muted text-sm" style="margin:4px 0 0">改动保存到所属待办；计时器支持 1h30m 简写，留空保存即清除。</p>
-        </span></div>
+        </div></div>
         <div class="kv"><span class="k">当前状态</span><span class="v">${esc(occ.schedule_label)}</span></div>
         ${this.conflictById?.get(occ.id) ? `<div class="kv kv-block"><span class="k">排程冲突</span><span class="v">${esc(this.conflictById.get(occ.id).reason)}</span></div>` : ''}`,
       actions,
@@ -661,6 +711,7 @@ export default {
 
   /** BUG-11：详情栏「保存提醒」→ PATCH 所属任务定义的闹钟/计时器字段。 */
   async saveOccurrenceAlarm(occId) {
+    const owner = { selected: this.selected, reads: this.reads, tab: this.activeTab };
     const host = this.detail?.body?.querySelector('[data-alarm-controls]');
     if (!host) return;
     const taskId = Number(host.dataset.taskId);
@@ -676,11 +727,13 @@ export default {
         }),
       });
       toast('提醒已保存');
+      if (this.reads !== owner.reads || !this.root) return;
       this.reads?.invalidate();
       await this.loadToday();
+      if (this.reads !== owner.reads || !this.root) return;
       await this.loadOccurrences();
       const fresh = this.findOccurrence(occId) || this.occurrences.find((o) => o.id === occId);
-      if (fresh) this.showOccurrenceDetail(fresh);
+      if (fresh && this.selectionIsCurrent(owner)) this.showOccurrenceDetail(fresh);
     } catch (error) {
       toast(`保存提醒失败：${error.message}`, 'err');
     }
@@ -726,6 +779,8 @@ export default {
   },
 
   async showTaskDetail(task) {
+    if (!this.detail || this.activeTab !== 'all' || this.selected?.kind !== 'task'
+        || this.selected.id !== task.id) return;
     this.markSelected(`[data-task="${task.id}"]`);
     const parts = [];
     if (task.is_active && !task.is_hollow
@@ -790,6 +845,32 @@ export default {
   },
 
   /* ---------- 排列模式（指针拖拽） ---------- */
+
+  async orderSaved(ids, result, applyCandidate = true) {
+    const reads = this.reads;
+    if (!reads || !this.root) return;
+    reads.invalidate();
+    if (this.board && applyCandidate && !result?.replayed) {
+      const position = new Map(ids.map((id, index) => [id, index]));
+      const estimates = new Map((result?.estimates || []).map((occ) => [occ.id, occ]));
+      const updating = result?.recompute_enabled !== false && !result?.schedule_applied;
+      this.board = { ...this.board, progress: this.board.progress
+        .map((occ) => ({ ...occ, ...estimates.get(occ.id),
+          sort_order: position.get(occ.id) ?? occ.sort_order, time_updating: updating }))
+        .sort((a, b) => a.sort_order - b.sort_order) };
+      if (result?.schedule_applied) {
+        this.board.conflicts = [];
+        this.board.recompute = { ...this.board.recompute, pending: false,
+          requested_at: null, request_token: null, wait_minutes: null, reason: null };
+      }
+    }
+    if (!this.reorderMode) this.renderBoard();
+    const ok = await this.loadToday({ fresh: true });
+    if (this.reads !== reads || !this.root || ok) return;
+    this.savedRefresh = { names: ['today'], message: result?.schedule_applied
+      ? '顺序和预估时间已保存，列表同步失败' : '顺序已保存，列表更新失败' };
+    this.renderReadFeedback();
+  },
 
   enterReorder() {
     return this.sort.enterReorder();
@@ -859,6 +940,7 @@ export default {
   },
 
   async occurrenceAction(act, id) {
+    const reads = this.reads;
     const post = (path, body) => gw(`/admin/api/planning/occurrences/${id}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -888,8 +970,10 @@ export default {
       else if (act === 'split') return this.askSplit(id);
       else if (act === 'spawn-remaining') return this.askRemaining(id);
       toast('已更新');
-      this.reads?.invalidate();
+      if (!this.root || this.reads !== reads) return;
+      reads.invalidate();
       await this.loadToday();
+      if (!this.root || this.reads !== reads) return;
       await this.loadOccurrences();
     } catch (error) {
       toast(`操作失败：${error.message}`, 'err');
@@ -897,6 +981,7 @@ export default {
   },
 
   async taskAction(act, id, el = null) {
+    const owner = { selected: this.selected, reads: this.reads, tab: this.activeTab };
     try {
       if (act === 'early') {
         const task = this.tasks.find((t) => t.id === id);
@@ -960,12 +1045,13 @@ export default {
           if (el) el.disabled = false;
         }
       }
+      if (this.reads !== owner.reads || !this.root) return;
       this.reads?.invalidate();
       await Promise.all([this.loadTasks(), this.loadToday()]);
       if (act === 'pause-refresh' || act === 'resume-refresh') {
         // 按钮状态只来自服务端持久化数据，刷新页面后同样正确（需求 24H）
         const fresh = this.tasks.find((t) => t.id === id);
-        if (fresh) this.showTaskDetail(fresh);
+        if (fresh && this.selectionIsCurrent(owner)) this.showTaskDetail(fresh);
       }
     } catch (error) {
       toast(`操作失败：${error.message}`, 'err');

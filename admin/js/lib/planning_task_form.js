@@ -1,7 +1,7 @@
 // Task creation/edit form. Local submitting/committed state belongs to one opened form.
-import { gw } from '../api.js?v=20261012-unified-selects';
-import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261012-unified-selects';
-import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261012-unified-selects';
+import { gw } from '../api.js?v=20261012-sort-immediate';
+import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261012-sort-immediate';
+import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261012-sort-immediate';
 
 export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
   const editing = !!task?.id;

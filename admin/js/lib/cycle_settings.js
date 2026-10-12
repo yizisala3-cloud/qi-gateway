@@ -3,12 +3,12 @@
 // 冲突就地调整 + 原子保存）与原实现一致。onSaved 在保存成功后回调（规划页
 // 重拉今日看板，配置页重载整页）；demoSettings 仅用于数据库未连接的本地
 // 预览——读取失败时以示例数据打开弹窗（保存会因库不可用自然报错）。
-import { gw, esc } from '../api.js?v=20261012-unified-selects';
-import { modal, toast, errorBlock } from '../ui.js?v=20261012-unified-selects';
-import { createRetroTimeField } from './retro_time.js?v=20261012-unified-selects';
+import { gw, esc } from '../api.js?v=20261012-sort-immediate';
+import { modal, toast, errorBlock } from '../ui.js?v=20261012-sort-immediate';
+import { createRetroTimeField } from './retro_time.js?v=20261012-sort-immediate';
 import {
   mergeBoundaryAdjustments, rememberedAdjustment,
-} from './planning_adjustments.js?v=20261012-unified-selects';
+} from './planning_adjustments.js?v=20261012-sort-immediate';
 
 function fmtDue(iso) {
   if (!iso) return '';

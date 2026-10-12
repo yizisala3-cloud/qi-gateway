@@ -67,7 +67,12 @@ class Element {
   scrollIntoView() {}
   remove() { this.removed = true; }
   setPointerCapture(id) { this.captured = id; }
-  getBoundingClientRect() { return { top: 0, height: 40 }; }
+  hasPointerCapture(id) { return this.captured === id; }
+  releasePointerCapture() { this.captured = null; }
+  removeAttribute() {}
+  setAttribute() {}
+  cloneNode() { return new Element(); }
+  getBoundingClientRect() { return { top: 0, bottom: 40, left: 0, width: 300, height: 40 }; }
 }
 
 class AudioFixture {
@@ -110,9 +115,14 @@ class NotificationFixture {
   }
 }
 
-globalThis.document = { body: new Element(), createElement: () => new Element() };
+globalThis.document = { body: new Element(), scrollingElement: new Element(), createElement: () => new Element() };
+document.scrollingElement.scrollTop = 0;
+globalThis.getComputedStyle = () => ({ overflowY: 'visible' });
+globalThis.requestAnimationFrame = () => 1;
+globalThis.cancelAnimationFrame = () => {};
 globalThis.window = {
   location: { origin: 'http://planning.test' },
+  innerHeight: 800, scrollY: 0,
   Notification: NotificationFixture,
   matchMedia: () => ({ matches: false }),
   addEventListener(name, fn, options = {}) {
@@ -346,14 +356,17 @@ const checks = {
     sort.enterReorder();
     respond = async () => response();
     await sort.confirmReorder();
-    assert.deepEqual(requests.at(-1).body, { order: [7] });
+    assert.deepEqual(requests.at(-1).body.order, [7]);
+    assert.ok(requests.at(-1).body.request_key);
+    assert.deepEqual(requests.at(-1).body.expected_order.map((row) => row.id), [7, 8]);
     assert.ok(toastMessages.some((value) => value.includes('自动重算已关闭，时间未重算')));
+    sort.enterReorder();
     sort.attachDragHandlers();
-    assert.equal(item.listeners.get('pointerdown').size, 1);
+    assert.equal(typeof item.onpointerdown, 'function');
     sort.startDrag({ button: 0, pointerType: 'mouse', pointerId: 31, clientY: 10, preventDefault() {} }, item);
     assert.equal(item.captured, 31);
     assert.equal(item.classList.contains('is-dragging'), true);
-    [...item.listeners.get('pointerup')][0]();
+    [...item.listeners.get('pointerup')][0]({ pointerId: 31, clientY: 10 });
     assert.equal(item.classList.contains('is-dragging'), false);
     assert.equal(item.listeners.get('pointermove').size, 0);
     assert.equal(item.listeners.get('pointercancel').size, 0);

@@ -1,5 +1,5 @@
 // pages/memories.js - 记忆管理：记忆库 + 审核申请
-import { createMemoryBrowser } from './_memory_browser.js?v=20261012-unified-selects';
+import { createMemoryBrowser } from './_memory_browser.js?v=20261012-sort-immediate';
 
 export default {
   browser: null,

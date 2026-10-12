@@ -1,6 +1,6 @@
 // pages/digest.js - 记忆总结：连续感总结 + 反刍连续感
-import { gw, esc, query } from '../api.js?v=20261012-unified-selects';
-import { loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, fmtDate } from '../ui.js?v=20261012-unified-selects';
+import { gw, esc, query } from '../api.js?v=20261012-sort-immediate';
+import { loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, fmtDate } from '../ui.js?v=20261012-sort-immediate';
 
 const TIME_PRECISION_LABELS = {
   minute: '精确到分钟', day: '精确到日期', approximate: '大概时间', unknown: '时间未知',
