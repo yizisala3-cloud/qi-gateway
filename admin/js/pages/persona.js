@@ -1,7 +1,7 @@
 // pages/persona.js - 人设与规则：人设 / 用户资料 / 互动规则
-import { query, update, insert, esc } from '../api.js?v=20261012-sort-immediate';
-import { loading, empty, tag, toast, modal, confirm, delegate, icon } from '../ui.js?v=20261012-sort-immediate';
-import { createMemoryBrowser } from './_memory_browser.js?v=20261012-sort-immediate';
+import { query, update, insert, esc } from '../api.js?v=20261012-shared-controls-r1';
+import { loading, empty, tag, toast, modal, confirm, delegate, icon } from '../ui.js?v=20261012-shared-controls-r1';
+import { createMemoryBrowser } from './_memory_browser.js?v=20261012-shared-controls-r1';
 
 const VIEW_TABS = [
   { key: 'persona', label: '人设' },
@@ -71,10 +71,10 @@ export default {
     host.innerHTML = `
       <div class="toolbar">
         <span class="grow"></span>
-        <button class="btn btn-secondary is-disabled" disabled title="暂未接入">前端写入 persona</button>
+        <button class="btn btn-secondary is-disabled" disabled aria-describedby="persona-write-note">前端写入 persona</button>
         <button class="btn btn-primary" data-act="add">${icon('plus')}新增人设</button>
       </div>
-      <p class="muted text-sm" style="margin:-6px 0 14px">“前端写入”与提示词注入开关暂未接入，按钮仅作占位。</p>
+      <p class="muted text-sm" id="persona-write-note" style="margin:-6px 0 14px">“前端写入”与提示词注入开关暂未接入，按钮仅作占位。</p>
       ${data.length ? data.map((p) => `
         <div class="mem-card" style="cursor:default">
           <div class="card-top">

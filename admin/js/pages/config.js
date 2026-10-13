@@ -1,8 +1,8 @@
 // pages/config.js - 配置：真实状态展示 + 功能开关
-import { gw, esc } from '../api.js?v=20261012-sort-immediate';
-import { loading, errorBlock, tag, toast, delegate, icon } from '../ui.js?v=20261012-sort-immediate';
-import { openCycleSettings } from '../lib/cycle_settings.js?v=20261012-sort-immediate';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261012-sort-immediate';
+import { gw, esc } from '../api.js?v=20261012-shared-controls-r1';
+import { loading, errorBlock, tag, toast, delegate, icon } from '../ui.js?v=20261012-shared-controls-r1';
+import { openCycleSettings } from '../lib/cycle_settings.js?v=20261012-shared-controls-r1';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261012-shared-controls-r1';
 
 // 规划数据库不可用时的示例数据（仅本地预览；保存会因库不可用自然报错）
 const DEMO_CYCLE = {
@@ -20,12 +20,12 @@ function okTag(value, yes = '正常', no = '异常') {
   return value ? tag(yes, 'green') : tag(no, 'red');
 }
 
-function toggleHtml(action, enabled, title) {
-  return `<button class="toggle-switch" role="switch" aria-checked="${enabled ? 'true' : 'false'}" data-act="${action}" title="${title}"><span class="toggle-knob"></span></button>`;
+function toggleHtml(action, enabled, label) {
+  return `<button class="toggle-switch" role="switch" aria-label="${esc(label)}" aria-checked="${enabled ? 'true' : 'false'}" data-act="${action}" data-tooltip="${esc(label)}"><span class="toggle-knob"></span></button>`;
 }
 
-function unknownToggle() {
-  return `${tag('状态未知', 'muted')} <button class="toggle-switch" disabled aria-checked="false"><span class="toggle-knob"></span></button>`;
+function unknownToggle(label) {
+  return `${tag('状态未知', 'muted')} <button class="toggle-switch" role="switch" aria-label="${esc(label)}" disabled aria-checked="false"><span class="toggle-knob"></span></button><span class="control-note">读取失败，暂不可修改</span>`;
 }
 
 export default {
@@ -110,13 +110,13 @@ export default {
       const uptimeText = uptimeMin >= 60 ? `${Math.floor(uptimeMin / 60)} 小时 ${uptimeMin % 60} 分` : `${uptimeMin} 分钟`;
       const eventideControl = eventideSettings
         ? toggleHtml('toggle-eventide', this.injectEnabled, '切换身体状态注入')
-        : unknownToggle();
+        : unknownToggle('身体状态注入');
       const recentChatControl = contextSettings
         ? toggleHtml('toggle-recent-chat', this.recentChatEnabled, '切换近期对话注入')
-        : unknownToggle();
+        : unknownToggle('近期对话注入');
       const timestampControl = contextSettings
         ? toggleHtml('toggle-timestamp', this.timestampEnabled, '切换时间戳注入')
-        : unknownToggle();
+        : unknownToggle('时间戳注入');
       const limitKnown = contextSettings && this.recentChatLimit !== null;
       // 这个标签保存条数后要原地改文案，不能直接用 tag()（拿不到元素），
       // 这里手写同构 span 并带上 id，textContent 更新不会破坏 tag 结构。
@@ -160,8 +160,8 @@ export default {
             ${this.keyRefReady === false ? '<p class="muted text-sm" style="margin:6px 0 0;color:var(--amber)">密钥标识未就绪（GATEWAY_KEY_REF_SECRET 缺失或短于 32 字节）：日志暂不能按密钥区分故障，密钥值查看不受影响。</p>' : ''}
             <p class="muted text-sm" style="margin:6px 0 0">密钥值只在点击「显示」后按项从服务端获取（响应不缓存）；隐藏或离开本页即清除，不写入浏览器存储。标识 K-… 与日志页一致，用于按密钥区分故障。</p>
             <div class="kv" style="margin-top:8px"><span class="k">更换 API 配置</span><span class="v">
-              <button class="btn btn-secondary btn-sm is-disabled" disabled title="暂未接入">更换配置</button>
-              <span class="disabled-note" style="margin-left:8px">暂未接入</span>
+              <button class="btn btn-secondary btn-sm is-disabled" disabled aria-describedby="config-change-note">更换配置</button>
+              <span class="control-note" id="config-change-note">暂未接入</span>
             </span></div>
           </div>
           <div class="card">
@@ -191,7 +191,7 @@ export default {
           <div class="card">
             <div class="card-head"><div class="card-title">${icon('calendar')}规划周期</div></div>
             <div class="kv"><span class="k">每日刷新时间</span><span class="v">
-              <span class="retro-time retro-time-inline" data-retro-for="cfg-cycle-boundary" data-retro-mode="time" data-retro-align="right" data-retro-value="${esc(cycle.refresh_boundary_time || '')}"></span>
+              <span class="retro-time retro-time-inline" aria-label="每日刷新时间（北京时间）" data-retro-for="cfg-cycle-boundary" data-retro-mode="time" data-retro-align="right" data-retro-value="${esc(cycle.refresh_boundary_time || '')}"></span>
               <button class="btn btn-secondary btn-sm" data-act="save-cycle-boundary" style="margin-left:8px">保存</button>
             </span></div>
             <div class="kv"><span class="k">重算等待</span><span class="v">

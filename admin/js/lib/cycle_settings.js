@@ -3,12 +3,12 @@
 // 冲突就地调整 + 原子保存）与原实现一致。onSaved 在保存成功后回调（规划页
 // 重拉今日看板，配置页重载整页）；demoSettings 仅用于数据库未连接的本地
 // 预览——读取失败时以示例数据打开弹窗（保存会因库不可用自然报错）。
-import { gw, esc } from '../api.js?v=20261012-sort-immediate';
-import { modal, toast, errorBlock } from '../ui.js?v=20261012-sort-immediate';
-import { createRetroTimeField } from './retro_time.js?v=20261012-sort-immediate';
+import { gw, esc } from '../api.js?v=20261012-shared-controls-r1';
+import { modal, toast, errorBlock } from '../ui.js?v=20261012-shared-controls-r1';
+import { createRetroTimeField } from './retro_time.js?v=20261012-shared-controls-r1';
 import {
   mergeBoundaryAdjustments, rememberedAdjustment,
-} from './planning_adjustments.js?v=20261012-sort-immediate';
+} from './planning_adjustments.js?v=20261012-shared-controls-r1';
 
 function fmtDue(iso) {
   if (!iso) return '';
@@ -91,9 +91,9 @@ export async function openCycleSettings({ onSaved = null, demoSettings = null, i
               <label class="inline">${esc(c.content)}：当前时段 ${esc(c.window_start_tod) || '无'} ～ ${esc(c.window_end_tod) || '无'}</label>
               <div class="tag-row" style="align-items:center">
                 <span class="muted text-sm">最早开始</span>
-                <div class="retro-time" data-retro-for="pf-adj-start-${c.task_id}" data-retro-mode="time" data-retro-value="${esc((prev && prev.window_start_tod) || c.window_start_tod || '')}"></div>
+                <div class="retro-time" aria-label="${esc(c.content)}的最早开始" data-retro-for="pf-adj-start-${c.task_id}" data-retro-mode="time" data-retro-value="${esc((prev && prev.window_start_tod) || c.window_start_tod || '')}"></div>
                 <span class="muted text-sm">最晚完成</span>
-                <div class="retro-time" data-retro-for="pf-adj-end-${c.task_id}" data-retro-mode="time" data-retro-value="${esc((prev && prev.window_end_tod) || c.window_end_tod || '')}"></div>
+                <div class="retro-time" aria-label="${esc(c.content)}的最晚完成" data-retro-for="pf-adj-end-${c.task_id}" data-retro-mode="time" data-retro-value="${esc((prev && prev.window_end_tod) || c.window_end_tod || '')}"></div>
               </div>
               <p class="muted text-sm">${esc(c.reason)}</p>
             </div>`;

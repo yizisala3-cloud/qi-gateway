@@ -1,13 +1,13 @@
 // pages/_memory_browser.js - shared library/requests browser with detail panel
-import { gw, query, update, count, esc } from '../api.js?v=20261012-sort-immediate';
+import { gw, query, update, count, esc } from '../api.js?v=20261012-shared-controls-r1';
 import {
   loading, empty, errorBlock, banner, tag, heatTag, impTag, pagerHtml,
   toast, modal, confirm, delegate, icon, fmtDate, createDetailPanel,
-} from '../ui.js?v=20261012-sort-immediate';
-import { openMemoryForm } from './_memory_form.js?v=20261012-sort-immediate';
-import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20261012-sort-immediate';
+} from '../ui.js?v=20261012-shared-controls-r1';
+import { openMemoryForm } from './_memory_form.js?v=20261012-shared-controls-r1';
+import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20261012-shared-controls-r1';
 
-export const ASSET_VERSION = '20261012-sort-immediate';
+export const ASSET_VERSION = '20261012-shared-controls-r1';
 
 const PAGE_SIZE = 20;
 const REQ_FETCH_LIMIT = 100;
@@ -400,11 +400,11 @@ export function createMemoryBrowser({
       <div class="toolbar">
         <div class="search-box">${icon('search')}<input type="search" id="lib-search" placeholder="搜索标题或内容…" value="${esc(state.search)}"></div>
         ${showTypeFilter && !lockedType ? `
-        <select id="lib-type" title="连续感类型">
+        <select id="lib-type" aria-label="连续感类型">
           <option value="">全部类型</option>
           ${TYPE_OPTIONS.map(([k, v]) => `<option value="${k}" ${state.type === k ? 'selected' : ''}>${v}</option>`).join('')}
         </select>` : ''}
-        <select id="lib-sort" title="排序">
+        <select id="lib-sort" aria-label="排序">
           <option value="created_at" ${state.sort === 'created_at' ? 'selected' : ''}>按创建时间</option>
           <option value="heat" ${state.sort === 'heat' ? 'selected' : ''}>按热度</option>
           <option value="importance" ${state.sort === 'importance' ? 'selected' : ''}>按重要性</option>
@@ -419,11 +419,11 @@ export function createMemoryBrowser({
   function requestsShell() {
     return `
       <div class="toolbar">
-        <select id="req-status" title="申请状态">
+        <select id="req-status" aria-label="申请状态">
           ${REQ_STATUSES.map((s) => `<option value="${s.key}" ${state.reqStatus === s.key ? 'selected' : ''}>${s.label}</option>`).join('')}
         </select>
         ${showTypeFilter && !lockedType ? `
-        <select id="req-type" title="连续感类型">
+        <select id="req-type" aria-label="连续感类型">
           <option value="">全部类型</option>
           ${TYPE_OPTIONS.map(([k, v]) => `<option value="${k}" ${state.type === k ? 'selected' : ''}>${v}</option>`).join('')}
         </select>` : ''}

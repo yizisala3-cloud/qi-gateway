@@ -33,6 +33,9 @@ DATABASE_MARKER_FILE_KEYWORD = "pgserver"
 # （Node 或 quickjs）。没有统一命名惯例，按文件名维护；新增此类测试时
 # 把文件名加进来。
 FRONTEND_MARKER_FILES = frozenset({
+    "test_admin_tooltip.py",
+    "test_ui_overlay_interaction.py",
+    "test_retro_time_interaction.py",
     "test_gateway_log_frontend.py",
     "test_absorb_display_js.py",
     "test_admin_memory_form_logic.py",

@@ -1,5 +1,5 @@
 // ui.js - shared retro UI components: icons, tags, modal, toast, detail panel
-export const ASSET_VERSION = '20261012-sort-immediate';
+export const ASSET_VERSION = '20261012-shared-controls-r1';
 
 /* ---------- SVG icons (stroke, no emoji; object entries = fill icons with own viewBox) ---------- */
 const ICON_PATHS = {
@@ -138,25 +138,241 @@ export function toast(msg, type = 'ok') {
 }
 
 /* ---------- modal ---------- */
-export function modal({ title, body, footer, wide = false, draggable = false, onMaskClose = null }) {
+let overlayManager = null;
+let modalSequence = 0;
+const FOCUSABLE = 'button, input, select, textarea, a[href], [tabindex], [contenteditable="true"]';
+
+function canFocus(element) {
+  return !!element?.isConnected && !element.matches(':disabled')
+    && !element.closest('[inert], [hidden], [aria-hidden="true"]')
+    && element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden';
+}
+
+function focusableWithin(element) {
+  return [...element.querySelectorAll(FOCUSABLE)].filter(node => node.tabIndex >= 0 && canFocus(node));
+}
+
+// Lazy: formatter-only imports remain usable without a browser document.
+function getOverlayManager() {
+  if (overlayManager) return overlayManager;
+  const modals = [];
+  const surfaces = [];
+  const inertBefore = new Map();
+  let observing = false;
+  let scrollBefore = null;
+  const topModal = () => modals.at(-1);
+  const liveSurfaces = () => surfaces.filter(surface => surface.owner === (topModal() || null)
+    && surface.element.isConnected && surface.anchor.isConnected);
+  const allowedRoots = () => [topModal()?.root, ...liveSurfaces().map(surface => surface.element)].filter(Boolean);
+  const contains = (node) => allowedRoots().some(root => root.contains(node));
+  const activeFocusable = () => [...new Set(allowedRoots().flatMap(focusableWithin))];
+  const focusCurrent = () => {
+    const top = topModal();
+    if (!top) return;
+    const target = canFocus(top.lastFocused) && contains(top.lastFocused)
+      ? top.lastFocused : activeFocusable()[0] || top.root;
+    target.focus({ preventScroll: true });
+  };
+  const restoreInert = node => {
+    const previous = inertBefore.get(node);
+    if (previous === null) node.removeAttribute('inert');
+    else node.setAttribute('inert', previous);
+    inertBefore.delete(node);
+  };
+  const sync = () => {
+    const top = topModal();
+    const roots = top ? [top.mask, ...liveSurfaces().map(surface => surface.element)] : [];
+    for (const child of document.body.children) {
+      // Descriptions may be body portals, but contain no interactive controls.
+      const allowed = !top || child.matches('[role="tooltip"]')
+        || roots.some(root => child === root || child.contains(root));
+      if (allowed) {
+        if (inertBefore.has(child)) restoreInert(child);
+      } else if (!inertBefore.has(child)) {
+        inertBefore.set(child, child.getAttribute('inert'));
+        child.setAttribute('inert', '');
+      }
+    }
+    for (const child of [...inertBefore.keys()]) {
+      if (!child.isConnected || !top) restoreInert(child);
+    }
+    modals.forEach((entry, index) => {
+      entry.mask.style.zIndex = String(1000 + index * 100);
+      entry.root.setAttribute('aria-modal', String(entry === top));
+    });
+    surfaces.forEach(surface => {
+      const ownerIndex = modals.indexOf(surface.owner);
+      const siblingIndex = surfaces.filter(other => other.owner === surface.owner).indexOf(surface);
+      surface.element.style.zIndex = String((ownerIndex < 0 ? (top ? 990 : 2100) : 1010 + ownerIndex * 100) + siblingIndex);
+    });
+    if (top) {
+      if (!modals.some(entry => entry.scrollLocked)) scrollBefore = document.body.style.overflow;
+      modals.forEach(entry => { entry.scrollLocked = true; });
+      document.body.style.overflow = 'hidden';
+    } else if (scrollBefore !== null) {
+      document.body.style.overflow = scrollBefore;
+      scrollBefore = null;
+    }
+    if (!modals.length && !surfaces.length && observing) {
+      observer.disconnect();
+      document.removeEventListener('keydown', onEscape, true);
+      document.removeEventListener('keydown', onTab);
+      document.removeEventListener('focusin', onFocus, true);
+      for (const type of ['pointerdown', 'mousedown', 'touchstart', 'click']) {
+        document.removeEventListener(type, onBackground, true);
+      }
+      observing = false;
+    }
+  };
+  const removeSurface = surface => {
+    const index = surfaces.indexOf(surface);
+    if (index < 0) return;
+    surfaces.splice(index, 1);
+    surface.element.style.zIndex = surface.previousZIndex;
+    sync();
+  };
+  const observer = new MutationObserver(() => {
+    for (const entry of [...modals]) {
+      if (!entry.mask.isConnected || !entry.root.isConnected) entry.close();
+    }
+    for (const surface of [...surfaces]) {
+      if (!surface.element.isConnected || !surface.anchor.isConnected
+        || (surface.owner && !modals.includes(surface.owner))) {
+        removeSurface(surface);
+        surface.onEscape({ reason: 'removed', restoreFocus: false });
+      }
+    }
+    sync();
+    if (topModal() && !contains(document.activeElement)) focusCurrent();
+  });
+  const onEscape = event => {
+    if (event.key !== 'Escape' || event.isComposing) return;
+    const surface = liveSurfaces().at(-1);
+    const top = topModal();
+    if (!surface && !top) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (surface) surface.onEscape({ reason: 'escape', restoreFocus: true });
+    else top.requestClose();
+  };
+  const onTab = event => {
+    if (event.key !== 'Tab' || event.defaultPrevented || !topModal()) return;
+    const options = activeFocusable();
+    const index = options.indexOf(document.activeElement);
+    const next = event.shiftKey
+      ? options[index < 0 ? options.length - 1 : (index - 1 + options.length) % options.length]
+      : options[(index + 1) % options.length];
+    event.preventDefault();
+    (next || topModal().root).focus({ preventScroll: true });
+  };
+  const onFocus = event => {
+    const top = topModal();
+    if (!top) return;
+    if (contains(event.target)) top.lastFocused = event.target;
+    else focusCurrent();
+  };
+  const onBackground = event => {
+    const top = topModal();
+    if (!top || event.target === top.mask || contains(event.target)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+  const start = () => {
+    if (observing) return;
+    observing = true;
+    document.addEventListener('keydown', onEscape, true);
+    // Bubble phase lets a selector first close on Tab and return to its field.
+    document.addEventListener('keydown', onTab);
+    document.addEventListener('focusin', onFocus, true);
+    for (const type of ['pointerdown', 'mousedown', 'touchstart', 'click']) {
+      document.addEventListener(type, onBackground, true);
+    }
+    observer.observe(document.body, { childList: true, subtree: true });
+  };
+  overlayManager = {
+    addModal(entry) {
+      modals.push(entry);
+      start();
+      sync();
+      entry.root.focus({ preventScroll: true });
+      queueMicrotask(() => {
+        if (topModal() !== entry || !entry.root.isConnected || document.activeElement !== entry.root) return;
+        const body = entry.root.querySelector('.modal-body');
+        const autofocus = entry.root.querySelector('[autofocus]');
+        const target = canFocus(autofocus) ? autofocus
+          : focusableWithin(body)[0] || entry.root.querySelector('[data-cancel]') || activeFocusable()[0] || entry.root;
+        (canFocus(target) ? target : entry.root).focus({ preventScroll: true });
+      });
+    },
+    removeModal(entry) {
+      const index = modals.indexOf(entry);
+      if (index < 0) return;
+      const wasTop = entry === topModal();
+      modals.splice(index, 1);
+      for (const surface of [...surfaces]) {
+        if (surface.owner !== entry) continue;
+        removeSurface(surface);
+        surface.onEscape({ reason: 'removed', restoreFocus: false });
+      }
+      sync();
+      if (!wasTop) return;
+      if (canFocus(entry.previousFocus) && (!topModal() || contains(entry.previousFocus))) {
+        entry.previousFocus.focus({ preventScroll: true });
+      } else if (topModal()) focusCurrent();
+      else document.querySelector('#page-root button:not(:disabled), .sidebar-nav a, .sidebar-nav button')?.focus({ preventScroll: true });
+    },
+    register({ element, anchor, onEscape }) {
+      const parentSurface = [...surfaces].reverse().find(surface => surface.element.contains(anchor));
+      const owner = parentSurface ? parentSurface.owner
+        : [...modals].reverse().find(entry => entry.root.contains(anchor)) || null;
+      const surface = { element, anchor, onEscape, owner, previousZIndex: element.style.zIndex };
+      surfaces.push(surface);
+      start();
+      sync();
+      return () => removeSurface(surface);
+    },
+  };
+  return overlayManager;
+}
+
+/** Body portals participate in their anchor's modal; callers own closing/focus restoration. */
+export function registerFloatingSurface({ element, anchor, onEscape }) {
+  return getOverlayManager().register({ element, anchor, onEscape });
+}
+
+export function modal({ title, body, footer, wide = false, draggable = false, onMaskClose = null, onDismiss = null }) {
+  const previousFocus = document.activeElement;
+  const titleId = `modal-title-${++modalSequence}`;
   const mask = document.createElement('div');
   mask.className = 'modal-mask';
   mask.innerHTML = `
-    <div class="modal ${wide ? 'modal-wide' : ''}" role="dialog" aria-label="${esc(title)}">
-      <div class="modal-head"><h3>${title}</h3><button class="modal-close" aria-label="关闭">${icon('x')}</button></div>
+    <div class="modal ${wide ? 'modal-wide' : ''}" role="dialog" tabindex="-1" aria-labelledby="${titleId}">
+      <div class="modal-head"><h3 id="${titleId}">${title}</h3><button type="button" class="modal-close" data-tooltip="关闭弹窗" aria-label="关闭弹窗">${icon('x')}</button></div>
       <div class="modal-body">${body}</div>
       ${footer ? `<div class="modal-foot">${footer}</div>` : ''}
     </div>`;
   document.body.appendChild(mask);
   const root = mask.querySelector('.modal');
-  const close = () => mask.remove();
-  mask.querySelector('.modal-close').onclick = close;
+  const manager = getOverlayManager();
+  let dismissed = false;
+  const entry = { root, mask, previousFocus, close: null, requestClose: null };
+  const close = () => {
+    if (dismissed) return;
+    dismissed = true;
+    mask.remove();
+    manager.removeModal(entry);
+    onDismiss?.();
+  };
+  const closeButton = mask.querySelector('.modal-close');
+  closeButton.onclick = () => onMaskClose ? onMaskClose() : close();
+  // Read the current button handler at activation time: pages override it with
+  // save/abort/stop-ringing hooks after modal() returns.
+  entry.close = close;
+  entry.requestClose = () => closeButton.click();
+  manager.addModal(entry);
   mask.addEventListener('click', e => {
     if (e.target !== mask) return;
-    // onMaskClose：调用方自有的关闭流程（含保存确认/清理）；不提供时保持
-    // 原默认直接移除
-    if (onMaskClose) { onMaskClose(); return; }
-    close();
+    entry.requestClose();
   });
   if (draggable) {
     const head = mask.querySelector('.modal-head');
@@ -184,6 +400,7 @@ export function modal({ title, body, footer, wide = false, draggable = false, on
 
 export function confirm(msg, { title = '请确认', okText = '确认', cancelText = '取消', danger = true } = {}) {
   return new Promise(resolve => {
+    let result = false;
     const { root, close } = modal({
       title,
       body: `<p class="confirm-text">${msg}</p>`,
@@ -192,11 +409,14 @@ export function confirm(msg, { title = '请确认', okText = '确认', cancelTex
       // 遮罩点击同样按取消结算（BUG-11）：只移除节点不结束 Promise 会让
       // 背后的保存/删除流程永远等待
       onMaskClose: () => { close(); resolve(false); },
+      // Direct removal / navigation also ends the waiting decision. Preserve
+      // the existing boolean contract (including deferred memo BUG-13).
+      onDismiss: () => resolve(result),
     });
     // 确认 / 取消 / × / 遮罩四个入口都只结算一次 Promise；×与遮罩按取消
     // 处理（BUG-11）。重复 resolve 本身无害，显式覆盖 × 的默认 close。
     root.querySelector('[data-cancel]').onclick = () => { close(); resolve(false); };
-    root.querySelector('[data-ok]').onclick = () => { close(); resolve(true); };
+    root.querySelector('[data-ok]').onclick = () => { result = true; close(); resolve(true); };
     root.querySelector('.modal-close').onclick = () => { close(); resolve(false); };
   });
 }
@@ -220,12 +440,12 @@ export function createDetailPanel(host, { fitViewport = false } = {}) {
           <h3 class="detail-title"></h3>
           <div class="detail-badges tag-row"></div>
         </div>
-        <button class="icon-btn detail-collapse" title="收起详情栏">${icon('chevron-right')}</button>
+        <button class="icon-btn detail-collapse" aria-label="收起详情栏" data-tooltip="收起详情栏">${icon('chevron-right')}</button>
       </div>
       <div class="detail-body"></div>
       <div class="detail-foot"></div>
     </aside>
-    <button class="detail-rail" title="展开详情栏">${icon('chevron-left')}<span>详情</span></button>
+    <button class="detail-rail" aria-label="展开详情栏" data-tooltip="展开详情栏">${icon('chevron-left')}<span>详情</span></button>
     <div class="detail-backdrop"></div>`);
 
   const panel = host.querySelector('.detail-panel');

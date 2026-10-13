@@ -952,6 +952,7 @@ class PlanningNavigationContractTests(unittest.TestCase):
                 const toast = (msg) => { g.toasts.push(msg); };
                 const makeEl = () => {
                   const kids = {};
+                  const attributes = {};
                   return {
                     value: '', checked: false, disabled: false,
                     style: {}, dataset: {}, addEventListener: () => {},
@@ -962,6 +963,9 @@ class PlanningNavigationContractTests(unittest.TestCase):
                     },
                     querySelectorAll: () => [],
                     insertAdjacentHTML: () => {},
+                    setAttribute: (name, value) => { attributes[name] = String(value); },
+                    getAttribute: (name) => name in attributes ? attributes[name] : null,
+                    removeAttribute: (name) => { delete attributes[name]; },
                   };
                 };
                 const modal = () => {
@@ -1127,6 +1131,7 @@ class PlanningNavigationContractTests(unittest.TestCase):
                             retroHosts: {}, appliedRetro: [] };
                 const el = (sel) => {
                   const id = sel.startsWith('#') ? sel.slice(1) : null;
+                  const attributes = {};
                   const base = {
                     value: id && id in values ? values[id] : '',
                     checked: false, disabled: false, hidden: true,
@@ -1137,6 +1142,9 @@ class PlanningNavigationContractTests(unittest.TestCase):
                     scrollIntoView() {}, insertAdjacentHTML() {},
                     querySelector(sel2) { return el(sel2); },
                     querySelectorAll() { return []; },
+                    setAttribute(name, value) { attributes[name] = String(value); },
+                    getAttribute(name) { return name in attributes ? attributes[name] : null; },
+                    removeAttribute(name) { delete attributes[name]; },
                   };
                   return base;
                 };
@@ -1147,7 +1155,7 @@ class PlanningNavigationContractTests(unittest.TestCase):
                     const key = host[1];
                     if (!g.retroHosts[key]) {
                       const input = el('#' + key);
-                      const button = { disabled: false, title: '' };
+                      const button = el('button');
                       g.retroHosts[key] = { input: input, button: button,
                                             querySelector(s2) {
                                               return s2 === 'input' ? input : button;

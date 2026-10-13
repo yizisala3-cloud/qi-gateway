@@ -658,7 +658,8 @@ img[aria-hidden="true"],
   transition: background 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s;
 }
 .btn .ico { width: 14px; height: 14px; }
-.btn:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, .tab:focus-visible {
+.btn:focus-visible, .icon-btn:focus-visible, .modal-close:focus-visible,
+input:focus-visible, select:focus-visible, textarea:focus-visible, .tab:focus-visible {
   outline: 1.5px solid rgba(154, 130, 72, 0.65);
   outline-offset: 1px;
 }
@@ -748,6 +749,10 @@ input:focus, textarea:focus, select:focus {
   box-shadow: 0 0 0 3px var(--gold-soft);
 }
 input::placeholder, textarea::placeholder { color: var(--ink-faint); }
+/* 保留 number 的范围、步长和方向键，只统一移除系统步进箭头。 */
+input[type="number"] { appearance: textfield; -moz-appearance: textfield; }
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 textarea { resize: vertical; line-height: 1.6; }
 textarea.mono, input.mono { font-family: var(--mono); font-size: 12.5px; }
 select {
@@ -1163,6 +1168,31 @@ html[data-theme="night"] .detail-panel { --detail-tint: rgba(34, 40, 30, 0.92); 
 .modal-close .ico { width: 15px; height: 15px; }
 .modal-close:hover { background: var(--gold-soft); color: var(--ink); }
 .confirm-text { margin: 4px 0; color: var(--ink-soft); }
+/* 提示与必需说明共用书页色板；辅助提示可鼠标移入，但没有交互控件。 */
+.retro-tooltip {
+  position: fixed;
+  z-index: 2300;
+  max-width: min(320px, calc(100vw - 16px));
+  background: linear-gradient(var(--gold-soft), transparent 80%), var(--paper-solid);
+  border: 1px solid var(--gold-line);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lift);
+  padding: 8px 12px;
+  color: var(--ink);
+  font: 12.5px/1.6 var(--font);
+  overflow-wrap: anywhere;
+  overflow: hidden;
+  pointer-events: auto;
+}
+.retro-tooltip[hidden] { display: none; }
+.control-note {
+  display: inline-block;
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 /* 规划提醒弹窗：多项提醒合并展示时的条目分隔（#31） */
 hr.ring-divider { border: 0; border-top: 1px solid var(--gold-faint); margin: 10px 0; }
 
@@ -1530,6 +1560,16 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   box-shadow: 0 0 0 3px var(--gold-soft);
   outline: none;
 }
+.retro-time-field:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
+  border-color: var(--gold-faint);
+}
+.retro-time-field[aria-invalid="true"] {
+  border-color: var(--red);
+  box-shadow: 0 0 0 2px var(--red-soft);
+}
 .retro-time-field .retro-time-text.is-empty { color: var(--ink-faint); }
 .retro-time-field .ico {
   width: 15px;
@@ -1542,6 +1582,13 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   position: fixed;
   z-index: 2100;
   width: 258px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--gold-line) transparent;
   background: var(--paper-solid);
   border: 1px solid var(--gold-line);
   border-radius: var(--radius);
@@ -1585,6 +1632,7 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   gap: 2px;
   text-align: center;
 }
+.retro-time-row { display: contents; }
 .retro-time-week span {
   font-size: 11.5px;
   color: var(--ink-muted);
@@ -1607,6 +1655,18 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   color: var(--paper-solid);
 }
 .retro-time-grid button.is-selected:hover { background: var(--green-mid); }
+.retro-time-grid button:focus-visible,
+.retro-time-nav button:focus-visible,
+.rtp-select-btn:focus-visible {
+  outline: 1.5px solid var(--gold);
+  outline-offset: 1px;
+}
+.retro-time-keyboard-hint {
+  margin: 8px 0 0;
+  color: var(--ink-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
 
 .retro-time-time {
   display: flex;

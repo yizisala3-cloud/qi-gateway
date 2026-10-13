@@ -1,6 +1,6 @@
 // 共享纸面下拉：手动字段与页面原有单选 select 共用同一浮层。
 // 原 select 保留 id/name/options/value、校验及业务监听；展示按钮不提交表单。
-import { esc, icon } from '../ui.js?v=20261012-sort-immediate';
+import { esc, icon, registerFloatingSurface } from '../ui.js?v=20261012-shared-controls-r1';
 
 let activeRetroSelectPop = null;
 let popSequence = 0;
@@ -23,7 +23,7 @@ function fieldName(input, host) {
     copy.querySelectorAll('select, input, textarea, button, .retro-select, .retro-time').forEach(control => control.remove());
     return copy.textContent.trim();
   }).filter(Boolean);
-  return input.getAttribute('aria-label') || labels.join('、') || input.title
+  return input.getAttribute('aria-label') || labels.join('、') || input.dataset.tooltip || input.title
     || host.closest('.field')?.querySelector('label')?.textContent.trim()
     || host.closest('label')?.childNodes[0]?.textContent.trim() || '选择';
 }
@@ -144,17 +144,16 @@ export function openRetroSelectPop(anchor, input, apply, options) {
   const top = rect.bottom + size.height + 6 > innerHeight - 8 ? rect.top - size.height - 6 : rect.bottom + 6;
   pop.style.left = `${Math.max(8, Math.min(rect.left, innerWidth - size.width - 8))}px`;
   pop.style.top = `${Math.max(8, Math.min(top, innerHeight - size.height - 8))}px`;
+  const unregisterSurface = registerFloatingSurface({
+    element: pop, anchor, onEscape: () => closeRetroSelectPop(true),
+  });
   focus(pop.querySelector('.is-selected:not(:disabled)') || buttons[0]);
 
   const onOutside = event => {
     if (!pop.contains(event.target) && !anchor.contains(event.target)) closeRetroSelectPop();
   };
   const onKey = event => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      closeRetroSelectPop(true);
-    } else if (event.key === 'Tab') {
+    if (event.key === 'Tab') {
       // 从触发按钮继续正常 Tab 顺序，而不是从 body 尾部的浮层跳走。
       closeRetroSelectPop(true);
     }
@@ -173,6 +172,7 @@ export function openRetroSelectPop(anchor, input, apply, options) {
   window.addEventListener('resize', onViewportChange);
   window.addEventListener('scroll', onViewportChange, true);
   pop._cleanup = () => {
+    unregisterSurface();
     rootObserver.disconnect();
     document.removeEventListener('pointerdown', onOutside, true);
     document.removeEventListener('keydown', onKey, true);
@@ -210,6 +210,10 @@ export function initRetroSelects(root = document.body) {
       button.setAttribute('aria-label', `${fieldName(select, host)}${select.required ? '（必填）' : ''}：${label}`);
       if (select.hasAttribute('aria-labelledby')) button.setAttribute('aria-labelledby', select.getAttribute('aria-labelledby'));
       else button.removeAttribute('aria-labelledby');
+      for (const attribute of ['aria-describedby', 'aria-invalid']) {
+        if (select.hasAttribute(attribute)) button.setAttribute(attribute, select.getAttribute(attribute));
+        else button.removeAttribute(attribute);
+      }
       if (activeRetroSelectPop?._forInput === select) closeRetroSelectPop();
     };
     const apply = (value, silent, index) => {
@@ -244,7 +248,7 @@ export function initRetroSelects(root = document.body) {
     select.addEventListener('click', onNativeClick);
     const observer = new MutationObserver(sync);
     observer.observe(select, { childList: true, subtree: true, characterData: true, attributes: true,
-      attributeFilter: ['disabled', 'required', 'selected', 'label', 'value', 'title', 'aria-label', 'aria-labelledby'] });
+      attributeFilter: ['disabled', 'required', 'selected', 'label', 'value', 'title', 'data-tooltip', 'aria-label', 'aria-labelledby', 'aria-describedby', 'aria-invalid'] });
     const dispose = () => {
       if (activeRetroSelectPop?._forInput === select) closeRetroSelectPop();
       observer.disconnect();

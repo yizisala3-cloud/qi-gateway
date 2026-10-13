@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="day">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>共享控件本地验收</title>
+  <link rel="stylesheet" href="/admin/css/style.css?v=__ASSET_VERSION__">
+</head>
+<body>
+  <main class="content" style="margin:20px auto;max-width:960px;height:auto;min-height:calc(100vh - 40px)">
+    <h1>共享控件本地验收</h1>
+    <p class="field-hint">真实共享组件和样式 · 合成接口 · 所有保存只记录在本机内存</p>
+    <div class="toolbar" style="margin-top:16px">
+      <button class="btn btn-secondary" id="qa-timeout">超时重新安排</button>
+      <button class="btn btn-secondary" id="qa-defer">延后时间</button>
+      <button class="btn btn-secondary" id="qa-window">调整时段</button>
+      <button class="btn btn-secondary" id="qa-time-only">纯时分模式</button>
+      <button class="btn btn-secondary" id="qa-backfill">补填实际时间</button>
+      <button class="btn btn-secondary" id="qa-locked">锁定窗口</button>
+      <button class="btn btn-secondary" id="qa-modal">弹窗与嵌套确认</button>
+      <button class="btn btn-secondary" id="qa-error">下一次保存模拟范围错误</button>
+      <button class="btn btn-secondary" id="qa-theme">切换日间／夜读</button>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="field"><label for="qa-number">数字字段（1–10，整数）</label><input id="qa-number" type="number" min="1" max="10" step="1" value="5"></div>
+      <button class="btn btn-secondary" id="qa-background">背景计数</button>
+      <output id="qa-background-count">0</output>
+      <button class="icon-btn" aria-label="测试纸张提示" data-tooltip="辅助说明使用纸张底色和金线；鼠标悬停或键盘聚焦都可阅读。" id="qa-tooltip">?</button>
+      <p id="qa-status" role="status">准备就绪</p>
+    </div>
+    <pre id="qa-requests" class="mono" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+    <pre id="qa-events" hidden></pre>
+  </main>
+  <script type="module">
+    import { createPlanningDialogs } from '/admin/js/lib/planning_dialogs.js?v=__ASSET_VERSION__';
+    import { modal, confirm } from '/admin/js/ui.js?v=__ASSET_VERSION__';
+    import { initRetroSelects } from '/admin/js/lib/retro_select.js?v=__ASSET_VERSION__';
+    import { initRetroTooltips } from '/admin/js/lib/retro_tooltip.js?v=__ASSET_VERSION__';
+    import { createRetroTimeField } from '/admin/js/lib/retro_time.js?v=__ASSET_VERSION__';
+    window.controlEvents = [];
+    const recordEvent = event => {
+      window.controlEvents.push({ type: event.type, target: event.target.className || event.target.nodeName,
+        scrollTop: event.target.scrollTop ?? null, focus: document.activeElement?.className,
+        value: document.activeElement?.dataset?.value, at: performance.now() });
+      if (window.controlEvents.length > 500) window.controlEvents.shift();
+      document.querySelector('#qa-events').textContent = JSON.stringify(window.controlEvents);
+    };
+    document.addEventListener('scroll', recordEvent, true);
+    document.addEventListener('focusin', recordEvent, true);
+    localStorage.setItem('qi-token', 'local-log-preview');
+    initRetroSelects(); initRetroTooltips();
+    const example = { id: 7, task_id: 7, task_type: 'daily', status: 'pending',
+      window_start_at: '2026-10-15T09:00:00+08:00', window_end_at: '2026-10-15T11:00:00+08:00',
+      actual_start: '2026-10-15T09:10:00+08:00', actual_end: '2026-10-15T09:40:00+08:00' };
+    const locked = { ...example, id: 8, task_id: 8, task_type: 'once', window_start_at: null, window_end_at: null };
+    const refresh = async () => {
+      document.querySelector('#qa-requests').textContent = JSON.stringify(await (await fetch('/controls-requests')).json(), null, 2);
+    };
+    const dialogs = createPlanningDialogs({ findOccurrence: id => id === 8 ? locked : example,
+      getOccurrences: () => [example, locked], getTasks: () => [{ id: 7, task_type: 'daily' }, { id: 8, task_type: 'once', target_date: null }],
+      openTaskForm: () => {}, loadToday: refresh, loadTasks: refresh, loadOccurrences: refresh });
+    document.querySelector('#qa-timeout').onclick = () => dialogs.askRescheduleTimeout(7);
+    document.querySelector('#qa-defer').onclick = () => dialogs.askNewTime(7, 'deferred', '延后到什么时间？');
+    document.querySelector('#qa-window').onclick = () => dialogs.askEditTime(7);
+    document.querySelector('#qa-time-only').onclick = () => {
+      const { root, close } = modal({ title: '纯时分模式验收',
+        body: '<div class="field"><label>时分</label><div id="qa-time-host"></div></div>',
+        footer: '<button class="btn btn-secondary" data-cancel>取消</button>' });
+      createRetroTimeField(root.querySelector('#qa-time-host'), { id: 'qa-time-value', mode: 'time', value: '06:00', label: '时分' });
+      root.querySelector('[data-cancel]').onclick = close;
+    };
+    document.querySelector('#qa-backfill').onclick = () => dialogs.askBackfill(7);
+    document.querySelector('#qa-locked').onclick = () => dialogs.askEditTime(8);
+    document.querySelector('#qa-theme').onclick = () => {
+      document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'night' ? 'day' : 'night';
+    };
+    document.querySelector('#qa-error').onclick = async () => {
+      await fetch('/controls-fail-next', { method: 'POST' });
+      document.querySelector('#qa-status').textContent = '下一次保存会返回合成范围错误';
+    };
+    let count = 0;
+    document.querySelector('#qa-background').onclick = () => { document.querySelector('#qa-background-count').textContent = ++count; };
+    document.querySelector('#qa-modal').onclick = () => {
+      const { root, close } = modal({ title: '共享弹窗验收',
+        body: '<div class="field"><label for="qa-draft">编辑草稿</label><input id="qa-draft" value="保留这段输入"></div><div class="field"><label for="qa-select">嵌套下拉</label><select id="qa-select"><option>第一项</option><option>第二项</option><option>第三项</option></select></div><button class="btn btn-secondary" id="qa-confirm">打开确认框</button><p id="qa-confirm-result" role="status">尚未确认</p>',
+        footer: '<button class="btn btn-secondary" data-cancel>取消</button>',
+      });
+      root.querySelector('[data-cancel]').onclick = close;
+      root.querySelector('#qa-confirm').onclick = async () => {
+        const result = await confirm('是否确认这次测试操作？', { danger: false });
+        root.querySelector('#qa-confirm-result').textContent = result ? '确认完成' : '取消已结算';
+      };
+    };
+  </script>
+</body>
+</html>

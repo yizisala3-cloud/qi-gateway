@@ -131,18 +131,21 @@ class MemoryBrowserContractTests(unittest.TestCase):
         # modal 关闭是被其父节点（body）整体移除，modal 内部无 childList
         # 变化；清理观察必须挂在 body 上（辅助断言，主验为浏览器验收）。
         form = FORM.read_text(encoding="utf-8")
-        self.assertIn("rootObserver.observe(document.body, { childList: true, subtree: true });", form)
-        self.assertIn("clearTimeout(listenerTimer);", form)
-        self.assertNotIn("observer.observe(host,", form)
-        self.assertIn("if (!document.contains(anchor)) closeRetroTimePop();", form)
+        picker = (ROOT / "admin/js/lib/retro_time.js").read_text(encoding="utf-8")
+        self.assertIn("import { createRetroTimeField }", form)
+        self.assertNotIn("function openRetroTimePop", form)
+        self.assertIn("rootObserver.observe(document.body, { childList: true, subtree: true", picker)
+        self.assertIn("rootObserver.disconnect();", picker)
+        self.assertIn("document.removeEventListener('pointerdown', onOutside, true);", picker)
+        self.assertIn("!anchor.isConnected", picker)
 
     def test_no_native_datetime_inputs_remain(self):
         # 原生 datetime-local 的浏览器弹窗与复古视觉体系不符，
         # 一律使用自绘复古时间选择器。
         form = FORM.read_text(encoding="utf-8")
         self.assertNotIn("datetime-local", form)
-        self.assertIn("retro-time-field", form)
-        self.assertIn("retro-time-pop", form)
+        self.assertIn("createRetroTimeField(host", form)
+        self.assertIn("lib/retro_time.js", form)
         css = (ROOT / "admin" / "css" / "style.css").read_text(encoding="utf-8")
         self.assertIn(".retro-time-pop", css)
         self.assertNotIn("#3b82f6", css.lower())

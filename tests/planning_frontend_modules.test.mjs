@@ -29,6 +29,9 @@ class Element {
     this.children = [];
     this.nodes = new Map();
     this.lists = new Map();
+    this.attributes = new Map();
+    this.parentElement = null;
+    this.tabIndex = 0;
     this.listeners = new Map();
     this.classes = new Set();
     this.classList = {
@@ -43,11 +46,16 @@ class Element {
     });
   }
   querySelector(selector) {
-    if (!this.nodes.has(selector)) this.nodes.set(selector, new Element());
+    if (!this.nodes.has(selector)) {
+      const node = new Element();
+      node.parentElement = this;
+      this.nodes.set(selector, node);
+    }
     return this.nodes.get(selector);
   }
   querySelectorAll(selector) { return this.lists.get(selector) || []; }
   appendChild(child) {
+    child.parentElement = this;
     this.children.push(child);
     if (child.className === 'modal-mask') masks.push(child);
   }
@@ -65,12 +73,26 @@ class Element {
   removeEventListener(name, fn) { this.listeners.get(name)?.delete(fn); }
   insertAdjacentHTML() {}
   scrollIntoView() {}
-  remove() { this.removed = true; }
+  remove() { this.removed = true; this.parentElement = null; }
   setPointerCapture(id) { this.captured = id; }
   hasPointerCapture(id) { return this.captured === id; }
   releasePointerCapture() { this.captured = null; }
-  removeAttribute() {}
-  setAttribute() {}
+  removeAttribute(name) { this.attributes.delete(name); }
+  setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  getAttribute(name) { return this.attributes.get(name) ?? null; }
+  get isConnected() { return !this.removed && (this === document.body || !!this.parentElement?.isConnected); }
+  matches(selector) {
+    if (selector === ':disabled') return this.disabled;
+    if (selector === '[role="tooltip"]') return this.getAttribute('role') === 'tooltip';
+    return selector.split(',').some(part => {
+      const match = part.trim().match(/^\[([\w-]+)(?:="([^"]+)")?\]$/);
+      return match && this.attributes.has(match[1]) && (!match[2] || this.getAttribute(match[1]) === match[2]);
+    });
+  }
+  closest(selector) { return this.matches(selector) ? this : this.parentElement?.closest(selector) || null; }
+  getClientRects() { return this.isConnected && !this.hidden ? [{}] : []; }
+  focus() { if (this.isConnected && !this.closest('[inert]')) document.activeElement = this; }
+  click() { if (!this.disabled) this.onclick?.({ target: this, currentTarget: this }); }
   cloneNode() { return new Element(); }
   getBoundingClientRect() { return { top: 0, bottom: 40, left: 0, width: 300, height: 40 }; }
 }
@@ -115,7 +137,17 @@ class NotificationFixture {
   }
 }
 
-globalThis.document = { body: new Element(), scrollingElement: new Element(), createElement: () => new Element() };
+const documentListeners = new Map();
+globalThis.document = {
+  body: new Element(), scrollingElement: new Element(), createElement: () => new Element(),
+  activeElement: null, querySelector: () => null,
+  addEventListener(name, fn) {
+    if (!documentListeners.has(name)) documentListeners.set(name, new Set());
+    documentListeners.get(name).add(fn);
+  },
+  removeEventListener(name, fn) { documentListeners.get(name)?.delete(fn); },
+};
+globalThis.MutationObserver = class { observe() {} disconnect() {} };
 document.scrollingElement.scrollTop = 0;
 globalThis.getComputedStyle = () => ({ overflowY: 'visible' });
 globalThis.requestAnimationFrame = () => 1;

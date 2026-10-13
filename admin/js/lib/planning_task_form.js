@@ -1,7 +1,7 @@
 // Task creation/edit form. Local submitting/committed state belongs to one opened form.
-import { gw } from '../api.js?v=20261012-sort-immediate';
-import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261012-sort-immediate';
-import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261012-sort-immediate';
+import { gw } from '../api.js?v=20261012-shared-controls-r1';
+import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261012-shared-controls-r1';
+import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261012-shared-controls-r1';
 
 export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
   const editing = !!task?.id;
@@ -100,7 +100,7 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
       if (input) input.disabled = true;
       if (button) {
         button.disabled = true;
-        button.title = '该单次待办已生成当前实例：请在该待办详情栏使用「调整时段」';
+        button.setAttribute('aria-describedby', 'pf-once-lock-note');
       }
     };
     lockRetro('.retro-time[data-retro-for="pf-target-date"]');
@@ -108,7 +108,7 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
     lockRetro('.retro-time[data-retro-for="pf-window-end"]');
     const lockNote = root.querySelector('[data-type-block="once"]');
     if (lockNote) lockNote.insertAdjacentHTML('beforeend',
-      '<p class="muted text-sm">该单次待办已生成当前实例：任务日期与未来窗口模板已锁定，调整这一次请在该待办详情栏使用「调整时段」。</p>');
+      '<p class="muted text-sm" id="pf-once-lock-note">该单次待办已生成当前实例：任务日期与未来窗口模板已锁定，调整这一次请在该待办详情栏使用「调整时段」。</p>');
   }
   const syncBlocks = () => {
     const type = typeSelect.value;
@@ -136,7 +136,7 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
   // §30.6（2026-10-01）：单次目标日期可选；未填日期时最早开始／最晚完成
   // 控件不可设置，并说明常驻语义（前后端都拒绝空日期 + 非空窗口组合）。
   const residentNote = root.querySelector('#pf-resident-note');
-  const toggleRetro = (hostSelector, disabled, title) => {
+  const toggleRetro = (hostSelector, disabled) => {
     const host = root.querySelector(hostSelector);
     if (!host) return;
     const input = host.querySelector('input');
@@ -144,7 +144,8 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
     if (input) input.disabled = disabled;
     if (button) {
       button.disabled = disabled;
-      button.title = title;
+      if (disabled) button.setAttribute('aria-describedby', 'pf-resident-note');
+      else button.removeAttribute('aria-describedby');
     }
   };
   const syncOnceWindow = () => {
@@ -166,10 +167,8 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
     residentNote.textContent = residual
       ? '未填日期：单次待办常驻显示，不设最早开始／最晚完成。当前仍有残留时段值——请点击「清空残留时段」明确清除后再保存。'
       : '未填日期：单次待办常驻显示，不设最早开始／最晚完成，直到你主动处理。';
-    const residentTitle = resident
-      ? '无日期单次常驻显示，不能设置可安排时段' : '';
-    toggleRetro('.retro-time[data-retro-for="pf-window-start"]', resident, residentTitle);
-    toggleRetro('.retro-time[data-retro-for="pf-window-end"]', resident, residentTitle);
+    toggleRetro('.retro-time[data-retro-for="pf-window-start"]', resident);
+    toggleRetro('.retro-time[data-retro-for="pf-window-end"]', resident);
     const clearBtn = root.querySelector('#pf-clear-window');
     if (clearBtn) clearBtn.hidden = !residual;
   };

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>qi-dashboard</title>
 <link rel="icon" href="/admin/assets/lily-medallion.png">
-<link rel="stylesheet" href="/admin/css/style.css?v=20261012-sort-immediate&amp;sidebar=20261010-candle-motion2">
+<link rel="stylesheet" href="/admin/css/style.css?v=20261012-shared-controls-r1&amp;sidebar=20261010-candle-motion2">
 </head>
 <body>
 <div class="app" id="app">
@@ -48,7 +48,7 @@
       <img class="ornament-bottom" src="/admin/assets/ornaments/top-border-ornament.png" alt="" aria-hidden="true">
       <div class="sidebar-foot">
         <span id="status-dot" class="status-chip"><span class="dot dot-muted"></span>检测中</span>
-        <button class="icon-btn" id="theme-btn" title="切换日间 / 夜读" aria-label="切换主题"></button>
+        <button class="icon-btn" id="theme-btn" data-tooltip="切换日间 / 夜读" aria-label="切换主题"></button>
       </div>
     </aside>
     <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
@@ -75,6 +75,6 @@
 <!-- 备忘录 Markdown 依赖（固定版本随项目交付；window.marked / window.DOMPurify） -->
 <script src="/admin/assets/vendor/marked-12.0.2.min.js"></script>
 <script src="/admin/assets/vendor/purify-3.1.6.min.js"></script>
-<script type="module" src="/admin/js/app.js?v=20261012-sort-immediate"></script>
+<script type="module" src="/admin/js/app.js?v=20261012-shared-controls-r1"></script>
 </body>
 </html>

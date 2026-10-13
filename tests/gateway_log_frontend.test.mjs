@@ -23,6 +23,9 @@ class Element {
     this.innerHTML = '';
     this.children = [];
     this.nodes = new Map();
+    this.attributes = new Map();
+    this.parentElement = null;
+    this.tabIndex = 0;
     this.listeners = new Map();
     this.onclick = null;
     this.classList = {
@@ -34,11 +37,16 @@ class Element {
     });
   }
   querySelector(selector) {
-    if (!this.nodes.has(selector)) this.nodes.set(selector, new Element());
+    if (!this.nodes.has(selector)) {
+      const node = new Element();
+      node.parentElement = this;
+      this.nodes.set(selector, node);
+    }
     return this.nodes.get(selector);
   }
   querySelectorAll() { return []; }
   appendChild(child) {
+    child.parentElement = this;
     this.children.push(child);
     if (child.className === 'modal-mask') masks.push(child);
   }
@@ -47,12 +55,39 @@ class Element {
     this.listeners.get(name).add(fn);
   }
   removeEventListener(name, fn) { this.listeners.get(name)?.delete(fn); }
-  remove() { this.removed = true; }
+  remove() { this.removed = true; this.parentElement = null; }
+  setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  getAttribute(name) { return this.attributes.get(name) ?? null; }
+  removeAttribute(name) { this.attributes.delete(name); }
+  get isConnected() { return !this.removed && (this === document.body || !!this.parentElement?.isConnected); }
+  matches(selector) {
+    if (selector === ':disabled') return this.disabled;
+    if (selector === '[role="tooltip"]') return this.getAttribute('role') === 'tooltip';
+    return selector.split(',').some(part => {
+      const match = part.trim().match(/^\[([\w-]+)(?:="([^"]+)")?\]$/);
+      return match && this.attributes.has(match[1]) && (!match[2] || this.getAttribute(match[1]) === match[2]);
+    });
+  }
+  closest(selector) { return this.matches(selector) ? this : this.parentElement?.closest(selector) || null; }
+  contains(node) { return node === this || [...this.nodes.values(), ...this.children].some(child => child.contains(node)); }
+  getClientRects() { return this.isConnected && !this.hidden ? [{}] : []; }
+  focus() { if (this.isConnected && !this.closest('[inert]')) document.activeElement = this; }
+  click() { if (!this.disabled) this.onclick?.({ target: this, currentTarget: this }); }
   setPointerCapture() {}
   getBoundingClientRect() { return { top: 0, height: 40 }; }
 }
 
-globalThis.document = { body: new Element(), createElement: () => new Element() };
+const documentListeners = new Map();
+globalThis.document = {
+  body: new Element(), createElement: () => new Element(), activeElement: null, querySelector: () => null,
+  addEventListener(name, fn) {
+    if (!documentListeners.has(name)) documentListeners.set(name, new Set());
+    documentListeners.get(name).add(fn);
+  },
+  removeEventListener(name, fn) { documentListeners.get(name)?.delete(fn); },
+};
+globalThis.MutationObserver = class { observe() {} disconnect() {} };
+globalThis.getComputedStyle = () => ({ visibility: 'visible' });
 globalThis.window = { location: { origin: 'http://logs.test' } };
 globalThis.localStorage = {
   store: new Map([['qi-token', 'token-1']]),

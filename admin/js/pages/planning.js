@@ -1,25 +1,25 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
 // 数据按需加载：今日看板保留 30 秒提醒轮询，首次/失效切入时刷新可见列表。
-import { gw } from '../api.js?v=20261012-sort-immediate';
+import { gw } from '../api.js?v=20261012-shared-controls-r1';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, esc,
   createDetailPanel,
-} from '../ui.js?v=20261012-sort-immediate';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261012-sort-immediate';
-import { createRetroSelectField } from '../lib/retro_select.js?v=20261012-sort-immediate';
+} from '../ui.js?v=20261012-shared-controls-r1';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261012-shared-controls-r1';
+import { createRetroSelectField } from '../lib/retro_select.js?v=20261012-shared-controls-r1';
 import {
   TASK_TYPE_LABELS, TASK_TYPES, STATUS_META, CLOSED_STATUSES,
   fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty, formatIntervalMinutes,
   itemMeta, isClosedOcc, formatLoggedDuration, durationText, durationDetailRows,
   itemBadges, itemHtml,
-} from '../lib/planning_display.js?v=20261012-sort-immediate';
-import { openTaskForm } from '../lib/planning_task_form.js?v=20261012-sort-immediate';
-import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261012-sort-immediate';
-import { createPlanningSort } from '../lib/planning_sort.js?v=20261012-sort-immediate';
-import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261012-sort-immediate';
-import { createPlanningMemo } from '../lib/planning_memo.js?v=20261012-sort-immediate';
-import { createPlanningReads } from '../lib/planning_reads.js?v=20261012-sort-immediate';
+} from '../lib/planning_display.js?v=20261012-shared-controls-r1';
+import { openTaskForm } from '../lib/planning_task_form.js?v=20261012-shared-controls-r1';
+import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261012-shared-controls-r1';
+import { createPlanningSort } from '../lib/planning_sort.js?v=20261012-shared-controls-r1';
+import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261012-shared-controls-r1';
+import { createPlanningMemo } from '../lib/planning_memo.js?v=20261012-shared-controls-r1';
+import { createPlanningReads } from '../lib/planning_reads.js?v=20261012-shared-controls-r1';
 
 // 部分完成属于开放生命周期：实例仍在「进度中」，直到「已全部完成」才关闭
 const OPEN_STATUSES = ['pending', 'in_progress', 'deferred', 'partial'];
@@ -783,13 +783,14 @@ export default {
         || this.selected.id !== task.id) return;
     this.markSelected(`[data-task="${task.id}"]`);
     const parts = [];
+    let earlyHint = '';
     if (task.is_active && !task.is_hollow
         && ['interval', 'weekly', 'monthly'].includes(task.task_type)) {
       // 中空待办的提前处理由完整轮次承载，提前完成按钮必然 409——隐藏不适用入口
-      const earlyHint = task.refresh_mode === 'after_completion'
+      earlyHint = task.refresh_mode === 'after_completion'
         ? '提前完成：记录本次完成，并从现在重新计算下一次刷新时间'
         : '提前完成：记录本次额外完成，不影响后续固定刷新';
-      parts.push(`<button class="btn btn-primary btn-sm" data-act="task-early" data-id="${task.id}" title="${esc(earlyHint)}">${icon('check')}提前完成</button>`);
+      parts.push(`<button class="btn btn-primary btn-sm" data-act="task-early" data-id="${task.id}" aria-describedby="plan-task-early-note">${icon('check')}提前完成</button>`);
     }
     // 暂停刷新 = 只阻止未来周期轮次生成（需求 24）：任务、规则、当前实例、
     // 历史事实与固定时间轴都不动；refresh_enabled 缺失视为开启（与后端一致）
@@ -815,6 +816,7 @@ export default {
       badges: `<div class="tag-row">${tag(esc(TASK_TYPE_LABELS[task.task_type] || ''), 'gold')}${task.refresh_enabled === false && task.is_active ? tag('刷新已暂停', 'slate') : ''}${task.is_active ? '' : tag('已删除', 'red')}</div>`,
       html: `
         <div class="kv"><span class="k">重复规则</span><span class="v">${esc(taskTypeSummary(task))}</span></div>
+        ${earlyHint ? `<p class="field-hint" id="plan-task-early-note">${esc(earlyHint)}</p>` : ''}
         ${task.task_type === 'interval' && task.refresh_mode === 'after_completion'
           ? `<div class="kv"><span class="k">刷新间隔</span><span class="v">${esc(formatIntervalMinutes(task.after_completion_minutes))}（完成后起算，精确到分钟）</span></div>` : ''}
         ${task.deleted_at ? `<div class="kv"><span class="k">删除时间</span><span class="v">${fmtDue(task.deleted_at)}</span></div>` : ''}
