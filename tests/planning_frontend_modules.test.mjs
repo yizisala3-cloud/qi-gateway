@@ -191,6 +191,7 @@ const dialogModule = await import(moduleUrl('lib/planning_dialogs.js'));
 const sortModule = await import(moduleUrl('lib/planning_sort.js'));
 const reminderModule = await import(moduleUrl('lib/planning_reminder.js'));
 const readsModule = await import(moduleUrl('lib/planning_reads.js'));
+const syncModule = await import(moduleUrl('lib/planning_sync.js'));
 const ui = await import(moduleUrl('ui.js'));
 const lastModal = () => masks.at(-1).querySelector('.modal');
 const response = (body = {}) => ({ ok: true, json: async () => body });
@@ -235,7 +236,7 @@ const checks = {
     for (const file of [
       'pages/planning.js', 'lib/planning_display.js', 'lib/planning_task_form.js',
       'lib/planning_dialogs.js', 'lib/planning_sort.js', 'lib/planning_reminder.js', 'lib/planning_reads.js',
-      'lib/retro_time.js', 'lib/retro_select.js', 'lib/cycle_settings.js',
+      'lib/retro_time.js', 'lib/retro_select.js', 'lib/cycle_settings.js', 'lib/planning_sync.js',
     ]) {
       const source = await readFile(join(workspace, 'admin/js', file), 'utf8');
       const imports = [...source.matchAll(/(?:import\s[^;]*?from\s*)['"]([^'"]+)['"]/g)];
@@ -469,12 +470,16 @@ const checks = {
     page.board = { ...emptyBoard(), progress: [{ id: 7, status: 'pending', content: 'keep input' }] };
     const originalDetail = page.showOccurrenceDetail;
     let detailRenders = 0;
-    page.showOccurrenceDetail = () => { detailRenders += 1; };
-    page.renderBoard();
-    assert.equal(detailRenders, 0);
-    input.defaultValue = input.value;
+    page.showOccurrenceDetail = (occ, options) => {
+      assert.equal(options.preserveInputs, true);
+      assert.equal(input.value, 'unsaved');
+      detailRenders += 1;
+    };
     page.renderBoard();
     assert.equal(detailRenders, 1);
+    input.defaultValue = input.value;
+    page.renderBoard();
+    assert.equal(detailRenders, 2);
     page.showOccurrenceDetail = originalDetail;
     page.unmount();
     assert.equal(intervals.size, 0);
@@ -1058,6 +1063,127 @@ const checks = {
       assert.equal(reminders.timerAudio.loop, false, '计时器只播一次');
       assert.equal(reminders.pendingRecovery, null);
       reminders.dispose();
+    }
+  },
+
+  async 'C6-order-receipt'() {
+    const before = { ...emptyBoard(), progress: [7, 8].map((id, index) => ({
+      id, task_id: id, sort_order: index, status: 'pending', est_start: `old-${id}`,
+      window_start_at: 'window', actual_start: null, estimated_time_source: 'automatic',
+    })), recompute: { enabled: true, pending: true, wait_minutes: 30 } };
+    const receipt = { schedule_applied: true, recompute_enabled: true, estimates: [
+      { id: 8, est_start: 'new-8', is_fixed: true, fixed_source: 'manual', status: 'completed' },
+      { id: 7, est_start: 'new-7' },
+    ] };
+    const merged = syncModule.mergeOrderReceipt(structuredClone(before), [8, 7], receipt, before);
+    assert.deepEqual(merged.progress.map(o => o.id), [8, 7]);
+    assert.equal(merged.progress[0].est_start, 'new-8');
+    assert.equal(merged.progress[0].is_fixed, true);
+    assert.equal(merged.progress[0].status, 'pending', 'receipt cannot overwrite lifecycle facts');
+    assert.equal(merged.progress[0].window_start_at, 'window');
+    assert.equal(merged.recompute.pending, false);
+    assert.equal(merged.recompute.enabled, true);
+    assert.equal(merged.progress.some(o => o.time_updating), false);
+    assert.equal(before.progress[1].est_start, 'old-8', 'merge leaves submission snapshot intact');
+    assert.deepEqual(syncModule.mergeOrderReceipt(null, [8, 7], receipt, before), merged);
+    assert.equal(syncModule.mergeOrderReceipt(before, [8, 7], { ...receipt, replayed: true }, before), before);
+    for (const [field, value] of Object.entries({ status: 'partial', est_start: 'later',
+      actual_start: 'fact', window_start_at: 'later-window', sort_order: 9, task_id: 99 })) {
+      const latest = structuredClone(before); latest.progress[0][field] = value;
+      assert.equal(syncModule.mergeOrderReceipt(latest, [8, 7], receipt, before), latest, field);
+    }
+    const relabeled = structuredClone(before); relabeled.progress[0].schedule_label = '落后';
+    assert.notEqual(syncModule.mergeOrderReceipt(relabeled, [8, 7], receipt, before), relabeled,
+      'clock-derived display label does not represent a later business write');
+    const removed = { ...before, progress: [before.progress[0]] };
+    assert.equal(syncModule.mergeOrderReceipt(removed, [8, 7], receipt, before), removed);
+    const replaced = { ...before, progress: [before.progress[0], { ...before.progress[1], id: 9 }] };
+    assert.equal(syncModule.mergeOrderReceipt(replaced, [8, 7], receipt, before), replaced);
+    const newerSwitch = { ...before, recompute: { enabled: false } };
+    const preservedSwitch = syncModule.mergeOrderReceipt(newerSwitch, [8, 7], receipt, before);
+    assert.equal(preservedSwitch.recompute.enabled, false, 'a newer switch must not be overwritten');
+    assert.deepEqual(preservedSwitch.progress.map(o => o.id), [8, 7], 'independently committed order is still known');
+    assert.equal(preservedSwitch.progress[0].est_start, 'new-8');
+    const off = syncModule.mergeOrderReceipt(before, [8, 7], { recompute_enabled: false,
+      schedule_applied: false, estimates: [{ id: 8, est_start: 'must-not-apply' }] }, before);
+    assert.equal(off.recompute.enabled, false);
+    assert.equal(off.recompute.pending, false);
+    assert.equal(off.progress[0].est_start, 'old-8');
+    assert.equal(off.progress.some(o => o.time_updating), false);
+    const reads = readsModule.createPlanningReads();
+    reads.seed('today');
+    assert.equal(reads.hasData('today'), true);
+    assert.equal(reads.needsRead('today'), true, 'seed cannot claim a successful read');
+    const failure = await reads.read('today', { request: async () => { throw new Error('offline'); }, apply() {} });
+    assert.equal(failure.error.message, 'offline');
+    assert.equal(reads.hasData('today'), true);
+  },
+
+  async 'C7-field-authority-and-labels'() {
+    const before = { ...emptyBoard(), now: '2026-10-12T12:00:00+08:00',
+      progress: [7, 8].map((id, index) => ({ id, task_id: id, status: 'pending', sort_order: index,
+        est_start: `2026-10-12T${index ? '13' : '11'}:00:00+08:00`,
+        est_end: `2026-10-12T${index ? '13' : '11'}:30:00+08:00`,
+        schedule_label: '落后', window_start_at: null, actual_start: null })),
+      recompute: { enabled: true, pending: false } };
+    const result = { recompute_enabled: true, schedule_applied: true, estimates: [
+      { id: 8, est_start: '2026-10-12T04:00:00Z', est_end: '2026-10-12T04:30:00Z' },
+      { id: 7, est_start: '2026-10-12T04:30:00Z', est_end: '2026-10-12T05:00:00Z' },
+    ] };
+    const updated = syncModule.mergeOrderReceipt(before, [8, 7], result, before);
+    assert.equal(updated.progress[1].schedule_label, '正常');
+    const matchingOff = { ...before, recompute: { enabled: false, pending: false } };
+    const off = syncModule.mergeOrderReceipt(matchingOff, [8, 7], {
+      recompute_enabled: false, schedule_applied: false, estimates: result.estimates }, before);
+    assert.deepEqual(off.progress.map(o => o.id), [8, 7]);
+    assert.equal(off.progress[0].est_start, before.progress[1].est_start, 'disabled saves order only');
+    const newerOn = { ...matchingOff, recompute: { enabled: true, pending: true,
+      requested_at: '2026-10-12T12:01:00+08:00', reason: 'new-edit' } };
+    const onPreserved = syncModule.mergeOrderReceipt(newerOn, [8, 7], {
+      recompute_enabled: false, schedule_applied: false, estimates: [] }, matchingOff);
+    assert.deepEqual(onPreserved.recompute, newerOn.recompute);
+    assert.equal(onPreserved.progress.some(o => o.time_updating), false);
+    const newerRequest = { ...before, recompute: { enabled: true, pending: true,
+      requested_at: '2026-10-12T12:01:00+08:00', reason: 'new-edit' } };
+    assert.deepEqual(syncModule.mergeOrderReceipt(newerRequest, [8, 7], result, before).recompute,
+      newerRequest.recompute, 'newer read request metadata is independent of order fields');
+    const utcBefore = structuredClone(before);
+    utcBefore.progress[0].est_start = '2026-10-12T03:00:00Z';
+    assert.notEqual(syncModule.mergeOrderReceipt(utcBefore, [8, 7], result, before), utcBefore,
+      'equivalent timestamps are not a business conflict');
+    assert.notEqual(syncModule.mergeOrderReceipt(updated, [8, 7], result, before), updated,
+      'an already observed commit is compatible with its own receipt');
+    const laterResult = { ...result, estimates: result.estimates.map(o => ({ ...o,
+      est_start: o.id === 8 ? '2026-10-12T06:00:00Z' : '2026-10-12T06:30:00Z',
+      est_end: o.id === 8 ? '2026-10-12T06:30:00Z' : '2026-10-12T07:00:00Z' })) };
+    assert.equal(syncModule.mergeOrderReceipt(updated, [8, 7], laterResult, before), updated);
+    assert.equal(syncModule.mergeOrderReceipt(updated, [8, 7], laterResult, before, updated)
+      .progress[0].est_start, '2026-10-12T06:00:00Z', 'a known earlier local commit does not block a later success');
+    for (const field of ['actual_start', 'window_start_at', 'partial_at', 'handled_at', 'closed_at']) {
+      const changed = structuredClone(updated); changed.progress[0][field] = '2026-10-12T13:00:00+08:00';
+      assert.equal(syncModule.mergeOrderReceipt(changed, [8, 7], laterResult, before, updated), changed, field);
+    }
+    const history = { id: 99, status: 'completed', actual_start: 'fact', window_start_at: 'frozen' };
+    const filtered = [before.progress[0], history, before.progress[1]];
+    const synchronized = syncModule.mergeOccurrencesFromBoard(filtered, updated, before);
+    assert.deepEqual(synchronized.map(o => o.id), [7, 99, 8]);
+    assert.equal(synchronized[0].est_start, '2026-10-12T04:30:00Z');
+    assert.equal(synchronized[1], history);
+    assert.equal(syncModule.mergeOccurrencesFromBoard(synchronized, updated, updated), synchronized,
+      'unchanged hidden records must not require a second list repaint');
+    const newerAll = { ...before.progress[1], est_start: '2026-10-12T18:00:00+08:00', actual_start: 'fact' };
+    assert.equal(syncModule.mergeOccurrencesFromBoard([newerAll], updated, before)[0], newerAll);
+    const micros = structuredClone(before);
+    micros.progress[0].est_start = '2026-10-12T11:00:00.000001+08:00';
+    assert.equal(syncModule.mergeOrderReceipt(micros, [8, 7], result, before), micros,
+      'a microsecond change is a real newer time, not an equivalent UTC encoding');
+    const savedClock = Date.now; Date.now = () => Date.parse('2030-01-01T00:00:00Z');
+    try {
+      assert.equal(syncModule.scheduleLabel({ status: 'pending', est_start: '2026-10-12T12:30:00+08:00' }, before.now), '正常');
+    } finally { Date.now = savedClock; }
+    const cases = JSON.parse(await readFile(join(workspace, 'label-cases.json'), 'utf8'));
+    for (const { occ, now, expected } of cases) {
+      assert.equal(syncModule.scheduleLabel(occ, now), expected, JSON.stringify({ occ, now }));
     }
   },
 

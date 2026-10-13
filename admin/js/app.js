@@ -1,13 +1,13 @@
 // app.js - shell: login, sidebar, routing, theme, mobile drawers
-import { NAV, ROUTE_INDEX } from './routes.js?v=20261012-shared-controls-r1';
-import { loading, errorBlock, icon, esc } from './ui.js?v=20261012-shared-controls-r1';
-import { gw, getToken, setToken, clearToken } from './api.js?v=20261012-shared-controls-r1';
-import { initHeaderDivider } from './lib/header_divider.js?v=20261012-shared-controls-r1';
-import { initRetroSelects } from './lib/retro_select.js?v=20261012-shared-controls-r1';
-import { initRetroTooltips } from './lib/retro_tooltip.js?v=20261012-shared-controls-r1';
+import { NAV, ROUTE_INDEX } from './routes.js?v=20261012-integrated-controls-sync';
+import { loading, errorBlock, icon, esc } from './ui.js?v=20261012-integrated-controls-sync';
+import { gw, getToken, setToken, clearToken } from './api.js?v=20261012-integrated-controls-sync';
+import { initHeaderDivider } from './lib/header_divider.js?v=20261012-integrated-controls-sync';
+import { initRetroSelects } from './lib/retro_select.js?v=20261012-integrated-controls-sync';
+import { initRetroTooltips } from './lib/retro_tooltip.js?v=20261012-integrated-controls-sync';
 
 const DEFAULT_ROUTE = 'memories';
-const ASSET_VERSION = '20261012-shared-controls-r1';
+const ASSET_VERSION = '20261012-integrated-controls-sync';
 
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);

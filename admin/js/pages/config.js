@@ -1,8 +1,8 @@
 // pages/config.js - 配置：真实状态展示 + 功能开关
-import { gw, esc } from '../api.js?v=20261012-shared-controls-r1';
-import { loading, errorBlock, tag, toast, delegate, icon } from '../ui.js?v=20261012-shared-controls-r1';
-import { openCycleSettings } from '../lib/cycle_settings.js?v=20261012-shared-controls-r1';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261012-shared-controls-r1';
+import { gw, esc } from '../api.js?v=20261012-integrated-controls-sync';
+import { loading, errorBlock, tag, toast, delegate, icon } from '../ui.js?v=20261012-integrated-controls-sync';
+import { openCycleSettings } from '../lib/cycle_settings.js?v=20261012-integrated-controls-sync';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261012-integrated-controls-sync';
 
 // 规划数据库不可用时的示例数据（仅本地预览；保存会因库不可用自然报错）
 const DEMO_CYCLE = {

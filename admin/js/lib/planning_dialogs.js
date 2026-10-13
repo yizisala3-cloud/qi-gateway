@@ -1,7 +1,7 @@
 // Instance dialogs: form-local inputs and timeout retry identity stay in their closures.
-import { gw } from '../api.js?v=20261012-shared-controls-r1';
-import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261012-shared-controls-r1';
-import { createRetroTimeField } from './retro_time.js?v=20261012-shared-controls-r1';
+import { gw } from '../api.js?v=20261012-integrated-controls-sync';
+import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261012-integrated-controls-sync';
+import { createRetroTimeField } from './retro_time.js?v=20261012-integrated-controls-sync';
 
 function initDialogTimes(root) {
   root.querySelectorAll('.retro-time[data-retro-for]').forEach(host => {
@@ -28,7 +28,7 @@ function initDialogTimes(root) {
 
 export function createPlanningDialogs({
   findOccurrence, getOccurrences, getTasks, openTaskForm,
-  loadToday, loadTasks, loadOccurrences,
+  loadToday, loadTasks, loadOccurrences, onChanged = () => {},
 }) {
   return {
     askCompleteDuration(id, post) {
@@ -53,6 +53,7 @@ export function createPlanningDialogs({
         if (text) body.actual_logged_duration = text;
         try {
           await post('/finish', body);
+          onChanged();
           close();
           toast('已完成');
           await Promise.all([loadToday(), loadOccurrences()]);
@@ -82,6 +83,7 @@ export function createPlanningDialogs({
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ status: 'partial', partial_note: note }),
           });
+          onChanged();
           close();
           toast('已记录部分完成；待办保持开放，可继续处理');
           await loadToday();
@@ -121,6 +123,7 @@ export function createPlanningDialogs({
             headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
             body: JSON.stringify({ est_start: new Date(value).toISOString() }),
           });
+          onChanged();
           close();
           toast('已保存新的执行时间；原超时记录保留');
           await loadToday();
@@ -150,6 +153,7 @@ export function createPlanningDialogs({
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ status: targetStatus, est_start: new Date(value).toISOString() }),
           });
+          onChanged();
           close();
           toast(targetStatus === 'deferred' ? '已延后' : '已重新安排');
           await loadToday();
@@ -205,6 +209,7 @@ export function createPlanningDialogs({
               window_end_at: end ? new Date(end).toISOString() : null,
             }),
           });
+          onChanged();
           close();
           toast('时段已更新；待办时间将按新时段重新安排');
           await loadToday();
@@ -257,6 +262,7 @@ export function createPlanningDialogs({
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
           });
+          onChanged();
           close();
           toast('实际时间已更新');
           await loadToday();
@@ -337,6 +343,7 @@ export function createPlanningDialogs({
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ parts }),
           });
+          onChanged();
           close();
           toast('已拆分：原待办按「此次不执行」收口，新待办已创建');
           await Promise.all([loadToday(), loadTasks(), loadOccurrences()]);

@@ -1,11 +1,11 @@
 // Candidate order belongs to this controller until confirmation or cancellation.
-import { gw } from '../api.js?v=20261012-shared-controls-r1';
-import { toast } from '../ui.js?v=20261012-shared-controls-r1';
+import { gw } from '../api.js?v=20261012-integrated-controls-sync';
+import { toast } from '../ui.js?v=20261012-integrated-controls-sync';
 
 export function createPlanningSort({
   getRoot, getProgressList, getBoard, getActiveTab, getActiveSection,
   selectSection, renderBoard, loadToday, getReorderMode, setReorderMode,
-  invalidateToday = () => {}, onSaved = null,
+  invalidateToday = () => {}, onSaved = null, captureSave = () => null,
 }) {
   let session = 0;
   let pending = false;
@@ -61,6 +61,7 @@ export function createPlanningSort({
       const signature = JSON.stringify(ids);
       if (!request || request.signature !== signature) request = { signature, key: crypto.randomUUID() };
       const owner = session;
+      const receipt = captureSave();
       const root = getRoot();
       pending = true;
       busy(true);
@@ -98,12 +99,12 @@ export function createPlanningSort({
       if (owner !== session || root !== getRoot()) {
         // A committed write still invalidates data after leaving this session;
         // its candidate must not overwrite a different page or a newer reorder.
-        if (onSaved) onSaved(ids, saved, false);
+        if (onSaved) onSaved(ids, saved, receipt);
         return;
       }
       sort.exitReorder();
       // Commit feedback is immediate; refresh has a separate page identity.
-      if (onSaved) onSaved(ids, saved);
+      if (onSaved) onSaved(ids, saved, receipt);
       else if (await loadToday() === false) toast('顺序已保存，列表更新失败，请刷新重试', 'warn');
     },
 

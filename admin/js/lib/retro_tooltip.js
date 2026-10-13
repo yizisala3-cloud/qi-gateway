@@ -1,5 +1,5 @@
 // Auxiliary paper hints. Required/locked/unavailable explanations belong in visible page text.
-import { registerFloatingSurface } from '../ui.js?v=20261012-shared-controls-r1';
+import { registerFloatingSurface } from '../ui.js?v=20261012-integrated-controls-sync';
 
 const initializers = new WeakMap();
 let descriptionSequence = 0;
