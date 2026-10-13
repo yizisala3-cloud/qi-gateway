@@ -159,6 +159,7 @@ const dialogModule = await import(moduleUrl('lib/planning_dialogs.js'));
 const sortModule = await import(moduleUrl('lib/planning_sort.js'));
 const reminderModule = await import(moduleUrl('lib/planning_reminder.js'));
 const readsModule = await import(moduleUrl('lib/planning_reads.js'));
+const syncModule = await import(moduleUrl('lib/planning_sync.js'));
 const ui = await import(moduleUrl('ui.js'));
 const lastModal = () => masks.at(-1).querySelector('.modal');
 const response = (body = {}) => ({ ok: true, json: async () => body });
@@ -203,7 +204,7 @@ const checks = {
     for (const file of [
       'pages/planning.js', 'lib/planning_display.js', 'lib/planning_task_form.js',
       'lib/planning_dialogs.js', 'lib/planning_sort.js', 'lib/planning_reminder.js', 'lib/planning_reads.js',
-      'lib/retro_time.js', 'lib/retro_select.js', 'lib/cycle_settings.js',
+      'lib/retro_time.js', 'lib/retro_select.js', 'lib/cycle_settings.js', 'lib/planning_sync.js',
     ]) {
       const source = await readFile(join(workspace, 'admin/js', file), 'utf8');
       const imports = [...source.matchAll(/(?:import\s[^;]*?from\s*)['"]([^'"]+)['"]/g)];
@@ -437,12 +438,16 @@ const checks = {
     page.board = { ...emptyBoard(), progress: [{ id: 7, status: 'pending', content: 'keep input' }] };
     const originalDetail = page.showOccurrenceDetail;
     let detailRenders = 0;
-    page.showOccurrenceDetail = () => { detailRenders += 1; };
-    page.renderBoard();
-    assert.equal(detailRenders, 0);
-    input.defaultValue = input.value;
+    page.showOccurrenceDetail = (occ, options) => {
+      assert.equal(options.preserveInputs, true);
+      assert.equal(input.value, 'unsaved');
+      detailRenders += 1;
+    };
     page.renderBoard();
     assert.equal(detailRenders, 1);
+    input.defaultValue = input.value;
+    page.renderBoard();
+    assert.equal(detailRenders, 2);
     page.showOccurrenceDetail = originalDetail;
     page.unmount();
     assert.equal(intervals.size, 0);
@@ -1027,6 +1032,56 @@ const checks = {
       assert.equal(reminders.pendingRecovery, null);
       reminders.dispose();
     }
+  },
+
+  async 'C6-order-receipt'() {
+    const before = { ...emptyBoard(), progress: [7, 8].map((id, index) => ({
+      id, task_id: id, sort_order: index, status: 'pending', est_start: `old-${id}`,
+      window_start_at: 'window', actual_start: null, estimated_time_source: 'automatic',
+    })), recompute: { enabled: true, pending: true, wait_minutes: 30 } };
+    const receipt = { schedule_applied: true, recompute_enabled: true, estimates: [
+      { id: 8, est_start: 'new-8', is_fixed: true, fixed_source: 'manual', status: 'completed' },
+      { id: 7, est_start: 'new-7' },
+    ] };
+    const merged = syncModule.mergeOrderReceipt(structuredClone(before), [8, 7], receipt, before);
+    assert.deepEqual(merged.progress.map(o => o.id), [8, 7]);
+    assert.equal(merged.progress[0].est_start, 'new-8');
+    assert.equal(merged.progress[0].is_fixed, true);
+    assert.equal(merged.progress[0].status, 'pending', 'receipt cannot overwrite lifecycle facts');
+    assert.equal(merged.progress[0].window_start_at, 'window');
+    assert.equal(merged.recompute.pending, false);
+    assert.equal(merged.recompute.enabled, true);
+    assert.equal(merged.progress.some(o => o.time_updating), false);
+    assert.equal(before.progress[1].est_start, 'old-8', 'merge leaves submission snapshot intact');
+    assert.deepEqual(syncModule.mergeOrderReceipt(null, [8, 7], receipt, before), merged);
+    assert.equal(syncModule.mergeOrderReceipt(before, [8, 7], { ...receipt, replayed: true }, before), before);
+    for (const [field, value] of Object.entries({ status: 'partial', est_start: 'later',
+      actual_start: 'fact', window_start_at: 'later-window', sort_order: 9, task_id: 99 })) {
+      const latest = structuredClone(before); latest.progress[0][field] = value;
+      assert.equal(syncModule.mergeOrderReceipt(latest, [8, 7], receipt, before), latest, field);
+    }
+    const relabeled = structuredClone(before); relabeled.progress[0].schedule_label = '落后';
+    assert.notEqual(syncModule.mergeOrderReceipt(relabeled, [8, 7], receipt, before), relabeled,
+      'clock-derived display label does not represent a later business write');
+    const removed = { ...before, progress: [before.progress[0]] };
+    assert.equal(syncModule.mergeOrderReceipt(removed, [8, 7], receipt, before), removed);
+    const replaced = { ...before, progress: [before.progress[0], { ...before.progress[1], id: 9 }] };
+    assert.equal(syncModule.mergeOrderReceipt(replaced, [8, 7], receipt, before), replaced);
+    const newerSwitch = { ...before, recompute: { enabled: false } };
+    assert.equal(syncModule.mergeOrderReceipt(newerSwitch, [8, 7], receipt, before), newerSwitch);
+    const off = syncModule.mergeOrderReceipt(before, [8, 7], { recompute_enabled: false,
+      schedule_applied: false, estimates: [{ id: 8, est_start: 'must-not-apply' }] }, before);
+    assert.equal(off.recompute.enabled, false);
+    assert.equal(off.recompute.pending, false);
+    assert.equal(off.progress[0].est_start, 'old-8');
+    assert.equal(off.progress.some(o => o.time_updating), false);
+    const reads = readsModule.createPlanningReads();
+    reads.seed('today');
+    assert.equal(reads.hasData('today'), true);
+    assert.equal(reads.needsRead('today'), true, 'seed cannot claim a successful read');
+    const failure = await reads.read('today', { request: async () => { throw new Error('offline'); }, apply() {} });
+    assert.equal(failure.error.message, 'offline');
+    assert.equal(reads.hasData('today'), true);
   },
 
   async 'C1-visible-refresh'() {

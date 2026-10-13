@@ -1,25 +1,26 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
 // 数据按需加载：今日看板保留 30 秒提醒轮询，首次/失效切入时刷新可见列表。
-import { gw } from '../api.js?v=20261012-sort-immediate';
+import { gw } from '../api.js?v=20261012-planning-sync';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, esc,
   createDetailPanel,
-} from '../ui.js?v=20261012-sort-immediate';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261012-sort-immediate';
-import { createRetroSelectField } from '../lib/retro_select.js?v=20261012-sort-immediate';
+} from '../ui.js?v=20261012-planning-sync';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261012-planning-sync';
+import { createRetroSelectField } from '../lib/retro_select.js?v=20261012-planning-sync';
 import {
   TASK_TYPE_LABELS, TASK_TYPES, STATUS_META, CLOSED_STATUSES,
   fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty, formatIntervalMinutes,
   itemMeta, isClosedOcc, formatLoggedDuration, durationText, durationDetailRows,
   itemBadges, itemHtml,
-} from '../lib/planning_display.js?v=20261012-sort-immediate';
-import { openTaskForm } from '../lib/planning_task_form.js?v=20261012-sort-immediate';
-import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261012-sort-immediate';
-import { createPlanningSort } from '../lib/planning_sort.js?v=20261012-sort-immediate';
-import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261012-sort-immediate';
-import { createPlanningMemo } from '../lib/planning_memo.js?v=20261012-sort-immediate';
-import { createPlanningReads } from '../lib/planning_reads.js?v=20261012-sort-immediate';
+} from '../lib/planning_display.js?v=20261012-planning-sync';
+import { openTaskForm } from '../lib/planning_task_form.js?v=20261012-planning-sync';
+import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261012-planning-sync';
+import { createPlanningSort } from '../lib/planning_sort.js?v=20261012-planning-sync';
+import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261012-planning-sync';
+import { createPlanningMemo } from '../lib/planning_memo.js?v=20261012-planning-sync';
+import { createPlanningReads } from '../lib/planning_reads.js?v=20261012-planning-sync';
+import { mergeOrderReceipt } from '../lib/planning_sync.js?v=20261012-planning-sync';
 
 // 部分完成属于开放生命周期：实例仍在「进度中」，直到「已全部完成」才关闭
 const OPEN_STATUSES = ['pending', 'in_progress', 'deferred', 'partial'];
@@ -40,6 +41,8 @@ export default {
   reads: null,
   readErrors: null,
   savedRefresh: null,
+  orderRevision: 0, // Survives remounts; later business writes supersede older receipts.
+  pendingOrder: null,
   pollTimer: null,
   reminder: createPlanningReminder(),
   dialogs: null,
@@ -51,11 +54,12 @@ export default {
   async mount(root) {
     this.selected = null;
     this.reorderMode = false;
-    this.board = null;
+    this.board = this.pendingOrder?.board || null;
     this.tasks = [];
     this.occurrences = [];
     this.root = root;
     this.reads = createPlanningReads();
+    if (this.board) this.reads.seed('today');
     this.readErrors = new Map();
     this.savedRefresh = null;
     this.loadedTabs = new Set();
@@ -65,6 +69,7 @@ export default {
       getOccurrences: () => this.occurrences,
       getTasks: () => this.tasks,
       openTaskForm: (task) => this.openTaskForm(task),
+      onChanged: () => this.planningChanged(),
       loadToday: () => this.loadToday({ fresh: true }),
       loadTasks: () => this.loadTasks({ fresh: true }),
       loadOccurrences: () => this.loadOccurrences({ fresh: true }),
@@ -81,8 +86,8 @@ export default {
       getReorderMode: () => this.reorderMode,
       setReorderMode: (enabled) => { this.reorderMode = enabled; },
       invalidateToday: () => { if (this.reads === mountedReads) mountedReads.invalidate(['today']); },
-      onSaved: (ids, result, applyCandidate = true) =>
-        this.orderSaved(ids, result, applyCandidate && this.reads === mountedReads),
+      captureSave: () => ({ revision: ++this.orderRevision, board: structuredClone(this.board) }),
+      onSaved: (ids, result, receipt) => this.orderSaved(ids, result, receipt),
     });
     this.memo = createPlanningMemo({
       beginReader: (id) => {
@@ -267,6 +272,7 @@ export default {
     });
 
     this.reminder.attach();
+    if (this.board) this.renderBoard();
     await this.loadToday();
     if (this.reads !== mountedReads || !this.root) return;
     this.pollTimer = setInterval(() => {
@@ -409,6 +415,7 @@ export default {
       apply: (board) => {
         if (this.reorderMode) return;
         this.board = board;
+        this.pendingOrder = null;
         this.renderBoard();
         this.reminder.checkAlarms(board);
       },
@@ -450,7 +457,14 @@ export default {
     return results.every(Boolean);
   },
 
+  planningChanged() {
+    this.orderRevision += 1;
+    this.pendingOrder = null;
+    this.reads?.invalidate();
+  },
+
   async taskSaved(editing) {
+    this.planningChanged();
     // 保存前发出的慢轮询自此失效；隐藏列表仅标记，下一次切入再读取。
     // 表单关闭/路由重挂载不会撤销业务写入；成功时刷新当前挂载的页面。
     const mountedReads = this.reads;
@@ -549,7 +563,7 @@ export default {
     this.root.querySelector('#planning-done-count').textContent = `${board.done.length}`;
 
     const banner = this.root.querySelector('#planning-alarm-banner');
-    if (board.recompute?.pending) {
+    if (board.recompute?.pending && board.recompute.enabled !== false) {
       banner.innerHTML = `
         <div class="plan-alarm-bar">
           ${icon('clock')}
@@ -561,20 +575,9 @@ export default {
 
     if (this.selected?.kind === 'occ' && this.activeTab === 'today') {
       const occ = this.findOccurrence(this.selected.id);
-      // 轮询保护：详情栏内有用户修改过但尚未保存的输入（闹钟/计时器）时，
-      // 跳过本轮详情重绘，不覆盖未保存内容（保存/切换后自然恢复刷新）
-      if (occ && !this.detailHasUnsavedInput()) this.showOccurrenceDetail(occ);
+      if (occ) this.showOccurrenceDetail(occ, { preserveInputs: true });
     }
     if (inReorder) this.attachDragHandlers();
-  },
-
-  detailHasUnsavedInput() {
-    const body = this.detail?.body;
-    if (!body) return false;
-    return [...body.querySelectorAll('input')].some((el) => {
-      if (el.type === 'checkbox') return el.checked !== el.defaultChecked;
-      return el.value !== el.defaultValue;
-    });
   },
 
   findOccurrence(id) {
@@ -643,9 +646,9 @@ export default {
           ${this.itemBadges(occ)}
         </div></div>
       </div>`).join('');
-    if (this.activeTab === 'all' && this.selected?.kind === 'occ' && !this.detailHasUnsavedInput()) {
+    if (this.activeTab === 'all' && this.selected?.kind === 'occ') {
       const occ = this.occurrences.find((o) => o.id === this.selected.id);
-      if (occ) this.showOccurrenceDetail(occ);
+      if (occ) this.showOccurrenceDetail(occ, { preserveInputs: true });
     }
   },
 
@@ -674,15 +677,13 @@ export default {
     }
   },
 
-  async showOccurrenceDetail(occ) {
+  async showOccurrenceDetail(occ, { preserveInputs = false } = {}) {
     if (!this.detail || this.selected?.kind !== 'occ' || this.selected.id !== occ.id
         || !['today', 'all'].includes(this.activeTab)) return;
     this.markSelected(`[data-occ="${occ.id}"], [data-occ-all="${occ.id}"]`);
-    const actions = this.occurrenceActions(occ);
-    this.detail.render({
-      title: esc(occ.content),
-      badges: `<div class="tag-row">${tag(esc(TASK_TYPE_LABELS[occ.task_type] || ''), 'gold')}${this.itemBadges(occ)}</div>`,
-      html: `
+    const title = esc(occ.content);
+    const badges = `<div class="tag-row">${tag(esc(TASK_TYPE_LABELS[occ.task_type] || ''), 'gold')}${this.itemBadges(occ)}</div>`;
+    const facts = `
         <div class="kv"><span class="k">原始规划周期</span><span class="v">${esc(occ.schedule_date || occ.for_date)}</span></div>
         ${occ.display_cycle_date ? `<div class="kv"><span class="k">当前展示周期</span><span class="v">${esc(occ.display_cycle_date)}</span></div>` : ''}
         <div class="kv"><span class="k">预估时间</span><span class="v">${occ.time_updating ? '更新中…' : fmtRange(occ.est_start, occ.est_end)}</span></div>
@@ -695,6 +696,35 @@ export default {
         ${occ.is_limited ? `<div class="kv"><span class="k">限时截止</span><span class="v">${fmtClock(occ.deadline_at)}</span></div>` : ''}
         ${occ.partial_note ? `<div class="kv kv-block"><span class="k">部分完成说明</span><span class="v">${esc(occ.partial_note)}</span></div>` : ''}
         ${occ.partial_at ? `<div class="kv"><span class="k">部分完成时间</span><span class="v">${fmtDue(occ.partial_at)}</span></div>` : ''}
+`;
+    const state = `
+        <div class="kv"><span class="k">当前状态</span><span class="v">${esc(occ.schedule_label)}</span></div>
+        ${this.conflictById?.get(occ.id) ? `<div class="kv kv-block"><span class="k">排程冲突</span><span class="v">${esc(this.conflictById.get(occ.id).reason)}</span></div>` : ''}`;
+    const actions = this.occurrenceActions(occ);
+    const factsHost = this.detail.body.querySelector(`[data-occ-readonly="${occ.id}"]`);
+    if (preserveInputs && factsHost) {
+      // Update facts in place. Input identity, focus, selection and drawer state survive.
+      const update = (el, html) => { if (el.innerHTML !== html) el.innerHTML = html; };
+      update(factsHost, facts);
+      update(this.detail.body.querySelector('[data-occ-state]'), state);
+      update(this.detail.el.querySelector('.detail-title'), title);
+      update(this.detail.el.querySelector('.detail-badges'), badges);
+      update(this.detail.foot, actions);
+      for (const [selector, value] of [
+        ['[data-alarm-start]', !!occ.alarm_start], ['[data-alarm-end]', !!occ.alarm_end],
+        ['[data-timer-input]', String(occ.timer_minutes ?? '')],
+      ]) {
+        const input = this.detail.body.querySelector(selector);
+        const checkbox = input.type === 'checkbox';
+        const dirty = checkbox ? input.checked !== input.defaultChecked : input.value !== input.defaultValue;
+        if (dirty || document.activeElement === input) continue;
+        if (checkbox) { input.checked = value; input.defaultChecked = value; }
+        else { input.value = value; input.defaultValue = value; }
+      }
+      return;
+    }
+    this.detail.render({ title, badges, actions, html: `
+      <div data-occ-readonly="${occ.id}">${facts}</div>
         <div class="kv kv-block"><span class="k">提醒</span><div class="v plan-alarm-controls">
           <div class="tag-row" data-alarm-controls data-task-id="${occ.task_id}">
             <label class="inline"><input type="checkbox" data-alarm-start ${occ.alarm_start ? 'checked' : ''}> 开始闹钟</label>
@@ -703,10 +733,7 @@ export default {
             <button class="btn btn-secondary btn-sm" data-act="occ-save-alarm" data-id="${occ.id}">${icon('check')}保存提醒</button>
           </div>
         </div></div>
-        <div class="kv"><span class="k">当前状态</span><span class="v">${esc(occ.schedule_label)}</span></div>
-        ${this.conflictById?.get(occ.id) ? `<div class="kv kv-block"><span class="k">排程冲突</span><span class="v">${esc(this.conflictById.get(occ.id).reason)}</span></div>` : ''}`,
-      actions,
-    });
+      <div data-occ-state>${state}</div>` });
   },
 
   /** BUG-11：详情栏「保存提醒」→ PATCH 所属任务定义的闹钟/计时器字段。 */
@@ -716,24 +743,32 @@ export default {
     if (!host) return;
     const taskId = Number(host.dataset.taskId);
     const timer = host.querySelector('[data-timer-input]').value.trim();
+    const values = {
+      alarm_start: host.querySelector('[data-alarm-start]').checked,
+      alarm_end: host.querySelector('[data-alarm-end]').checked,
+      timer_minutes: timer || null,
+    };
     try {
       await gw(`/admin/api/planning/tasks/${taskId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          alarm_start: host.querySelector('[data-alarm-start]').checked,
-          alarm_end: host.querySelector('[data-alarm-end]').checked,
-          timer_minutes: timer || null,
-        }),
+        body: JSON.stringify(values),
       });
+      this.planningChanged();
       toast('提醒已保存');
+      if (this.selectionIsCurrent(owner)
+          && host === this.detail.body.querySelector('[data-alarm-controls]')) {
+        host.querySelector('[data-alarm-start]').defaultChecked = values.alarm_start;
+        host.querySelector('[data-alarm-end]').defaultChecked = values.alarm_end;
+        host.querySelector('[data-timer-input]').defaultValue = timer;
+      }
       if (this.reads !== owner.reads || !this.root) return;
       this.reads?.invalidate();
       await this.loadToday();
       if (this.reads !== owner.reads || !this.root) return;
       await this.loadOccurrences();
       const fresh = this.findOccurrence(occId) || this.occurrences.find((o) => o.id === occId);
-      if (fresh && this.selectionIsCurrent(owner)) this.showOccurrenceDetail(fresh);
+      if (fresh && this.selectionIsCurrent(owner)) this.showOccurrenceDetail(fresh, { preserveInputs: true });
     } catch (error) {
       toast(`保存提醒失败：${error.message}`, 'err');
     }
@@ -846,27 +881,22 @@ export default {
 
   /* ---------- 排列模式（指针拖拽） ---------- */
 
-  async orderSaved(ids, result, applyCandidate = true) {
+  async orderSaved(ids, result, receipt) {
+    const current = receipt?.revision === this.orderRevision;
+    if (current && !result?.replayed) {
+      const board = mergeOrderReceipt(this.board, ids, result, receipt.board);
+      if (board && board !== this.board) {
+        this.board = board;
+        this.pendingOrder = { revision: receipt.revision, board };
+      }
+    }
     const reads = this.reads;
     if (!reads || !this.root) return;
     reads.invalidate();
-    if (this.board && applyCandidate && !result?.replayed) {
-      const position = new Map(ids.map((id, index) => [id, index]));
-      const estimates = new Map((result?.estimates || []).map((occ) => [occ.id, occ]));
-      const updating = result?.recompute_enabled !== false && !result?.schedule_applied;
-      this.board = { ...this.board, progress: this.board.progress
-        .map((occ) => ({ ...occ, ...estimates.get(occ.id),
-          sort_order: position.get(occ.id) ?? occ.sort_order, time_updating: updating }))
-        .sort((a, b) => a.sort_order - b.sort_order) };
-      if (result?.schedule_applied) {
-        this.board.conflicts = [];
-        this.board.recompute = { ...this.board.recompute, pending: false,
-          requested_at: null, request_token: null, wait_minutes: null, reason: null };
-      }
-    }
+    if (this.board) reads.seed('today');
     if (!this.reorderMode) this.renderBoard();
     const ok = await this.loadToday({ fresh: true });
-    if (this.reads !== reads || !this.root || ok) return;
+    if (this.reads !== reads || !this.root || ok || receipt?.revision !== this.orderRevision) return;
     this.savedRefresh = { names: ['today'], message: result?.schedule_applied
       ? '顺序和预估时间已保存，列表同步失败' : '顺序已保存，列表更新失败' };
     this.renderReadFeedback();
@@ -901,6 +931,7 @@ export default {
   async runRecompute() {
     try {
       const result = await gw('/admin/api/planning/recompute', { method: 'POST' });
+      this.planningChanged();
       if (result.conflicts?.length) {
         // 冲突 = 本轮整体未生效（既有 est 保留）：三要素逐条呈现
         this.showConflictsModal(result.conflicts, result.updated);
@@ -941,11 +972,15 @@ export default {
 
   async occurrenceAction(act, id) {
     const reads = this.reads;
-    const post = (path, body) => gw(`/admin/api/planning/occurrences/${id}${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body || {}),
-    });
+    const post = async (path, body) => {
+      const result = await gw(`/admin/api/planning/occurrences/${id}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+      });
+      this.planningChanged();
+      return result;
+    };
     try {
       if (act === 'start') await post('/start');
       else if (act === 'finish' || act === 'complete') return this.askCompleteDuration(id, post);
@@ -1045,6 +1080,7 @@ export default {
           if (el) el.disabled = false;
         }
       }
+      this.planningChanged();
       if (this.reads !== owner.reads || !this.root) return;
       this.reads?.invalidate();
       await Promise.all([this.loadTasks(), this.loadToday()]);

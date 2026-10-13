@@ -313,7 +313,7 @@ class PlanningPageContractTests(unittest.TestCase):
             "`/admin/api/planning/tasks/${taskId}`",
             "timer_minutes: timer || null",
             "alarm_start: host.querySelector('[data-alarm-start]').checked",
-            "if (fresh && this.selectionIsCurrent(owner)) this.showOccurrenceDetail(fresh);",
+            "if (fresh && this.selectionIsCurrent(owner)) this.showOccurrenceDetail(fresh, { preserveInputs: true });",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.page)
@@ -589,9 +589,9 @@ class PlanningPageContractTests(unittest.TestCase):
         self.assertNotIn("if (occ.is_limited) badges.push(tag('限时', 'red'));", (self.page + self.display))
 
     def test_poll_does_not_overwrite_unsaved_detail_input(self):
-        # 30 秒轮询：详情栏有未保存输入时跳过重绘，不覆盖用户正在编辑的内容
-        self.assertIn("if (occ && !this.detailHasUnsavedInput()) this.showOccurrenceDetail(occ);", self.page)
-        self.assertIn("detailHasUnsavedInput()", self.page)
+        # 30 秒轮询：只读信息原位更新，提醒草稿和焦点独立保留
+        self.assertIn("if (occ) this.showOccurrenceDetail(occ, { preserveInputs: true });", self.page)
+        self.assertIn("if (dirty || document.activeElement === input) continue;", self.page)
 
     def test_pause_resume_refresh_entry_and_copy(self):
         # 需求 24：任务详情栏提供「暂停刷新 / 恢复刷新」，仅周期任务（每日/

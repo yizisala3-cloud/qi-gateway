@@ -81,3 +81,6 @@ class PlanningFrontendModulesTests(unittest.TestCase):
 
     def test_closing_pending_form_and_remounting_cannot_start_second_create(self):
         self._run_group("C5-closed-pending-form")
+
+    def test_order_receipt_preserves_newer_results_facts_and_seeded_cache(self):
+        self._run_group("C6-order-receipt")

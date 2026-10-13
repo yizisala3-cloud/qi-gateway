@@ -16,6 +16,7 @@ export function createPlanningReads() {
 
   return {
     invalidate,
+    seed(name) { lists.get(name).hasData = true; },
     needsRead(name) { return lists.get(name).status !== 'loaded'; },
     hasData(name) { return lists.get(name).hasData; },
     dispose() { disposed = true; },
