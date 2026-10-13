@@ -1068,7 +1068,10 @@ const checks = {
     const replaced = { ...before, progress: [before.progress[0], { ...before.progress[1], id: 9 }] };
     assert.equal(syncModule.mergeOrderReceipt(replaced, [8, 7], receipt, before), replaced);
     const newerSwitch = { ...before, recompute: { enabled: false } };
-    assert.equal(syncModule.mergeOrderReceipt(newerSwitch, [8, 7], receipt, before), newerSwitch);
+    const preservedSwitch = syncModule.mergeOrderReceipt(newerSwitch, [8, 7], receipt, before);
+    assert.equal(preservedSwitch.recompute.enabled, false, 'a newer switch must not be overwritten');
+    assert.deepEqual(preservedSwitch.progress.map(o => o.id), [8, 7], 'independently committed order is still known');
+    assert.equal(preservedSwitch.progress[0].est_start, 'new-8');
     const off = syncModule.mergeOrderReceipt(before, [8, 7], { recompute_enabled: false,
       schedule_applied: false, estimates: [{ id: 8, est_start: 'must-not-apply' }] }, before);
     assert.equal(off.recompute.enabled, false);
@@ -1082,6 +1085,74 @@ const checks = {
     const failure = await reads.read('today', { request: async () => { throw new Error('offline'); }, apply() {} });
     assert.equal(failure.error.message, 'offline');
     assert.equal(reads.hasData('today'), true);
+  },
+
+  async 'C7-field-authority-and-labels'() {
+    const before = { ...emptyBoard(), now: '2026-10-12T12:00:00+08:00',
+      progress: [7, 8].map((id, index) => ({ id, task_id: id, status: 'pending', sort_order: index,
+        est_start: `2026-10-12T${index ? '13' : '11'}:00:00+08:00`,
+        est_end: `2026-10-12T${index ? '13' : '11'}:30:00+08:00`,
+        schedule_label: '落后', window_start_at: null, actual_start: null })),
+      recompute: { enabled: true, pending: false } };
+    const result = { recompute_enabled: true, schedule_applied: true, estimates: [
+      { id: 8, est_start: '2026-10-12T04:00:00Z', est_end: '2026-10-12T04:30:00Z' },
+      { id: 7, est_start: '2026-10-12T04:30:00Z', est_end: '2026-10-12T05:00:00Z' },
+    ] };
+    const updated = syncModule.mergeOrderReceipt(before, [8, 7], result, before);
+    assert.equal(updated.progress[1].schedule_label, '正常');
+    const matchingOff = { ...before, recompute: { enabled: false, pending: false } };
+    const off = syncModule.mergeOrderReceipt(matchingOff, [8, 7], {
+      recompute_enabled: false, schedule_applied: false, estimates: result.estimates }, before);
+    assert.deepEqual(off.progress.map(o => o.id), [8, 7]);
+    assert.equal(off.progress[0].est_start, before.progress[1].est_start, 'disabled saves order only');
+    const newerOn = { ...matchingOff, recompute: { enabled: true, pending: true,
+      requested_at: '2026-10-12T12:01:00+08:00', reason: 'new-edit' } };
+    const onPreserved = syncModule.mergeOrderReceipt(newerOn, [8, 7], {
+      recompute_enabled: false, schedule_applied: false, estimates: [] }, matchingOff);
+    assert.deepEqual(onPreserved.recompute, newerOn.recompute);
+    assert.equal(onPreserved.progress.some(o => o.time_updating), false);
+    const newerRequest = { ...before, recompute: { enabled: true, pending: true,
+      requested_at: '2026-10-12T12:01:00+08:00', reason: 'new-edit' } };
+    assert.deepEqual(syncModule.mergeOrderReceipt(newerRequest, [8, 7], result, before).recompute,
+      newerRequest.recompute, 'newer read request metadata is independent of order fields');
+    const utcBefore = structuredClone(before);
+    utcBefore.progress[0].est_start = '2026-10-12T03:00:00Z';
+    assert.notEqual(syncModule.mergeOrderReceipt(utcBefore, [8, 7], result, before), utcBefore,
+      'equivalent timestamps are not a business conflict');
+    assert.notEqual(syncModule.mergeOrderReceipt(updated, [8, 7], result, before), updated,
+      'an already observed commit is compatible with its own receipt');
+    const laterResult = { ...result, estimates: result.estimates.map(o => ({ ...o,
+      est_start: o.id === 8 ? '2026-10-12T06:00:00Z' : '2026-10-12T06:30:00Z',
+      est_end: o.id === 8 ? '2026-10-12T06:30:00Z' : '2026-10-12T07:00:00Z' })) };
+    assert.equal(syncModule.mergeOrderReceipt(updated, [8, 7], laterResult, before), updated);
+    assert.equal(syncModule.mergeOrderReceipt(updated, [8, 7], laterResult, before, updated)
+      .progress[0].est_start, '2026-10-12T06:00:00Z', 'a known earlier local commit does not block a later success');
+    for (const field of ['actual_start', 'window_start_at', 'partial_at', 'handled_at', 'closed_at']) {
+      const changed = structuredClone(updated); changed.progress[0][field] = '2026-10-12T13:00:00+08:00';
+      assert.equal(syncModule.mergeOrderReceipt(changed, [8, 7], laterResult, before, updated), changed, field);
+    }
+    const history = { id: 99, status: 'completed', actual_start: 'fact', window_start_at: 'frozen' };
+    const filtered = [before.progress[0], history, before.progress[1]];
+    const synchronized = syncModule.mergeOccurrencesFromBoard(filtered, updated, before);
+    assert.deepEqual(synchronized.map(o => o.id), [7, 99, 8]);
+    assert.equal(synchronized[0].est_start, '2026-10-12T04:30:00Z');
+    assert.equal(synchronized[1], history);
+    assert.equal(syncModule.mergeOccurrencesFromBoard(synchronized, updated, updated), synchronized,
+      'unchanged hidden records must not require a second list repaint');
+    const newerAll = { ...before.progress[1], est_start: '2026-10-12T18:00:00+08:00', actual_start: 'fact' };
+    assert.equal(syncModule.mergeOccurrencesFromBoard([newerAll], updated, before)[0], newerAll);
+    const micros = structuredClone(before);
+    micros.progress[0].est_start = '2026-10-12T11:00:00.000001+08:00';
+    assert.equal(syncModule.mergeOrderReceipt(micros, [8, 7], result, before), micros,
+      'a microsecond change is a real newer time, not an equivalent UTC encoding');
+    const savedClock = Date.now; Date.now = () => Date.parse('2030-01-01T00:00:00Z');
+    try {
+      assert.equal(syncModule.scheduleLabel({ status: 'pending', est_start: '2026-10-12T12:30:00+08:00' }, before.now), '正常');
+    } finally { Date.now = savedClock; }
+    const cases = JSON.parse(await readFile(join(workspace, 'label-cases.json'), 'utf8'));
+    for (const { occ, now, expected } of cases) {
+      assert.equal(syncModule.scheduleLabel(occ, now), expected, JSON.stringify({ occ, now }));
+    }
   },
 
   async 'C1-visible-refresh'() {

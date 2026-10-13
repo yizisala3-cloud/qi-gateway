@@ -1,6 +1,6 @@
 // Candidate order belongs to this controller until confirmation or cancellation.
-import { gw } from '../api.js?v=20261012-planning-sync';
-import { toast } from '../ui.js?v=20261012-planning-sync';
+import { gw } from '../api.js?v=20261012-planning-sync2';
+import { toast } from '../ui.js?v=20261012-planning-sync2';
 
 export function createPlanningSort({
   getRoot, getProgressList, getBoard, getActiveTab, getActiveSection,

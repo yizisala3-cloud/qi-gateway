@@ -1,26 +1,26 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
 // 数据按需加载：今日看板保留 30 秒提醒轮询，首次/失效切入时刷新可见列表。
-import { gw } from '../api.js?v=20261012-planning-sync';
+import { gw } from '../api.js?v=20261012-planning-sync2';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, esc,
   createDetailPanel,
-} from '../ui.js?v=20261012-planning-sync';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261012-planning-sync';
-import { createRetroSelectField } from '../lib/retro_select.js?v=20261012-planning-sync';
+} from '../ui.js?v=20261012-planning-sync2';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261012-planning-sync2';
+import { createRetroSelectField } from '../lib/retro_select.js?v=20261012-planning-sync2';
 import {
   TASK_TYPE_LABELS, TASK_TYPES, STATUS_META, CLOSED_STATUSES,
   fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty, formatIntervalMinutes,
   itemMeta, isClosedOcc, formatLoggedDuration, durationText, durationDetailRows,
   itemBadges, itemHtml,
-} from '../lib/planning_display.js?v=20261012-planning-sync';
-import { openTaskForm } from '../lib/planning_task_form.js?v=20261012-planning-sync';
-import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261012-planning-sync';
-import { createPlanningSort } from '../lib/planning_sort.js?v=20261012-planning-sync';
-import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261012-planning-sync';
-import { createPlanningMemo } from '../lib/planning_memo.js?v=20261012-planning-sync';
-import { createPlanningReads } from '../lib/planning_reads.js?v=20261012-planning-sync';
-import { mergeOrderReceipt } from '../lib/planning_sync.js?v=20261012-planning-sync';
+} from '../lib/planning_display.js?v=20261012-planning-sync2';
+import { openTaskForm } from '../lib/planning_task_form.js?v=20261012-planning-sync2';
+import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261012-planning-sync2';
+import { createPlanningSort } from '../lib/planning_sort.js?v=20261012-planning-sync2';
+import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261012-planning-sync2';
+import { createPlanningMemo } from '../lib/planning_memo.js?v=20261012-planning-sync2';
+import { createPlanningReads } from '../lib/planning_reads.js?v=20261012-planning-sync2';
+import { mergeOrderReceipt, mergeOccurrencesFromBoard } from '../lib/planning_sync.js?v=20261012-planning-sync2';
 
 // 部分完成属于开放生命周期：实例仍在「进度中」，直到「已全部完成」才关闭
 const OPEN_STATUSES = ['pending', 'in_progress', 'deferred', 'partial'];
@@ -41,7 +41,10 @@ export default {
   reads: null,
   readErrors: null,
   savedRefresh: null,
-  orderRevision: 0, // Survives remounts; later business writes supersede older receipts.
+  orderRevision: 0, // Successful non-sort writes supersede captured business snapshots.
+  orderAttempt: 0,
+  lastOrderAttempt: 0, // Only confirmed successes advance this ordering barrier.
+  lastOrderBoard: null,
   pendingOrder: null,
   pollTimer: null,
   reminder: createPlanningReminder(),
@@ -86,7 +89,8 @@ export default {
       getReorderMode: () => this.reorderMode,
       setReorderMode: (enabled) => { this.reorderMode = enabled; },
       invalidateToday: () => { if (this.reads === mountedReads) mountedReads.invalidate(['today']); },
-      captureSave: () => ({ revision: ++this.orderRevision, board: structuredClone(this.board) }),
+      captureSave: () => ({ attempt: ++this.orderAttempt, revision: this.orderRevision,
+        board: structuredClone(this.board) }),
       onSaved: (ids, result, receipt) => this.orderSaved(ids, result, receipt),
     });
     this.memo = createPlanningMemo({
@@ -414,8 +418,10 @@ export default {
       request: () => gw('/admin/api/planning/today'),
       apply: (board) => {
         if (this.reorderMode) return;
+        const previousBoard = this.board;
         this.board = board;
         this.pendingOrder = null;
+        this.syncOccurrencesFromBoard(previousBoard);
         this.renderBoard();
         this.reminder.checkAlarms(board);
       },
@@ -460,6 +466,7 @@ export default {
   planningChanged() {
     this.orderRevision += 1;
     this.pendingOrder = null;
+    this.lastOrderBoard = null;
     this.reads?.invalidate();
   },
 
@@ -881,23 +888,46 @@ export default {
 
   /* ---------- 排列模式（指针拖拽） ---------- */
 
+  syncOccurrencesFromBoard(previousBoard) {
+    if (!this.root || !this.occurrences.length) return;
+    const occurrences = mergeOccurrencesFromBoard(this.occurrences, this.board, previousBoard);
+    if (occurrences !== this.occurrences) {
+      this.occurrences = occurrences;
+      this.renderOccurrences();
+    } else if (this.activeTab === 'all' && this.selected?.kind === 'occ') {
+      const occ = occurrences.find((item) => item.id === this.selected.id);
+      if (occ) this.showOccurrenceDetail(occ, { preserveInputs: true });
+    }
+  },
+
   async orderSaved(ids, result, receipt) {
-    const current = receipt?.revision === this.orderRevision;
-    if (current && !result?.replayed) {
-      const board = mergeOrderReceipt(this.board, ids, result, receipt.board);
+    const current = receipt?.revision === this.orderRevision
+      && receipt.attempt > this.lastOrderAttempt && !result?.replayed;
+    if (current) {
+      const board = mergeOrderReceipt(this.board, ids, result, receipt.board, this.lastOrderBoard);
+      this.lastOrderAttempt = receipt.attempt;
       if (board && board !== this.board) {
         this.board = board;
-        this.pendingOrder = { revision: receipt.revision, board };
+        this.lastOrderBoard = board;
+        this.pendingOrder = { revision: receipt.revision, attempt: receipt.attempt, board };
       }
+      this.syncOccurrencesFromBoard(receipt.board);
     }
     const reads = this.reads;
     if (!reads || !this.root) return;
     reads.invalidate();
     if (this.board) reads.seed('today');
     if (!this.reorderMode) this.renderBoard();
-    const ok = await this.loadToday({ fresh: true });
-    if (this.reads !== reads || !this.root || ok || receipt?.revision !== this.orderRevision) return;
-    this.savedRefresh = { names: ['today'], message: result?.schedule_applied
+    // Visible all-tab records must read after the commit too. The immediate
+    // cache merge remains displayed if these reads are slow or fail.
+    const names = [...new Set(['today', ...this.visibleLists()])];
+    const load = { today: () => this.loadToday({ fresh: true }),
+      tasks: () => this.loadTasks({ fresh: true }),
+      occurrences: () => this.loadOccurrences({ fresh: true }) };
+    const outcomes = await Promise.all(names.map((name) => load[name]()));
+    if (this.reads !== reads || !this.root || outcomes.every(Boolean) || !current
+        || receipt.revision !== this.orderRevision || receipt.attempt !== this.lastOrderAttempt) return;
+    this.savedRefresh = { names, message: result?.schedule_applied
       ? '顺序和预估时间已保存，列表同步失败' : '顺序已保存，列表更新失败' };
     this.renderReadFeedback();
   },

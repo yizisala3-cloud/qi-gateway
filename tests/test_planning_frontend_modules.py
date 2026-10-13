@@ -17,7 +17,7 @@ SCRIPT = ROOT / "tests" / "planning_frontend_modules.test.mjs"
 
 
 class PlanningFrontendModulesTests(unittest.TestCase):
-    def _run_group(self, group):
+    def _run_group(self, group, payload=None):
         node = shutil.which("node")
         if node is None:
             try:
@@ -33,6 +33,8 @@ class PlanningFrontendModulesTests(unittest.TestCase):
             shutil.copytree(ROOT / "admin" / "js", tmp / "admin" / "js")
             (tmp / "package.json").write_text(
                 json.dumps({"type": "module"}), encoding="utf-8")
+            if payload is not None:
+                (tmp / "label-cases.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             env = dict(os.environ, TZ="Asia/Shanghai")
             result = subprocess.run(
                 [node, str(SCRIPT), str(tmp), group],
@@ -84,3 +86,28 @@ class PlanningFrontendModulesTests(unittest.TestCase):
 
     def test_order_receipt_preserves_newer_results_facts_and_seeded_cache(self):
         self._run_group("C6-order-receipt")
+
+    def test_field_authority_and_labels_match_backend_semantics(self):
+        from datetime import datetime
+        from gateway.planning_serialization import schedule_label
+
+        now = "2026-10-12T12:00:00+08:00"
+        payload = []
+        starts = [None, "2026-10-12T11:00:00+08:00", "2026-10-12T12:00:00+08:00",
+                  "2026-10-12T12:00:00.001+08:00", "2026-10-12T12:00:00.000001+08:00",
+                  "2026-10-12T12:00:00.000999+08:00", "2026-10-12T04:30:00Z"]
+        nominals = [None, "2026-10-12T12:00:59.999+08:00", "2026-10-12T12:01:00+08:00",
+                    "2026-10-12T12:01:00.001+08:00", "2026-10-12T12:01:00.000001+08:00",
+                    "2026-10-12T13:00:00+08:00"]
+        for status in ["pending", "in_progress", "partial", "deferred", "timeout", "completed", "discarded"]:
+            for start in starts:
+                for nominal in nominals:
+                    occ = {"status": status, "est_start": start, "nominal_start": nominal}
+                    payload.append({"occ": occ, "now": now,
+                                    "expected": schedule_label(occ, {}, datetime.fromisoformat(now))})
+        for clock in ["2026-10-12T12:00:00.000999+08:00", "2026-10-12T12:00:00.000001+08:00"]:
+            for start in starts:
+                occ = {"status": "pending", "est_start": start, "nominal_start": None}
+                payload.append({"occ": occ, "now": clock,
+                                "expected": schedule_label(occ, {}, datetime.fromisoformat(clock))})
+        self._run_group("C7-field-authority-and-labels", payload)

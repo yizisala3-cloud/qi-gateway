@@ -1,7 +1,7 @@
 // Task creation/edit form. Local submitting/committed state belongs to one opened form.
-import { gw } from '../api.js?v=20261012-planning-sync';
-import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261012-planning-sync';
-import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261012-planning-sync';
+import { gw } from '../api.js?v=20261012-planning-sync2';
+import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261012-planning-sync2';
+import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261012-planning-sync2';
 
 export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
   const editing = !!task?.id;

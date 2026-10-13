@@ -486,6 +486,290 @@ async function main() {
       assert.deepEqual((await snapshot(page)).dom, [8, 7]);
     });
 
+    await check('Review R1: all-tab list/detail must adopt committed estimates while retaining drafts', async () => {
+      await install(page);
+      results.reviewAll = await page.evaluate(async () => {
+        window.fetch = (raw, opts) => String(raw).endsWith('/planning/reorder')
+          ? new Promise(resolve => { gates.submit = resolve; })
+          : String(raw).includes('/planning/occurrences') && !opts?.method
+            ? Promise.resolve(Response.json(board.progress)) : baseFetch(raw, opts);
+        beginSort();
+        planning.switchTab('all');
+        await planning.loadOccurrences();
+        planning.select('occ', 8);
+        const input = planning.detail.body.querySelector('[data-timer-input]');
+        input.value = '45m'; input.focus(); input.setSelectionRange(1, 3);
+        window.allInput = input;
+        commit(); await confirmation;
+        await planning.loadToday();
+        return { activeTab: planning.activeTab,
+            persisted: board.progress.map(o => [o.id, o.est_start]),
+            today: planning.board.progress.map(o => [o.id, o.est_start]),
+            all: planning.occurrences.map(o => [o.id, o.est_start]),
+            needsOccurrencesRead: planning.reads.needsRead('occurrences'),
+            detail: planning.detail.body.textContent,
+            draft: input.value, sameNode: planning.detail.body.querySelector('[data-timer-input]') === allInput,
+            focused: document.activeElement === input,
+            calls: calls.slice(),
+        };
+      });
+      await page.screenshot({ path: path.join(out, 'review-all.png'), fullPage: true });
+      assert.equal(results.reviewAll.draft, '45m');
+      assert.equal(results.reviewAll.focused, true);
+      assert.equal(results.reviewAll.all.find(o => o[0] === 8)[1],
+        results.reviewAll.persisted.find(o => o[0] === 8)[1]);
+      assert.match(results.reviewAll.detail, /12:00/);
+    });
+
+    await check('Review R2: rejected newer sort must not invalidate an earlier committed receipt', async () => {
+      await install(page);
+      await page.evaluate(async () => {
+        let orderCalls = 0;
+        let remountRead = true;
+        window.fetch = (raw, opts) => {
+          if (String(raw).endsWith('/planning/today') && remountRead) {
+            remountRead = false;
+            const precommit = structuredClone(board);
+            // GET captured the old order; the first transaction commits before
+            // this snapshot is delivered, but its POST response is still delayed.
+            board.progress = [8, 7].map((id, index) => ({ ...board.progress.find(o => o.id === id),
+              sort_order: index, est_start: `2026-10-12T12:${index ? '30' : '00'}:00+08:00`,
+              est_end: index ? '2026-10-12T13:00:00+08:00' : '2026-10-12T12:30:00+08:00' }));
+            window.firstReceipt = { recompute_enabled: true, schedule_applied: true, estimates: structuredClone(board.progress) };
+            return Promise.resolve(Response.json(precommit));
+          }
+          if (!String(raw).endsWith('/planning/reorder')) return baseFetch(raw, opts);
+          if (++orderCalls === 1) return new Promise(resolve => { gates.submit = resolve; });
+          return Promise.resolve(Response.json({ error: 'new sort rejected: expected_order is stale', error_code: 'concurrent_modified' }, { status: 409 }));
+        };
+        beginSort();
+        window.firstConfirmation = confirmation;
+        planning.unmount();
+        await planning.mount(document.querySelector('#fixture'));
+        clearInterval(planning.pollTimer); planning.pollTimer = null;
+        failRead = true;
+        beginSort(); await confirmation;
+        gates.submit(Response.json(firstReceipt)); await firstConfirmation;
+      });
+      await page.waitForFunction(() => planning.readErrors.has('today'));
+      results.reviewRejected = await snapshot(page);
+      results.reviewRejected.revision = await page.evaluate(() => planning.orderRevision);
+      await page.screenshot({ path: path.join(out, 'review-rejected.png'), fullPage: true });
+      assert.deepEqual(results.reviewRejected.cached, results.reviewRejected.persisted);
+    });
+
+    await check('Review R3: current auto-off read matching the receipt must not prevent committed order adoption', async () => {
+      await install(page);
+      await page.evaluate(async () => {
+        window.fetch = (raw, opts) => String(raw).endsWith('/planning/reorder')
+          ? new Promise(resolve => { gates.submit = resolve; }) : baseFetch(raw, opts);
+        beginSort();
+        board.recompute.enabled = false;
+        planning.switchTab('goals'); await planning.loadToday();
+        board.progress = [8, 7].map((id, index) => ({ ...board.progress.find(o => o.id === id), sort_order: index }));
+        failRead = true;
+        gates.submit(Response.json({ recompute_enabled: false, schedule_applied: false, estimates: [] }));
+        await confirmation;
+        planning.switchTab('today');
+      });
+      await page.waitForFunction(() => planning.savedRefresh);
+      results.reviewAutoOffRead = await snapshot(page);
+      results.reviewAutoOffRead.enabled = await page.evaluate(() => planning.board.recompute.enabled);
+      assert.equal(results.reviewAutoOffRead.enabled, false);
+      assert.deepEqual(results.reviewAutoOffRead.cached, results.reviewAutoOffRead.persisted);
+    });
+
+    await check('Review R4: schedule labels must agree with receipt estimates when the follow-up GET fails', async () => {
+      await install(page);
+      await page.evaluate(async () => {
+        board.now = '2026-10-12T12:00:00+08:00';
+        Object.assign(board.progress[0], { est_start: '2026-10-12T11:00:00+08:00',
+          est_end: '2026-10-12T11:30:00+08:00', schedule_label: '落后' });
+        await planning.loadToday(); planning.select('occ', 7);
+        planning.detail.body.querySelector('[data-timer-input]').value = '45m';
+        window.fetch = (raw, opts) => String(raw).endsWith('/planning/reorder')
+          ? new Promise(resolve => { gates.submit = resolve; }) : baseFetch(raw, opts);
+        beginSort();
+        board.progress = [8, 7].map((id, index) => ({ ...board.progress.find(o => o.id === id), sort_order: index,
+          est_start: `2026-10-12T12:${index ? '30' : '00'}:00+08:00`,
+          est_end: index ? '2026-10-12T13:00:00+08:00' : '2026-10-12T12:30:00+08:00', schedule_label: '正常' }));
+        const fields = ['id', 'est_start', 'est_end', 'nominal_start', 'estimated_time_source',
+          'fixed_source', 'schedule_managed', 'is_fixed'];
+        const estimates = board.progress.map(o => Object.fromEntries(fields.filter(k => Object.hasOwn(o, k)).map(k => [k, o[k]])));
+        failRead = true;
+        gates.submit(Response.json({ recompute_enabled: true, schedule_applied: true, estimates }));
+        await confirmation;
+      });
+      await page.waitForFunction(() => planning.savedRefresh);
+      results.reviewLabel = await page.evaluate(() => ({
+        server: board.progress.find(o => o.id === 7), cached: planning.board.progress.find(o => o.id === 7),
+        detail: planning.detail.body.textContent,
+      }));
+      assert.equal(results.reviewLabel.cached.est_start, results.reviewLabel.server.est_start);
+      assert.equal(results.reviewLabel.cached.schedule_label, results.reviewLabel.server.schedule_label);
+    });
+
+
+    for (const mode of ['slow', 'failed']) {
+      await check(`all-tab ${mode} reads: immediate estimates, filtered/history order and input identity survive`, async () => {
+        await install(page);
+        await page.evaluate(async (mode) => {
+          window.recordList = [structuredClone(board.progress[0]), { ...board.progress[0], id: 99, task_id: 99,
+            status: 'completed', actual_start: '2026-10-11T10:00:00+08:00', window_start_at: '2026-10-11T09:00:00+08:00' },
+            structuredClone(board.progress[1])];
+          window.postReads = false; window.pendingReads = [];
+          window.fetch = (raw, opts) => {
+            if (String(raw).endsWith('/planning/reorder')) return new Promise(resolve => { gates.submit = resolve; });
+            if (postReads && String(raw).includes('/planning/')) return mode === 'slow'
+              ? new Promise(resolve => pendingReads.push(resolve))
+              : Promise.resolve(Response.json({ error: 'offline' }, { status: 503 }));
+            if (String(raw).includes('/planning/occurrences')) return Promise.resolve(Response.json(recordList));
+            return baseFetch(raw, opts);
+          };
+          beginSort(); planning.filters.schedule_date = '2026-10-12'; planning.switchTab('all');
+          await planning.loadOccurrences(); planning.select('occ', 8);
+          window.retainedInput = planning.detail.body.querySelector('[data-timer-input]');
+          retainedInput.value = '45m'; retainedInput.focus(); retainedInput.setSelectionRange(1, 3);
+          planning.detail.body.querySelector('[data-alarm-end]').checked = true;
+          postReads = true; commit(); await confirmation;
+        }, mode);
+        assert.equal(await page.evaluate(() => planning.occurrences.find(o => o.id === 8).est_start), '2026-10-12T12:00:00+08:00');
+        assert.deepEqual(await page.evaluate(() => planning.occurrences.map(o => o.id)), [7, 99, 8]);
+        assert.equal(await page.evaluate(() => planning.occurrences[1].actual_start), '2026-10-11T10:00:00+08:00');
+        assert.equal(await page.evaluate(() => planning.occurrences[1].window_start_at), '2026-10-11T09:00:00+08:00');
+        assert.equal(await page.evaluate(() => retainedInput === planning.detail.body.querySelector('[data-timer-input]')
+          && document.activeElement === retainedInput && retainedInput.selectionStart === 1 && retainedInput.selectionEnd === 3), true);
+        assert.equal(await page.locator('[data-alarm-end]').isChecked(), true);
+        assert.match(await page.locator('.detail-body').textContent(), /12:00/);
+        if (mode === 'slow') {
+          await page.evaluate(() => pendingReads.forEach(resolve => resolve(Response.json({ error: 'offline' }, { status: 503 }))));
+        }
+        await page.waitForFunction(() => planning.savedRefresh);
+        assert.deepEqual(await page.evaluate(() => [...planning.savedRefresh.names].sort()), ['occurrences', 'tasks', 'today']);
+      });
+    }
+    await check('normal today polling updates an already-selected all-tab detail without rebuilding its draft', async () => {
+      await install(page);
+      await page.evaluate(async () => {
+        board.now = '2026-10-12T12:00:00+08:00'; await planning.loadToday();
+        window.fetch = (raw, opts) => String(raw).includes('/planning/occurrences')
+          ? Promise.resolve(Response.json(board.progress)) : baseFetch(raw, opts);
+        planning.switchTab('all'); await planning.loadOccurrences(); planning.select('occ', 8);
+        window.pollInput = planning.detail.body.querySelector('[data-timer-input]');
+        pollInput.value = '45m'; pollInput.focus(); pollInput.setSelectionRange(1, 2);
+        Object.assign(board.progress[1], { est_start: '2026-10-12T15:00:00+08:00', est_end: '2026-10-12T15:30:00+08:00', schedule_label: '正常' });
+        await planning.loadToday({ silent: true });
+      });
+      assert.equal(await page.evaluate(() => planning.occurrences.find(o => o.id === 8).est_start), '2026-10-12T15:00:00+08:00');
+      assert.match(await page.locator('.detail-body').textContent(), /15:00/);
+      assert.equal(await page.evaluate(() => document.activeElement === pollInput && pollInput.selectionStart === 1
+        && pollInput === planning.detail.body.querySelector('[data-timer-input]')), true);
+    });
+    await check('all-tab newer lifecycle/window/time result survives an older order receipt and failed reads', async () => {
+      await install(page);
+      await page.evaluate(async () => {
+        window.latestList = structuredClone(board.progress);
+        window.fetch = (raw, opts) => String(raw).endsWith('/planning/reorder')
+          ? new Promise(resolve => { gates.submit = resolve; })
+          : String(raw).includes('/planning/occurrences') ? Promise.resolve(Response.json(latestList)) : baseFetch(raw, opts);
+        beginSort(); planning.switchTab('all'); await planning.loadOccurrences();
+        Object.assign(latestList[1], { est_start: '2026-10-12T18:00:00+08:00', actual_start: '2026-10-12T18:00:00+08:00',
+          status: 'in_progress', window_start_at: '2026-10-12T17:00:00+08:00' });
+        await planning.loadOccurrences(); planning.select('occ', 8);
+        planning.detail.body.querySelector('[data-timer-input]').value = '90m';
+        const fetchBeforeFailure = window.fetch;
+        window.fetch = (raw, opts) => String(raw).endsWith('/planning/reorder') ? fetchBeforeFailure(raw, opts)
+          : Promise.resolve(Response.json({ error: 'offline' }, { status: 503 }));
+        commit(); await confirmation;
+      });
+      await page.waitForFunction(() => planning.savedRefresh);
+      assert.equal(await page.evaluate(() => planning.occurrences.find(o => o.id === 8).est_start), '2026-10-12T18:00:00+08:00');
+      assert.equal(await page.evaluate(() => planning.occurrences.find(o => o.id === 8).status), 'in_progress');
+      assert.equal(await page.evaluate(() => planning.occurrences.find(o => o.id === 8).window_start_at), '2026-10-12T17:00:00+08:00');
+      assert.equal(await page.locator('[data-timer-input]').inputValue(), '90m');
+    });
+    await check('older success arriving before newer success cannot block the later confirmed estimates', async () => {
+      await install(page);
+      await page.evaluate(async () => {
+        let writes = 0; let initialRemountRead = true;
+        const makeReceipt = hour => ({ recompute_enabled: true, schedule_applied: true,
+          estimates: board.progress.map((o, index) => ({ ...o, est_start: `2026-10-12T${hour}:${index ? '30' : '00'}:00+08:00`,
+            est_end: `2026-10-12T${index ? Number(hour) + 1 : hour}:${index ? '00' : '30'}:00+08:00` })) });
+        window.fetch = (raw, opts) => {
+          if (String(raw).endsWith('/planning/reorder')) return new Promise(resolve => {
+            if (++writes === 1) gates.first = resolve;
+            else { window.newReceipt = makeReceipt('15'); board.progress = newReceipt.estimates; gates.second = resolve; }
+          });
+          if (String(raw).endsWith('/planning/today') && initialRemountRead) {
+            initialRemountRead = false; const precommit = structuredClone(board);
+            window.oldReceipt = makeReceipt('14'); board.progress = oldReceipt.estimates;
+            return Promise.resolve(Response.json(precommit));
+          }
+          return baseFetch(raw, opts);
+        };
+        planning.enterReorder(); window.firstOrder = planning.confirmReorder();
+        planning.unmount(); await planning.mount(document.querySelector('#fixture'));
+        clearInterval(planning.pollTimer); planning.pollTimer = null;
+        planning.enterReorder(); window.secondOrder = planning.confirmReorder();
+        failRead = true; gates.first(Response.json(oldReceipt)); await firstOrder;
+        gates.second(Response.json(newReceipt)); await secondOrder;
+      });
+      await page.waitForFunction(() => planning.savedRefresh);
+      assert.deepEqual((await snapshot(page)).cached, (await snapshot(page)).persisted);
+    });
+    for (const direction of ['closing', 'reopening']) {
+      await check(`switch ${direction} after commit preserves the newer switch while adopting compatible order fields`, async () => {
+        await install(page);
+        await page.evaluate(async (direction) => {
+          board.recompute = { enabled: direction === 'closing', pending: false };
+          await planning.loadToday();
+          window.fetch = (raw, opts) => String(raw).endsWith('/planning/reorder')
+            ? new Promise(resolve => { gates.submit = resolve; }) : baseFetch(raw, opts);
+          beginSort(); planning.switchTab('goals'); await planning.loadToday();
+          board.recompute = { enabled: direction !== 'closing', pending: direction !== 'closing',
+            requested_at: '2026-10-12T12:01:00+08:00', wait_minutes: 30, reason: 'later-switch' };
+          await planning.loadToday();
+          window.expectedSwitch = structuredClone(board.recompute);
+          const enabled = direction === 'closing';
+          board.progress = [8, 7].map((id, index) => ({ ...board.progress.find(o => o.id === id), sort_order: index,
+            ...(enabled ? { est_start: `2026-10-12T12:${index ? '30' : '00'}:00+08:00` } : {}) }));
+          failRead = true;
+          gates.submit(Response.json({ recompute_enabled: enabled, schedule_applied: enabled,
+            estimates: enabled ? board.progress : [] }));
+          await confirmation; planning.switchTab('today');
+        }, direction);
+        await page.waitForFunction(() => planning.savedRefresh);
+        assert.deepEqual((await snapshot(page)).cached, (await snapshot(page)).persisted);
+        assert.deepEqual(await page.evaluate(() => planning.board.recompute), await page.evaluate(() => expectedSwitch));
+        assert.equal(await page.evaluate(() => planning.board.progress.some(o => o.time_updating)), false);
+      });
+    }
+    await check('accepted earlier receipt after rejected remount attempt registers saved-refresh feedback', async () => {
+      await install(page);
+      await page.evaluate(async () => {
+        let count = 0; let remountRead = true;
+        window.fetch = (raw, opts) => {
+          if (String(raw).endsWith('/planning/reorder')) {
+            if (++count === 1) return new Promise(resolve => { gates.submit = resolve; });
+            return Promise.resolve(Response.json({ error: 'reject', error_code: 'concurrent_modified' }, { status: 409 }));
+          }
+          if (String(raw).endsWith('/planning/today') && remountRead) {
+            remountRead = false; const before = structuredClone(board);
+            board.progress = [8, 7].map((id, index) => ({ ...board.progress.find(o => o.id === id), sort_order: index }));
+            return Promise.resolve(Response.json(before));
+          }
+          return baseFetch(raw, opts);
+        };
+        beginSort(); window.first = confirmation;
+        planning.unmount(); await planning.mount(document.querySelector('#fixture'));
+        failRead = true; beginSort(); await confirmation;
+        gates.submit(Response.json({ recompute_enabled: false, schedule_applied: false, estimates: [] })); await first;
+      });
+      await page.waitForFunction(() => planning.savedRefresh);
+      assert.match(await page.locator('#planning-load-feedback').textContent(), /顺序已保存/);
+      assert.deepEqual((await snapshot(page)).cached, (await snapshot(page)).persisted);
+    });
+
     assert.deepEqual(results.pageErrors, []);
   } finally {
     if (browser) await browser.close();
