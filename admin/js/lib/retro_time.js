@@ -1,6 +1,6 @@
 // Shared paper calendar and time picker. Hidden values retain the caller's id/value
 // and input-event contract; memory continues to normalize/preserve timestamps itself.
-import { esc, icon, registerFloatingSurface } from '../ui.js?v=20261012-integrated-controls-sync';
+import { esc, icon, registerFloatingSurface } from '../ui.js?v=20261014-admin-layout-help-scrollbars';
 
 let activeRetroTimePop = null;
 let sequence = 0;

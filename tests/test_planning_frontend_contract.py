@@ -212,13 +212,12 @@ class PlanningPageContractTests(unittest.TestCase):
 
     def test_closed_records_duration_display_prefers_manual_then_labelled_estimate(self):
         # #19 展示口径：已完成 / 已删除（含历史超时）记录手填 →「实际耗时」；
-        # 未手填 →「预估耗时」标注预估；开放实例保持既有展示。
+        # 未手填 →「预估耗时」标注预估；列表继续保留既有展示口径。
         for marker in (
             "isClosedOcc(occ)",
             "formatLoggedDuration(seconds)",
             "durationText(occ)",
             "durationDetailRows(occ)",
-            "this.durationDetailRows(occ)",
             "actual_logged_seconds != null",
         ):
             with self.subTest(marker=marker):

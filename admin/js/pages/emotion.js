@@ -1,6 +1,6 @@
 // pages/emotion.js - 情感：Eventide 身体状态真实展示（只读）
-import { gw, esc } from '../api.js?v=20261012-integrated-controls-sync';
-import { loading, empty, errorBlock, banner, tag, icon, fmtDate, delegate } from '../ui.js?v=20261012-integrated-controls-sync';
+import { gw, esc } from '../api.js?v=20261014-admin-layout-help-scrollbars';
+import { loading, empty, errorBlock, banner, tag, icon, fmtDate, delegate } from '../ui.js?v=20261014-admin-layout-help-scrollbars';
 
 // 等级 → tag 色调：低→green、中低/中→slate、中高→amber、高→red
 const LEVEL_TONES = { '低': 'green', '中低': 'slate', '中': 'slate', '中高': 'amber', '高': 'red' };
@@ -18,7 +18,7 @@ function fieldRow(field) {
         <span class="body-field-value mono">${hasValue ? value : '-'}</span>
         ${field.level ? tag(esc(field.level), tone) : ''}
       </div>
-      ${field.description ? `<div class="body-field-desc">${esc(field.description)}</div>` : ''}
+      ${field.description ? `<div class="body-field-desc" data-help-note="身体状态指标">${esc(field.description)}</div>` : ''}
     </div>`;
 }
 
@@ -101,7 +101,7 @@ export default {
         <div class="card-head">
           <div>
             <div class="card-title">${icon('heart')}身体状态</div>
-            <div class="card-sub">由 Eventide 在聊天时自动推进；本页只读展示，不提供手动调整。</div>
+            <div class="card-sub" data-help-note="身体状态">由 Eventide 在聊天时自动推进；本页只读展示，不提供手动调整。</div>
           </div>
         </div>
         ${bodyHtml}

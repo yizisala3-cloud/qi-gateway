@@ -1,8 +1,8 @@
 // pages/config.js - 配置：真实状态展示 + 功能开关
-import { gw, esc } from '../api.js?v=20261012-integrated-controls-sync';
-import { loading, errorBlock, tag, toast, delegate, icon } from '../ui.js?v=20261012-integrated-controls-sync';
-import { openCycleSettings } from '../lib/cycle_settings.js?v=20261012-integrated-controls-sync';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261012-integrated-controls-sync';
+import { gw, esc } from '../api.js?v=20261014-admin-layout-help-scrollbars';
+import { loading, errorBlock, tag, toast, delegate, icon } from '../ui.js?v=20261014-admin-layout-help-scrollbars';
+import { openCycleSettings } from '../lib/cycle_settings.js?v=20261014-admin-layout-help-scrollbars';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261014-admin-layout-help-scrollbars';
 
 // 规划数据库不可用时的示例数据（仅本地预览；保存会因库不可用自然报错）
 const DEMO_CYCLE = {
@@ -158,7 +158,7 @@ export default {
             <div class="card-head"><div class="card-title">${icon('key')}模型与插件密钥（默认隐藏，点击后按项显示）</div></div>
             <div id="cred-list">${this.renderCredentialRows()}</div>
             ${this.keyRefReady === false ? '<p class="muted text-sm" style="margin:6px 0 0;color:var(--amber)">密钥标识未就绪（GATEWAY_KEY_REF_SECRET 缺失或短于 32 字节）：日志暂不能按密钥区分故障，密钥值查看不受影响。</p>' : ''}
-            <p class="muted text-sm" style="margin:6px 0 0">密钥值只在点击「显示」后按项从服务端获取（响应不缓存）；隐藏或离开本页即清除，不写入浏览器存储。标识 K-… 与日志页一致，用于按密钥区分故障。</p>
+            <p class="muted text-sm" style="margin:6px 0 0" data-help-note="密钥查看">密钥值只在点击「显示」后按项从服务端获取（响应不缓存）；隐藏或离开本页即清除，不写入浏览器存储。标识 K-… 与日志页一致，用于按密钥区分故障。</p>
             <div class="kv" style="margin-top:8px"><span class="k">更换 API 配置</span><span class="v">
               <button class="btn btn-secondary btn-sm is-disabled" disabled aria-describedby="config-change-note">更换配置</button>
               <span class="control-note" id="config-change-note">暂未接入</span>
@@ -173,12 +173,12 @@ export default {
           <div class="card">
             <div class="card-head"><div class="card-title">${icon('flame')}功能开关</div></div>
             <div class="kv"><span class="k">身体状态注入</span><span class="v">${eventideControl}</span></div>
-            <p class="muted text-sm" style="margin:6px 0 0">关闭后聊天提示词不再注入 Eventide 身体状态卡，状态模拟暂停并冻结；重新开启后按时间分段追赶。</p>
+            <p class="muted text-sm" style="margin:6px 0 0" data-help-note="身体状态开关">关闭后聊天提示词不再注入 Eventide 身体状态卡，状态模拟暂停并冻结；重新开启后按时间分段追赶。</p>
             <div class="kv" style="margin-top:16px"><span class="k">日志收集</span><span class="v">
               <span id="log-collection-tag" class="tag ${this.logCollectionEnabled === true ? 'tag-green' : 'tag-muted'}">${this.logCollectionEnabled === null ? '状态未知' : this.logCollectionEnabled ? '已开启' : '已关闭'}</span>
               <button class="toggle-switch" role="switch" aria-label="日志收集" aria-checked="${this.logCollectionEnabled === true}" data-act="toggle-log-collection" ${this.logCollectionWritable && this.logCollectionEnabled !== null ? '' : 'disabled'}><span class="toggle-knob"></span></button>
             </span></div>
-            <p class="muted text-sm" style="margin:6px 0 0">默认关闭。关闭后停止收集新的报错，已保存的历史日志仍可查看；设置保存后生效，重启后保留。</p>
+            <p class="muted text-sm" style="margin:6px 0 0" data-help-note="日志收集">默认关闭。关闭后停止收集新的报错，已保存的历史日志仍可查看；设置保存后生效，重启后保留。</p>
             <p id="log-collection-note" class="muted text-sm" style="margin:6px 0 0">${this.logCollectionWritable ? '' : '暂不能保存开关，请检查数据库连接或重新进入本页。'}</p>
           </div>
           <div class="card">
@@ -186,7 +186,7 @@ export default {
             <div class="kv"><span class="k">注入条数</span><span class="v">${limitControl}</span></div>
             <div class="kv"><span class="k">近期对话注入</span><span class="v">${recentChatControl}</span></div>
             <div class="kv"><span class="k">时间戳注入</span><span class="v">${timestampControl}</span></div>
-            <p class="muted text-sm" style="margin:6px 0 0">近期对话每轮从数据库取最近 N 条聊天记录（user/assistant 各算一条）注入补充上下文，与客户端本次发送的历史无关；时间戳为每轮请求附上当前北京时间。改动保存后立即对下一次聊天生效。</p>
+            <p class="muted text-sm" style="margin:6px 0 0" data-help-note="上下文注入">近期对话每轮从数据库取最近 N 条聊天记录（user/assistant 各算一条）注入补充上下文，与客户端本次发送的历史无关；时间戳为每轮请求附上当前北京时间。改动保存后立即对下一次聊天生效。</p>
           </div>
           <div class="card">
             <div class="card-head"><div class="card-title">${icon('calendar')}规划周期</div></div>
@@ -202,7 +202,7 @@ export default {
             <div class="kv"><span class="k">自动重算</span><span class="v">${toggleHtml('toggle-auto-recompute', cycle.auto_recompute_enabled, '切换自动重算')}</span></div>
             <div class="kv"><span class="k">待生效修改</span><span class="v">${cycle.pending_boundary ? tag(`将改为 ${esc(cycle.refresh_boundary_time || '')}`, 'amber') : tag('无', 'muted')}</span></div>
             ${cycleIsDemo ? '<p class="muted text-sm" style="margin:6px 0 0">规划数据库未连接，以上为示例数据，不可修改；连接后自动显示真实值。</p>' : ''}
-            <p class="muted text-sm" style="margin:6px 0 0">新的刷新时间从下一规划周期开始生效，当前周期保持不变；若有待办跨越新刷新时间，保存时会列出供逐个调整。</p>
+            <p class="muted text-sm" style="margin:6px 0 0" data-help-note="规划周期">新的刷新时间从下一规划周期开始生效，当前周期保持不变；若有待办跨越新刷新时间，保存时会列出供逐个调整。</p>
           </div>
           <div class="card">
             <div class="card-head"><div class="card-title">${icon('feather')}页眉花饰</div></div>
@@ -210,10 +210,10 @@ export default {
               <span class="tag tag-green" id="divider-tag">${dividerName}</span>
               <button class="btn btn-secondary btn-sm" data-act="toggle-divider" style="margin-left:8px">切换样式</button>
             </span></div>
-            <p class="muted text-sm" style="margin:6px 0 0">切换每页标题下的分隔线：紫藤花枝 / 铃兰花枝 / 直线。点一下立即生效，选择保存在本机浏览器。</p>
+            <p class="muted text-sm" style="margin:6px 0 0" data-help-note="页眉花饰">切换每页标题下的分隔线：紫藤花枝 / 铃兰花枝 / 直线。点一下立即生效，选择保存在本机浏览器。</p>
           </div>
         </div>
-        <p class="muted text-sm mt16">本页全部信息来自网关真实接口（/health、/status、连续感状态、Eventide 设置、上下文注入设置、日志收集设置、规划周期、密钥元数据）。密钥默认隐藏，点击某一项「显示」后才从服务端按项获取真实值；隐藏或离开本页即清除。</p>`;
+        <p class="muted text-sm mt16" data-help-note="配置信息来源">本页全部信息来自网关真实接口（/health、/status、连续感状态、Eventide 设置、上下文注入设置、日志收集设置、规划周期、密钥元数据）。密钥默认隐藏，点击某一项「显示」后才从服务端按项获取真实值；隐藏或离开本页即清除。</p>`;
     } catch (error) {
       root.innerHTML = errorBlock(`配置状态读取失败：${esc(error.message)}`);
     }

@@ -3,12 +3,12 @@
 // 冲突就地调整 + 原子保存）与原实现一致。onSaved 在保存成功后回调（规划页
 // 重拉今日看板，配置页重载整页）；demoSettings 仅用于数据库未连接的本地
 // 预览——读取失败时以示例数据打开弹窗（保存会因库不可用自然报错）。
-import { gw, esc } from '../api.js?v=20261012-integrated-controls-sync';
-import { modal, toast, errorBlock } from '../ui.js?v=20261012-integrated-controls-sync';
-import { createRetroTimeField } from './retro_time.js?v=20261012-integrated-controls-sync';
+import { gw, esc } from '../api.js?v=20261014-admin-layout-help-scrollbars';
+import { modal, toast, errorBlock } from '../ui.js?v=20261014-admin-layout-help-scrollbars';
+import { createRetroTimeField } from './retro_time.js?v=20261014-admin-layout-help-scrollbars';
 import {
   mergeBoundaryAdjustments, rememberedAdjustment,
-} from './planning_adjustments.js?v=20261012-integrated-controls-sync';
+} from './planning_adjustments.js?v=20261014-admin-layout-help-scrollbars';
 
 function fmtDue(iso) {
   if (!iso) return '';
@@ -40,7 +40,7 @@ export async function openCycleSettings({ onSaved = null, demoSettings = null, i
     body: `
         <div class="field"><label>每日刷新时间（北京时间）</label>
           <div class="retro-time" data-retro-for="pf-cycle-boundary" data-retro-mode="time" data-retro-value="${esc(presetBoundary)}"></div>
-          <p class="muted text-sm">新的刷新时间从下一规划周期开始生效，当前周期保持不变。</p></div>
+          <p class="muted text-sm" data-help-note="规划周期">新的刷新时间从下一规划周期开始生效，当前周期保持不变。</p></div>
         ${pending ? `<div class="field muted text-sm">当前已有等待生效的修改：新刷新时间 ${esc(presetBoundary)} 将于 ${esc(fmtDue(pending.effective_at))} 起生效；当前周期按原刷新时间 ${esc(pending.previous_time)} 继续走完。</div>` : ''}
         <div id="pf-boundary-conflicts"></div>
         <div class="field"><label class="inline"><input type="checkbox" id="pf-daily-refresh" ${settings.daily_refresh_enabled ? 'checked' : ''}> 每日待办自动刷新</label></div>

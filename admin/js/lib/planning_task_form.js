@@ -1,7 +1,7 @@
 // Task creation/edit form. Local submitting/committed state belongs to one opened form.
-import { gw } from '../api.js?v=20261012-integrated-controls-sync';
-import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261012-integrated-controls-sync';
-import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261012-integrated-controls-sync';
+import { gw } from '../api.js?v=20261014-admin-layout-help-scrollbars';
+import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261014-admin-layout-help-scrollbars';
+import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261014-admin-layout-help-scrollbars';
 
 export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
   const editing = !!task?.id;
@@ -32,23 +32,23 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
       <div data-type-block="interval" style="display:none">
         <div class="field"><label>刷新方式</label>
           <div class="tag-row">
-            <label class="inline"><input type="radio" name="pf-refresh-mode" value="after_completion" ${(value('refresh_mode', 'after_completion')) === 'after_completion' ? 'checked' : ''}> 处理后刷新（完成后起算）</label>
-            <label class="inline"><input type="radio" name="pf-refresh-mode" value="fixed_interval" ${value('refresh_mode') === 'fixed_interval' ? 'checked' : ''}> 固定间隔（固定时间轴）</label>
+            <label class="inline"><input type="radio" name="pf-refresh-mode" value="after_completion" ${(value('refresh_mode', 'after_completion')) === 'after_completion' ? 'checked' : ''}> 处理后刷新<span data-help-note>处理后刷新：完成后起算</span></label>
+            <label class="inline"><input type="radio" name="pf-refresh-mode" value="fixed_interval" ${value('refresh_mode') === 'fixed_interval' ? 'checked' : ''}> 固定间隔<span data-help-note>固定间隔：固定时间轴</span></label>
           </div>
         </div>
         <div class="field" id="pf-ac-block"><label>处理后刷新间隔</label>
           <input type="text" id="pf-ac-interval" value="${esc(value('after_completion_minutes') ? formatIntervalMinutes(value('after_completion_minutes')) : '')}" placeholder="如 1d、2h、30m、1d1h1m">
-          <p class="muted text-sm">无单位按天；d（天）、h（小时）、m（分钟）可组合，最短 1 分钟，最长 365 天。</p>
+          <p class="muted text-sm" data-help-note="刷新间隔">无单位按天；d（天）、h（小时）、m（分钟）可组合，最短 1 分钟，最长 365 天。</p>
         </div>
-        <div class="field" id="pf-fi-block" hidden><label>间隔天数（1-3650）</label>
+        <div class="field" id="pf-fi-block" hidden><label>间隔天数<span data-help-note>1-3650</span></label>
           <input type="number" id="pf-interval-days" min="1" max="3650" value="${esc(value('interval_days', 1))}"></div>
         <div id="pf-interval-error" hidden></div>
       </div>
       <div data-type-block="weekly" style="display:none">
-        <div class="field"><label>每周几出现（可多选）</label><div class="tag-row">${weekdayChecks}</div></div>
+        <div class="field"><label>每周几出现<span data-help-note>可多选</span></label><div class="tag-row">${weekdayChecks}</div></div>
       </div>
       <div data-type-block="monthly" style="display:none">
-        <div class="field"><label>每月几号出现（逗号分隔，如 1,15；当月没有则跳过）</label>
+        <div class="field"><label>每月几号出现<span data-help-note>逗号分隔，如 1,15；当月没有则跳过</span></label>
           <input type="text" id="pf-month-days" value="${esc((value('month_days') || []).join(','))}"></div>
       </div>
       <div data-type-block="once" style="display:none">
@@ -57,7 +57,7 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
           <p class="muted text-sm" id="pf-resident-note" hidden>未填日期：单次待办常驻显示，不设最早开始／最晚完成，直到你主动处理。</p></div>
         <div id="pf-once-error" hidden></div>
       </div>
-      <div class="field"><label>预估耗时（分钟，或 1h30m 简写）</label>
+      <div class="field"><label>预估耗时<span data-help-note>分钟，或 1h30m 简写</span></label>
         <input type="text" id="pf-estimated" value="${esc(value('estimated_minutes', ''))}"></div>
       <div class="field"><label>可安排时段</label>
         <div class="window-fields">
@@ -71,16 +71,16 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
         <button type="button" id="pf-clear-window" class="btn btn-secondary btn-sm" hidden>清空残留时段</button>
       </div>
       <div id="pf-window-error" hidden></div>
-      <div class="field"><label class="inline"><input type="checkbox" id="pf-hollow" ${value('is_hollow') ? 'checked' : ''}> 中空待办（开始/结束两个条目，中间可插入其他待办）</label></div>
+      <div class="field"><label class="inline"><input type="checkbox" id="pf-hollow" ${value('is_hollow') ? 'checked' : ''}> 中空待办<span data-help-note>开始/结束两个条目，中间可插入其他待办</span></label></div>
       <div id="pf-hollow-block" style="display:none">
         <div class="field"><label>开始阶段内容</label><input type="text" id="pf-hollow-start" value="${esc(value('hollow_start_content'))}"></div>
-        <div class="field"><label>开始阶段耗时（分钟）</label><input type="number" id="pf-hollow-start-min" min="1" value="${esc(value('hollow_start_minutes', ''))}"></div>
-        <div class="field"><label>中间等待时长（分钟）</label><input type="number" id="pf-hollow-wait" min="1" value="${esc(value('hollow_wait_minutes', ''))}"></div>
+        <div class="field"><label>开始阶段耗时<span data-help-note>分钟</span></label><input type="number" id="pf-hollow-start-min" min="1" value="${esc(value('hollow_start_minutes', ''))}"></div>
+        <div class="field"><label>中间等待时长<span data-help-note>分钟</span></label><input type="number" id="pf-hollow-wait" min="1" value="${esc(value('hollow_wait_minutes', ''))}"></div>
         <div class="field"><label>中间说明（可选）</label><input type="text" id="pf-hollow-note" value="${esc(value('hollow_wait_note'))}"></div>
         <div class="field"><label>结束阶段内容</label><input type="text" id="pf-hollow-end" value="${esc(value('hollow_end_content'))}"></div>
-        <div class="field"><label>结束阶段耗时（分钟）</label><input type="number" id="pf-hollow-end-min" min="1" value="${esc(value('hollow_end_minutes', ''))}"></div>
+        <div class="field"><label>结束阶段耗时<span data-help-note>分钟</span></label><input type="number" id="pf-hollow-end-min" min="1" value="${esc(value('hollow_end_minutes', ''))}"></div>
       </div>
-      ${editing ? `<div class="field muted text-sm">修改规则只影响以后生成的轮次，当前已经生成的待办保持不变；提醒（闹钟/计时器）在待办详情栏设置。</div>
+      ${editing ? `<div class="field muted text-sm" data-help-note="待办规则">修改规则只影响以后生成的轮次，当前已经生成的待办保持不变；提醒（闹钟/计时器）在待办详情栏设置。</div>
       <div class="field"><label class="inline"><input type="checkbox" id="pf-active" ${value('is_active') ? 'checked' : ''}> 启用中</label></div>` : ''}`,
     footer: `<button class="btn btn-secondary" data-cancel>取消</button>
              <button class="btn btn-primary" data-ok>${editing ? '保存' : '创建'}</button>`,

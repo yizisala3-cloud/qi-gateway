@@ -37,6 +37,7 @@
   --mono: ui-monospace, "JetBrains Mono", Consolas, monospace;
   --sidebar-w: 236px;
   --detail-w: 380px;
+  --scrollbar-size: 10px;
   --shadow-soft: 0 1px 2px rgba(70, 58, 30, 0.06);
   --shadow-lift: 0 3px 12px rgba(70, 58, 30, 0.1);
 }
@@ -100,10 +101,21 @@ img[aria-hidden="true"],
   -webkit-user-select: none;
   user-select: none;
 }
-::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar { width: var(--scrollbar-size); height: var(--scrollbar-size); }
 ::-webkit-scrollbar-thumb { background: var(--gold-faint); border-radius: 6px; border: 2px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-thumb:hover { background: var(--gold-line); background-clip: content-box; }
 ::-webkit-scrollbar-track { background: transparent; }
+[data-unified-scrollbar]::-webkit-scrollbar-track:vertical {
+  margin-top: var(--scrollbar-track-top, 0px);
+  margin-bottom: var(--scrollbar-track-bottom, 0px);
+}
+[data-unified-scrollbar]::-webkit-scrollbar-track:horizontal {
+  margin-left: var(--scrollbar-track-left, 0px);
+  margin-right: var(--scrollbar-track-right, 0px);
+}
+@supports not selector(::-webkit-scrollbar) {
+  * { scrollbar-width: thin; scrollbar-color: var(--gold-faint) transparent; }
+}
 
 .ico { width: 16px; height: 16px; flex-shrink: 0; }
 
@@ -317,6 +329,7 @@ img[aria-hidden="true"],
 }
 .nav-item {
   display: flex;
+  user-select: none;
   align-items: center;
   gap: 10px;
   padding: 9px 14px;
@@ -1059,11 +1072,268 @@ html[data-theme="night"] .detail-panel { --detail-tint: rgba(34, 40, 30, 0.92); 
 #planning-layout .detail-foot .btn { max-width: 100%; white-space: normal; }
 #planning-layout .kv-block .plan-alarm-controls { white-space: normal; }
 #planning-layout [data-reorder-feedback] { overflow-wrap: anywhere; }
+
+/* Planning detail: paper, grouped facts and actions. Header ornaments retain
+   their existing assets, geometry and styles. Other pages keep their panels. */
+#planning-layout .detail-panel {
+  --detail-tint: rgba(250, 248, 236, 0.62);
+  border-color: var(--gold-line);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lift);
+}
+html[data-theme="night"] #planning-layout .detail-panel {
+  --detail-tint: rgba(34, 31, 25, 0.94);
+}
+#planning-layout .detail-head {
+  position: relative;
+  padding: 22px 16px 16px 22px;
+  background: transparent;
+}
+#planning-layout .detail-head::after {
+  content: "";
+  position: absolute;
+  left: calc(50% - 3px);
+  bottom: -4px;
+  width: 6px;
+  height: 6px;
+  transform: rotate(45deg);
+  border: 1px solid var(--gold);
+  background: var(--paper-solid);
+}
+#planning-layout .detail-title { font-size: 18px; line-height: 1.6; letter-spacing: .02em; }
+#planning-layout .detail-badges { margin-top: 10px; }
+#planning-layout .detail-badges .tag { background: var(--green-soft); color: var(--green-ink); border-color: var(--gold-faint); }
+#planning-layout .detail-badges .tag-red { background: var(--red-soft); color: var(--red); }
+#planning-layout .detail-body { padding: 20px 20px 12px; }
+#planning-layout .plan-detail-section {
+  padding: 0;
+  margin-bottom: 20px;
+  background: transparent;
+}
+#planning-layout .plan-detail-section-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 12px;
+  color: var(--ink);
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: .08em;
+}
+#planning-layout .plan-detail-section-title .ico { width: 18px; height: 18px; color: var(--green-ink); }
+#planning-layout .plan-detail-rule {
+  position: relative;
+  flex: 1;
+  min-width: 12px;
+  height: 1px;
+  margin-left: 5px;
+  background: var(--gold-faint);
+}
+#planning-layout .plan-detail-rule::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: -2px;
+  width: 4px;
+  height: 4px;
+  transform: rotate(45deg);
+  border: 1px solid var(--gold-line);
+  background: var(--paper-solid);
+}
+#planning-layout .detail-body .kv .k { color: var(--ink-soft); }
+#planning-layout .detail-body .kv { gap: 12px; font-size: 12.5px; }
+#planning-layout .plan-detail-times {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+#planning-layout .plan-detail-time {
+  min-width: 0;
+  padding: 12px 10px;
+  border-radius: 8px;
+  background: var(--green-soft);
+}
+#planning-layout .plan-detail-time > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-soft);
+  font-size: 11.5px;
+  margin-bottom: 6px;
+}
+#planning-layout .plan-detail-time .ico { width: 13px; height: 13px; }
+#planning-layout .plan-detail-time > strong {
+  display: block;
+  color: var(--green-ink);
+  font-size: 17px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+#planning-layout .plan-detail-durations,
+#planning-layout .plan-detail-cycle-rows {
+  display: block;
+  padding: 2px 12px;
+  border: 1px dashed var(--gold-faint);
+  border-radius: 8px;
+  background: var(--paper-veil);
+}
+#planning-layout .plan-detail-cycle-rows .v { font-variant-numeric: tabular-nums; }
+#planning-layout .plan-detail-reminders .plan-alarm-controls { white-space: normal; }
+#planning-layout .plan-detail-reminders [data-alarm-controls] {
+  display: grid;
+  grid-template-columns: 1fr 1fr minmax(90px, 1.5fr);
+  gap: 10px 8px;
+}
+#planning-layout .plan-detail-reminders label.inline {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--ink);
+  white-space: nowrap;
+}
+#planning-layout .plan-detail-reminders input[type="checkbox"] { accent-color: var(--green-mid); }
+#planning-layout .plan-detail-timer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+#planning-layout .plan-detail-timer > span { display: none; }
+#planning-layout .plan-detail-timer input { width: 100%; min-width: 0; padding: 8px; font-size: 11.5px; }
+#planning-layout [data-act="occ-save-alarm"] {
+  grid-column: 1 / -1;
+  justify-self: start;
+  min-height: 32px;
+  padding: 6px 14px;
+  color: var(--green-ink);
+  background: var(--green-soft);
+}
+#planning-layout .plan-detail-status-row { display: flex; align-items: center; gap: 12px; }
+#planning-layout .plan-detail-status-row .plan-detail-section-title { flex: 1; min-width: 0; margin: 0; }
+#planning-layout .plan-detail-status-row .k { color: var(--ink); }
+#planning-layout .plan-detail-status-pill {
+  flex-shrink: 0;
+  padding: 3px 12px;
+  border: 1px solid var(--gold-faint);
+  border-radius: 20px;
+  color: var(--green-ink);
+  background: var(--green-soft);
+  font-size: 12px;
+}
+#planning-layout .detail-foot {
+  gap: 8px;
+  padding: 12px 20px max(14px, env(safe-area-inset-bottom));
+  background: transparent;
+}
+#planning-layout .detail-foot > .plan-detail-section-title { width: 100%; margin-bottom: 2px; }
+#planning-layout .detail-foot > .btn { flex: 1 1 calc(50% - 4px); min-height: 32px; }
+#planning-layout .detail-foot > .btn-danger-line { flex-basis: 100%; }
+#planning-layout .plan-detail-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  width: 100%;
+}
+#planning-layout .plan-detail-actions .btn { padding: 7px 6px; min-height: 32px; font-size: 11.5px; gap: 5px; }
+#planning-layout .plan-detail-actions-primary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+#planning-layout .plan-detail-actions-split { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+#planning-layout .plan-detail-actions-primary .btn { font-size: 12.5px; }
+#planning-layout .plan-detail-actions-primary .btn:only-child { grid-column: 1 / -1; }
+#planning-layout .plan-detail-actions-danger { position: relative; grid-template-columns: 1fr; padding-top: 10px; margin-top: 2px; border-top: 1px solid var(--gold-faint); }
+#planning-layout .plan-detail-actions-danger::before { content: ""; position: absolute; left: calc(50% - 2px); top: -3px; width: 4px; height: 4px; transform: rotate(45deg); border: 1px solid var(--gold); background: var(--paper-solid); }
+#planning-layout .detail-foot .btn-danger-line {
+  color: var(--red);
+  border-color: var(--red-soft);
+  background: var(--red-soft);
+  box-shadow: none;
+}
+#planning-layout .detail-foot .btn-danger-line:hover:not(:disabled) { background: var(--red-soft); }
+
+/* Desktop planning fills the space below the existing page heading. Both
+   columns scroll independently inside that bounded row; the outer page does
+   not measure its height from the longer column. */
+@media (min-width: 1101px) {
+  #content:has(#planning-layout) {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding-bottom: var(--radius);
+  }
+  #content:has(#planning-layout) > .page-head,
+  #content:has(#planning-layout) > .page-head-rule { flex: none; }
+  #content:has(#planning-layout) > #page-root { flex: 1 1 0; min-height: 0; }
+  #content:has(#planning-layout) > #page-root > .fade-in { height: 100%; min-height: 0; }
+  #planning-layout {
+    --detail-w: min(380px, 38%);
+    --planning-column-gap: 20px;
+    --planning-scrollbar-width: var(--scrollbar-size);
+    height: 100%;
+    min-height: 0;
+    grid-template-columns: minmax(0, 1fr) var(--planning-column-gap) var(--detail-w) var(--planning-scrollbar-width);
+    grid-template-rows: minmax(0, 1fr);
+    column-gap: 0;
+    align-items: stretch;
+  }
+  /* The native list scrollbar uses the outer edge. The right-side padding is
+     empty space reserved for the independently scrolling detail column. */
+  #planning-layout > .page-main {
+    grid-column: 1 / -1;
+    grid-row: 1;
+    min-height: 0;
+    padding-right: calc(var(--planning-column-gap) + var(--detail-w));
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+  }
+  #planning-layout.detail-collapsed { grid-template-columns: minmax(0, 1fr) var(--planning-scrollbar-width); }
+  #planning-layout.detail-collapsed > .page-main { padding-right: 0; }
+  #planning-layout .detail-panel {
+    grid-column: 3;
+    grid-row: 1;
+    position: relative;
+    top: 0;
+    height: 100%;
+    min-height: 0;
+    max-height: 100%;
+  }
+  #planning-layout .detail-head,
+  #planning-layout .detail-foot { flex: 0 0 auto; }
+  #planning-layout .detail-body { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior-y: contain; }
+  #planning-layout .detail-titles { max-height: 160px; }
+}
+
+/* A narrower inline panel keeps its existing button groups on one line. */
+@media (min-width: 1101px) and (max-width: 1200px) {
+  #planning-layout .detail-foot { padding-inline: 12px; }
+  #planning-layout .plan-detail-actions .btn { padding-inline: 4px; gap: 2px; }
+}
+
+/* Short desktop windows keep the same groups and typography while reducing
+   vertical spacing in the non-scrolling regions to leave room for the body. */
+@media (min-width: 1101px) and (max-height: 680px) {
+  #planning-layout .detail-head { padding-block: 12px; }
+  #planning-layout .detail-foot { padding-block: 8px; gap: 4px; }
+  #planning-layout .plan-detail-actions { gap: 4px; }
+  #planning-layout .plan-detail-actions-danger { padding-top: 6px; margin-top: 0; }
+}
+
 @media (max-width: 1100px) {
   #planning-layout .detail-panel {
-    top: var(--detail-viewport-top, 0px); bottom: auto;
-    height: var(--detail-available, 100dvh); max-height: var(--detail-available, 100dvh);
+    --planning-drawer-inset: 10px;
+    --planning-drawer-height: calc(var(--detail-available, 100dvh) - 2 * var(--planning-drawer-inset));
+    top: calc(var(--detail-viewport-top, 0px) + var(--planning-drawer-inset));
+    right: 0;
+    bottom: auto;
+    width: min(380px, calc(100vw - var(--planning-drawer-inset)));
+    height: var(--planning-drawer-height);
+    max-height: var(--planning-drawer-height);
+    border: 1px solid var(--gold-line);
+    border-right: none;
+    border-radius: 14px 0 0 14px;
   }
+  #planning-layout .detail-body { overscroll-behavior-y: contain; }
 }
 
 .detail-rail {
@@ -1443,6 +1713,8 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
 /* 手机竖屏（≤560px）：卡片网格改单列，内容区收紧换回可读宽度 */
 @media (max-width: 560px) {
   .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+  #planning-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #planning-tabs .tab { min-width: 0; justify-content: flex-start; }
   .content { padding: 16px 14px 56px; }
   .card { padding: 13px 14px; }
   .page-title { font-size: 21px; }
@@ -1481,6 +1753,48 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   line-height: 1.5;
 }
 .field-hint-inline { font-weight: 400; font-size: 12px; color: var(--ink-muted); }
+
+/* Optional explanations expand in normal flow, including inside scrollable forms. */
+.help-note { display: flow-root; max-width: 100%; min-width: 0; margin: 6px 0; }
+.help-note:not(:has(> .help-note-content:not([hidden]):not(:empty))) { display: none; }
+.help-note-toggle {
+  display: flex;
+  float: left;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  list-style: none;
+  border-radius: 50%;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.help-note-toggle::-webkit-details-marker { display: none; }
+.help-note-toggle .ico { width: 16px; height: 16px; }
+.help-note-toggle:hover,
+.help-note[open] > .help-note-toggle { color: var(--green-ink); background: var(--gold-soft); }
+.help-note-toggle:focus-visible { outline: 2px solid var(--green-mid); outline-offset: 2px; }
+.help-note-content {
+  display: block;
+  margin: 0 0 0 32px !important;
+  padding: 3px 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.7;
+  letter-spacing: normal;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.field:has(> .help-note-inline) { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 6px; align-items: start; }
+.field > label:has(+ .help-note-inline) { grid-area: 1 / 1; display: flex; align-items: center; min-height: 26px; margin: 0 0 5px; }
+.field > .help-note-inline { grid-area: 1 / 2; margin: 0 0 5px; }
+.field:has(> .help-note-inline) > :not(label):not(.help-note-inline) { grid-column: 1 / -1; }
+.field:has(> .help-note-inline):has(> .char-count) { grid-template-columns: max-content minmax(0, 1fr) max-content; }
+.field:has(> .help-note-inline):has(> .char-count) > .char-count { grid-area: 1 / 3; justify-self: end; float: none; }
+.plan-region-head:has(> .help-note) { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: start; }
+.plan-region-head:has(> .help-note) > .plan-region-title { grid-area: 1 / 1; min-height: 26px; }
+.plan-region-head > .help-note { grid-area: 1 / 2; margin: 0; }
 .field-hint.req-note { color: var(--amber); }
 .char-count { float: right; font-size: 12px; color: var(--ink-faint); font-weight: 400; }
 
@@ -1587,8 +1901,6 @@ html[data-theme="night"] .banner-danger { color: #d69380; }
   max-height: calc(100dvh - 16px);
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: var(--gold-line) transparent;
   background: var(--paper-solid);
   border: 1px solid var(--gold-line);
   border-radius: var(--radius);
@@ -1829,8 +2141,6 @@ select.retro-select-source {
   box-shadow: inset 0 0 0 3px var(--paper-solid), inset 0 0 0 4px var(--gold-faint), var(--shadow-lift);
   padding: 8px;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: var(--gold-line) transparent;
   color: var(--ink);
   font-family: var(--font);
   user-select: none;

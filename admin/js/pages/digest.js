@@ -1,6 +1,6 @@
 // pages/digest.js - 记忆总结：连续感总结 + 反刍连续感
-import { gw, esc, query } from '../api.js?v=20261012-integrated-controls-sync';
-import { loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, fmtDate } from '../ui.js?v=20261012-integrated-controls-sync';
+import { gw, esc, query } from '../api.js?v=20261014-admin-layout-help-scrollbars';
+import { loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, fmtDate } from '../ui.js?v=20261014-admin-layout-help-scrollbars';
 
 const TIME_PRECISION_LABELS = {
   minute: '精确到分钟', day: '精确到日期', approximate: '大概时间', unknown: '时间未知',
@@ -127,7 +127,7 @@ export default {
           <div id="view-rumination" hidden>
             <div id="rumination-warning"></div>
             <div class="toolbar">
-              <span class="muted text-sm">独立游标 · 每日一次 · 批次 60～120 条</span>
+              <span class="muted text-sm" data-help-note="总结调度">独立游标 · 每日一次 · 批次 60～120 条</span>
               <span class="grow"></span>
               <button class="btn btn-primary" data-act="rumination-execute" disabled>${icon('check')}执行反刍总结</button>
             </div>
@@ -261,7 +261,7 @@ export default {
         <div class="card-head">
           <div>
             <div class="card-title">${icon('scroll')}反刍连续感 ${data.configured ? tag('已配置', 'green') : tag('未配置', 'red')}</div>
-            <div class="card-sub">独立于连续感快速路径：每天到达配置小时后运行一次，首批只取最近 120 条；不足 60 条的积压留到次日。</div>
+            <div class="card-sub" data-help-note="反刍连续感">独立于连续感快速路径：每天到达配置小时后运行一次，首批只取最近 120 条；不足 60 条的积压留到次日。</div>
           </div>
         </div>
         <div class="kv"><span class="k">独立游标</span><span class="v mono">${esc(data.cursor ?? 0)}${data.initialized ? '' : ' · 首次运行待初始化'}</span></div>
@@ -426,7 +426,7 @@ export default {
         <div class="card-head">
           <div>
             <div class="card-title">${icon('scroll')}连续感总结 ${statusTag(data.status)}</div>
-            <div class="card-sub">写入的申请按类型分流：moment、thread、inside_joke 校验通过后自动转正，其余类型进入审核队列；自动阈值 ${esc(data.auto_threshold ?? 80)} 条，手动与自动冷却彼此独立。</div>
+            <div class="card-sub" data-help-note="连续感总结">写入的申请按类型分流：moment、thread、inside_joke 校验通过后自动转正，其余类型进入审核队列；自动阈值 ${esc(data.auto_threshold ?? 80)} 条，手动与自动冷却彼此独立。</div>
           </div>
         </div>
         ${paused ? `<div class="banner banner-danger">本批未生成候选，连续感自动总结已暂停。请重试或确认跳过本批。</div>` : ''}

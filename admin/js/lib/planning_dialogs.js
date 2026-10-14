@@ -1,7 +1,7 @@
 // Instance dialogs: form-local inputs and timeout retry identity stay in their closures.
-import { gw } from '../api.js?v=20261012-integrated-controls-sync';
-import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261012-integrated-controls-sync';
-import { createRetroTimeField } from './retro_time.js?v=20261012-integrated-controls-sync';
+import { gw } from '../api.js?v=20261014-admin-layout-help-scrollbars';
+import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261014-admin-layout-help-scrollbars';
+import { createRetroTimeField } from './retro_time.js?v=20261014-admin-layout-help-scrollbars';
 
 function initDialogTimes(root) {
   root.querySelectorAll('.retro-time[data-retro-for]').forEach(host => {
@@ -38,7 +38,7 @@ export function createPlanningDialogs({
           <div class="field">
             <label>实际耗时（可留空）</label>
             <input type="text" data-actual-duration placeholder="如 45、1h30m、1h1m1s">
-            <p class="muted text-sm" style="margin:4px 0 0">无后缀按分钟计，可组合时/分/秒；留空则不记录手填耗时。</p>
+            <p class="muted text-sm" style="margin:4px 0 0" data-help-note="耗时填写">无后缀按分钟计，可组合时/分/秒；留空则不记录手填耗时。</p>
           </div>`,
         footer: `<button class="btn btn-secondary" data-cancel>取消</button>
                  <button class="btn btn-primary" data-ok>完成</button>`,
@@ -69,7 +69,7 @@ export function createPlanningDialogs({
         title: '部分完成',
         body: `<div class="field"><label>完成了哪些部分（会保存为说明）</label>
                <textarea id="planning-partial-note" rows="3" placeholder="例如：背完了前 20 页"></textarea></div>
-               <div class="field muted text-sm">记录后待办保持开放，之后可点「已全部完成」收口。</div>`,
+               <div class="field muted text-sm" data-help-note="部分完成">记录后待办保持开放，之后可点「已全部完成」收口。</div>`,
         footer: `<button class="btn btn-secondary" data-cancel>取消</button>
                  <button class="btn btn-primary" data-ok>保存</button>`,
       });
@@ -102,7 +102,7 @@ export function createPlanningDialogs({
       let lastSubmittedTime = null;
       const { root, close } = modal({
         title: '重新安排执行时间',
-        body: `<div class="field muted text-sm">重新安排当前待办的执行时间，已有进度会保留；原超时记录保留。</div>
+        body: `<div class="field muted text-sm" data-help-note="重新安排">重新安排当前待办的执行时间，已有进度会保留；原超时记录保留。</div>
                <div class="field"><label>新的执行时间</label>
                <div class="retro-time" data-retro-for="planning-reschedule-time"></div></div>`,
         footer: `<button class="btn btn-secondary" data-cancel>取消</button>
@@ -186,7 +186,7 @@ export function createPlanningDialogs({
       const { root, close } = modal({
         title: '调整时段',
         body: `
-          <p class="muted text-sm">调整当前这一轮的可安排时段（最早开始 / 最晚完成，两端可独立留空）。把时段收窄到恰好容纳预计耗时，就会把这条待办钉在该时间，不再被自动重算移动。</p>
+          <p class="muted text-sm" data-help-note="可安排时段">调整当前这一轮的可安排时段（最早开始 / 最晚完成，两端可独立留空）。把时段收窄到恰好容纳预计耗时，就会把这条待办钉在该时间，不再被自动重算移动。</p>
           <div class="field"><label>最早开始（可选）</label><div class="retro-time" data-retro-for="planning-adj-window-start" data-retro-value="${esc(toLocal(occ.window_start_at))}" data-retro-disabled="${residentOnce}"></div></div>
           <div class="field"><label>最晚完成（可选，越过即超时）</label><div class="retro-time" data-retro-for="planning-adj-window-end" data-retro-value="${esc(toLocal(occ.window_end_at))}" data-retro-disabled="${residentOnce}"></div></div>
           ${residentOnce ? '<p class="muted text-sm" id="planning-resident-window-note">未指定日期的单次待办常驻显示、不设可安排时段：不能为它的当前实例新增时间窗口。</p>' : ''}
@@ -242,7 +242,7 @@ export function createPlanningDialogs({
         body: `
           <div class="field"><label>实际开始</label><div class="retro-time" data-retro-for="planning-backfill-start" data-retro-value="${esc(toLocal(occ.actual_start))}"></div></div>
           <div class="field"><label>实际结束</label><div class="retro-time" data-retro-for="planning-backfill-end" data-retro-value="${esc(toLocal(occ.actual_end))}"></div></div>
-          <p class="muted text-sm">留空即清除该时间；同时有起止时自动计算实际耗时，预估耗时独立保留。</p>`,
+          <p class="muted text-sm" data-help-note="实际时间">留空即清除该时间；同时有起止时自动计算实际耗时，预估耗时独立保留。</p>`,
         footer: `<button class="btn btn-secondary" data-cancel>取消</button>
                  <button class="btn btn-primary" data-ok>保存</button>`,
       });
@@ -289,12 +289,12 @@ export function createPlanningDialogs({
       const { root, close } = modal({
         title: '拆分待办',
         body: `
-          <p class="muted text-sm">结束当前这一轮，并把剩余工作拆成新的单次待办（今天执行）；原条目按「此次不执行」留痕，已有进度保留。</p>
+          <p class="muted text-sm" data-help-note="拆分待办">结束当前这一轮，并把剩余工作拆成新的单次待办（今天执行）；原条目按「此次不执行」留痕，已有进度保留。</p>
           <div id="planning-split-parts">
             ${partRow(1)}
           </div>
           <button type="button" class="btn btn-quiet btn-sm" data-add-part>${icon('plus')}添加待办</button>
-          <p class="muted text-sm" style="margin-top:6px">最多 10 个；只填 1 个也可以提交。</p>`,
+          <p class="muted text-sm" style="margin-top:6px" data-help-note="拆分数量">最多 10 个；只填 1 个也可以提交。</p>`,
         footer: `<button class="btn btn-secondary" data-cancel>取消</button>
                  <button class="btn btn-primary" data-ok>拆分</button>`,
       });

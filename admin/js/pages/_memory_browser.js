@@ -1,13 +1,13 @@
 // pages/_memory_browser.js - shared library/requests browser with detail panel
-import { gw, query, update, count, esc } from '../api.js?v=20261012-integrated-controls-sync';
+import { gw, query, update, count, esc } from '../api.js?v=20261014-admin-layout-help-scrollbars';
 import {
   loading, empty, errorBlock, banner, tag, heatTag, impTag, pagerHtml,
   toast, modal, confirm, delegate, icon, fmtDate, createDetailPanel,
-} from '../ui.js?v=20261012-integrated-controls-sync';
-import { openMemoryForm } from './_memory_form.js?v=20261012-integrated-controls-sync';
-import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20261012-integrated-controls-sync';
+} from '../ui.js?v=20261014-admin-layout-help-scrollbars';
+import { openMemoryForm } from './_memory_form.js?v=20261014-admin-layout-help-scrollbars';
+import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20261014-admin-layout-help-scrollbars';
 
-export const ASSET_VERSION = '20261012-integrated-controls-sync';
+export const ASSET_VERSION = '20261014-admin-layout-help-scrollbars';
 
 const PAGE_SIZE = 20;
 const REQ_FETCH_LIMIT = 100;
@@ -430,7 +430,7 @@ export function createMemoryBrowser({
         <div class="search-box">${icon('search')}<input type="search" id="req-search" placeholder="搜索当前结果内的标题 / 内容 / 编号…" value="${esc(state.reqSearch)}"></div>
         <button class="btn btn-secondary" data-act="refresh">${icon('refresh')}刷新</button>
       </div>
-      <p class="muted text-sm" style="margin:0 0 12px">episode、profile、interaction_rule 会进入审核队列；moment、thread、inside_joke 校验通过且召回场景与向量就绪后直接写入正式记忆，否则同样进入审核队列。搜索作用于最近 ${REQ_FETCH_LIMIT} 条申请。</p>
+      <p class="muted text-sm" style="margin:0 0 12px" data-help-note="记忆审核">episode、profile、interaction_rule 会进入审核队列；moment、thread、inside_joke 校验通过且召回场景与向量就绪后直接写入正式记忆，否则同样进入审核队列。搜索作用于最近 ${REQ_FETCH_LIMIT} 条申请。</p>
       <div id="req-list">${loading()}</div>
       <div id="req-pager"></div>`;
   }

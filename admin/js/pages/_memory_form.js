@@ -1,14 +1,14 @@
 // pages/_memory_form.js - 手工新增 / 完整编辑 / 修改类型 共用动态表单
 // 六类连续感结构全部由本模块的中文动态表单生成，用户永不直接编辑 JSON；
 // 普通标签与召回标签是两套独立控件；召回向量和 content_hash 均由服务端维护。
-import { gw, esc } from '../api.js?v=20261012-integrated-controls-sync';
-import { modal, confirm, toast, icon } from '../ui.js?v=20261012-integrated-controls-sync';
+import { gw, esc } from '../api.js?v=20261014-admin-layout-help-scrollbars';
+import { modal, confirm, toast, icon } from '../ui.js?v=20261014-admin-layout-help-scrollbars';
 import {
   toDatetimeLocal, fromDatetimeLocal, stableJson,
   buildEditPatch, isSameMinute, mergeContinuityForSubmit, continuityEquals,
-} from './_memory_patch.js?v=20261012-integrated-controls-sync';
+} from './_memory_patch.js?v=20261014-admin-layout-help-scrollbars';
 
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261012-integrated-controls-sync';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261014-admin-layout-help-scrollbars';
 
 /* ---------- 枚举与字段定义 ---------- */
 
@@ -264,7 +264,7 @@ function renderContinuitySection(type, data, threadState) {
       <div class="field" data-cf="${f.k}">
         <label>${fieldLabel(f)}</label>
         ${control}
-        ${f.hint ? `<div class="field-hint">${esc(f.hint)}</div>` : ''}
+        ${f.hint ? `<div class="field-hint" data-help-note>${esc(f.hint)}</div>` : ''}
         ${reqNote}
       </div>`;
   }).join('');
@@ -346,21 +346,21 @@ function commonSectionHtml(mode, memory) {
   return `
     <div class="form-section">
       <div class="form-section-title">通用信息</div>
-      <div class="field"><label>标题<span class="field-hint-inline">（可空，最多 100 字）</span></label>
+      <div class="field"><label>标题<span class="field-hint-inline" data-help-note>（可空，最多 100 字）</span></label>
         <input type="text" id="mf-title" maxlength="100" value="${esc(memory ? memory.title || '' : '')}"></div>
       <div class="field"><label>正文<span class="req-mark">必填</span><span class="char-count" id="mf-content-count"></span></label>
         <textarea id="mf-content" rows="6" maxlength="3000">${esc(memory ? memory.content || '' : '')}</textarea>
-        <div class="field-hint">5 到 3000 个字符；修改正文后服务端会重新计算内容哈希并按现有规则处理向量</div></div>
-      <div class="field"><label>标签<span class="field-hint-inline">（普通标签，回车添加，可空）</span></label>
+        <div class="field-hint" data-help-note>5 到 3000 个字符；修改正文后服务端会重新计算内容哈希并按现有规则处理向量</div></div>
+      <div class="field"><label>标签<span class="field-hint-inline" data-help-note>（普通标签，回车添加，可空）</span></label>
         <div id="mf-tags"></div></div>
       <div class="grid grid-2">
-        <div class="field"><label>重要性<span class="field-hint-inline">（1-10）</span></label>
+        <div class="field"><label>重要性<span class="field-hint-inline" data-help-note>（1-10）</span></label>
           <input type="number" id="mf-importance" min="1" max="10" step="1" value="${memory ? Number(memory.importance) || 5 : 5}"></div>
-        <div class="field"><label>来源类型<span class="field-hint-inline">（可空，空值保存为空）</span></label>
+        <div class="field"><label>来源类型<span class="field-hint-inline" data-help-note>（可空，空值保存为空）</span></label>
           <select id="mf-source-type"><option value="">未指定</option>${sourceOptions}</select></div>
       </div>
       <div class="grid grid-2">
-        <div class="field"><label>记忆时间<span class="field-hint-inline">（可空，精确到分钟）</span></label>
+        <div class="field"><label>记忆时间<span class="field-hint-inline" data-help-note>（可空，精确到分钟）</span></label>
           <div class="retro-time" data-retro-for="mf-memory-time" data-retro-value="${esc(memoryTime)}"></div>
         </div>
         <div class="field"><label>时间精度</label>
@@ -369,13 +369,13 @@ function commonSectionHtml(mode, memory) {
             ${TIME_PRECISIONS.map((p) => `<option value="${p.value}" ${precision === p.value ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}
           </select></div>
       </div>
-      <div class="field"><label>证据消息 ID<span class="field-hint-inline">（可空，多个用逗号分隔）</span></label>
+      <div class="field"><label>证据消息 ID<span class="field-hint-inline" data-help-note>（可空，多个用逗号分隔）</span></label>
         <input type="text" id="mf-evidence" value="${esc(memory && memory.evidence_message_ids ? memory.evidence_message_ids.join(', ') : '')}">
-        <div class="field-hint">填写后服务端会从聊天原文推导证据时间；留空则证据时间为空，绝不伪造</div></div>
-      <div class="field"><label>召回场景<span class="field-hint-inline">（可空；保存后由服务端生成召回向量）</span></label>
+        <div class="field-hint" data-help-note>填写后服务端会从聊天原文推导证据时间；留空则证据时间为空，绝不伪造</div></div>
+      <div class="field"><label>召回场景<span class="field-hint-inline" data-help-note>（可空；保存后由服务端生成召回向量）</span></label>
         <textarea id="mf-recall-scene" rows="2">${esc(memory ? memory.recall_scene || '' : '')}</textarea>
-        <div class="field-hint">在什么情境下应该想起这条记忆</div></div>
-      <div class="field"><label>召回标签<span class="field-hint-inline">（召回标签，独立于普通标签，回车添加）</span></label>
+        <div class="field-hint" data-help-note>在什么情境下应该想起这条记忆</div></div>
+      <div class="field"><label>召回标签<span class="field-hint-inline" data-help-note>（召回标签，独立于普通标签，回车添加）</span></label>
         <div id="mf-recall-tags"></div></div>
     </div>`;
 }
@@ -387,7 +387,7 @@ function typeSectionHtml(mode, memory) {
       return `
         <div class="form-section">
           <div class="form-section-title">连续感结构 · ${esc(CONTINUITY_TYPES[memory.continuity_type] || memory.continuity_type)}</div>
-          <div class="field-hint" style="margin-bottom:10px">修改类型请使用详情栏的「修改类型」按钮；此处仅编辑当前类型的内容。</div>
+          <div class="field-hint" data-help-note style="margin-bottom:10px">修改类型请使用详情栏的「修改类型」按钮；此处仅编辑当前类型的内容。</div>
           <div id="mf-continuity"></div>
         </div>`;
     }
@@ -411,7 +411,7 @@ function typeSectionHtml(mode, memory) {
           <option value="">请选择类型</option>
           ${Object.entries(CONTINUITY_TYPES).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}
         </select>
-        ${mode === 'change' ? '<div class="field-hint">新类型不能与当前类型相同；保存成功后会生成新版本，原版本保留为直接上一版本。</div>' : '<div class="field-hint">选择类型后，表单会按类型展开对应的中文结构字段。</div>'}
+        ${mode === 'change' ? '<div class="field-hint" data-help-note>新类型不能与当前类型相同；保存成功后会生成新版本，原版本保留为直接上一版本。</div>' : '<div class="field-hint" data-help-note>选择类型后，表单会按类型展开对应的中文结构字段。</div>'}
       </div>
       <div id="mf-continuity"></div>
     </div>`;
@@ -482,10 +482,11 @@ export async function openMemoryForm({ mode = 'create', memory = null, onSaved =
 
   const rerenderContinuity = (type, preset) => {
     if (!type) {
-      continuityHost.innerHTML = '<p class="muted text-sm" style="margin:0">请先选择类型，表单会按类型展开对应的中文结构字段。</p>';
+      // This instruction is already available beside the type field.
+      continuityHost.innerHTML = '';
       return;
     }
-    const intro = `<p class="muted text-sm" style="margin:0 0 10px">${esc(TYPE_INTRO[type])}</p>`;
+    const intro = `<p class="muted text-sm" data-help-note="记忆类型" data-help-for="mf-type" style="margin:0 0 10px">${esc(TYPE_INTRO[type])}</p>`;
     continuityHost.innerHTML = intro + renderContinuitySection(type, preset ? preset.data : null, preset ? preset.threadState : null);
     continuityHost.querySelectorAll('.retro-time[data-retro-for]').forEach(initRetroTime);
     const stateSelect = isThreadStateField();

@@ -15,12 +15,12 @@
 // 一期不实现清单勾选、待办互通与 AI 读写（F01–F03 仅预留稳定身份与
 // 可复用基础接口）。
 
-import { gw } from '../api.js?v=20261012-integrated-controls-sync';
+import { gw } from '../api.js?v=20261014-admin-layout-help-scrollbars';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, icon, esc,
-} from '../ui.js?v=20261012-integrated-controls-sync';
-import { createRetroSelectField } from './retro_select.js?v=20261012-integrated-controls-sync';
-import { renderMarkdown } from './memo_markdown.js?v=20261012-integrated-controls-sync';
+} from '../ui.js?v=20261014-admin-layout-help-scrollbars';
+import { createRetroSelectField } from './retro_select.js?v=20261014-admin-layout-help-scrollbars';
+import { renderMarkdown } from './memo_markdown.js?v=20261014-admin-layout-help-scrollbars';
 
 const KIND_LABELS = { pinned: '常驻备忘', note: '随笔' };
 const AUTOSAVE_DELAY_MS = 800;
@@ -838,7 +838,7 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
         ${results.length
           ? `<div class="memo-list">${results.map((item) => this.itemHtml(item, { fragment: true })).join('')}</div>`
           : empty('没有匹配的标题或正文', '搜索结果不影响已保存的排列顺序')}
-        <p class="muted text-sm">搜索结果按标题匹配优先、正文匹配其次；同一条记录只显示一次，并展示所属标签。</p>`;
+        <p class="muted text-sm" data-help-note="备忘录搜索">搜索结果按标题匹配优先、正文匹配其次；同一条记录只显示一次，并展示所属标签。</p>`;
     },
 
     async renderLifecycleList(status) {

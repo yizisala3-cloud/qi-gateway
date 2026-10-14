@@ -1,9 +1,9 @@
 // pages/logs.js - 全网关报错日志：真实查询 / 筛选 / 分页 / 详情（§36 批次）
 // 数据全部来自 /admin/api/logs* 只读接口；无 mock fallback。
-import { gw, esc } from '../api.js?v=20261012-integrated-controls-sync';
+import { gw, esc } from '../api.js?v=20261014-admin-layout-help-scrollbars';
 import {
   loading, empty, errorBlock, tag, toast, modal, delegate, icon,
-} from '../ui.js?v=20261012-integrated-controls-sync';
+} from '../ui.js?v=20261014-admin-layout-help-scrollbars';
 
 const LEVEL_META = {
   WARNING: { label: '警告', tone: 'amber' },
@@ -150,7 +150,7 @@ export default {
         <div class="card-head">
           <div>
             <div class="card-title">${icon('journal')}报错日志</div>
-            <div class="card-sub">全网关 WARNING 及以上故障事件，按相同错误聚合；时间显示为 Asia/Shanghai。</div>
+            <div class="card-sub" data-help-note="报错日志">全网关 WARNING 及以上故障事件，按相同错误聚合；时间显示为 Asia/Shanghai。</div>
           </div>
         </div>
         <div id="log-list">${loading()}</div>
@@ -686,7 +686,7 @@ export default {
       ${latest.stack_trace ? `<div style="margin-top:4px"><button class="btn btn-quiet btn-sm" data-copy="stack">${icon('copy')}复制堆栈</button></div>` : ''}
       ${truncatedNote}
       <div class="section-title">关联样本（最近 ${esc(samples.length)} / 共 ${esc(g.event_count ?? 0)} 次）</div>
-      <p class="muted text-sm">样本只列出最近事件；不同 request_id 的其余发生不在样本内，不代表同一来源。</p>
+      <p class="muted text-sm" data-help-note="日志样本">样本只列出最近事件；不同 request_id 的其余发生不在样本内，不代表同一来源。</p>
       ${sampleRows || '<p class="muted">没有可显示的样本。</p>'}`;
   },
 

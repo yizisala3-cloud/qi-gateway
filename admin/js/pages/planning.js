@@ -1,26 +1,29 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
 // 数据按需加载：今日看板保留 30 秒提醒轮询，首次/失效切入时刷新可见列表。
-import { gw } from '../api.js?v=20261012-integrated-controls-sync';
+import { gw } from '../api.js?v=20261014-admin-layout-help-scrollbars';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, esc,
   createDetailPanel,
-} from '../ui.js?v=20261012-integrated-controls-sync';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261012-integrated-controls-sync';
-import { createRetroSelectField } from '../lib/retro_select.js?v=20261012-integrated-controls-sync';
+} from '../ui.js?v=20261014-admin-layout-help-scrollbars';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261014-admin-layout-help-scrollbars';
+import { createRetroSelectField } from '../lib/retro_select.js?v=20261014-admin-layout-help-scrollbars';
 import {
   TASK_TYPE_LABELS, TASK_TYPES, STATUS_META, CLOSED_STATUSES,
   fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty, formatIntervalMinutes,
   itemMeta, isClosedOcc, formatLoggedDuration, durationText, durationDetailRows,
   itemBadges, itemHtml,
-} from '../lib/planning_display.js?v=20261012-integrated-controls-sync';
-import { openTaskForm } from '../lib/planning_task_form.js?v=20261012-integrated-controls-sync';
-import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261012-integrated-controls-sync';
-import { createPlanningSort } from '../lib/planning_sort.js?v=20261012-integrated-controls-sync';
-import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261012-integrated-controls-sync';
-import { createPlanningMemo } from '../lib/planning_memo.js?v=20261012-integrated-controls-sync';
-import { createPlanningReads } from '../lib/planning_reads.js?v=20261012-integrated-controls-sync';
-import { mergeOrderReceipt, mergeOccurrencesFromBoard } from '../lib/planning_sync.js?v=20261012-integrated-controls-sync';
+} from '../lib/planning_display.js?v=20261014-admin-layout-help-scrollbars';
+import { openTaskForm } from '../lib/planning_task_form.js?v=20261014-admin-layout-help-scrollbars';
+import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261014-admin-layout-help-scrollbars';
+import { createPlanningSort } from '../lib/planning_sort.js?v=20261014-admin-layout-help-scrollbars';
+import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261014-admin-layout-help-scrollbars';
+import { createPlanningMemo } from '../lib/planning_memo.js?v=20261014-admin-layout-help-scrollbars';
+import { createPlanningReads } from '../lib/planning_reads.js?v=20261014-admin-layout-help-scrollbars';
+import { mergeOrderReceipt, mergeOccurrencesFromBoard } from '../lib/planning_sync.js?v=20261014-admin-layout-help-scrollbars';
+
+const detailHeading = (label, name) => `<h4 class="plan-detail-section-title">${icon(name)}<span>${esc(label)}</span><span class="plan-detail-rule" aria-hidden="true"></span></h4>`;
+const detailRange = (start, end) => start && !end ? `${fmtClock(start)} ～` : fmtRange(start, end);
 
 // 部分完成属于开放生命周期：实例仍在「进度中」，直到「已全部完成」才关闭
 const OPEN_STATUSES = ['pending', 'in_progress', 'deferred', 'partial'];
@@ -144,7 +147,7 @@ export default {
             <div class="card">
               <div class="plan-region-head">
                 <div class="plan-region-title">${icon('calendar')}当前待办</div>
-                <span class="plan-region-sub">只显示今天的待办；已完成的记录可改状态、补时间</span>
+                <span class="plan-region-sub" data-help-note="当前待办">只显示今天的待办；已完成的记录可改状态、补时间</span>
               </div>
               <div id="planning-alarm-banner"></div>
               <div class="subtabs">
@@ -162,7 +165,7 @@ export default {
             <div class="card">
               <div class="plan-region-head">
                 <div class="plan-region-title">${icon('inbox')}全部待办</div>
-                <span class="plan-region-sub">所有任务定义与出现记录，可筛选、编辑、提前完成</span>
+                <span class="plan-region-sub" data-help-note="全部待办">所有任务定义与出现记录，可筛选、编辑、提前完成</span>
               </div>
               <div class="toolbar" style="margin-bottom:6px">
                 <label class="inline">类型
@@ -193,7 +196,7 @@ export default {
             <div class="card">
               <div class="plan-region-head">
                 <div class="plan-region-title">${icon('feather')}备忘录</div>
-                <span class="plan-region-sub">常驻与随笔 · 自动保存</span>
+                <span class="plan-region-sub" data-help-note="备忘录">常驻与随笔 · 自动保存</span>
               </div>
               <div data-memo-root></div>
             </div>
@@ -691,21 +694,23 @@ export default {
     const title = esc(occ.content);
     const badges = `<div class="tag-row">${tag(esc(TASK_TYPE_LABELS[occ.task_type] || ''), 'gold')}${this.itemBadges(occ)}</div>`;
     const facts = `
-        <div class="kv"><span class="k">原始规划周期</span><span class="v">${esc(occ.schedule_date || occ.for_date)}</span></div>
-        ${occ.display_cycle_date ? `<div class="kv"><span class="k">当前展示周期</span><span class="v">${esc(occ.display_cycle_date)}</span></div>` : ''}
-        <div class="kv"><span class="k">预估时间</span><span class="v">${occ.time_updating ? '更新中…' : fmtRange(occ.est_start, occ.est_end)}</span></div>
+      <section class="plan-detail-section" aria-label="时间安排">
+        ${detailHeading('时间安排', 'clock')}
+        <div class="plan-detail-times">
+          <div class="plan-detail-time"><span>${icon('clock')}预估时间</span><strong>${occ.time_updating ? '更新中…' : detailRange(occ.est_start, occ.est_end)}</strong></div>
+          <div class="plan-detail-time"><span>${icon('clock')}实际时间</span><strong>${detailRange(occ.actual_start, occ.actual_end)}</strong></div>
+        </div>
         ${(occ.window_start_at || occ.window_end_at) ? `<div class="kv"><span class="k">可安排时段</span><span class="v">${[
           occ.window_start_at ? `不早于 ${fmtClock(occ.window_start_at)}` : '',
           occ.window_end_at ? `最晚完成 ${fmtClock(occ.window_end_at)}` : '',
         ].filter(Boolean).join('，')}</span></div>` : ''}
-        <div class="kv"><span class="k">实际时间</span><span class="v">${fmtRange(occ.actual_start, occ.actual_end)}</span></div>
-        ${this.durationDetailRows(occ)}
         ${occ.is_limited ? `<div class="kv"><span class="k">限时截止</span><span class="v">${fmtClock(occ.deadline_at)}</span></div>` : ''}
         ${occ.partial_note ? `<div class="kv kv-block"><span class="k">部分完成说明</span><span class="v">${esc(occ.partial_note)}</span></div>` : ''}
         ${occ.partial_at ? `<div class="kv"><span class="k">部分完成时间</span><span class="v">${fmtDue(occ.partial_at)}</span></div>` : ''}
+      </section>
 `;
     const state = `
-        <div class="kv"><span class="k">当前状态</span><span class="v">${esc(occ.schedule_label)}</span></div>
+        <div class="plan-detail-status-row"><h4 class="plan-detail-section-title">${icon('activity')}<span class="k">当前状态</span><span class="plan-detail-rule" aria-hidden="true"></span></h4><span class="plan-detail-status-pill">${esc(occ.schedule_label || '-')}</span></div>
         ${this.conflictById?.get(occ.id) ? `<div class="kv kv-block"><span class="k">排程冲突</span><span class="v">${esc(this.conflictById.get(occ.id).reason)}</span></div>` : ''}`;
     const actions = this.occurrenceActions(occ);
     const factsHost = this.detail.body.querySelector(`[data-occ-readonly="${occ.id}"]`);
@@ -732,15 +737,15 @@ export default {
     }
     this.detail.render({ title, badges, actions, html: `
       <div data-occ-readonly="${occ.id}">${facts}</div>
-        <div class="kv kv-block"><span class="k">提醒</span><div class="v plan-alarm-controls">
+        <section class="plan-detail-section plan-detail-reminders" aria-label="提醒">${detailHeading('提醒', 'bell')}<div class="plan-alarm-controls">
           <div class="tag-row" data-alarm-controls data-task-id="${occ.task_id}">
             <label class="inline"><input type="checkbox" data-alarm-start ${occ.alarm_start ? 'checked' : ''}> 开始闹钟</label>
             <label class="inline"><input type="checkbox" data-alarm-end ${occ.alarm_end ? 'checked' : ''}> 结束闹钟</label>
-            <input type="text" data-timer-input placeholder="计时器，如 1h30m" value="${esc(occ.timer_minutes ?? '')}" style="width:130px">
+            <label class="plan-detail-timer"><span>计时器</span><input type="text" data-timer-input aria-label="计时器" placeholder="计时器，如 1h30m" value="${esc(occ.timer_minutes ?? '')}"></label>
             <button class="btn btn-secondary btn-sm" data-act="occ-save-alarm" data-id="${occ.id}">${icon('check')}保存提醒</button>
           </div>
-        </div></div>
-      <div data-occ-state>${state}</div>` });
+        </div></section>
+      <section class="plan-detail-section plan-detail-state" data-occ-state>${state}</section>` });
   },
 
   /** BUG-11：详情栏「保存提醒」→ PATCH 所属任务定义的闹钟/计时器字段。 */
@@ -784,40 +789,49 @@ export default {
   occurrenceActions(occ) {
     const btn = (act, label, icon_name = 'check', cls = 'btn-secondary') =>
       `<button class="btn ${cls} btn-sm" data-act="occ-${act}" data-id="${occ.id}">${icon(icon_name)}${label}</button>`;
-    const parts = [];
+    const primary = [];
+    const adjustments = [];
+    const splits = [];
+    const danger = [];
     if (occ.status === 'pending') {
-      parts.push(btn('start', '开始', 'check', 'btn-primary'));
-      parts.push(btn('complete', '已完成'));
+      primary.push(btn('start', '开始', 'check', 'btn-primary'));
+      primary.push(btn('complete', '已完成'));
     }
     if (occ.status === 'in_progress') {
-      parts.push(btn('finish', '结束', 'check', 'btn-primary'));
-      parts.push(btn('complete', '已完成'));
+      primary.push(btn('finish', '结束', 'check', 'btn-primary'));
+      primary.push(btn('complete', '已完成'));
+    }
+    if (occ.status === 'partial') {
+      // Final completion stays ahead of adjustments in the operation group.
+      primary.push(btn('finish', '已全部完成', 'check', 'btn-primary'));
     }
     if (OPEN_STATUSES.includes(occ.status)) {
       // 部分完成 = 记录一次部分完成事实，实例保持开放、可继续处理
-      parts.push(btn('partial', occ.status === 'partial' ? '更新部分完成说明' : '部分完成'));
-      parts.push(btn('defer', '延后', 'clock'));
-      parts.push(btn('discard-this', '此次不执行'));
-      parts.push(btn('edit-time', '调整时段', 'edit'));
-      parts.push(btn('spawn-remaining', '剩余另建待办', 'plus'));
-      parts.push(btn('split', '拆分待办', 'layers'));
-      parts.push(btn('discard', '删除待办', 'x', 'btn-danger-line'));
-    }
-    if (occ.status === 'partial') {
-      // 已全部完成：最终补完时间入账，处理后刷新型以此为下一轮基准
-      parts.push(btn('finish', '已全部完成', 'check', 'btn-primary'));
+      primary.push(btn('partial', occ.status === 'partial' ? '更新部分完成说明' : '部分完成', 'clock'));
+      adjustments.push(btn('defer', '延后', 'clock'));
+      adjustments.push(btn('discard-this', '此次不执行'));
+      adjustments.push(btn('edit-time', '调整时段', 'edit'));
+      splits.push(btn('spawn-remaining', '剩余另建待办', 'plus'));
+      splits.push(btn('split', '拆分待办', 'layers'));
+      danger.push(btn('discard', '删除待办', 'trash', 'btn-danger-line'));
     }
     if (occ.status === 'timeout') {
       // 超时实例不复活：重新安排 = 保留超时历史 + 新建单次待办
-      parts.push(btn('reschedule-timeout', '重新安排', 'clock', 'btn-primary'));
-      parts.push(btn('discard-this', '此次不执行'));
-      parts.push(btn('discard', '删除待办', 'x', 'btn-danger-line'));
+      primary.push(btn('reschedule-timeout', '重新安排', 'clock', 'btn-primary'));
+      adjustments.push(btn('discard-this', '此次不执行'));
+      danger.push(btn('discard', '删除待办', 'trash', 'btn-danger-line'));
     }
     if (CLOSED_STATUSES.includes(occ.status)) {
       // 已关闭历史不复活（过去不重写）：只允许补填实际时间
-      parts.push(btn('backfill', '补填实际时间', 'edit'));
+      primary.push(btn('backfill', '补填实际时间', 'edit'));
     }
-    return parts.join('');
+    return [
+      primary.length || adjustments.length || splits.length || danger.length ? detailHeading('操作', 'grid') : '',
+      primary.length ? `<div class="plan-detail-actions plan-detail-actions-primary" role="group" aria-label="执行操作">${primary.join('')}</div>` : '',
+      adjustments.length ? `<div class="plan-detail-actions" role="group" aria-label="调整待办">${adjustments.join('')}</div>` : '',
+      splits.length ? `<div class="plan-detail-actions plan-detail-actions-split" role="group" aria-label="拆分与续办">${splits.join('')}</div>` : '',
+      danger.length ? `<div class="plan-detail-actions plan-detail-actions-danger" role="group" aria-label="删除操作">${danger.join('')}</div>` : '',
+    ].join('');
   },
 
   async showTaskDetail(task) {
@@ -842,7 +856,7 @@ export default {
     }
     parts.push(`<button class="btn btn-secondary btn-sm" data-act="task-edit" data-id="${task.id}">${icon('edit')}编辑</button>`);
     if (task.is_active) {
-      parts.push(`<button class="btn btn-danger-line btn-sm" data-act="task-discard" data-id="${task.id}">${icon('x')}删除待办</button>`);
+      parts.push(`<button class="btn btn-danger-line btn-sm" data-act="task-discard" data-id="${task.id}">${icon('trash')}删除待办</button>`);
     } else if (task.deleted_at) {
       // §25（2026-10-07）：已删除的待办不提供恢复入口（后端同样拒绝）；
       // 有执行事实者的历史仍可在列表与出现记录中查看。
@@ -857,11 +871,16 @@ export default {
       title: esc(task.content),
       badges: `<div class="tag-row">${tag(esc(TASK_TYPE_LABELS[task.task_type] || ''), 'gold')}${task.refresh_enabled === false && task.is_active ? tag('刷新已暂停', 'slate') : ''}${task.is_active ? '' : tag('已删除', 'red')}</div>`,
       html: `
+      <section class="plan-detail-section" aria-label="重复与刷新">
+        ${detailHeading('重复与刷新', 'calendar')}
         <div class="kv"><span class="k">重复规则</span><span class="v">${esc(taskTypeSummary(task))}</span></div>
         ${earlyHint ? `<p class="field-hint" id="plan-task-early-note">${esc(earlyHint)}</p>` : ''}
         ${task.task_type === 'interval' && task.refresh_mode === 'after_completion'
           ? `<div class="kv"><span class="k">刷新间隔</span><span class="v">${esc(formatIntervalMinutes(task.after_completion_minutes))}（完成后起算，精确到分钟）</span></div>` : ''}
         ${task.deleted_at ? `<div class="kv"><span class="k">删除时间</span><span class="v">${fmtDue(task.deleted_at)}</span></div>` : ''}
+      </section>
+      <section class="plan-detail-section" aria-label="时间安排">
+        ${detailHeading('时间安排', 'clock')}
         <div class="kv"><span class="k">可安排时段</span><span class="v">${(task.window_start_tod || task.window_end_tod)
           ? `${esc(task.window_start_tod || '无')} ～ ${esc(task.window_end_tod || '无')}${(task.window_start_tod && task.window_end_tod && task.window_end_tod < task.window_start_tod) ? '（结束在次日）' : ''}`
           : '未设置（正常自动排程）'}</span></div>
@@ -871,14 +890,18 @@ export default {
           → 中间 ${task.hollow_wait_minutes}m${task.hollow_wait_note ? `（${esc(task.hollow_wait_note)}）` : ''}
           → 结束：${esc(task.hollow_end_content || task.content)}（${task.hollow_end_minutes}m）</span></div>` : ''}
         ${task.is_limited ? `<div class="kv"><span class="k">限时截止</span><span class="v">${esc(task.deadline_tod)}${task.deadline_end_tod ? `～${esc(task.deadline_end_tod)}` : ''}</span></div>` : ''}
+      </section>
+      <section class="plan-detail-section" aria-label="提醒与周期">
+        ${detailHeading('提醒与周期', 'bell')}
         <div class="kv"><span class="k">提醒</span><span class="v">${[
           task.alarm_start ? '开始闹钟' : '',
           task.alarm_end ? '结束闹钟' : '',
           task.timer_minutes ? `计时器 ${task.timer_minutes}m` : '',
         ].filter(Boolean).join('、') || '无'}</span></div>
         ${task.next_due ? `<div class="kv muted text-sm"><span class="k">下次到期</span><span class="v">${fmtDue(task.next_due)}</span></div>` : ''}
-        <div class="kv muted text-sm"><span class="k">生成游标</span><span class="v">${esc(task.cursor_date || '-')}</span></div>`,
-      actions: parts.join(''),
+        <div class="kv muted text-sm"><span class="k">生成游标</span><span class="v">${esc(task.cursor_date || '-')}</span></div>
+      </section>`,
+      actions: `${detailHeading('操作', 'grid')}${parts.join('')}`,
     });
   },
 
