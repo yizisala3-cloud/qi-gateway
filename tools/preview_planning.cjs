@@ -1,5 +1,5 @@
-// Local planning layout preview. Serves the real admin assets with read-only
-// synthetic tasks; never loads .env, connects to a database, or ships in Docker.
+// Local UI preview. Task creation/notes mutate synthetic in-memory data only;
+// never loads .env, connects to a database, or ships in Docker.
 const http = require('node:http');
 const { once } = require('node:events');
 const { server: baseServer } = require('./preview_gateway_logs.cjs');
@@ -52,6 +52,30 @@ const occurrences = examples.map((row, index) => ({
   schedule_label: row.status === 'deferred' ? '落后' : '正常', source: 'local_preview',
   ...row,
 }));
+tasks[0].note = '先确定布局和交互，再逐项调整。完成后检查手机和桌面显示。';
+occurrences[0].note = tasks[0].note;
+tasks[1].note = '阅读后留下一个值得记住的想法。';
+occurrences[1].note = tasks[1].note;
+occurrences.push({ ...occurrences[1], id: 2002, status: 'completed',
+  round_key: 'preview-previous-reading', note: '上次阅读的备注，后续修改时保留。',
+  actual_minutes: 20, actual_logged_seconds: 1200 });
+const creationKeys = new Map();
+
+async function payloadOf(request) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > 16384) throw new Error('请求内容过大');
+    chunks.push(chunk);
+  }
+  const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('请求必须是对象');
+  if (payload.note != null && (typeof payload.note !== 'string' || Array.from(payload.note).length > 60)) {
+    throw new Error('备注须为不超过 60 字的文本');
+  }
+  return payload;
+}
 
 function json(response, body, status = 200) {
   response.writeHead(status, {
@@ -66,6 +90,42 @@ const server = http.createServer(async (request, response) => {
     if (url.pathname.startsWith('/admin/api/planning/') || url.pathname.startsWith('/admin/api/memo/')) {
       if (request.headers.authorization !== `Bearer ${TOKEN}`) {
         return json(response, { error: '请使用本地预览令牌' }, 401);
+      }
+      const taskMatch = url.pathname.match(/^\/admin\/api\/planning\/tasks\/(\d+)$/);
+      if (taskMatch) {
+        const task = tasks.find(row => row.id === Number(taskMatch[1]));
+        if (!task) return json(response, { error: '测试待办不存在' }, 404);
+        if (request.method === 'GET') return json(response, task);
+        if (request.method === 'PATCH') {
+          let payload;
+          try { payload = await payloadOf(request); }
+          catch (error) { return json(response, { error: error.message }, 400); }
+          if (!Object.hasOwn(payload, 'note')) return json(response, { error: '此预览仅支持编辑备注' }, 405);
+          task.note = payload.note?.trim() || null;
+          for (const row of occurrences) {
+            if (row.task_id === task.id && ['pending', 'in_progress', 'deferred', 'partial'].includes(row.status)) row.note = task.note;
+          }
+          return json(response, task);
+        }
+      }
+      if (request.method === 'POST' && url.pathname === '/admin/api/planning/tasks') {
+        let payload;
+        try { payload = await payloadOf(request); }
+        catch (error) { return json(response, { error: error.message }, 400); }
+        if (!payload.content?.trim()) return json(response, { error: '请填写内容' }, 400);
+        const key = request.headers['idempotency-key'];
+        if (key && creationKeys.has(key)) return json(response, creationKeys.get(key), 201);
+        const id = Math.max(...tasks.map(row => row.id)) + 1;
+        const task = { ...tasks[0], ...payload, id, note: payload.note?.trim() || null,
+          task_type: payload.task_type || 'daily', estimated_minutes: Number(payload.estimated_minutes) || 30,
+          created_at: clock(0), updated_at: clock(0) };
+        tasks.push(task);
+        occurrences.push({ ...occurrences[1], ...task, id: id + 1000, task_id: id,
+          task_content: task.content, status: 'pending', round_key: `preview-created-${id}`,
+          sort_order: id, actual_start: null, actual_end: null, actual_minutes: null,
+          actual_logged_seconds: null, partial_note: null, est_start: null, est_end: null });
+        if (key) creationKeys.set(key, task);
+        return json(response, task, 201);
       }
       if (request.method !== 'GET') {
         return json(response, { error: '本地预览中的测试数据仅供查看，暂不支持保存修改' }, 405);

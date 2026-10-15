@@ -89,10 +89,38 @@ body {
     linear-gradient(var(--green-veil), var(--green-veil)),
     url("/admin/assets/dark-green-paper.png") center / 100vh 100vh repeat, var(--green-deep);
   -webkit-font-smoothing: antialiased;
+  -webkit-user-select: none;
+  user-select: none;
 }
 a { color: inherit; text-decoration: none; }
 h1, h2, h3, h4 { margin: 0; font-weight: 600; }
 ::selection { background: rgba(154, 130, 72, 0.32); }
+/* 仅内容标题、正文和编辑区进入选区；界面标签、状态、时间等沿用 body 的 none。
+   混有编号或状态的标题只在实际文字上标记 copyable-text。 */
+.copyable-text,
+.plan-item-title,
+.memo-item-title,
+.memo-item-excerpt,
+.memo-md,
+.mem-snippet,
+.log-pre,
+input,
+textarea,
+[contenteditable]:not([contenteditable="false"]) {
+  -webkit-user-select: text;
+  user-select: text;
+}
+/* 空编辑区显示的示例提示属于界面文案，输入内容后恢复上面的 text。 */
+input:placeholder-shown,
+textarea:placeholder-shown {
+  -webkit-user-select: none;
+  user-select: none;
+}
+.plan-item.is-dragging *,
+.plan-drag-copy * {
+  -webkit-user-select: none;
+  user-select: none;
+}
 /* 装饰素材不进入正文选区，避免透明图片的矩形外框被选区染色。 */
 img[alt=""],
 img[aria-hidden="true"],
@@ -1064,11 +1092,11 @@ html[data-theme="night"] .detail-panel { --detail-tint: rgba(34, 40, 30, 0.92); 
 .detail-foot:empty { display: none; }
 
 /* Planning uses the actual remaining viewport below the page heading. */
-#planning-layout .detail-panel { max-height: var(--detail-available, calc(100dvh - 180px)); }
+#planning-layout .detail-panel { max-height: var(--detail-available, calc(100dvh - 180px)); overflow-y: auto; }
 #planning-layout .detail-head, #planning-layout .detail-foot { flex-shrink: 0; }
-#planning-layout .detail-body { min-height: 0; min-width: 0; overflow-wrap: anywhere; }
+#planning-layout .detail-body { flex: 0 0 auto; min-height: 0; min-width: 0; overflow: visible; overflow-wrap: anywhere; }
 #planning-layout .detail-titles { min-width: 0; max-height: min(160px, calc(var(--detail-available, 600px) * .3)); overflow-y: auto; }
-#planning-layout .detail-foot { align-items: center; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+#planning-layout .detail-foot { margin-top: auto; align-items: center; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
 #planning-layout .detail-foot .btn { max-width: 100%; white-space: normal; }
 #planning-layout .kv-block .plan-alarm-controls { white-space: normal; }
 #planning-layout [data-reorder-feedback] { overflow-wrap: anywhere; }
@@ -1211,18 +1239,30 @@ html[data-theme="night"] #planning-layout .detail-panel {
   color: var(--green-ink);
   background: var(--green-soft);
 }
-#planning-layout .plan-detail-status-row { display: flex; align-items: center; gap: 12px; }
-#planning-layout .plan-detail-status-row .plan-detail-section-title { flex: 1; min-width: 0; margin: 0; }
-#planning-layout .plan-detail-status-row .k { color: var(--ink); }
-#planning-layout .plan-detail-status-pill {
-  flex-shrink: 0;
-  padding: 3px 12px;
+#planning-layout .plan-task-note {
+  margin-top: 12px;
+  padding: 10px 12px;
   border: 1px solid var(--gold-faint);
-  border-radius: 20px;
-  color: var(--green-ink);
-  background: var(--green-soft);
-  font-size: 12px;
+  border-radius: 8px;
+  background: var(--paper-card);
+  cursor: pointer;
 }
+#planning-layout .plan-task-note:hover,
+#planning-layout .plan-task-note:focus-visible { border-color: var(--gold); outline-color: var(--gold); }
+.plan-task-note-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--ink-soft); font-size: 12px; margin-bottom: 5px; }
+.plan-task-note-head .ico { width: 14px; height: 14px; }
+.plan-task-note-text { font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; white-space: normal; }
+.plan-task-note-empty { color: var(--ink-faint); font-size: 13px; }
+.modal.task-note-modal { max-width: 520px; }
+.task-note-modal textarea { width: 100%; min-height: 120px; }
+.task-note-field label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.task-note-field .char-count { margin-left: auto; }
+.task-note-field textarea:focus {
+  outline: none;
+  box-shadow: none;
+}
+.task-note-error { color: var(--red); font-size: 12px; margin: 6px 0 0; }
+.plan-note-full { white-space: pre-wrap; overflow-wrap: anywhere; min-height: 72px; }
 #planning-layout .detail-foot {
   gap: 8px;
   padding: 12px 20px max(14px, env(safe-area-inset-bottom));
@@ -1300,7 +1340,6 @@ html[data-theme="night"] #planning-layout .detail-panel {
   }
   #planning-layout .detail-head,
   #planning-layout .detail-foot { flex: 0 0 auto; }
-  #planning-layout .detail-body { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior-y: contain; }
   #planning-layout .detail-titles { max-height: 160px; }
 }
 
@@ -1311,7 +1350,7 @@ html[data-theme="night"] #planning-layout .detail-panel {
 }
 
 /* Short desktop windows keep the same groups and typography while reducing
-   vertical spacing in the non-scrolling regions to leave room for the body. */
+   vertical spacing so more of the continuous detail content remains visible. */
 @media (min-width: 1101px) and (max-height: 680px) {
   #planning-layout .detail-head { padding-block: 12px; }
   #planning-layout .detail-foot { padding-block: 8px; gap: 4px; }
@@ -1333,7 +1372,6 @@ html[data-theme="night"] #planning-layout .detail-panel {
     border-right: none;
     border-radius: 14px 0 0 14px;
   }
-  #planning-layout .detail-body { overscroll-behavior-y: contain; }
 }
 
 .detail-rail {
@@ -2429,7 +2467,8 @@ select.retro-select-source {
 }
 .memo-handle:hover { color: var(--gold-strong); }
 .memo-handle-spacer { width: 30px; flex: none; }
-body.memo-dragging { user-select: none; }
+body.memo-dragging,
+body.memo-dragging * { -webkit-user-select: none; user-select: none; }
 body.memo-dragging .memo-handle { cursor: grabbing; }
 
 /* ── 条目：标题 + 一行正文（溢出省略）── */

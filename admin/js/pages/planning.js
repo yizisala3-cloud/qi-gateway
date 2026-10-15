@@ -20,6 +20,7 @@ import { createPlanningSort } from '../lib/planning_sort.js?v=20261014-admin-lay
 import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261014-admin-layout-help-scrollbars';
 import { createPlanningMemo } from '../lib/planning_memo.js?v=20261014-admin-layout-help-scrollbars';
 import { createPlanningReads } from '../lib/planning_reads.js?v=20261014-admin-layout-help-scrollbars';
+import { taskNotePreview, openTaskNote } from '../lib/planning_notes.js?v=20261014-admin-layout-help-scrollbars';
 import { mergeOrderReceipt, mergeOccurrencesFromBoard } from '../lib/planning_sync.js?v=20261014-admin-layout-help-scrollbars';
 
 const detailHeading = (label, name) => `<h4 class="plan-detail-section-title">${icon(name)}<span>${esc(label)}</span><span class="plan-detail-rule" aria-hidden="true"></span></h4>`;
@@ -55,6 +56,7 @@ export default {
   sort: null,
   memo: null,
   taskForm: null,
+  noteDialog: null,
   loadedTabs: null, // 仅用于备忘录的按需挂载
 
   async mount(root) {
@@ -369,6 +371,8 @@ export default {
   },
 
   unmount() {
+    this.noteDialog?.close();
+    this.noteDialog = null;
     this.clearSelection();
     this.sort?.exitReorder();
     this.detail?.dispose();
@@ -691,7 +695,7 @@ export default {
     if (!this.detail || this.selected?.kind !== 'occ' || this.selected.id !== occ.id
         || !['today', 'all'].includes(this.activeTab)) return;
     this.markSelected(`[data-occ="${occ.id}"], [data-occ-all="${occ.id}"]`);
-    const title = esc(occ.content);
+    const title = `<span class="copyable-text">${esc(occ.content)}</span>`;
     const badges = `<div class="tag-row">${tag(esc(TASK_TYPE_LABELS[occ.task_type] || ''), 'gold')}${this.itemBadges(occ)}</div>`;
     const facts = `
       <section class="plan-detail-section" aria-label="时间安排">
@@ -705,13 +709,13 @@ export default {
           occ.window_end_at ? `最晚完成 ${fmtClock(occ.window_end_at)}` : '',
         ].filter(Boolean).join('，')}</span></div>` : ''}
         ${occ.is_limited ? `<div class="kv"><span class="k">限时截止</span><span class="v">${fmtClock(occ.deadline_at)}</span></div>` : ''}
-        ${occ.partial_note ? `<div class="kv kv-block"><span class="k">部分完成说明</span><span class="v">${esc(occ.partial_note)}</span></div>` : ''}
+        ${occ.partial_note ? `<div class="kv kv-block"><div class="k">部分完成备注：</div><div class="v copyable-text">${esc(occ.partial_note)}</div></div>` : ''}
         ${occ.partial_at ? `<div class="kv"><span class="k">部分完成时间</span><span class="v">${fmtDue(occ.partial_at)}</span></div>` : ''}
       </section>
 `;
     const state = `
-        <div class="plan-detail-status-row"><h4 class="plan-detail-section-title">${icon('activity')}<span class="k">当前状态</span><span class="plan-detail-rule" aria-hidden="true"></span></h4><span class="plan-detail-status-pill">${esc(occ.schedule_label || '-')}</span></div>
-        ${this.conflictById?.get(occ.id) ? `<div class="kv kv-block"><span class="k">排程冲突</span><span class="v">${esc(this.conflictById.get(occ.id).reason)}</span></div>` : ''}`;
+        ${this.conflictById?.get(occ.id) ? `<div class="kv kv-block"><span class="k">排程冲突</span><span class="v">${esc(this.conflictById.get(occ.id).reason)}</span></div>` : ''}
+        ${taskNotePreview(occ.task_id, occ.note, { readOnly: !OPEN_STATUSES.includes(occ.status) })}`;
     const actions = this.occurrenceActions(occ);
     const factsHost = this.detail.body.querySelector(`[data-occ-readonly="${occ.id}"]`);
     if (preserveInputs && factsHost) {
@@ -737,7 +741,7 @@ export default {
     }
     this.detail.render({ title, badges, actions, html: `
       <div data-occ-readonly="${occ.id}">${facts}</div>
-        <section class="plan-detail-section plan-detail-reminders" aria-label="提醒">${detailHeading('提醒', 'bell')}<div class="plan-alarm-controls">
+        <section class="plan-detail-section plan-detail-reminders" aria-label="提醒"><div class="plan-alarm-controls">
           <div class="tag-row" data-alarm-controls data-task-id="${occ.task_id}">
             <label class="inline"><input type="checkbox" data-alarm-start ${occ.alarm_start ? 'checked' : ''}> 开始闹钟</label>
             <label class="inline"><input type="checkbox" data-alarm-end ${occ.alarm_end ? 'checked' : ''}> 结束闹钟</label>
@@ -868,7 +872,7 @@ export default {
       parts.push(`<button class="btn btn-secondary btn-sm" data-act="task-enable" data-id="${task.id}">${icon('refresh')}重新启用</button>`);
     }
     this.detail.render({
-      title: esc(task.content),
+      title: `<span class="copyable-text">${esc(task.content)}</span>`,
       badges: `<div class="tag-row">${tag(esc(TASK_TYPE_LABELS[task.task_type] || ''), 'gold')}${task.refresh_enabled === false && task.is_active ? tag('刷新已暂停', 'slate') : ''}${task.is_active ? '' : tag('已删除', 'red')}</div>`,
       html: `
       <section class="plan-detail-section" aria-label="重复与刷新">
@@ -900,7 +904,7 @@ export default {
         ].filter(Boolean).join('、') || '无'}</span></div>
         ${task.next_due ? `<div class="kv muted text-sm"><span class="k">下次到期</span><span class="v">${fmtDue(task.next_due)}</span></div>` : ''}
         <div class="kv muted text-sm"><span class="k">生成游标</span><span class="v">${esc(task.cursor_date || '-')}</span></div>
-      </section>`,
+      </section>${taskNotePreview(task.id, task.note, { readOnly: !task.is_active })}`,
       actions: `${detailHeading('操作', 'grid')}${parts.join('')}`,
     });
   },
@@ -1071,6 +1075,7 @@ export default {
   },
 
   async taskAction(act, id, el = null) {
+    if (act === 'note') return this.openNoteForSelection(id);
     const owner = { selected: this.selected, reads: this.reads, tab: this.activeTab };
     try {
       if (act === 'early') {
@@ -1189,6 +1194,25 @@ export default {
 
   /* ---------- 新建 / 编辑任务表单 ---------- */
 
+  openNoteForSelection(taskId) {
+    if (this.noteDialog?.root.isConnected) {
+      this.noteDialog.root.focus();
+      return;
+    }
+    const selected = this.selected;
+    const occurrence = selected?.kind === 'occ'
+      ? this.findOccurrence(selected.id) || this.occurrences.find(row => row.id === selected.id) : null;
+    const task = selected?.kind === 'task' ? this.tasks.find(row => row.id === selected.id) : null;
+    if ((occurrence?.task_id ?? task?.id) !== taskId) return;
+    const readOnly = occurrence ? !OPEN_STATUSES.includes(occurrence.status) : !task.is_active;
+    this.noteDialog = openTaskNote({
+      taskId, note: (occurrence || task).note, readOnly,
+      // Refresh the currently mounted page, even if this dialog's page left.
+      // Re-read authoritative data without applying an old response to a new draft.
+      onSaved: () => this.taskSaved(true),
+    });
+  },
+
   openTaskForm(task) {
     if (this.taskForm?.isSubmitting()) {
       toast(this.taskForm.editing ? '待办正在保存，请等待完成' : '待办正在创建，请等待完成', 'warn');
@@ -1211,6 +1235,8 @@ export default {
       if (!el || el.disabled) return;
       const act = el.dataset.act;
       const id = Number(el.dataset.id);
+      const selection = window.getSelection?.();
+      if (act === 'task-note' && selection && !selection.isCollapsed && el.contains(selection.anchorNode)) return;
       if (act.startsWith('occ-')) {
         e.stopPropagation();
         this.occurrenceAction(act.slice(4), id);
@@ -1218,6 +1244,13 @@ export default {
         e.stopPropagation();
         this.taskAction(act.slice(5), id, el);
       }
+    });
+    scope.addEventListener('keydown', event => {
+      if (this.reads !== mountedReads) return;
+      const note = event.target.closest('[data-act="task-note"]');
+      if (!note || !['Enter', ' '].includes(event.key)) return;
+      event.preventDefault();
+      this.openNoteForSelection(Number(note.dataset.id));
     });
   },
 

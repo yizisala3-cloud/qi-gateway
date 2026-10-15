@@ -64,7 +64,7 @@ function candidateCards(candidates) {
     const evidence = (candidate.evidence_message_ids || []).map((id) => `#${esc(id)}`).join('、') || '-';
     return `
       <div class="mem-card" style="cursor:default" data-candidate="${index}">
-        <div class="mem-title">${esc(candidate.title || '(无标题)')}</div>
+        <div class="mem-title copyable-text">${esc(candidate.title || '(无标题)')}</div>
         <div class="mem-snippet">${esc(candidate.content || '')}</div>
         <div class="mt8">
           <div class="kv"><span class="k">连续感类型</span><span class="v">${esc(candidate.continuity_type || '-')}</span></div>

@@ -95,6 +95,8 @@ def serialize_occurrence(occ: dict[str, Any], task: dict[str, Any], now: datetim
         # 修改只影响未来轮次。
         "estimated_minutes": common._effective_minutes(occ, task),
         "partial_note": occ.get("partial_note"),
+        # A blank historical note must never fall back to today's template.
+        "note": occ.get("note"),
         "sort_order": occ.get("sort_order", 0),
         "is_fixed": occ.get("is_fixed", False),
         "estimated_time_source": occ.get("estimated_time_source"),
@@ -120,6 +122,7 @@ def serialize_task(task: dict[str, Any], now: datetime) -> dict[str, Any]:
     return {
         "id": task["id"],
         "content": task["content"],
+        "note": task.get("note"),
         "task_type": task["task_type"],
         "refresh_mode": task.get("refresh_mode"),
         "refresh_anchor_at": task.get("refresh_anchor_at"),

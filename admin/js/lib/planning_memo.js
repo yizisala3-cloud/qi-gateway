@@ -950,7 +950,7 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
         if (!current()) return;
         const tagsHtml = (entry.tags || []).map((t) => tag(esc(t.name), 'slate')).join('');
         const reader = showReader(owner, {
-          title: esc(entry.title || '备忘录'),
+          title: `<span class="copyable-text">${esc(entry.title || '备忘录')}</span>`,
           html: `
             <div class="tag-row" style="margin-bottom:10px">
               ${tag(KIND_LABELS[entry.kind] || entry.kind, entry.kind === 'pinned' ? 'gold' : 'muted')}

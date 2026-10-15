@@ -49,7 +49,7 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
         raise common.PlanningError("invalid_payload", "请求内容必须是 JSON 对象")
 
     allowed = {
-        "content", "task_type", "interval_days", "weekdays", "month_days",
+        "content", "note", "task_type", "interval_days", "weekdays", "month_days",
         "target_date", "time_mode", "estimated_minutes",
         "is_hollow", "hollow_start_content", "hollow_start_minutes",
         "hollow_wait_minutes", "hollow_wait_note", "hollow_end_content",
@@ -72,6 +72,13 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
     if "content" in payload or not partial:
         content = common._clean_text(payload.get("content"), "content", required=True, maximum=common.MAX_CONTENT_LENGTH)
         result["content"] = content
+
+    if "note" in payload:
+        note = payload["note"]
+        if isinstance(note, str):
+            note = note.replace("\r\n", "\n").replace("\r", "\n")
+        result["note"] = common._clean_text(
+            note, "备注", required=False, maximum=common.MAX_TASK_NOTE_LENGTH)
 
     task_type = payload.get("task_type", result.get("task_type"))
     if task_type is not None or not partial:
@@ -509,7 +516,7 @@ def _creation_window_outcome(
 # 服务端注入的缺省（固定间隔 anchor=当前时刻、created_at 等）不参与
 # 内容比对——两次相同意图在不同时刻创建的缺省不同不构成「不同内容」。
 _CREATION_CONTENT_FIELDS = (
-    "content", "task_type", "time_mode", "estimated_minutes",
+    "content", "note", "task_type", "time_mode", "estimated_minutes",
     "window_start_tod", "window_end_tod",
     "interval_days", "weekdays", "month_days", "target_date",
     "refresh_mode", "refresh_enabled", "refresh_anchor_at",
@@ -532,6 +539,9 @@ _SEMANTIC_REFRESH_MODE_DEFAULTS = {
 
 def _creation_request_content(row: dict[str, Any]) -> dict[str, Any]:
     content = {field: row.get(field) for field in _CREATION_CONTENT_FIELDS}
+    # Preserve old tombstone digests when the optional note is empty.
+    if content.get("note") is None:
+        content.pop("note", None)
     if content.get("refresh_mode") is None:
         content["refresh_mode"] = _SEMANTIC_REFRESH_MODE_DEFAULTS.get(
             content.get("task_type"))
@@ -559,6 +569,8 @@ def _normalize_stored_creation_content(stored: Any) -> dict[str, Any] | None:
     if stored is None or not isinstance(stored, dict):
         return stored
     content = {field: stored.get(field) for field in _CREATION_CONTENT_FIELDS}
+    if content.get("note") is None:
+        content.pop("note", None)
     if content.get("refresh_enabled") is None:
         content["refresh_enabled"] = True
     if content.get("refresh_mode") is None:
@@ -1066,6 +1078,15 @@ def _update_task(task_id: int, payload: Any, now: datetime | None = None) -> dic
     row = validate_task_payload(payload, partial=True)
     if not row:
         raise common.PlanningError("invalid_payload", "没有可修改的字段")
+    if set(row) == {"note"}:
+        # A database trigger updates the template and open snapshots in the
+        # same transaction. Notes do not change scheduling or lifecycle facts.
+        response = client.table("planning_task").update({
+            **row, "updated_at": common._iso(now),
+        }).eq("id", task_id).execute()
+        if not response.data:
+            raise common.PlanningError("not_found", "待办任务不存在", 404)
+        return presentation.serialize_task(response.data[0], now)
     if any(field in row and row[field] != task.get(field) for field in
            ("task_type", "refresh_mode", "refresh_anchor_at")):
         existing = runtime._rows(client, "planning_occurrence", lambda q: q.eq("task_id", task_id).limit(1))

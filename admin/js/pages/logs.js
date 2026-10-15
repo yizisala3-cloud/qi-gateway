@@ -506,7 +506,7 @@ export default {
       <div class="mem-card" data-act="detail" data-fingerprint="${esc(g.fingerprint)}">
         <div class="card-top">
           <div class="card-main">
-            <div class="mem-title">${levelTag(g.level)} ${tag(esc(moduleLabel(g.module)), 'slate')} ${esc(g.message_zh || '(无摘要)')}</div>
+            <div class="mem-title">${levelTag(g.level)} ${tag(esc(moduleLabel(g.module)), 'slate')} <span class="copyable-text">${esc(g.message_zh || '(无摘要)')}</span></div>
             <div class="card-meta">
               ${esc(g.error_code || '-')} · ${esc(g.operation || '-')}
               · 共 ${esc(g.event_count ?? 0)} 次
@@ -542,7 +542,7 @@ export default {
   renderGroupCards() {
     return this.groups.map((g) => `
       <div class="mem-card" style="opacity:.65" data-act="detail" data-fingerprint="${esc(g.fingerprint)}">
-        <div class="mem-title">${levelTag(g.level)} ${esc(g.message_zh || '(无摘要)')}</div>
+        <div class="mem-title">${levelTag(g.level)} <span class="copyable-text">${esc(g.message_zh || '(无摘要)')}</span></div>
         <div class="card-meta">${esc(g.error_code || '-')} · 共 ${esc(g.event_count ?? 0)} 次 · 最近 ${esc(fmtCST(g.last_seen_at))}</div>
       </div>`).join('');
   },
@@ -669,7 +669,7 @@ export default {
         ${s.source ? `<div class="card-meta mono">${esc(s.source)}</div>` : ''}
       </div>`).join('');
     return `
-      <div class="kv"><span class="k">中文摘要</span><span class="v">${esc(g.message_zh || '-')}</span></div>
+      <div class="kv"><span class="k">中文摘要</span><span class="v copyable-text">${esc(g.message_zh || '-')}</span></div>
       <div class="kv"><span class="k">级别</span><span class="v">${levelTag(g.level)}</span></div>
       <div class="kv"><span class="k">模块 / 操作</span><span class="v">${esc(moduleLabel(g.module))} · ${esc(g.operation || '-')}</span></div>
       <div class="kv"><span class="k">错误码</span><span class="v mono">${esc(g.error_code || '-')}</span></div>

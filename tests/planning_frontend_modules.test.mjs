@@ -224,6 +224,90 @@ const readPaths = () => requests.filter(({ options }) => !options.method)
   .map(({ url }) => new URL(url).pathname);
 
 const checks = {
+  async 'C8-note-remount'() {
+    // Deferred promises control commit order; polling/timers never run here.
+    let stored = '旧备注';
+    let finishPatch;
+    let holdRead = null;
+    const snapshot = () => ({ ...emptyBoard(), progress: [{
+      id: 1, task_id: 10, content: '备注竞态', status: 'pending', note: stored,
+    }] });
+    respond = async ({ url, options, body }) => {
+      const path = new URL(url).pathname;
+      if (options.method === 'PATCH') return new Promise(resolve => {
+        finishPatch = () => { stored = body.note; resolve(response({ id: 10, note: stored })); };
+      });
+      if (path.endsWith('/today')) {
+        const old = snapshot();
+        if (holdRead) { const release = holdRead; holdRead = null; return release(old); }
+        return response(old);
+      }
+      if (path.endsWith('/tasks/10')) return response({ id: 10, note: stored });
+      return response([]);
+    };
+    const beginSave = async () => {
+      page.selected = { kind: 'occ', id: 1 };
+      page.openNoteForSelection(10);
+      await flush();
+      const session = page.noteDialog;
+      session.root.querySelector('#task-note-text').value = '新备注';
+      const button = session.root.querySelector('[data-save]');
+      const pending = button.onclick();
+      await button.onclick();
+      return { session, pending };
+    };
+    for (const staleMountRead of [false, true]) {
+      stored = '旧备注';
+      await page.mount(new Element());
+      const { session, pending } = await beginSave();
+      page.unmount();
+      assert.equal(session.root.isConnected, false);
+      let releaseOldRead;
+      if (staleMountRead) holdRead = old => new Promise(resolve => {
+        releaseOldRead = () => resolve(response(old));
+      });
+      const remount = page.mount(new Element());
+      if (!staleMountRead) {
+        await remount;
+        assert.equal(page.board.progress[0].note, '旧备注', 'remount really read pre-commit data');
+      }
+      // A new editor draft must survive the old PATCH and the fresh list read.
+      page.selected = { kind: 'occ', id: 1 };
+      if (staleMountRead) page.board = snapshot();
+      page.openNoteForSelection(10);
+      await flush();
+      const freshDialog = page.noteDialog;
+      freshDialog.root.querySelector('#task-note-text').value = '新弹窗未保存草稿';
+      const before = readPaths().filter(path => path.endsWith('/today')).length;
+      finishPatch();
+      await pending;
+      assert.equal(page.board.progress[0].note, '新备注', 'late commit refreshes the currently mounted page');
+      assert.equal(readPaths().filter(path => path.endsWith('/today')).length, before + 1,
+        'one commit-driven read; no polling or repeated requests');
+      assert.equal(freshDialog.root.querySelector('#task-note-text').value, '新弹窗未保存草稿');
+      assert.equal(freshDialog.root.isConnected, true);
+      if (staleMountRead) { releaseOldRead(); await remount; }
+      assert.equal(page.board.progress[0].note, '新备注', 'late old mount read cannot undo the refresh');
+      page.unmount();
+    }
+    await page.mount(new Element());
+    const oldPageRoot = page.root;
+    const { session, pending } = await beginSave();
+    page.unmount();
+    const before = requests.length;
+    // Touching detached modal/page nodes after successful commit is forbidden.
+    session.root.querySelector = () => { throw new Error('detached modal DOM access'); };
+    oldPageRoot.querySelector = () => { throw new Error('unmounted page DOM access'); };
+    finishPatch();
+    await pending;
+    assert.equal(requests.length, before, 'commit while away performs no page reads');
+    assert.equal(page.root, null);
+    await page.mount(new Element());
+    assert.equal(page.board.progress[0].note, '新备注');
+    page.unmount();
+    assert.equal(requests.filter(row => row.options.method === 'PATCH').length, 3);
+  },
+
   async graph() {
     assert.equal(typeof page.mount, 'function');
     assert.equal(typeof page.unmount, 'function');

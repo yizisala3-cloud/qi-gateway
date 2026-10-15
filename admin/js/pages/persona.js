@@ -79,7 +79,7 @@ export default {
         <div class="mem-card" style="cursor:default">
           <div class="card-top">
             <div class="card-main">
-              <div class="mem-title">${esc(p.name)} ${p.is_active ? tag('启用中', 'green') : tag('已停用', 'muted')}</div>
+              <div class="mem-title"><span class="copyable-text">${esc(p.name)}</span> ${p.is_active ? tag('启用中', 'green') : tag('已停用', 'muted')}</div>
               <div class="mem-snippet">${esc((p.content || '').slice(0, 200))}</div>
               <div class="card-meta">更新于 ${esc(fmtUpdatedAt(p.updated_at))} · system prompt 独立存储，不与用户资料 / 互动规则记忆混用</div>
             </div>

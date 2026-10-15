@@ -30,6 +30,7 @@ ROUTES = ROOT / "admin" / "js" / "routes.js"
 UI = ROOT / "admin" / "js" / "ui.js"
 DISPLAY = ROOT / 'admin/js/lib/planning_display.js'
 TASK_FORM = ROOT / 'admin/js/lib/planning_task_form.js'
+NOTES = ROOT / 'admin/js/lib/planning_notes.js'
 DIALOGS = ROOT / 'admin/js/lib/planning_dialogs.js'
 SORT = ROOT / 'admin/js/lib/planning_sort.js'
 REMINDER = ROOT / 'admin/js/lib/planning_reminder.js'
@@ -53,6 +54,14 @@ def _task_form_source(form):
         form, re.S)
     assert match is not None, "openTaskForm implementation must exist"
     return match.group(1)
+
+
+def _note_input_source():
+    """Load the form's real note helpers into the isolated QuickJS harness."""
+    source = NOTES.read_text(encoding="utf-8")
+    start = source.index("export const TASK_NOTE_LIMIT")
+    end = source.index("export function taskNotePreview")
+    return source[start:end].replace("export ", "")
 
 
 def _try_import_quickjs():
@@ -377,8 +386,8 @@ class PlanningPageContractTests(unittest.TestCase):
         self.assertIn(r"(\d{2}):(\d{2})(?::\d{2})?", lib)
 
     def test_detail_terms_are_plain_language(self):
-        # BUG-15：「排列标签」→「当前状态」；生成游标 / 下次到期降为 muted 小字
-        self.assertIn("<span class=\"k\">当前状态</span>", self.page)
+        # 用户移除详情的「当前状态」行；生成游标 / 下次到期仍为 muted 小字。
+        self.assertNotIn("<span class=\"k\">当前状态</span>", self.page)
         self.assertNotIn("排列标签", self.page)
         self.assertIn('<div class="kv muted text-sm"><span class="k">生成游标</span>', self.page)
         self.assertIn('<div class="kv muted text-sm"><span class="k">下次到期</span>', self.page)
@@ -800,6 +809,7 @@ class PlanningNavigationContractTests(unittest.TestCase):
                 const esc = (v) => String(v == null ? '' : v);
                 const stub = { value: '', checked: false, disabled: false,
                                hidden: true, innerHTML: '',
+                               setAttribute: () => {}, addEventListener: () => {},
                                scrollIntoView: () => {} };
                 const root = {
                   querySelector: (sel) => {
@@ -808,6 +818,8 @@ class PlanningNavigationContractTests(unittest.TestCase):
                   },
                   querySelectorAll: () => [],
                 };
+                __NOTE_INPUT_HELPERS__
+                const noteEditor = bindNoteInput(root, 'pf-note');
                 const typeSelect = { value: 'daily' };
                 const submitBtn = { disabled: false };
                 let submitting = false, committed = false, createdTask = null;
@@ -1007,9 +1019,11 @@ class PlanningNavigationContractTests(unittest.TestCase):
               return out;
             })().then((v) => { __result = v; }).catch((e) => { __error = String(e); });
         """.replace("__HANDLER__", handler).replace(
+            "__NOTE_INPUT_HELPERS__", _note_input_source()).replace(
             "__OPENFORM_FACTORY__",
             "(function (modal, esc, icon, TASK_TYPES, TASK_TYPE_LABELS, "
-            "WEEKDAY_NAMES, gw, toast) { return function (task) {"
+            "WEEKDAY_NAMES, gw, toast) {" + _note_input_source()
+            + " return function (task) {"
              " const occurrences = this.occurrences;"
              " const initRetroFields = (...args) => this.initRetroFields(...args);"
              " const onSaved = () => this.loadAll();"
@@ -1240,7 +1254,8 @@ class PlanningNavigationContractTests(unittest.TestCase):
             })().then((v) => { __result = v; }).catch((e) => { __error = String(e); });
         """.replace("__OPENFORM_FACTORY__",
                     "(function (modal, esc, icon, TASK_TYPES, TASK_TYPE_LABELS, "
-                    "WEEKDAY_NAMES, gw, toast) { return function (task) {"
+                    "WEEKDAY_NAMES, gw, toast) {" + _note_input_source()
+                    + " return function (task) {"
              " const occurrences = this.occurrences;"
              " const initRetroFields = (...args) => this.initRetroFields(...args);"
              " const onSaved = () => this.loadAll();"

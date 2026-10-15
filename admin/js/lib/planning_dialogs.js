@@ -359,6 +359,7 @@ export function createPlanningDialogs({
       if (!source) return;
       openTaskForm({
         content: `${source.content}（剩余部分）`,
+        note: source.note || null,
         task_type: 'once',
         estimated_minutes: source.estimated_minutes || 30,
         target_date: source.display_cycle_date || source.schedule_date || source.for_date,

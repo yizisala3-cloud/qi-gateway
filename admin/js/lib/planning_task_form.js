@@ -2,6 +2,7 @@
 import { gw } from '../api.js?v=20261014-admin-layout-help-scrollbars';
 import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261014-admin-layout-help-scrollbars';
 import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261014-admin-layout-help-scrollbars';
+import { noteInputHtml, bindNoteInput } from './planning_notes.js?v=20261014-admin-layout-help-scrollbars';
 
 export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
   const editing = !!task?.id;
@@ -27,6 +28,7 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
     body: `
       <div class="field"><label>内容</label>
         <input type="text" id="pf-content" value="${esc(value('content'))}" placeholder="例如：背单词"></div>
+      ${noteInputHtml(value('note'), 'pf-note', 3)}
       <div class="field"><label>类型</label>
         <div class="retro-select" data-retro-select="pf-type" data-retro-value="${esc(value('task_type', 'daily'))}"></div></div>
       <div data-type-block="interval" style="display:none">
@@ -88,6 +90,7 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
 
   initRetroFields(root, { 'pf-type': typeSelectOptions });  // BUG-14：表单内日期/时刻/类型统一为复古选择器（值契约不变）
   // 复古下拉挂载后 #pf-type 才是隐藏 input，取值必须在 initRetroFields 之后
+  const noteEditor = bindNoteInput(root, 'pf-note');
   const typeSelect = root.querySelector('#pf-type');
   if (onceLocked) {
     // 批次 9 UI 修复：复古选择器是 hidden input + 按钮——只 disable
@@ -245,6 +248,7 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
       const type = typeSelect.value;
       const body = {
         content: root.querySelector('#pf-content').value.trim(),
+        note: noteEditor.read(),
         task_type: type,
       };
       const estimated = root.querySelector('#pf-estimated').value.trim();

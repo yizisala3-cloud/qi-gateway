@@ -63,6 +63,9 @@ class PlanningFrontendModulesTests(unittest.TestCase):
     def test_page_mount_remount_and_reminder_lifecycle(self):
         self._run_group("B6-lifecycle")
 
+    def test_note_commit_after_remount_refreshes_current_page(self):
+        self._run_group("C8-note-remount")
+
     def test_reminder_silent_warmup_dismissal_recovery_and_cleanup(self):
         self._run_group("B7-reminder-ring")
 

@@ -83,6 +83,7 @@ def reschedule_timeout_as_new(
     duration = common._effective_minutes(occ, task) or 30
     row = task_service.validate_task_payload({
         "content": occ.get("display_content") or presentation._display_content(task, occ),
+        "note": occ.get("note"),
         "task_type": "once",
         "target_date": today.isoformat(),
         "time_mode": "duration",

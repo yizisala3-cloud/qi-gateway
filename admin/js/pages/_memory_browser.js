@@ -81,7 +81,7 @@ function evidenceRange(memory) {
 function memoryKvRows(m) {
   return `
     <div class="kv"><span class="k">正文</span></div>
-    <div class="kv-block"><span class="v">${esc(m.content || '-')}</span></div>
+    <div class="kv-block"><span class="v copyable-text">${esc(m.content || '-')}</span></div>
     <div class="kv"><span class="k">状态</span><span class="v">${esc(verifiedMeta(m).label)}</span></div>
     <div class="kv"><span class="k">连续感类型</span><span class="v">${esc(continuityTypeLabel(m.continuity_type))}</span></div>
     <div class="kv"><span class="k">热度 / 重要性</span><span class="v">${Number(m.heat ?? 0).toFixed(1)} / ${esc(m.importance ?? '-')}</span></div>
@@ -102,7 +102,7 @@ function memoryKvRows(m) {
 function requestKvRows(r) {
   return `
     <div class="kv"><span class="k">申请内容</span></div>
-    <div class="kv-block"><span class="v">${esc(r.content || '-')}</span></div>
+    <div class="kv-block"><span class="v copyable-text">${esc(r.content || '-')}</span></div>
     ${r.reason ? `<div class="kv"><span class="k">申请理由</span></div><div class="kv-block"><span class="v">${esc(r.reason)}</span></div>` : ''}
     ${r.review_note ? `<div class="kv"><span class="k">审核备注</span></div><div class="kv-block"><span class="v">${esc(r.review_note)}</span></div>` : ''}
     <div class="kv"><span class="k">连续感类型</span><span class="v">${esc(continuityTypeLabel(r.continuity_type))}</span></div>
@@ -199,7 +199,7 @@ export async function showEvidenceModal(ids, subject = '') {
               ${tag(roleLabel[m.role] || esc(m.role || '未知'), 'slate')}
               ${tag(esc(fmtDate(m.created_at)), 'muted')}
             </div>
-            <div class="mt8" style="white-space:pre-wrap">${m.missing ? '<span class="muted">该消息已不存在或读取失败</span>' : esc(m.content || '')}</div>
+            <div class="mt8${m.missing ? '' : ' copyable-text'}" style="white-space:pre-wrap">${m.missing ? '<span class="muted">该消息已不存在或读取失败</span>' : esc(m.content || '')}</div>
           </div>
         </div>
       </div>`).join('')
@@ -232,7 +232,7 @@ export async function showVersionModal(memoryId) {
     const next = memory.superseded_by_memory_id ? await fetchOne(memory.superseded_by_memory_id) : null;
     const card = (m, note) => `
       <div class="mem-card" style="cursor:default">
-        <div class="mem-title">memory #${esc(m.id)} · ${esc(m.title || '(未命名)')}</div>
+        <div class="mem-title">memory #${esc(m.id)} · <span class="copyable-text">${esc(m.title || '(未命名)')}</span></div>
         <div class="mem-snippet">${esc((m.content || '').slice(0, 160))}</div>
         <div class="card-meta">${note ? `${esc(note)} · ` : ''}创建于 ${esc(fmtDate(m.created_at))}${m.superseded_at ? ` · 于 ${esc(fmtDate(m.superseded_at))} 被取代` : ''}</div>
       </div>`;
@@ -490,7 +490,7 @@ export function createMemoryBrowser({
       <div class="mem-card ${m.id === state.selected?.id && state.selected?.kind === 'mem' ? 'selected' : ''}" data-act="open-mem" data-id="${m.id}">
         <div class="card-top">
           <div class="card-main">
-            <div class="mem-title">#${m.id} · ${esc(m.title || '(未命名)')}</div>
+            <div class="mem-title">#${m.id} · <span class="copyable-text">${esc(m.title || '(未命名)')}</span></div>
             <div class="mem-snippet">${esc((m.content || '').slice(0, 160))}</div>
             <div class="tag-row mt8">
               ${tag(vm.label, vm.tone)}
@@ -565,7 +565,7 @@ export function createMemoryBrowser({
       <div class="mem-card ${r.status === 'rejected' ? 'is-dim' : ''} ${r.id === state.selected?.id && state.selected?.kind === 'req' ? 'selected' : ''}" data-act="open-req" data-id="${r.id}">
         <div class="card-top">
           <div class="card-main">
-            <div class="mem-title">#${r.id} · ${esc(r.title || '未命名记忆')}</div>
+            <div class="mem-title">#${r.id} · <span class="copyable-text">${esc(r.title || '未命名记忆')}</span></div>
             <div class="mem-snippet">${esc(r.content || '')}</div>
             <div class="tag-row mt8">
               ${tag(sm.label, sm.tone)}
@@ -636,7 +636,7 @@ export function createMemoryBrowser({
     if (hasVersions) actions += `<button class="btn btn-quiet btn-sm" data-act="mem-versions" data-id="${m.id}">${icon('layers')}查看版本关系</button>`;
     actions += `<button class="btn btn-quiet btn-sm" data-act="mem-trail" data-id="${m.id}">${icon('clock')}查看审核记录</button>`;
     panel.render({
-      title: `#${m.id} · ${esc(m.title || '(未命名)')}`,
+      title: `#${m.id} · <span class="copyable-text">${esc(m.title || '(未命名)')}</span>`,
       badges: tag(vm.label, vm.tone) + typeTag(m.continuity_type) + (isSuperseded ? tag('历史版本', 'muted') : ''),
       html: memoryKvRows(m) + (isSuperseded
         ? `<div class="kv"><span class="k">说明</span><span class="v muted">这条记忆已被新版本替代：可以查看，但不能编辑、恢复或参与召回。</span></div>`
@@ -651,7 +651,7 @@ export function createMemoryBrowser({
     const evidenceBtn = (r.evidence_message_ids || []).length
       ? `<button class="btn btn-quiet btn-sm" data-act="req-evidence" data-id="${r.id}">${icon('message')}查看原文证据</button>` : '';
     panel.render({
-      title: `#${r.id} · ${esc(r.title || '未命名记忆')}`,
+      title: `#${r.id} · <span class="copyable-text">${esc(r.title || '未命名记忆')}</span>`,
       badges: tag(sm.label, sm.tone) + typeTag(r.continuity_type),
       html: requestKvRows(r),
       actions: actionable ? `
@@ -895,7 +895,7 @@ export function createMemoryBrowser({
         if (!rows.length) { results.innerHTML = empty('没有找到可关联的已审核记忆'); return; }
         results.innerHTML = rows.map((memory) => `
           <button type="button" class="mem-card relation-target" data-memory-id="${memory.id}">
-            <div class="mem-title">memory #${memory.id} · ${esc(memory.title || '未命名')}</div>
+            <div class="mem-title">memory #${memory.id} · <span class="copyable-text">${esc(memory.title || '未命名')}</span></div>
             <div class="mem-snippet">${esc((memory.content || '').slice(0, 220))}</div>
             <div class="tag-row mt8">${impTag(memory.importance)}</div>
           </button>`).join('');

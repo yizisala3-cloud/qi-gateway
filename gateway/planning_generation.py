@@ -186,6 +186,7 @@ def _generation_snapshots(
         display = task["content"]
     return {
         "content_snapshot": task["content"],
+        "note": task.get("note"),
         "display_content": display,
         "time_mode_snapshot": task["time_mode"],
         "deadline_at": None,
