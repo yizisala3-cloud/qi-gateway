@@ -1,5 +1,5 @@
 // pages/memories.js - 记忆管理：记忆库 + 审核申请
-import { createMemoryBrowser } from './_memory_browser.js?v=20261014-admin-layout-help-scrollbars';
+import { createMemoryBrowser } from './_memory_browser.js?v=20261015-planning-responsive-notes';
 
 export default {
   browser: null,

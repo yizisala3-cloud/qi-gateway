@@ -1,27 +1,27 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
 // 数据按需加载：今日看板保留 30 秒提醒轮询，首次/失效切入时刷新可见列表。
-import { gw } from '../api.js?v=20261014-admin-layout-help-scrollbars';
+import { gw } from '../api.js?v=20261015-planning-responsive-notes';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, esc,
   createDetailPanel,
-} from '../ui.js?v=20261014-admin-layout-help-scrollbars';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261014-admin-layout-help-scrollbars';
-import { createRetroSelectField } from '../lib/retro_select.js?v=20261014-admin-layout-help-scrollbars';
+} from '../ui.js?v=20261015-planning-responsive-notes';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261015-planning-responsive-notes';
+import { createRetroSelectField } from '../lib/retro_select.js?v=20261015-planning-responsive-notes';
 import {
   TASK_TYPE_LABELS, TASK_TYPES, STATUS_META, CLOSED_STATUSES,
   fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty, formatIntervalMinutes,
   itemMeta, isClosedOcc, formatLoggedDuration, durationText, durationDetailRows,
   itemBadges, itemHtml,
-} from '../lib/planning_display.js?v=20261014-admin-layout-help-scrollbars';
-import { openTaskForm } from '../lib/planning_task_form.js?v=20261014-admin-layout-help-scrollbars';
-import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261014-admin-layout-help-scrollbars';
-import { createPlanningSort } from '../lib/planning_sort.js?v=20261014-admin-layout-help-scrollbars';
-import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261014-admin-layout-help-scrollbars';
-import { createPlanningMemo } from '../lib/planning_memo.js?v=20261014-admin-layout-help-scrollbars';
-import { createPlanningReads } from '../lib/planning_reads.js?v=20261014-admin-layout-help-scrollbars';
-import { taskNotePreview, openTaskNote } from '../lib/planning_notes.js?v=20261014-admin-layout-help-scrollbars';
-import { mergeOrderReceipt, mergeOccurrencesFromBoard } from '../lib/planning_sync.js?v=20261014-admin-layout-help-scrollbars';
+} from '../lib/planning_display.js?v=20261015-planning-responsive-notes';
+import { openTaskForm } from '../lib/planning_task_form.js?v=20261015-planning-responsive-notes';
+import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261015-planning-responsive-notes';
+import { createPlanningSort } from '../lib/planning_sort.js?v=20261015-planning-responsive-notes';
+import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261015-planning-responsive-notes';
+import { createPlanningMemo } from '../lib/planning_memo.js?v=20261015-planning-responsive-notes';
+import { createPlanningReads } from '../lib/planning_reads.js?v=20261015-planning-responsive-notes';
+import { taskNotePreview, openTaskNote, editTaskNoteInline } from '../lib/planning_notes.js?v=20261015-planning-responsive-notes';
+import { mergeOrderReceipt, mergeOccurrencesFromBoard } from '../lib/planning_sync.js?v=20261015-planning-responsive-notes';
 
 const detailHeading = (label, name) => `<h4 class="plan-detail-section-title">${icon(name)}<span>${esc(label)}</span><span class="plan-detail-rule" aria-hidden="true"></span></h4>`;
 const detailRange = (start, end) => start && !end ? `${fmtClock(start)} ～` : fmtRange(start, end);
@@ -57,6 +57,7 @@ export default {
   memo: null,
   taskForm: null,
   noteDialog: null,
+  noteInline: null,
   loadedTabs: null, // 仅用于备忘录的按需挂载
 
   async mount(root) {
@@ -237,7 +238,7 @@ export default {
       </div>`;
 
     const actionRoot = root.querySelector('#planning-layout');
-    this.detail = createDetailPanel(actionRoot, { fitViewport: true });
+    this.detail = createDetailPanel(actionRoot, { fitViewport: true, centeredTablet: true });
     this.progressList = root.querySelector('#planning-progress');
     actionRoot.addEventListener('click', (e) => {
       if (this.reads === mountedReads) this.handleItemClick(e);
@@ -373,6 +374,8 @@ export default {
   unmount() {
     this.noteDialog?.close();
     this.noteDialog = null;
+    this.noteInline?.close();
+    this.noteInline = null;
     this.clearSelection();
     this.sort?.exitReorder();
     this.detail?.dispose();
@@ -722,7 +725,9 @@ export default {
       // Update facts in place. Input identity, focus, selection and drawer state survive.
       const update = (el, html) => { if (el.innerHTML !== html) el.innerHTML = html; };
       update(factsHost, facts);
-      update(this.detail.body.querySelector('[data-occ-state]'), state);
+      if (!this.detail.body.querySelector('[data-note-editor]')) {
+        update(this.detail.body.querySelector('[data-occ-state]'), state);
+      }
       update(this.detail.el.querySelector('.detail-title'), title);
       update(this.detail.el.querySelector('.detail-badges'), badges);
       update(this.detail.foot, actions);
@@ -841,6 +846,7 @@ export default {
   async showTaskDetail(task) {
     if (!this.detail || this.activeTab !== 'all' || this.selected?.kind !== 'task'
         || this.selected.id !== task.id) return;
+    if (this.noteInline?.isActive() && this.noteInline.root.dataset.id === String(task.id)) return;
     this.markSelected(`[data-task="${task.id}"]`);
     const parts = [];
     let earlyHint = '';
@@ -1205,6 +1211,14 @@ export default {
     const task = selected?.kind === 'task' ? this.tasks.find(row => row.id === selected.id) : null;
     if ((occurrence?.task_id ?? task?.id) !== taskId) return;
     const readOnly = occurrence ? !OPEN_STATUSES.includes(occurrence.status) : !task.is_active;
+    if (window.matchMedia('(min-width: 481px) and (max-width: 1100px)').matches) {
+      if (readOnly) return;
+      if (this.noteInline?.isActive()) { this.noteInline.focus(); return; }
+      const root = this.detail.body.querySelector(`[data-act="task-note"][data-id="${taskId}"]`);
+      if (!root) return;
+      this.noteInline = editTaskNoteInline(root, { taskId, onSaved: () => this.taskSaved(true) });
+      return;
+    }
     this.noteDialog = openTaskNote({
       taskId, note: (occurrence || task).note, readOnly,
       // Refresh the currently mounted page, even if this dialog's page left.
@@ -1247,6 +1261,7 @@ export default {
     });
     scope.addEventListener('keydown', event => {
       if (this.reads !== mountedReads) return;
+      if (event.target.closest('textarea, input, button')) return;
       const note = event.target.closest('[data-act="task-note"]');
       if (!note || !['Enter', ' '].includes(event.key)) return;
       event.preventDefault();

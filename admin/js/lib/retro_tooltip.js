@@ -1,5 +1,5 @@
 // Auxiliary paper hints. Required/locked/unavailable explanations belong in visible page text.
-import { registerFloatingSurface } from '../ui.js?v=20261014-admin-layout-help-scrollbars';
+import { registerFloatingSurface } from '../ui.js?v=20261015-planning-responsive-notes';
 
 const initializers = new WeakMap();
 let descriptionSequence = 0;
@@ -192,6 +192,8 @@ export function initRetroTooltips(root = document) {
   doc.addEventListener('pointerout', onOut);
   doc.addEventListener('focusin', onFocus);
   doc.addEventListener('focusout', onBlur);
+  // Drag handles can capture the pointer before a click is ever dispatched.
+  doc.addEventListener('pointerdown', hide, true);
   doc.addEventListener('click', hide, true);
   doc.addEventListener('scroll', onViewportChange, true);
   win.addEventListener('resize', onViewportChange);
@@ -206,6 +208,7 @@ export function initRetroTooltips(root = document) {
     doc.removeEventListener('pointerout', onOut);
     doc.removeEventListener('focusin', onFocus);
     doc.removeEventListener('focusout', onBlur);
+    doc.removeEventListener('pointerdown', hide, true);
     doc.removeEventListener('click', hide, true);
     doc.removeEventListener('scroll', onViewportChange, true);
     win.removeEventListener('resize', onViewportChange);

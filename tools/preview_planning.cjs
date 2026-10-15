@@ -63,16 +63,13 @@ const creationKeys = new Map();
 
 async function payloadOf(request) {
   const chunks = [];
-  let size = 0;
   for await (const chunk of request) {
-    size += chunk.length;
-    if (size > 16384) throw new Error('请求内容过大');
     chunks.push(chunk);
   }
   const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('请求必须是对象');
-  if (payload.note != null && (typeof payload.note !== 'string' || Array.from(payload.note).length > 60)) {
-    throw new Error('备注须为不超过 60 字的文本');
+  if (payload.note != null && typeof payload.note !== 'string') {
+    throw new Error('备注须为文本');
   }
   return payload;
 }

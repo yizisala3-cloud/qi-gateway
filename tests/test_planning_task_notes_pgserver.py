@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / 'supabase/migrations/20261014010000_planning_task_notes.sql'
+UNLIMITED_MIGRATION = ROOT / 'supabase/migrations/20261015010000_planning_task_notes_unlimited.sql'
 
 
 class TaskNotePostgresTests(unittest.TestCase):
@@ -37,6 +38,7 @@ class TaskNotePostgresTests(unittest.TestCase):
                 updated_at timestamptz not null default now());
         ''')
         cls.conn.execute(MIGRATION.read_text(encoding='utf-8'))
+        cls.conn.execute(UNLIMITED_MIGRATION.read_text(encoding='utf-8'))
 
     @classmethod
     def tearDownClass(cls):
@@ -86,11 +88,14 @@ class TaskNotePostgresTests(unittest.TestCase):
         self.conn.execute("update planning_task set note='未来备注' where id=%s", (self.task_id,))
         self.assertIsNone(self.conn.execute('select note from planning_occurrence where id=%s', (blank,)).fetchone()[0])
 
-    def test_database_length_limit_matches_unicode_and_app_limit(self):
-        for value in ('字' * 60, '🙂' * 60):
+    def test_long_notes_sync_without_truncation_and_migration_is_repeatable(self):
+        opened = self.occurrence()
+        history = self.occurrence('completed')
+        self.conn.execute(UNLIMITED_MIGRATION.read_text(encoding='utf-8'))
+        for value in ('字' * 61, '🙂' * 61, '长备注🙂\n' * 10000):
             self.conn.execute('update planning_task set note=%s where id=%s', (value, self.task_id))
-        with self.assertRaises(self.psycopg.errors.CheckViolation):
-            self.conn.execute('update planning_task set note=%s where id=%s', ('字' * 61, self.task_id))
+            self.assertEqual(self.conn.execute('select note from planning_occurrence where id=%s', (opened,)).fetchone()[0], value)
+            self.assertEqual(self.conn.execute('select note from planning_occurrence where id=%s', (history,)).fetchone()[0], '最初备注')
 
     def test_any_snapshot_failure_rolls_back_template_and_all_snapshots(self):
         first = self.occurrence()

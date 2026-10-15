@@ -1,5 +1,5 @@
 // ui.js - shared retro UI components: icons, tags, modal, toast, detail panel
-export const ASSET_VERSION = '20261014-admin-layout-help-scrollbars';
+export const ASSET_VERSION = '20261015-planning-responsive-notes';
 
 /* ---------- SVG icons (stroke, no emoji; object entries = fill icons with own viewBox) ---------- */
 const ICON_PATHS = {
@@ -300,7 +300,7 @@ function getOverlayManager() {
       entry.root.focus({ preventScroll: true });
       queueMicrotask(() => {
         if (topModal() !== entry || !entry.root.isConnected || document.activeElement !== entry.root) return;
-        const body = entry.root.querySelector('.modal-body');
+        const body = entry.root.querySelector('.modal-body, .detail-body') || entry.root;
         const autofocus = entry.root.querySelector('[autofocus]');
         const target = canFocus(autofocus) ? autofocus
           : focusableWithin(body)[0] || entry.root.querySelector('[data-cancel]') || activeFocusable()[0] || entry.root;
@@ -350,7 +350,7 @@ export function modal({ title, body, footer, wide = false, draggable = false, on
   mask.className = 'modal-mask';
   mask.innerHTML = `
     <div class="modal ${wide ? 'modal-wide' : ''}" role="dialog" tabindex="-1" aria-labelledby="${titleId}">
-      <div class="modal-head"><h3 id="${titleId}">${title}</h3><button type="button" class="modal-close" data-tooltip="关闭弹窗" aria-label="关闭弹窗">${icon('x')}</button></div>
+      <div class="modal-head"><h3 id="${titleId}">${title}</h3><button type="button" class="modal-close" aria-label="关闭弹窗">${icon('x')}</button></div>
       <div class="modal-body">${body}</div>
       ${footer ? `<div class="modal-foot">${footer}</div>` : ''}
     </div>`;
@@ -435,15 +435,17 @@ export function delegate(root, actions) {
 }
 
 /* ---------- detail panel (right column / mobile drawer) ---------- */
-export function createDetailPanel(host, { fitViewport = false } = {}) {
+export function createDetailPanel(host, { fitViewport = false, centeredTablet = false } = {}) {
+  if (centeredTablet) host.classList.add('detail-modal');
   host.insertAdjacentHTML('beforeend', `
     <aside class="detail-panel" aria-label="详情栏">
+      ${centeredTablet ? '<button type="button" class="detail-sheet-handle" aria-label="上下拖动详情面板"><span></span></button>' : ''}
       <div class="detail-head">
         <div class="detail-titles">
           <h3 class="detail-title"></h3>
           <div class="detail-badges tag-row"></div>
         </div>
-        <button class="icon-btn detail-collapse" aria-label="收起详情栏" data-tooltip="收起详情栏">${icon('chevron-right')}</button>
+        <button class="icon-btn detail-collapse" aria-label="收起详情栏">${icon('chevron-right', 'detail-collapse-side')}${icon('x', 'detail-collapse-sheet')}</button>
       </div>
       <div class="detail-body"></div>
       <div class="detail-foot"></div>
@@ -452,6 +454,9 @@ export function createDetailPanel(host, { fitViewport = false } = {}) {
     <div class="detail-backdrop"></div>`);
 
   const panel = host.querySelector('.detail-panel');
+  const headEl = panel.querySelector('.detail-head');
+  const handleEl = panel.querySelector('.detail-sheet-handle');
+  const collapseEl = panel.querySelector('.detail-collapse');
   const rail = host.querySelector('.detail-rail');
   const backdrop = host.querySelector('.detail-backdrop');
   const titleEl = panel.querySelector('.detail-title');
@@ -459,12 +464,165 @@ export function createDetailPanel(host, { fitViewport = false } = {}) {
   const bodyEl = panel.querySelector('.detail-body');
   const footEl = panel.querySelector('.detail-foot');
   const mq = window.matchMedia('(max-width: 1100px)');
+  const sheetMq = window.matchMedia('(max-width: 480px)');
 
   bodyEl.innerHTML = empty('未选择条目', '点击左侧列表中的卡片查看详情');
 
   const expand = () => host.classList.remove('detail-collapsed');
-  const openDrawer = () => { expand(); host.classList.add('detail-open'); };
-  const closeDrawer = () => host.classList.remove('detail-open');
+  let overlayEntry = null;
+  let drag = null;
+  let dragOffset = null;
+  let sheetHeight = 0;
+  let sheetOffset = 0;
+  let closing = false;
+  let closeTimer = null;
+  const endDrag = () => {
+    const current = drag;
+    drag = null;
+    panel.classList.remove('detail-dragging');
+    if (current?.target.hasPointerCapture(current.pointerId)) {
+      current.target.releasePointerCapture(current.pointerId);
+    }
+  };
+  const resetDrag = () => {
+    endDrag();
+    dragOffset = null;
+    panel.style.removeProperty('--detail-drag-x');
+    panel.style.removeProperty('--detail-drag-y');
+  };
+  const moveDetail = (left, top) => {
+    const viewport = window.visualViewport;
+    const viewLeft = viewport?.offsetLeft || 0;
+    const viewTop = viewport?.offsetTop || 0;
+    const viewWidth = viewport?.width || window.innerWidth;
+    const viewHeight = viewport?.height || window.innerHeight;
+    const { width, height } = panel.getBoundingClientRect();
+    const x = Math.max(viewLeft + 12, Math.min(left, viewLeft + viewWidth - width - 12));
+    const y = Math.max(viewTop + 12, Math.min(top, viewTop + viewHeight - height - 12));
+    dragOffset = { x: x - (window.innerWidth - width) / 2,
+      y: y - (viewTop + (viewHeight - height) / 2) };
+    panel.style.setProperty('--detail-drag-x', `${dragOffset.x}px`);
+    panel.style.setProperty('--detail-drag-y', `${dragOffset.y}px`);
+  };
+  const moveSheet = offset => {
+    const maxOffset = Math.max(0, sheetHeight);
+    sheetOffset = Math.max(0, Math.min(maxOffset, offset));
+    panel.style.setProperty('--detail-sheet-offset', `${sheetOffset}px`);
+    host.style.setProperty('--detail-sheet-backdrop', `${1 - sheetOffset / Math.max(1, sheetHeight)}`);
+  };
+  const finishSheet = () => {
+    const height = window.visualViewport?.height || window.innerHeight;
+    if (sheetOffset > 0 && sheetHeight - sheetOffset <= height / 5 + 1) closeDrawer();
+  };
+  if (centeredTablet) {
+    headEl.addEventListener('pointerdown', e => {
+      if (!mq.matches || sheetMq.matches || !e.isPrimary || e.button !== 0
+        || e.target.closest('button, a, input, select, textarea, [role="button"]')) return;
+      const rect = panel.getBoundingClientRect();
+      drag = { target: headEl, pointerId: e.pointerId, x: e.clientX, y: e.clientY, left: rect.left, top: rect.top };
+      headEl.setPointerCapture(e.pointerId);
+      panel.classList.add('detail-dragging');
+      e.preventDefault();
+    });
+    headEl.addEventListener('pointermove', e => {
+      if (!drag || drag.target !== headEl || e.pointerId !== drag.pointerId) return;
+      moveDetail(drag.left + e.clientX - drag.x, drag.top + e.clientY - drag.y);
+    });
+    const finishPointer = e => {
+      if (drag && e.pointerId === drag.pointerId) endDrag();
+    };
+    headEl.addEventListener('pointerup', finishPointer);
+    headEl.addEventListener('pointercancel', finishPointer);
+    headEl.addEventListener('lostpointercapture', finishPointer);
+    handleEl.addEventListener('pointerdown', e => {
+      if (!sheetMq.matches || !e.isPrimary || e.button !== 0) return;
+      drag = { target: handleEl, pointerId: e.pointerId, y: e.clientY,
+        offset: sheetOffset };
+      handleEl.setPointerCapture(e.pointerId);
+      panel.classList.add('detail-dragging');
+      e.preventDefault();
+    });
+    handleEl.addEventListener('pointermove', e => {
+      if (!drag || drag.target !== handleEl || drag.pointerId !== e.pointerId) return;
+      moveSheet(drag.offset + e.clientY - drag.y);
+      finishSheet();
+    });
+    handleEl.addEventListener('pointerup', e => {
+      if (!drag || drag.target !== handleEl || drag.pointerId !== e.pointerId) return;
+      endDrag();
+      finishSheet();
+    });
+    const cancelSheetDrag = e => {
+      if (!drag || drag.target !== handleEl || drag.pointerId !== e.pointerId) return;
+      const offset = drag.offset;
+      endDrag();
+      moveSheet(offset);
+    };
+    handleEl.addEventListener('pointercancel', cancelSheetDrag);
+    handleEl.addEventListener('lostpointercapture', cancelSheetDrag);
+    handleEl.addEventListener('keydown', e => {
+      if (!sheetMq.matches || !['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) return;
+      e.preventDefault();
+      if (e.key === 'End') { closeDrawer(); return; }
+      moveSheet(e.key === 'Home' ? 0 : sheetOffset + (e.key === 'ArrowUp' ? -40 : 40));
+      finishSheet();
+    });
+  }
+  const releaseOverlay = () => {
+    if (!overlayEntry) return;
+    const entry = overlayEntry;
+    overlayEntry = null;
+    getOverlayManager().removeModal(entry);
+    panel.removeAttribute('aria-modal');
+    panel.removeAttribute('role');
+    panel.removeAttribute('tabindex');
+    panel.style.zIndex = '';
+  };
+  const completeClose = () => {
+    if (closeTimer !== null) clearTimeout(closeTimer);
+    closeTimer = null;
+    closing = false;
+    host.classList.remove('detail-closing');
+    releaseOverlay();
+  };
+  const closeDrawer = ({ immediate = false } = {}) => {
+    if (closing && !immediate) return;
+    const animate = !immediate && centeredTablet && sheetMq.matches
+      && host.classList.contains('detail-open')
+      && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // Commit the finger's last position before enabling the exit transition.
+    if (animate) panel.getBoundingClientRect();
+    endDrag();
+    closing = animate;
+    host.classList.toggle('detail-closing', animate);
+    host.classList.remove('detail-open');
+    if (animate) closeTimer = setTimeout(completeClose, 260);
+    else completeClose();
+  };
+  panel.addEventListener('transitionend', e => {
+    if (closing && e.target === panel && e.propertyName === 'transform') completeClose();
+  });
+  const syncOverlay = () => {
+    if (!mq.matches) { releaseOverlay(); return; }
+    if (centeredTablet && host.classList.contains('detail-open') && !overlayEntry) {
+      panel.setAttribute('role', 'dialog');
+      panel.setAttribute('tabindex', '-1');
+      panel.style.zIndex = '1001';
+      overlayEntry = { root: panel, mask: backdrop, previousFocus: document.activeElement,
+        close: closeDrawer, requestClose: closeDrawer };
+      getOverlayManager().addModal(overlayEntry);
+    }
+  };
+  const openDrawer = () => {
+    expand();
+    if (closeTimer !== null) clearTimeout(closeTimer);
+    closeTimer = null;
+    closing = false;
+    host.classList.remove('detail-closing');
+    if (!host.classList.contains('detail-open')) { resetDrag(); moveSheet(0); }
+    host.classList.add('detail-open');
+    syncOverlay();
+  };
   let viewportFrame = null;
   const updateViewport = () => {
     viewportFrame = null;
@@ -472,10 +630,45 @@ export function createDetailPanel(host, { fitViewport = false } = {}) {
     const viewport = window.visualViewport;
     const height = viewport?.height || window.innerHeight;
     const top = viewport?.offsetTop || 0;
-    if (mq.matches) {
+    if (closing) {
+      if (sheetMq.matches) return;
+      completeClose();
+    }
+    syncOverlay();
+    const closeLabel = mq.matches ? '关闭详情' : '收起详情栏';
+    collapseEl.setAttribute('aria-label', closeLabel);
+    if (centeredTablet && sheetMq.matches) {
+      if (drag?.target === headEl) endDrag();
       panel.style.setProperty('--detail-viewport-top', `${top}px`);
       panel.style.setProperty('--detail-available', `${height}px`);
+      const bodyStyle = getComputedStyle(bodyEl);
+      const bodyTop = bodyEl.getBoundingClientRect().top;
+      const bodyBottom = [...bodyEl.children].reduce((bottom, el) => {
+        const style = getComputedStyle(el);
+        return Math.max(bottom, el.getBoundingClientRect().bottom + (parseFloat(style.marginBottom) || 0));
+      }, bodyTop + (parseFloat(bodyStyle.paddingTop) || 0));
+      const bodyHeight = bodyBottom - bodyTop + (parseFloat(bodyStyle.paddingBottom) || 0);
+      const contentHeight = headEl.getBoundingClientRect().height + bodyHeight
+        + footEl.getBoundingClientRect().height + 2;
+      sheetHeight = Math.min(height - 12, contentHeight);
+      panel.style.setProperty('--detail-sheet-height', `${sheetHeight}px`);
+      moveSheet(sheetOffset);
+    } else if (centeredTablet && mq.matches) {
+      if (drag?.target === handleEl) endDrag();
+      panel.style.setProperty('--detail-viewport-top', `${top}px`);
+      panel.style.setProperty('--detail-available', `${height}px`);
+      if (dragOffset && host.classList.contains('detail-open')) {
+        const rect = panel.getBoundingClientRect();
+        moveDetail(rect.left, rect.top);
+      }
+    } else if (mq.matches) {
+      if (centeredTablet) resetDrag();
+      const drawerTop = sheetMq.matches ? top
+        : Math.max(top + 10, Math.min(host.getBoundingClientRect().top, top + height - 180));
+      panel.style.setProperty('--detail-viewport-top', `${drawerTop}px`);
+      panel.style.setProperty('--detail-available', `${sheetMq.matches ? height : top + height - drawerTop - 10}px`);
     } else {
+      if (centeredTablet) resetDrag();
       panel.style.setProperty('--detail-available', `${Math.max(0, top + height - panel.getBoundingClientRect().top - 12)}px`);
     }
   };
@@ -489,9 +682,15 @@ export function createDetailPanel(host, { fitViewport = false } = {}) {
     window.visualViewport?.addEventListener('scroll', scheduleViewport);
     scheduleViewport();
   }
+  const resizeObserver = fitViewport && typeof ResizeObserver === 'function'
+    ? new ResizeObserver(scheduleViewport) : null;
+  [headEl, bodyEl, footEl].forEach(el => resizeObserver?.observe(el));
+  const contentObserver = fitViewport ? new MutationObserver(scheduleViewport) : null;
+  contentObserver?.observe(bodyEl, { childList: true, characterData: true, subtree: true });
 
-  panel.querySelector('.detail-collapse').addEventListener('click', () => {
-    if (mq.matches) closeDrawer(); else host.classList.add('detail-collapsed');
+  collapseEl.addEventListener('click', () => {
+    closeDrawer();
+    if (!mq.matches) host.classList.add('detail-collapsed');
   });
   rail.addEventListener('click', expand);
   backdrop.addEventListener('click', closeDrawer);
@@ -505,6 +704,7 @@ export function createDetailPanel(host, { fitViewport = false } = {}) {
       badgesEl.innerHTML = badges;
       bodyEl.innerHTML = html || empty('未选择条目', '点击左侧列表中的卡片查看详情');
       footEl.innerHTML = actions || '';
+      moveSheet(0);
       panel.scrollTop = 0;
       expand();
       bodyEl.scrollTop = 0;
@@ -517,10 +717,13 @@ export function createDetailPanel(host, { fitViewport = false } = {}) {
       bodyEl.innerHTML = empty('未选择条目', '点击左侧列表中的卡片查看详情');
       footEl.innerHTML = '';
       bodyEl.scrollTop = 0;
-      closeDrawer();
+      closeDrawer({ immediate: true });
       scheduleViewport();
     },
     dispose() {
+      closeDrawer({ immediate: true });
+      resizeObserver?.disconnect();
+      contentObserver?.disconnect();
       if (viewportFrame !== null) cancelAnimationFrame(viewportFrame);
       window.removeEventListener('resize', scheduleViewport);
       window.removeEventListener('scroll', scheduleViewport, true);

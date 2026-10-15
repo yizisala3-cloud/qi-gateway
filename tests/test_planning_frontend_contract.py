@@ -59,7 +59,7 @@ def _task_form_source(form):
 def _note_input_source():
     """Load the form's real note helpers into the isolated QuickJS harness."""
     source = NOTES.read_text(encoding="utf-8")
-    start = source.index("export const TASK_NOTE_LIMIT")
+    start = source.index("export const noteLength")
     end = source.index("export function taskNotePreview")
     return source[start:end].replace("export ", "")
 

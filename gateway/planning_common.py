@@ -70,7 +70,6 @@ MAX_CONTENT_LENGTH = 500
 
 
 MAX_NOTE_LENGTH = 1000
-MAX_TASK_NOTE_LENGTH = 60
 
 
 MAX_LIST_ROWS = 500
@@ -334,7 +333,7 @@ def _minutes_between(start: datetime, end: datetime) -> int:
 
 # ── 校验 ──────────────────────────────────────────────────────────
 
-def _clean_text(value: Any, field: str, *, required: bool, maximum: int) -> str | None:
+def _clean_text(value: Any, field: str, *, required: bool, maximum: int | None) -> str | None:
     if value is None:
         text = ""
     elif isinstance(value, str):
@@ -343,7 +342,7 @@ def _clean_text(value: Any, field: str, *, required: bool, maximum: int) -> str 
         raise PlanningError("invalid_payload", f"{field} 须为文本")
     if required and not text:
         raise PlanningError("invalid_payload", f"{field} 不能为空")
-    if len(text) > maximum:
+    if maximum is not None and len(text) > maximum:
         raise PlanningError("invalid_payload", f"{field} 不能超过 {maximum} 个字符")
     return text or None
 

@@ -1,8 +1,8 @@
 // Task creation/edit form. Local submitting/committed state belongs to one opened form.
-import { gw } from '../api.js?v=20261014-admin-layout-help-scrollbars';
-import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261014-admin-layout-help-scrollbars';
-import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261014-admin-layout-help-scrollbars';
-import { noteInputHtml, bindNoteInput } from './planning_notes.js?v=20261014-admin-layout-help-scrollbars';
+import { gw } from '../api.js?v=20261015-planning-responsive-notes';
+import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261015-planning-responsive-notes';
+import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261015-planning-responsive-notes';
+import { noteInputHtml, bindNoteInput } from './planning_notes.js?v=20261015-planning-responsive-notes';
 
 export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
   const editing = !!task?.id;

@@ -78,7 +78,7 @@ def validate_task_payload(payload: Any, *, partial: bool = False) -> dict[str, A
         if isinstance(note, str):
             note = note.replace("\r\n", "\n").replace("\r", "\n")
         result["note"] = common._clean_text(
-            note, "备注", required=False, maximum=common.MAX_TASK_NOTE_LENGTH)
+            note, "备注", required=False, maximum=None)
 
     task_type = payload.get("task_type", result.get("task_type"))
     if task_type is not None or not partial:

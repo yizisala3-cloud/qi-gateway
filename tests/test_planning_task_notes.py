@@ -2,8 +2,6 @@
 import hashlib
 import json
 import unittest
-import re
-from pathlib import Path
 from unittest import mock
 
 from starlette.applications import Starlette
@@ -22,24 +20,20 @@ NOW = cst(2026, 10, 14, 12)
 
 
 class TaskNoteValidationTests(unittest.TestCase):
-    def test_limit_matches_frontend_and_database(self):
-        root = Path(__file__).resolve().parents[1]
-        frontend = (root / 'admin/js/lib/planning_notes.js').read_text(encoding='utf-8')
-        sql = (root / 'supabase/migrations/20261014010000_planning_task_notes.sql').read_text(encoding='utf-8')
-        self.assertEqual(int(re.search(r'TASK_NOTE_LIMIT = (\d+)', frontend).group(1)), common.MAX_TASK_NOTE_LENGTH)
-        self.assertEqual([int(value) for value in re.findall(r'char_length\(note\) <= (\d+)', sql)],
-                         [common.MAX_TASK_NOTE_LENGTH] * 2)
+    def test_other_text_fields_still_keep_their_limits(self):
+        with self.assertRaises(common.PlanningError):
+            tasks.validate_task_payload({'content': '字' * 501}, partial=True)
 
     def test_note_is_optional_and_empty_clears_it(self):
         for value in (None, '', '  \n '):
             self.assertIsNone(tasks.validate_task_payload({'note': value}, partial=True)['note'])
         self.assertNotIn('note', tasks.validate_task_payload({'content': '原内容'}, partial=True))
 
-    def test_limit_unicode_and_line_endings(self):
-        for value in ('字' * 60, '🙂' * 60):
-            self.assertEqual(tasks.validate_task_payload({'note': value}, partial=True)['note'], value)
+    def test_long_unicode_notes_and_line_endings(self):
+        for value in ('字' * 61, '🙂' * 61, '长备注🙂\n' * 10000):
+            self.assertEqual(tasks.validate_task_payload({'note': value}, partial=True)['note'], value.strip())
         self.assertEqual(tasks.validate_task_payload({'note': ' 第一行\r\n第二行 '}, partial=True)['note'], '第一行\n第二行')
-        for value in ('字' * 61, '🙂' * 61, 123, [], {}):
+        for value in (123, [], {}):
             with self.subTest(value=type(value).__name__), self.assertRaises(common.PlanningError):
                 tasks.validate_task_payload({'note': value}, partial=True)
 
@@ -103,10 +97,17 @@ class TaskNoteHttpTests(unittest.TestCase):
         self.assertEqual(self.http.get('/admin/api/planning/tasks/1', headers=self.auth).json()['note'], '新备注')
 
     def test_invalid_note_is_rejected_before_any_write(self):
-        response = self.http.patch('/admin/api/planning/tasks/1', headers=self.auth, json={'note': '字' * 61})
+        response = self.http.patch('/admin/api/planning/tasks/1', headers=self.auth, json={'note': 123})
         self.assertEqual(response.status_code, 400)
-        self.assertIn('60', response.json()['error'])
+        self.assertIn('文本', response.json()['error'])
         self.assertEqual(self.db.rows['planning_task'][0]['note'], '旧备注')
+
+    def test_long_note_is_saved_and_returned_without_truncation(self):
+        note = '长备注🙂\n' * 10000
+        response = self.http.patch('/admin/api/planning/tasks/1', headers=self.auth, json={'note': note})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['note'], note.strip())
+        self.assertEqual(self.http.get('/admin/api/planning/tasks/1', headers=self.auth).json()['note'], note.strip())
 
     def test_missing_task_and_clearing_note(self):
         self.assertEqual(self.http.patch('/admin/api/planning/tasks/999', headers=self.auth,
@@ -116,11 +117,12 @@ class TaskNoteHttpTests(unittest.TestCase):
         self.assertIsNone(response.json()['note'])
 
     def test_create_with_note_persists_and_returns_it(self):
+        note = '创建时的长备注🙂' * 1000
         with mock.patch('gateway.db.load_app_setting', return_value=None), \
                 mock.patch.object(tasks, '_generate_created_task_quietly'):
             response = self.http.post('/admin/api/planning/tasks', headers=self.auth,
                                       json={'content': '新建待办', 'task_type': 'daily',
-                                            'estimated_minutes': 20, 'note': '创建时的备注'})
+                                            'estimated_minutes': 20, 'note': note})
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json()['note'], '创建时的备注')
-        self.assertEqual(self.db.rows['planning_task'][-1]['note'], '创建时的备注')
+        self.assertEqual(response.json()['note'], note)
+        self.assertEqual(self.db.rows['planning_task'][-1]['note'], note)

@@ -243,14 +243,14 @@ class TaskNoteFullChainPostgresTests(unittest.TestCase):
         finally:
             self.conn.execute('drop trigger reject_review_note on planning_occurrence; drop function reject_review_note()')
 
-    def test_guarded_rpc_length_failure_rolls_back_date_and_window(self):
+    def test_guarded_rpc_updates_date_window_and_long_note_together(self):
         task_id = self.once()
-        with self.assertRaises(fullchain.psycopg.errors.CheckViolation):
-            self.client.rpc('planning_update_once_task_guarded', {
-                'p_task_id': task_id, 'p_patch': {'target_date': '2026-11-02',
-                    'window_start_tod': '10:00', 'window_end_tod': '12:00', 'note': '🙂' * 61},
-            }).execute()
-        self.assertEqual(self.row(task_id), ('2026-11-01', None, None, '原备注'))
+        long_note = '🙂' * 10000
+        self.client.rpc('planning_update_once_task_guarded', {
+            'p_task_id': task_id, 'p_patch': {'target_date': '2026-11-02',
+                'window_start_tod': '10:00', 'window_end_tod': '12:00', 'note': long_note},
+        }).execute()
+        self.assertEqual(self.row(task_id), ('2026-11-02', '10:00:00', '12:00:00', long_note))
 
     def test_guarded_rpc_waits_for_task_lock_then_rechecks_occurrence_with_note(self):
         task_id = self.once()
@@ -298,9 +298,10 @@ class TaskNoteFullChainPostgresTests(unittest.TestCase):
             holder.close()
             writer.close()
 
-    def test_api_create_unicode_idempotency_limit_edit_clear(self):
+    def test_api_create_long_unicode_idempotency_edit_clear(self):
+        long_note = '🙂' * 10000
         payload = {'content': '备注完整链路', 'task_type': 'once', 'target_date': '2026-11-01',
-                   'estimated_minutes': 30, 'note': '🙂' * 60}
+                   'estimated_minutes': 30, 'note': long_note}
         headers = {**self.headers, 'Idempotency-Key': 'note-fullchain-create'}
         first = self.http.post('/admin/api/planning/tasks', headers=headers, json=payload)
         self.assertEqual(first.status_code, 201, first.text)
@@ -308,11 +309,11 @@ class TaskNoteFullChainPostgresTests(unittest.TestCase):
         self.assertEqual(repeat.status_code, 201, repeat.text)
         task_id = first.json()['id']
         self.assertEqual(repeat.json()['id'], task_id)
-        self.assertEqual(self.row(task_id)[3], '🙂' * 60)
+        self.assertEqual(self.row(task_id)[3], long_note)
         bad = self.http.patch(f'/admin/api/planning/tasks/{task_id}', headers=self.headers,
-                               json={'target_date': '2026-11-02', 'note': '🙂' * 61})
+                               json={'target_date': '2026-11-02', 'note': 123})
         self.assertEqual(bad.status_code, 400, bad.text)
-        self.assertEqual(self.row(task_id), ('2026-11-01', None, None, '🙂' * 60))
+        self.assertEqual(self.row(task_id), ('2026-11-01', None, None, long_note))
         for value in ('一\r\n二🙂', None):
             changed = self.http.patch(f'/admin/api/planning/tasks/{task_id}', headers=self.headers,
                                        json={'note': value})

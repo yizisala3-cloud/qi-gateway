@@ -1,13 +1,13 @@
 // pages/_memory_browser.js - shared library/requests browser with detail panel
-import { gw, query, update, count, esc } from '../api.js?v=20261014-admin-layout-help-scrollbars';
+import { gw, query, update, count, esc } from '../api.js?v=20261015-planning-responsive-notes';
 import {
   loading, empty, errorBlock, banner, tag, heatTag, impTag, pagerHtml,
   toast, modal, confirm, delegate, icon, fmtDate, createDetailPanel,
-} from '../ui.js?v=20261014-admin-layout-help-scrollbars';
-import { openMemoryForm } from './_memory_form.js?v=20261014-admin-layout-help-scrollbars';
-import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20261014-admin-layout-help-scrollbars';
+} from '../ui.js?v=20261015-planning-responsive-notes';
+import { openMemoryForm } from './_memory_form.js?v=20261015-planning-responsive-notes';
+import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20261015-planning-responsive-notes';
 
-export const ASSET_VERSION = '20261014-admin-layout-help-scrollbars';
+export const ASSET_VERSION = '20261015-planning-responsive-notes';
 
 const PAGE_SIZE = 20;
 const REQ_FETCH_LIMIT = 100;
