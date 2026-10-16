@@ -1,15 +1,15 @@
 // app.js - shell: login, sidebar, routing, theme, mobile drawers
-import { NAV, ROUTE_INDEX } from './routes.js?v=20261015-planning-responsive-notes';
-import { loading, errorBlock, icon, esc } from './ui.js?v=20261015-planning-responsive-notes';
-import { gw, getToken, setToken, clearToken } from './api.js?v=20261015-planning-responsive-notes';
-import { initHeaderDivider } from './lib/header_divider.js?v=20261015-planning-responsive-notes';
-import { initRetroSelects } from './lib/retro_select.js?v=20261015-planning-responsive-notes';
-import { initRetroTooltips } from './lib/retro_tooltip.js?v=20261015-planning-responsive-notes';
-import { initHelpNotes } from './lib/help_notes.js?v=20261015-planning-responsive-notes';
-import { initScrollbars } from './lib/scrollbars.js?v=20261015-planning-responsive-notes';
+import { NAV, ROUTE_INDEX } from './routes.js?v=20261016-goal-dialog-fixes';
+import { loading, errorBlock, icon, esc } from './ui.js?v=20261016-goal-dialog-fixes';
+import { gw, getToken, setToken, clearToken } from './api.js?v=20261016-goal-dialog-fixes';
+import { initHeaderDivider } from './lib/header_divider.js?v=20261016-goal-dialog-fixes';
+import { initRetroSelects } from './lib/retro_select.js?v=20261016-goal-dialog-fixes';
+import { initRetroTooltips } from './lib/retro_tooltip.js?v=20261016-goal-dialog-fixes';
+import { initHelpNotes } from './lib/help_notes.js?v=20261016-goal-dialog-fixes';
+import { initScrollbars } from './lib/scrollbars.js?v=20261016-goal-dialog-fixes';
 
 const DEFAULT_ROUTE = 'planning';
-const ASSET_VERSION = '20261015-planning-responsive-notes';
+const ASSET_VERSION = '20261016-goal-dialog-fixes';
 
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);

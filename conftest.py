@@ -45,6 +45,7 @@ FRONTEND_MARKER_FILES = frozenset({
     "test_memo_frontend_contract.py",
     "test_planning_adjustments_logic.py",
     "test_planning_frontend_modules.py",
+    "test_planning_goals_frontend.py",
 })
 
 # 混合职责文件：只有列出的测试类属于 frontend，文件里的其余测试类是

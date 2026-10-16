@@ -2785,4 +2785,38 @@ body.memo-dragging .memo-handle { cursor: grabbing; }
 /* [hidden] 属性的作者级兜底（2026-10-03）：UA 的 [hidden]{display:none}
    会被任何作者 .btn{display:...} 普通规则覆盖（作者普通 > UA 普通，
    与优先级无关）——作者 !important 才能压过一切普通声明。 */
+/* Long-term goals reuse the paper cards, shared dialogs and detail panel. */
+.goal-list { display: grid; gap: 12px; }
+.goal-card { display: block; width: 100%; text-align: left; padding: 16px;
+  background: var(--paper-solid); color: var(--ink); border: 1px solid var(--gold-faint);
+  border-radius: var(--radius-sm); cursor: pointer; font: inherit; min-width: 0; }
+.goal-card:hover, .goal-card.selected { border-color: var(--gold-line); background: var(--gold-soft); }
+.goal-card:focus-visible { outline: 2px solid var(--green-ink); outline-offset: 2px; }
+.goal-card-title { display: block; font-weight: 600; margin-bottom: 14px; overflow-wrap: anywhere; }
+.goal-progress-label { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px;
+  font-size: 13px; color: var(--ink-soft); }
+.goal-progress-label strong { color: var(--green-ink); }
+.goal-progress { height: 7px; margin: 8px 0 12px; overflow: hidden;
+  border: 1px solid var(--gold-faint); background: var(--gold-soft); border-radius: 5px; }
+.goal-progress > span { display: block; height: 100%; background: var(--green-ink); border-radius: inherit; }
+.goal-card-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 14px;
+  color: var(--ink-muted); font-size: 12px; }
+.goal-card-meta > span { min-width: 0; overflow-wrap: anywhere; }
+.goal-card-meta .ico { width: 13px; height: 13px; vertical-align: middle; }
+.goal-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+.goal-fields input { width: 100%; min-width: 0; }
+.goal-link { margin: 20px 0 10px; border-top: 1px solid var(--gold-faint); padding-top: 14px; }
+.goal-link p { overflow-wrap: anywhere; margin: 8px 0; }
+.goal-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.goal-detail { min-width: 0; }
+.goal-heading { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; overflow-wrap: anywhere; }
+.goal-full-text { overflow-wrap: anywhere; white-space: pre-wrap; }
+.goal-recovery { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+.goal-recovery > span { flex: 1 1 180px; min-width: 0; overflow-wrap: anywhere; }
+.goal-history p { overflow-wrap: anywhere; border-bottom: 1px solid var(--gold-faint); padding-bottom: 10px; }
+@media (max-width: 480px) {
+  .goal-card { padding: 13px; }
+  .goal-actions .btn { flex: 1 1 calc(50% - 8px); }
+}
 [hidden] { display: none !important; }

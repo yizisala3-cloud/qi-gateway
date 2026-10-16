@@ -1,5 +1,5 @@
 // Optional explanations use native disclosures; the original node and IDs stay intact.
-import { icon } from '../ui.js?v=20261015-planning-responsive-notes';
+import { icon } from '../ui.js?v=20261016-goal-dialog-fixes';
 
 const initializers = new WeakMap();
 

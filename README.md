@@ -162,6 +162,26 @@
 
 取消字数上限还需应用 `supabase/migrations/20261015010000_planning_task_notes_unlimited.sql`，移除两张表原有的 60 字约束后再更新网关与前端；备注同步和历史保留规则保持不变。
 
+## 长期目标一期
+
+规划管理的“长期目标”支持目标增删改、重复待办一对一关联、目标内新建并关联、
+整轮完成自动计数与持久化手动修正。关联前已完成及解绑期间完成的轮次不补计；
+中空轮须两个阶段完整完成；解绑、换绑、删除待办保留已有贡献，合法历史状态更正
+仍调整原贡献。达标后继续累计，文字百分比可超过 100%。
+
+部署前，在现有完整迁移链之后执行
+`supabase/migrations/20261016010000_planning_goals.sql`，再更新网关和前端。
+该迁移新增五张私有表、整轮事实/删除触发器与目标 RPC，不回填历史贡献；
+不能用本地测试代替目标环境迁移和上线验收。目标写入需 UUID `Idempotency-Key`，
+编辑/关联/修正/删除还需 `expected_version`；完成事实与命令在 READ COMMITTED
+事务内排序，不能用前端列表重新计算次数。
+
+`python -m tools.preview_planning_goals` 启动一次性本地 PostgreSQL 和实际目标 API
+的预览（端口 8021、本地令牌 `local-goals-preview`）；后台生成/重算在该夹具中停用，
+不使用生产客户端。专项测试为 `pytest tests/test_planning_goals_pgserver.py --db` 与
+`pytest tests/test_planning_goals_frontend.py`，浏览器脚本为
+`node tests/planning_goals.browser.cjs`，需要预览服务与本机 Edge/Playwright。
+
 ## 开发
 
 ```bash

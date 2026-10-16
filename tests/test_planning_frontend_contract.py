@@ -36,7 +36,8 @@ SORT = ROOT / 'admin/js/lib/planning_sort.js'
 REMINDER = ROOT / 'admin/js/lib/planning_reminder.js'
 MEMO = ROOT / 'admin/js/lib/planning_memo.js'
 READS = ROOT / 'admin/js/lib/planning_reads.js'
-PLANNING_MODULES = (DISPLAY, TASK_FORM, DIALOGS, SORT, REMINDER, MEMO, READS)
+GOALS = ROOT / 'admin/js/lib/planning_goals.js'
+PLANNING_MODULES = (DISPLAY, TASK_FORM, DIALOGS, SORT, REMINDER, MEMO, READS, GOALS)
 STYLE = ROOT / "admin" / "css" / "style.css"
 CREDITS = ROOT / "admin" / "assets" / "audio" / "CREDITS.md"
 
@@ -50,10 +51,12 @@ LEGACY_NAV_KEYS = ("memories", "digest", "emotion", "persona", "config", "logs")
 def _task_form_source(form):
     """Read the complete form body from its dedicated implementation module."""
     match = re.search(
-        r"export function openTaskForm\(task, \{ occurrences, initRetroFields, onSaved \}\) \{(.*)\n\}",
+        r"export function openTaskForm\(task, \{ occurrences, initRetroFields, onSaved,.*?\}\) \{(.*)\n\}",
         form, re.S)
     assert match is not None, "openTaskForm implementation must exist"
-    return match.group(1)
+    # These source-level legacy harnesses strip the real parameter list. Native
+    # ES-module and browser tests exercise both defaults and the goal options.
+    return 'const allowedTypes = TASK_TYPES, createTask = null, onCreated = null;\n' + match.group(1)
 
 
 def _note_input_source():
@@ -168,8 +171,10 @@ class PlanningPageContractTests(unittest.TestCase):
                 self.assertIn(marker, self.page)
 
     def test_placeholder_regions_are_marked_not_available(self):
-        # 长期目标 = 二期占位空状态；每日总结 = 三按钮禁用 + 暂未接入。
-        self.assertIn("二期接入", self.page)
+        # 长期目标已接入，只有每日总结仍预留。
+        self.assertNotIn("二期接入", self.page)
+        self.assertIn('data-goals-root', self.page)
+        self.assertIn('data-goal-act="create"', self.page)
         self.assertIn("三期接入", self.page)
         self.assertIn("暂未接入", self.page)
         self.assertEqual(self.page.count('<button class="btn btn-secondary" disabled>'), 3)
@@ -707,7 +712,7 @@ class PlanningNavigationContractTests(unittest.TestCase):
             r"const submitBtn = root\.querySelector\('\[data-ok\]'\);\s*"
             r"let submitting = false;\s*"
             r"let committed = false;\s*"
-            r"(?:\s*//[^\n]*\n)*\s*let createdTask = null;\s*"
+            r"(?:\s*//[^\n]*\n)*\s*let createdTask = null;\s*let unknownCreationBody = null;\s*const creationDisabled = new Map\(\);\s*"
             r"submitBtn\.onclick = async \(\) => \{(.*?)\n  \};",
             form, re.S)
         self.assertIsNotNone(match, "task form submit handler must hold a submitting lock")
@@ -822,7 +827,9 @@ class PlanningNavigationContractTests(unittest.TestCase):
                 const noteEditor = bindNoteInput(root, 'pf-note');
                 const typeSelect = { value: 'daily' };
                 const submitBtn = { disabled: false };
-                let submitting = false, committed = false, createdTask = null;
+                let submitting = false, committed = false, createdTask = null, unknownCreationBody = null;
+                const creationDisabled = new Map();
+                const allowedTypes = ['daily','weekly','monthly','interval','once','idle'], createTask = null, onCreated = null;
                 // 创建幂等键（#9）：真实作用域在 openTaskForm 体内（每次打开
                 // 新建表单生成一次），拼接 handler 的场景桩以固定键等价模拟，
                 // 供 B 块断言「失败重试复用同一键」。
@@ -981,6 +988,7 @@ class PlanningNavigationContractTests(unittest.TestCase):
                 };
                 const modal = () => {
                   const root = makeEl();
+                  root.querySelector('#pf-type').value = 'daily';
                   const close = () => { g.closedForms += 1; };
                   g.forms.push({ root: root, close: close });
                   return { root: root, close: close };

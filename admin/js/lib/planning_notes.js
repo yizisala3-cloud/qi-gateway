@@ -1,5 +1,5 @@
-import { gw } from '../api.js?v=20261015-planning-responsive-notes';
-import { esc, icon, modal, toast } from '../ui.js?v=20261015-planning-responsive-notes';
+import { gw } from '../api.js?v=20261016-goal-dialog-fixes';
+import { esc, icon, modal, toast } from '../ui.js?v=20261016-goal-dialog-fixes';
 
 // Count Unicode code points for display without limiting note length.
 export const noteLength = value => Array.from(String(value || '').replace(/\r\n?/g, '\n')).length;

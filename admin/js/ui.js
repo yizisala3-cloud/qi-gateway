@@ -1,5 +1,5 @@
 // ui.js - shared retro UI components: icons, tags, modal, toast, detail panel
-export const ASSET_VERSION = '20261015-planning-responsive-notes';
+export const ASSET_VERSION = '20261016-goal-dialog-fixes';
 
 /* ---------- SVG icons (stroke, no emoji; object entries = fill icons with own viewBox) ---------- */
 const ICON_PATHS = {
@@ -401,9 +401,11 @@ export function modal({ title, body, footer, wide = false, draggable = false, on
   return { root, close, mask };
 }
 
-export function confirm(msg, { title = '请确认', okText = '确认', cancelText = '取消', danger = true } = {}) {
+export function confirm(msg, { title = '请确认', okText = '确认', cancelText = '取消', danger = true, signal = null } = {}) {
+  if (signal?.aborted) return Promise.resolve(false);
   return new Promise(resolve => {
     let result = false;
+    const abort = () => { close(); resolve(false); };
     const { root, close } = modal({
       title,
       body: `<p class="confirm-text">${msg}</p>`,
@@ -414,13 +416,14 @@ export function confirm(msg, { title = '请确认', okText = '确认', cancelTex
       onMaskClose: () => { close(); resolve(false); },
       // Direct removal / navigation also ends the waiting decision. Preserve
       // the existing boolean contract (including deferred memo BUG-13).
-      onDismiss: () => resolve(result),
+      onDismiss: () => { signal?.removeEventListener('abort', abort); resolve(result); },
     });
     // 确认 / 取消 / × / 遮罩四个入口都只结算一次 Promise；×与遮罩按取消
     // 处理（BUG-11）。重复 resolve 本身无害，显式覆盖 × 的默认 close。
     root.querySelector('[data-cancel]').onclick = () => { close(); resolve(false); };
     root.querySelector('[data-ok]').onclick = () => { result = true; close(); resolve(true); };
     root.querySelector('.modal-close').onclick = () => { close(); resolve(false); };
+    signal?.addEventListener('abort', abort, { once: true });
   });
 }
 

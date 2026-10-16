@@ -16,7 +16,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from . import planning
+from . import planning, planning_goals
 from .config import cfg
 
 log = logging.getLogger("gateway.planning_api")
@@ -229,7 +229,42 @@ async def recompute_collection(request: Request) -> JSONResponse:
     return await _dispatch(request, planning.trigger_recompute)
 
 
+async def goals_collection(request: Request) -> JSONResponse:
+    if request.method == "GET":
+        return await _dispatch(request, planning_goals.list_goals)
+    return await _dispatch_json(request, planning_goals.command, "create", None,
+                                idempotency_key=request.headers.get("Idempotency-Key"), created=True)
+
+
+async def goal_candidates(request: Request) -> JSONResponse:
+    return await _dispatch(request, planning_goals.candidates)
+
+
+async def goal_item(request: Request) -> JSONResponse:
+    goal_id = request.path_params["goal_id"]
+    if request.method == "GET":
+        return await _dispatch(request, planning_goals.get_goal, goal_id)
+    return await _dispatch_json(request, planning_goals.command,
+                                "delete" if request.method == "DELETE" else "edit", goal_id,
+                                idempotency_key=request.headers.get("Idempotency-Key"))
+
+
+async def goal_link(request: Request) -> JSONResponse:
+    return await _dispatch_json(request, planning_goals.command, "link", request.path_params["goal_id"],
+                                idempotency_key=request.headers.get("Idempotency-Key"))
+
+
+async def goal_progress(request: Request) -> JSONResponse:
+    return await _dispatch_json(request, planning_goals.command, "adjust", request.path_params["goal_id"],
+                                idempotency_key=request.headers.get("Idempotency-Key"))
+
+
 planning_api_routes = [
+    Route("/admin/api/planning/goals", goals_collection, methods=["GET", "POST"]),
+    Route("/admin/api/planning/goals/candidates", goal_candidates, methods=["GET"]),
+    Route("/admin/api/planning/goals/{goal_id:int}", goal_item, methods=["GET", "PATCH", "DELETE"]),
+    Route("/admin/api/planning/goals/{goal_id:int}/link", goal_link, methods=["POST"]),
+    Route("/admin/api/planning/goals/{goal_id:int}/progress", goal_progress, methods=["POST"]),
     Route("/admin/api/planning/cycle", cycle_settings, methods=["GET", "PATCH"]),
     Route("/admin/api/planning/today", today, methods=["GET"]),
     Route("/admin/api/planning/tasks", tasks_collection, methods=["GET", "POST"]),

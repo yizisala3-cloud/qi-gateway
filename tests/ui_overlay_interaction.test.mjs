@@ -158,4 +158,14 @@ await flush(); assert.equal(description.getAttribute('inert'), null);
 key('Escape'); assert.equal(hideTooltip, 1); assert.ok(tooltipModal.mask.isConnected);
 key('Escape'); await flush(); assert.equal(tooltipModal.mask.isConnected, false);
 assert.equal(observers.size, 0);
+// Page-owned confirmations settle as cancellation when that page is disposed.
+const pageLifetime = new AbortController();
+const pageDecision = confirm('离开页面时回收', { signal: pageLifetime.signal });
+await flush();
+pageLifetime.abort();
+assert.equal(await pageDecision, false);
+await flush();
+assert.equal(document.querySelector('.modal-mask'), null);
+assert.equal(await confirm('已卸载页面不打开确认框', { signal: pageLifetime.signal }), false);
+assert.equal(observers.size, 0);
 process.stdout.write('Shared modal/surface keyboard, async-close, cancellation and cleanup regressions passed.\n');

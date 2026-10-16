@@ -1,5 +1,5 @@
 // Auxiliary paper hints. Required/locked/unavailable explanations belong in visible page text.
-import { registerFloatingSurface } from '../ui.js?v=20261015-planning-responsive-notes';
+import { registerFloatingSurface } from '../ui.js?v=20261016-goal-dialog-fixes';
 
 const initializers = new WeakMap();
 let descriptionSequence = 0;

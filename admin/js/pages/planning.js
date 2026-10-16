@@ -1,27 +1,28 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
 // 数据按需加载：今日看板保留 30 秒提醒轮询，首次/失效切入时刷新可见列表。
-import { gw } from '../api.js?v=20261015-planning-responsive-notes';
+import { gw } from '../api.js?v=20261016-goal-dialog-fixes';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, esc,
   createDetailPanel,
-} from '../ui.js?v=20261015-planning-responsive-notes';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261015-planning-responsive-notes';
-import { createRetroSelectField } from '../lib/retro_select.js?v=20261015-planning-responsive-notes';
+} from '../ui.js?v=20261016-goal-dialog-fixes';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261016-goal-dialog-fixes';
+import { createRetroSelectField } from '../lib/retro_select.js?v=20261016-goal-dialog-fixes';
 import {
   TASK_TYPE_LABELS, TASK_TYPES, STATUS_META, CLOSED_STATUSES,
   fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty, formatIntervalMinutes,
   itemMeta, isClosedOcc, formatLoggedDuration, durationText, durationDetailRows,
   itemBadges, itemHtml,
-} from '../lib/planning_display.js?v=20261015-planning-responsive-notes';
-import { openTaskForm } from '../lib/planning_task_form.js?v=20261015-planning-responsive-notes';
-import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261015-planning-responsive-notes';
-import { createPlanningSort } from '../lib/planning_sort.js?v=20261015-planning-responsive-notes';
-import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261015-planning-responsive-notes';
-import { createPlanningMemo } from '../lib/planning_memo.js?v=20261015-planning-responsive-notes';
-import { createPlanningReads } from '../lib/planning_reads.js?v=20261015-planning-responsive-notes';
-import { taskNotePreview, openTaskNote, editTaskNoteInline } from '../lib/planning_notes.js?v=20261015-planning-responsive-notes';
-import { mergeOrderReceipt, mergeOccurrencesFromBoard } from '../lib/planning_sync.js?v=20261015-planning-responsive-notes';
+} from '../lib/planning_display.js?v=20261016-goal-dialog-fixes';
+import { openTaskForm } from '../lib/planning_task_form.js?v=20261016-goal-dialog-fixes';
+import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261016-goal-dialog-fixes';
+import { createPlanningSort } from '../lib/planning_sort.js?v=20261016-goal-dialog-fixes';
+import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261016-goal-dialog-fixes';
+import { createPlanningMemo } from '../lib/planning_memo.js?v=20261016-goal-dialog-fixes';
+import { createPlanningReads } from '../lib/planning_reads.js?v=20261016-goal-dialog-fixes';
+import { taskNotePreview, openTaskNote, editTaskNoteInline } from '../lib/planning_notes.js?v=20261016-goal-dialog-fixes';
+import { mergeOrderReceipt, mergeOccurrencesFromBoard } from '../lib/planning_sync.js?v=20261016-goal-dialog-fixes';
+import { createPlanningGoals } from '../lib/planning_goals.js?v=20261016-goal-dialog-fixes';
 
 const detailHeading = (label, name) => `<h4 class="plan-detail-section-title">${icon(name)}<span>${esc(label)}</span><span class="plan-detail-rule" aria-hidden="true"></span></h4>`;
 const detailRange = (start, end) => start && !end ? `${fmtClock(start)} ～` : fmtRange(start, end);
@@ -55,6 +56,7 @@ export default {
   dialogs: null,
   sort: null,
   memo: null,
+  goals: null,
   taskForm: null,
   noteDialog: null,
   noteInline: null,
@@ -133,6 +135,7 @@ export default {
             <button class="btn btn-secondary" data-act="recompute" data-toolbar-tab="todo">${icon('refresh')}重新计算时间</button>
             <button class="btn btn-secondary" data-act="enter-reorder" id="planning-reorder-btn" data-toolbar-tab="todo">${icon('sort')}调整顺序</button>
             <button class="btn btn-primary" data-act="memo-new" data-toolbar-tab="memo" hidden>${icon('plus')}新建备忘录</button>
+            <button class="btn btn-primary" data-goal-act="create" data-toolbar-tab="goals" hidden>${icon('plus')}新建目标</button>
           </div>
           <div id="planning-load-feedback" role="alert" hidden></div>
           <div id="planning-reorder-bar" style="display:none;margin-bottom:12px">
@@ -209,12 +212,9 @@ export default {
             <div class="card">
               <div class="plan-region-head">
                 <div class="plan-region-title">${icon('star')}长期目标</div>
-                <span class="plan-region-sub disabled-note">二期接入</span>
+                <span class="plan-region-sub" data-help-note="长期目标">完整完成整轮后自动累计，手动修正会保存。</span>
               </div>
-              <div class="plan-goal-empty">
-                <div class="empty-ornament" aria-hidden="true"></div>
-                <div>长期目标将在二期接入：目标内容 + 数值 + 单位，并按关联待办的完整完成次数推进进度。</div>
-              </div>
+              <div data-goals-root></div>
             </div>
           </div>
 
@@ -239,6 +239,11 @@ export default {
 
     const actionRoot = root.querySelector('#planning-layout');
     this.detail = createDetailPanel(actionRoot, { fitViewport: true, centeredTablet: true });
+    this.goals ||= createPlanningGoals({ getDetail: () => this.detail,
+      clearSelection: () => this.clearSelection(),
+      openTaskForm: (task, options) => this.openTaskForm(task, options),
+      onTaskChanged: () => this.taskSaved(false) });
+    this.goals.mount(root.querySelector('[data-goals-root]'), actionRoot);
     this.progressList = root.querySelector('#planning-progress');
     actionRoot.addEventListener('click', (e) => {
       if (this.reads === mountedReads) this.handleItemClick(e);
@@ -288,6 +293,7 @@ export default {
     this.pollTimer = setInterval(() => {
       if (this.reorderMode) return;  // 排列中不重绘，避免打断拖拽
       this.loadToday({ silent: true });
+      this.goals?.refresh();
     }, POLL_MS);
     this.reminder.listenForUnload();
   },
@@ -303,6 +309,7 @@ export default {
       this.loadToday();
     }
     if (this.activeTab === 'memo') this.memo?.flushPending();   // 切走前保存未落库内容
+    if (this.activeTab === 'goals') this.goals?.hide();
     this.activeTab = tab;
     this.root.querySelectorAll('#planning-tabs .tab').forEach((el) => {
       el.classList.toggle('active', el.dataset.tab === tab);
@@ -324,7 +331,7 @@ export default {
         this.memo?.show();
       }
     }
-    // 长期目标 / 每日总结为占位页签，无数据需要加载
+    if (tab === 'goals') this.goals?.show();
   },
 
   /** 工具栏按钮按页签显隐（2026-10-03 确认）：「新建待办」只在当前待办；
@@ -336,6 +343,7 @@ export default {
       const scope = el.dataset.toolbarTab;
       el.hidden = scope === 'today' ? tab !== 'today'
         : scope === 'memo' ? tab !== 'memo'
+          : scope === 'goals' ? tab !== 'goals'
           : !(tab === 'today' || tab === 'all');
     });
   },
@@ -383,6 +391,7 @@ export default {
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = null;
     this.memo?.dispose();
+    this.goals?.dispose();
     this.memo = null;
     this.loadedTabs = null;
     this.reminder.dispose();
@@ -1227,7 +1236,7 @@ export default {
     });
   },
 
-  openTaskForm(task) {
+  openTaskForm(task, options = {}) {
     if (this.taskForm?.isSubmitting()) {
       toast(this.taskForm.editing ? '待办正在保存，请等待完成' : '待办正在创建，请等待完成', 'warn');
       return;
@@ -1236,6 +1245,7 @@ export default {
       occurrences: this.occurrences,
       initRetroFields: (scope, options) => this.initRetroFields(scope, options),
       onSaved: () => this.taskSaved(!!task?.id),
+      ...options,
     });
     return this.taskForm;
   },

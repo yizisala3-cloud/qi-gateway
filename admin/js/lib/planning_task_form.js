@@ -1,10 +1,11 @@
 // Task creation/edit form. Local submitting/committed state belongs to one opened form.
-import { gw } from '../api.js?v=20261015-planning-responsive-notes';
-import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261015-planning-responsive-notes';
-import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261015-planning-responsive-notes';
-import { noteInputHtml, bindNoteInput } from './planning_notes.js?v=20261015-planning-responsive-notes';
+import { gw } from '../api.js?v=20261016-goal-dialog-fixes';
+import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261016-goal-dialog-fixes';
+import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261016-goal-dialog-fixes';
+import { noteInputHtml, bindNoteInput } from './planning_notes.js?v=20261016-goal-dialog-fixes';
 
-export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
+export function openTaskForm(task, { occurrences, initRetroFields, onSaved,
+  allowedTypes = TASK_TYPES, createTask = null, onCreated = null }) {
   const editing = !!task?.id;
   // 创建幂等键（清单 #9）：绑定本次打开表单的创建意图——提交 / API 阶段
   // 失败解锁后重试复用同一键，服务端收敛到同一任务；关闭重开是新意图，
@@ -18,7 +19,7 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
     && (task.has_generated_occurrence
       || occurrences.some((o) => o.task_id === task.id));
   const value = (field, fallback = '') => (task ? (task[field] ?? fallback) : fallback);
-  const typeSelectOptions = TASK_TYPES.map((t) => ({ value: t, label: TASK_TYPE_LABELS[t] }));
+  const typeSelectOptions = TASK_TYPES.filter(t => allowedTypes.includes(t)).map((t) => ({ value: t, label: TASK_TYPE_LABELS[t] }));
   const weekdayChecks = WEEKDAY_NAMES.map((name, index) => `
     <label class="inline"><input type="checkbox" data-weekday value="${index}"
       ${(value('weekdays') || []).includes(index) ? 'checked' : ''}>周${name}</label>`).join('');
@@ -209,6 +210,8 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
   // handler 作用域——提交 try 块内的声明在块外读取会抛 ReferenceError
   // 且被外层 catch 吞掉（R4 审查修复），两种新增提示都会失效。
   let createdTask = null;
+  let unknownCreationBody = null;
+  const creationDisabled = new Map();
   submitBtn.onclick = async () => {
     if (committed || submitting) return;
     submitting = true;
@@ -246,6 +249,7 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
         }
       }
       const type = typeSelect.value;
+      if (!allowedTypes.includes(type)) throw new Error('此入口仅允许创建有效的重复待办');
       const body = {
         content: root.querySelector('#pf-content').value.trim(),
         note: noteEditor.read(),
@@ -316,13 +320,17 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
           body: JSON.stringify(body),
         });
       } else {
-        createdTask = await gw('/admin/api/planning/tasks', {
+        const creationBody = unknownCreationBody || body;
+        // Retain the original body as well as its key if delivery is unknown.
+        // Changed inputs cannot accidentally turn a verification into a new intent.
+        unknownCreationBody = JSON.parse(JSON.stringify(creationBody));
+        createdTask = createTask ? await createTask(creationBody, creationIdempotencyKey) : await gw('/admin/api/planning/tasks', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Idempotency-Key': creationIdempotencyKey,
           },
-          body: JSON.stringify(body),
+          body: JSON.stringify(creationBody),
         });
       }
     } catch (error) {
@@ -341,9 +349,21 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
       // 可能已经成立，同样按结果未知提示，不得把 SyntaxError 文本当失败
       // 原因误报「保存失败：Unexpected end of JSON input」。
       const networkUnknown = !message
+        || error.status >= 500
         || error?.resultUnknown
         || error?.name === 'ResultUnknownError'
         || /failed to fetch|networkerror|load failed|timeout|timed out|network/i.test(message);
+      if (!editing && !networkUnknown && !(error.status >= 500)) unknownCreationBody = null;
+      if (!editing && networkUnknown) {
+        root.querySelectorAll('input, textarea').forEach(input => {
+          if (!creationDisabled.has(input)) creationDisabled.set(input, input.disabled);
+          input.disabled = true;
+        });
+        submitBtn.textContent = '核实创建结果';
+      } else if (!editing) {
+        for (const [input, disabled] of creationDisabled) input.disabled = disabled;
+        creationDisabled.clear();
+      }
       if (networkUnknown && !editing) {
         message = '未收到保存结果，请重试确认；系统会按本次操作避免重复创建';
       } else if (networkUnknown && editing) {
@@ -401,6 +421,12 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
       globalThis.console?.error({ location: 'planning_task_form.closeAfterSave',
         stack: error.stack, error, editing, taskId: task?.id || createdTask?.id });
     }
+    if (!editing && onCreated) {
+      try { await onCreated(createdTask); } catch (error) {
+        globalThis.console?.error({ location: 'planning_task_form.createdCallback', stack: error.stack, taskId: createdTask?.id });
+        toast('待办已创建，关联未完成，请在目标页面重试关联', 'warn');
+      }
+    }
     try { await onSaved(); } catch (error) {
       globalThis.console?.error({ location: 'planning_task_form.refreshAfterSave',
         stack: error.stack, error, editing, taskId: task?.id || createdTask?.id });
@@ -408,5 +434,5 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved }) {
     }
   };
   // 页面保留句柄：关闭弹窗不会取消已经发出的请求，仍须拦住重新打开提交。
-  return { editing, isSubmitting: () => submitting };
+  return { editing, root, close, isSubmitting: () => submitting };
 }

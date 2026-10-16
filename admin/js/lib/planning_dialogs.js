@@ -1,7 +1,7 @@
 // Instance dialogs: form-local inputs and timeout retry identity stay in their closures.
-import { gw } from '../api.js?v=20261015-planning-responsive-notes';
-import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261015-planning-responsive-notes';
-import { createRetroTimeField } from './retro_time.js?v=20261015-planning-responsive-notes';
+import { gw } from '../api.js?v=20261016-goal-dialog-fixes';
+import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261016-goal-dialog-fixes';
+import { createRetroTimeField } from './retro_time.js?v=20261016-goal-dialog-fixes';
 
 function initDialogTimes(root) {
   root.querySelectorAll('.retro-time[data-retro-for]').forEach(host => {
