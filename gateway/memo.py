@@ -62,10 +62,9 @@ def purge_expired_trash(client) -> int:
     """回收站到期清扫（M19）：硬删除删除满 72 小时的记录，返回条数。
 
     保留期与到期语义由数据库函数 ``memo_purge_expired_trash`` 承担
-    （迁移 20261004010000_memo_trash_retention_72h.sql）；本层在读取与
-    生命周期入口惰性调用。清扫失败不阻塞主流程：恢复路径的「到期无法
-    恢复」由生命周期 RPC 的保留期门独立兜底，未清扫的过期条目只是
-    暂留列表，待下一次成功清扫移除。
+    （迁移 20261016020000_memo_detail_read_and_cleanup.sql）。仅由后台
+    维护调用，读取和生命周期请求不等待物理清扫；详情/列表和恢复 RPC
+    独立执行到期门，清扫失败不会让到期内容重新可读或可恢复。
     """
     try:
         result = _call_rpc(client, "memo_purge_expired_trash", {"p_now": _iso(_now())})
@@ -73,6 +72,12 @@ def purge_expired_trash(client) -> int:
         log.warning("memo 回收站到期清扫失败（不阻塞读取）", exc_info=True)
         return 0
     return int(result or 0)
+
+
+def run_trash_maintenance() -> int:
+    """Called by the background loop, never by an interactive request."""
+    client = get_client()
+    return purge_expired_trash(client) if client is not None else 0
 
 
 class MemoError(Exception):
@@ -116,9 +121,10 @@ def _rpc_error(exc: Exception) -> MemoError:
     return MemoError("数据库操作暂时失败，请稍后重试", 503, "database_unavailable")
 
 
-def _call_rpc(client, fn: str, params: dict) -> Any:
+def _call_rpc(client, fn: str, params: dict, *, read_only: bool = False) -> Any:
     try:
-        response = client.rpc(fn, params).execute()
+        request = client.rpc(fn, params, get=True) if read_only else client.rpc(fn, params)
+        response = request.execute()
     except MemoError:
         raise
     except Exception as exc:
@@ -467,10 +473,8 @@ def _match_fragment(content: str, needle: str) -> str:
 
 # ── 读取端点 ──────────────────────────────────────────────────────
 
-def get_board(purge: bool = True) -> dict:
+def get_board() -> dict:
     client = _require_client()
-    if purge:
-        purge_expired_trash(client)   # 到期回收站清扫（M19，惰性）
     tags = _rows(client, "memo_tag", order_by=("position", "id"))
     groups = _rows(client, "memo_group")
     entries = _rows(client, "memo_entry", lambda q: q.eq("status", "active"))
@@ -479,36 +483,26 @@ def get_board(purge: bool = True) -> dict:
     return build_board(tags, groups, entries, entry_tags, positions)
 
 
-def get_entry(entry_id: int, purge: bool = True) -> dict:
+def get_entry(entry_id: int) -> dict:
     client = _require_client()
-    if purge:
-        # 到期回收站清扫（M19，惰性）：过期条目按不存在处理
-        purge_expired_trash(client)
-    rows = _rows(client, "memo_entry", lambda q: q.eq("id", entry_id).limit(1),
-                 paginate=False)
-    if not rows:
+    entry = _call_rpc(client, "memo_get_entry", {
+        "p_entry_id": entry_id, "p_now": _iso(_now()),
+    }, read_only=True)
+    if entry is None:
         raise MemoError("内容不存在或已被删除", 404, "not_found")
-    entry = rows[0]
-    tag_ids = [
-        row["tag_id"]
-        for row in _rows(client, "memo_entry_tag", lambda q: q.eq("entry_id", entry_id))
-    ]
-    tags = _rows(client, "memo_tag", lambda q: q.in_("id", sorted(tag_ids))) if tag_ids else []
-    tags.sort(key=lambda t: t["id"])
-    payload = _serialize_entry(entry)
-    payload["tags"] = [{"id": t["id"], "name": t["name"]} for t in tags]
-    return payload
+    return _serialize_entry(entry)
 
 
-def list_entries(status: str = "active", query: str | None = None,
-                 purge: bool = True) -> list[dict]:
+def list_entries(status: str = "active", query: str | None = None) -> list[dict]:
     """列表视图：归档 / 回收站（按状态时间倒序）与文字搜索（§5/§6.2）。"""
     if status not in STATUSES:
         raise MemoError(f"未知状态：{status}", 400, "invalid_payload")
     client = _require_client()
-    if purge:
-        purge_expired_trash(client)   # 回收站到期清扫（M19）：先清后读
     entries = _rows(client, "memo_entry", lambda q: q.eq("status", status))
+    if status == "deleted":
+        cutoff = _now() - timedelta(hours=72)
+        entries = [entry for entry in entries if entry.get("deleted_at") is None
+                   or datetime.fromisoformat(entry["deleted_at"].replace("Z", "+00:00")) > cutoff]
     entry_tags = _rows(client, "memo_entry_tag")
     tags = _rows(client, "memo_tag")
     tags_map = _entry_tags_map(entry_tags)
@@ -653,7 +647,6 @@ def set_entry_lifecycle(entry_id: int, action: str, expected_version) -> dict:
     if not isinstance(expected_version, int) or expected_version < 1:
         raise MemoError("expected_version 必须是正整数", 400, "invalid_payload")
     client = _require_client()
-    purge_expired_trash(client)   # 恢复前先清扫（M19）：过期条目由 RPC 保留期门兜底拒绝
     data = _call_rpc(client, "memo_set_entry_lifecycle", {
         "p_entry_id": entry_id,
         "p_action": action,

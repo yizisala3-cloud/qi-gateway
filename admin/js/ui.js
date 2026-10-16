@@ -1,5 +1,5 @@
 // ui.js - shared retro UI components: icons, tags, modal, toast, detail panel
-export const ASSET_VERSION = '20261016-goal-dialog-fixes';
+export const ASSET_VERSION = '20261016-memo-detail-latency';
 
 /* ---------- SVG icons (stroke, no emoji; object entries = fill icons with own viewBox) ---------- */
 const ICON_PATHS = {
@@ -438,7 +438,7 @@ export function delegate(root, actions) {
 }
 
 /* ---------- detail panel (right column / mobile drawer) ---------- */
-export function createDetailPanel(host, { fitViewport = false, centeredTablet = false } = {}) {
+export function createDetailPanel(host, { fitViewport = false, centeredTablet = false, onDismiss = null } = {}) {
   if (centeredTablet) host.classList.add('detail-modal');
   host.insertAdjacentHTML('beforeend', `
     <aside class="detail-panel" aria-label="详情栏">
@@ -590,6 +590,7 @@ export function createDetailPanel(host, { fitViewport = false, centeredTablet = 
   };
   const closeDrawer = ({ immediate = false } = {}) => {
     if (closing && !immediate) return;
+    if (!immediate) onDismiss?.();
     const animate = !immediate && centeredTablet && sheetMq.matches
       && host.classList.contains('detail-open')
       && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;

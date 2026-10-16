@@ -110,12 +110,22 @@ class FakeClient:
         self.queries.append(query)
         return query
 
-    def rpc(self, fn, params=None):
+    def rpc(self, fn, params=None, *, get=False):
         self.rpc_calls.append((fn, params))
         from types import SimpleNamespace
         if fn in self.rpc_errors:
             raise self.rpc_errors[fn]
         result = self.rpc_results.get(fn)
+        if fn == "memo_get_entry" and fn not in self.rpc_results:
+            assert get is True, "detail RPC must use a read-only GET"
+            result = next((dict(e) for e in self.rows["memo_entry"]
+                           if e["id"] == params["p_entry_id"]), None)
+            if result is not None:
+                ids = {row["tag_id"] for row in self.rows["memo_entry_tag"]
+                       if row["entry_id"] == result["id"]}
+                result["tags"] = [{"id": tag["id"], "name": tag["name"]}
+                                  for tag in sorted(self.rows["memo_tag"], key=lambda t: t["id"])
+                                  if tag["id"] in ids]
         return SimpleNamespace(execute=lambda: SimpleNamespace(data=result))
 
 
@@ -283,28 +293,39 @@ class MemoApiContractTests(unittest.TestCase):
                 headers=self.auth,
             )
             self.assertEqual(response.status_code, 200, action)
-            # 生命周期入口先做回收站到期清扫（M19），随后才是业务 RPC
-            self.assertEqual(self.fake.rpc_calls[0][0], "memo_purge_expired_trash")
-            fn, params = self.fake.rpc_calls[1]
+            self.assertEqual(len(self.fake.rpc_calls), 1)
+            fn, params = self.fake.rpc_calls[0]
             self.assertEqual(fn, "memo_set_entry_lifecycle")
             self.assertEqual(params["p_action"], action)
             self.assertEqual(params["p_expected_version"], 2)
 
-    def test_read_and_lifecycle_entrypoints_purge_expired_trash_first(self):
-        """M19：看板 / 列表 / 详情入口均先调用到期清扫 RPC；清扫失败不
-        阻塞读取（恢复路径由数据库保留期门独立兜底）。"""
+    def test_reads_do_not_wait_for_trash_cleanup(self):
+        """BUG-22: physical cleanup is no longer an interactive dependency."""
+        self.fake.rpc_errors["memo_purge_expired_trash"] = RuntimeError("cleanup blocked")
         for path in ("/admin/api/memo/board",
                      "/admin/api/memo/entries?status=deleted",
                      "/admin/api/memo/entries/3"):
             self.fake.rpc_calls.clear()
             response = self.http.get(path, headers=self.auth)
             self.assertEqual(response.status_code, 200, path)
-            self.assertEqual(self.fake.rpc_calls[0][0], "memo_purge_expired_trash",
-                             path)
-            self.assertIn("p_now", self.fake.rpc_calls[0][1])
-        self.fake.rpc_errors["memo_purge_expired_trash"] = RuntimeError("db down")
-        response = self.http.get("/admin/api/memo/board", headers=self.auth)
+            self.assertNotIn("memo_purge_expired_trash", [fn for fn, _ in self.fake.rpc_calls])
+
+    def test_expired_trash_is_hidden_without_physical_cleanup(self):
+        from datetime import datetime, timezone, timedelta
+        now = datetime(2026, 10, 16, tzinfo=timezone.utc)
+        self.fake.rows["memo_entry"] = [
+            {**ENTRY, "id": i, "status": "deleted", "deleted_at": stamp}
+            for i, stamp in enumerate([
+                (now - timedelta(hours=72)).isoformat(),
+                (now - timedelta(hours=72, microseconds=-1)).isoformat(),
+                (now - timedelta(hours=73)).isoformat(), None,
+            ], start=10)
+        ]
+        with mock.patch.object(memo, "_now", return_value=now):
+            response = self.http.get("/admin/api/memo/entries?status=deleted", headers=self.auth)
         self.assertEqual(response.status_code, 200)
+        self.assertEqual({row["id"] for row in response.json()}, {11, 13})
+        self.assertEqual(len(self.fake.rows["memo_entry"]), 4, "reads must not delete")
 
     # ── 标签 ──
 
@@ -454,15 +475,13 @@ class MemoApiContractTests(unittest.TestCase):
                          [("entry_id", False), ("tag_id", False)])
         self.assertEqual(order_by_table["memo_position"],
                          [("group_id", False), ("entry_id", False)])
-        # 详情页的关联读取同样不能按 id 排序
+        # Detail joins are now one read-only RPC, not paginated association reads.
         self.fake.queries.clear()
+        self.fake.rpc_calls.clear()
         with mock.patch.object(memo, "get_client", lambda: self.fake):
             memo.get_entry(3)
-        detail_tag_orders = [q.orders for q in self.fake.queries
-                             if q.table == "memo_entry_tag"]
-        self.assertTrue(detail_tag_orders)
-        for orders in detail_tag_orders:
-            self.assertIn(("entry_id", False), orders)
+        self.assertEqual(self.fake.queries, [])
+        self.assertEqual([fn for fn, _ in self.fake.rpc_calls], ["memo_get_entry"])
 
     def test_head_requests_use_read_semantics(self):
         """GET 路由自动接收 HEAD（F20）：带正文的 HEAD 不得进入写 RPC，
@@ -475,7 +494,7 @@ class MemoApiContractTests(unittest.TestCase):
                           content=b'{"content":"x"}', headers=body_headers)
         self.http.request("HEAD", "/admin/api/memo/tags",
                           content=b'{"name":"x"}', headers=body_headers)
-        write_rpcs = [fn for fn, _ in self.fake.rpc_calls]
+        write_rpcs = [fn for fn, _ in self.fake.rpc_calls if fn != "memo_get_entry"]
         self.assertEqual(write_rpcs, [], "HEAD 不得触发任何写 RPC")
         plain = self.http.head("/admin/api/memo/entries", headers=self.auth)
         self.assertEqual(plain.status_code, 200)

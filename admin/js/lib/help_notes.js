@@ -1,5 +1,5 @@
 // Optional explanations use native disclosures; the original node and IDs stay intact.
-import { icon } from '../ui.js?v=20261016-goal-dialog-fixes';
+import { icon } from '../ui.js?v=20261016-memo-detail-latency';
 
 const initializers = new WeakMap();
 

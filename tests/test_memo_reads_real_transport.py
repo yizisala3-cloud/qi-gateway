@@ -11,8 +11,7 @@
 - R09 分页进度与终止：服务端 Max Rows 把每页截小时不得跳行漏页；
   跨页匹配行减少时空页必须有限终止，不允许无限请求。
 
-GET 读取会携带回收站到期清扫 RPC（M19）；HEAD 读取语义保持零写——
-清扫只挂在真实 GET 与生命周期入口上。
+GET/HEAD 均保持零写；单条详情通过 GET 调用只读 memo_get_entry RPC。
 """
 
 import unittest
@@ -107,7 +106,7 @@ class MemoRealTransportReadTests(unittest.TestCase):
             self.assertNotIn("count=", call["url"],
                              "count 是 select/Prefer 语义，不是查询参数")
 
-    def test_entry_detail_and_composite_key_order_params(self):
+    def test_entry_detail_is_one_read_only_rpc_with_all_tags(self):
         rows = {
             "memo_entry": [{"id": 7, "title": None, "content": "正文", "kind": "note",
                             "status": "active", "content_version": 1,
@@ -122,18 +121,18 @@ class MemoRealTransportReadTests(unittest.TestCase):
 
         def handler(request):
             self.log.record(request)
-            table = request.url.path.rsplit("/", 1)[-1]
-            return httpx.Response(200, json=rows.get(table, []),
-                                  headers={"Content-Range": f"*/{len(rows.get(table, []))}"})
+            self.assertEqual(request.method, "GET")
+            self.assertEqual(request.url.path, "/rpc/memo_get_entry")
+            self.assertEqual(request.url.params["p_entry_id"], "7")
+            self.assertIn("p_now", request.url.params)
+            return httpx.Response(200, json={**rows["memo_entry"][0], "tags": [
+                {"id": tag["id"], "name": tag["name"]} for tag in rows["memo_tag"]]})
 
         self.client.session._transport = httpx.MockTransport(handler)
         response = self.http.get("/admin/api/memo/entries/7", headers=self.auth)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual([t["id"] for t in response.json()["tags"]], [1, 2])
-        orders = {call["path"].rsplit("/", 1)[-1]: call["query"].get("order")
-                  for call in self.log.calls}
-        self.assertEqual(orders["memo_entry_tag"], "entry_id.asc,tag_id.asc")
-        self.assertEqual(orders["memo_tag"], "id.asc")
+        self.assertEqual(len(self.log.calls), 1)
 
     def test_board_reads_composite_key_tables_with_unique_key_order(self):
         def handler(request):
@@ -150,10 +149,7 @@ class MemoRealTransportReadTests(unittest.TestCase):
         self.assertEqual(orders["memo_position"], "group_id.asc,entry_id.asc",
                          "位置表必须按 (group_id, entry_id) 唯一键排序")
         for call in self.log.calls:
-            if call["path"].endswith("/rpc/memo_purge_expired_trash"):
-                # 回收站到期清扫（M19）是读路径上的 RPC 写调用，不携带
-                # 分页语义；count=exact 只约束表读取（RPC 无 select 阶段）
-                continue
+            self.assertEqual(call["method"], "GET", "看板读取不得附带清扫写入")
             self.assertIn("count=exact", call["prefer"],
                           "计数必须在 select 阶段声明（Prefer: count=exact）")
 

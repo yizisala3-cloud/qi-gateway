@@ -1,5 +1,5 @@
-import { gw } from '../api.js?v=20261016-goal-dialog-fixes';
-import { esc, icon, modal, toast } from '../ui.js?v=20261016-goal-dialog-fixes';
+import { gw } from '../api.js?v=20261016-memo-detail-latency';
+import { esc, icon, modal, toast } from '../ui.js?v=20261016-memo-detail-latency';
 
 // Count Unicode code points for display without limiting note length.
 export const noteLength = value => Array.from(String(value || '').replace(/\r\n?/g, '\n')).length;

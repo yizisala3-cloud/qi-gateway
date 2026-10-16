@@ -43,6 +43,7 @@ FRONTEND_MARKER_FILES = frozenset({
     "test_memo_bugfix_20261004.py",
     "test_memo_editor_behavior.py",
     "test_memo_frontend_contract.py",
+    "test_memo_reader_behavior.py",
     "test_planning_adjustments_logic.py",
     "test_planning_frontend_modules.py",
     "test_planning_goals_frontend.py",

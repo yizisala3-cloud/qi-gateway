@@ -1,5 +1,5 @@
 // pages/memories.js - 记忆管理：记忆库 + 审核申请
-import { createMemoryBrowser } from './_memory_browser.js?v=20261016-goal-dialog-fixes';
+import { createMemoryBrowser } from './_memory_browser.js?v=20261016-memo-detail-latency';
 
 export default {
   browser: null,

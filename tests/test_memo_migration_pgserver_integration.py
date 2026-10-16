@@ -1573,5 +1573,83 @@ class MemoPhase1PostgresTests(unittest.TestCase):
         self.assertEqual(again, 0)
 
 
+    def test_detail_rpc_snapshot_tags_expiry_and_read_only(self):
+        import psycopg
+        a = self._make_tag("detail-read-a")["id"]
+        b = self._make_tag("detail-read-b")["id"]
+        entry = self._make_entry({"kind": "note", "content": "# detail", "tag_ids": [b, a]})
+        sql = "select public.memo_get_entry(%s, %s::timestamptz)"
+        now = "2026-10-02T09:00:00+08:00"
+        with psycopg.connect(self.server.get_uri()) as conn:
+            conn.execute("set transaction read only")
+            result = conn.execute(sql, [entry["id"], now]).fetchone()[0]
+            self.assertEqual(result, entry)
+            self.assertEqual([tag["id"] for tag in result["tags"]], [a, b])
+            self.assertIsNone(conn.execute(sql, [-1, now]).fetchone()[0])
+        bare = self._make_entry({"kind": "pinned", "content": "no tags"})
+        self.assertEqual(self._query(sql, [bare["id"], now])[0][0]["tags"], [])
+        self._call(_lifecycle_sql(entry["id"], "delete", 1))
+        self.assertIsNotNone(self._query(sql, [entry["id"], "2026-10-05T08:59:59.999999+08:00"])[0][0])
+        self.assertIsNone(self._query(sql, [entry["id"], "2026-10-05T09:00:00+08:00"])[0][0])
+        self.assertIsNotNone(self._entry(entry["id"]), "expiry filtering does not require physical deletion")
+
+    def test_detail_rpc_is_not_blocked_by_entry_writer(self):
+        import psycopg
+        entry = self._make_entry({"kind": "note", "content": "read while locked"})
+        with psycopg.connect(self.server.get_uri()) as writer, \
+                psycopg.connect(self.server.get_uri(), autocommit=True) as reader:
+            writer.execute("select id from public.memo_entry where id=%s for update", [entry["id"]])
+            reader.execute("set statement_timeout='500ms'")
+            result = reader.execute("select public.memo_get_entry(%s,%s::timestamptz)",
+                                    [entry["id"], NOW]).fetchone()[0]
+            self.assertEqual(result["content"], "read while locked")
+
+    def test_detail_rpc_acl_is_service_role_only(self):
+        for role, allowed in [("anon", False), ("authenticated", False), ("service_role", True)]:
+            with self.subTest(role=role):
+                actual = self._query("select has_function_privilege(%s, 'public.memo_get_entry(bigint,timestamptz)', 'execute')", [role])[0][0]
+                self.assertEqual(actual, allowed)
+
+    def test_cleanup_skips_writer_and_parallel_cleanup_then_retries(self):
+        import psycopg
+        entries = [self._make_entry({"kind": "pinned", "content": f"cleanup-{i}"}) for i in range(2)]
+        for entry in entries:
+            self._call(_lifecycle_sql(entry["id"], "delete", 1))
+        late = "2026-10-05T09:01:00+08:00"
+        sql = "select public.memo_purge_expired_trash(%s::timestamptz)"
+        with psycopg.connect(self.server.get_uri()) as writer, \
+                psycopg.connect(self.server.get_uri()) as cleaner, \
+                psycopg.connect(self.server.get_uri(), autocommit=True) as other:
+            writer.execute("select id from public.memo_entry where id=%s for update", [entries[0]["id"]])
+            cleaner.execute("set statement_timeout='1s'")
+            cleaner.execute(sql, [late])
+            other.execute("set statement_timeout='1s'")
+            other.execute(sql, [late])  # skips both the writer and uncommitted cleanup
+            cleaner.commit()
+            self.assertIsNotNone(self._entry(entries[0]["id"]))
+            self.assertIsNone(self._entry(entries[1]["id"]))
+            writer.rollback()
+            other.execute(sql, [late])
+        self.assertIsNone(self._entry(entries[0]["id"]))
+
+    def test_cleanup_with_delete_tag_keeps_lock_order_and_retention(self):
+        import psycopg
+        tag = self._make_tag("cleanup-delete-tag")["id"]
+        entries = [self._make_entry({"kind": "pinned", "content": f"shared-{i}", "tag_ids": [tag]}) for i in range(2)]
+        for entry in entries:
+            self._call(_lifecycle_sql(entry["id"], "delete", 1))
+        with psycopg.connect(self.server.get_uri()) as deleter, \
+                psycopg.connect(self.server.get_uri(), autocommit=True) as cleaner:
+            deleter.execute("select public.memo_delete_tag(%s,%s::timestamptz)", [tag, NOW])
+            cleaner.execute("set statement_timeout='1s'")
+            cleaner.execute("select public.memo_purge_expired_trash(%s::timestamptz)", ["2026-10-05T09:01:00+08:00"])
+            for entry in entries:
+                self.assertIsNotNone(self._entry(entry["id"]))
+            deleter.commit()
+            cleaner.execute("select public.memo_purge_expired_trash(%s::timestamptz)", ["2026-10-05T09:01:00+08:00"])
+        for entry in entries:
+            self.assertIsNone(self._entry(entry["id"]))
+
+
 if __name__ == "__main__":
     unittest.main()

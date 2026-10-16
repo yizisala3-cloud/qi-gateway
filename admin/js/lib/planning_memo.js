@@ -15,12 +15,12 @@
 // 一期不实现清单勾选、待办互通与 AI 读写（F01–F03 仅预留稳定身份与
 // 可复用基础接口）。
 
-import { gw } from '../api.js?v=20261016-goal-dialog-fixes';
+import { gw } from '../api.js?v=20261016-memo-detail-latency';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, icon, esc,
-} from '../ui.js?v=20261016-goal-dialog-fixes';
-import { createRetroSelectField } from './retro_select.js?v=20261016-goal-dialog-fixes';
-import { renderMarkdown } from './memo_markdown.js?v=20261016-goal-dialog-fixes';
+} from '../ui.js?v=20261016-memo-detail-latency';
+import { createRetroSelectField } from './retro_select.js?v=20261016-memo-detail-latency';
+import { renderMarkdown } from './memo_markdown.js?v=20261016-memo-detail-latency';
 
 const KIND_LABELS = { pinned: '常驻备忘', note: '随笔' };
 const AUTOSAVE_DELAY_MS = 800;
@@ -434,6 +434,8 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
     _disposed: false,
     _readerSeq: 0,
     _readerId: null,
+    _readerRequest: null,
+    _readerRefreshController: null,
     filterTagId: '',          // '' 全部 | 'untagged' | 数字
     activeTagId: null,        // 标签详情当前标签（'untagged' 或数字）
     searchQuery: '',
@@ -531,8 +533,7 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
       // await 返回后复核失败，不再创建旧编辑框或清草稿
       this._epoch += 1;
       this._disposed = true;
-      this._readerSeq += 1;
-      this._readerId = null;
+      this.cancelReader();
       this.invalidateTags();
       this.tags = [];
       this.tagsStatus = 'unloaded';
@@ -623,11 +624,11 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
     /** 看板+标签读取。返回 true = 本次读取已应用为本模块的最新数据；
      *  false = 读取失败或响应已过期（切视图/卸载）。重排/模式写入后的
      *  刷新确认依赖这个返回值（BUG-06）。 */
-    async reload({ silent = false } = {}) {
+    async reload({ silent = false, refreshTags = true } = {}) {
       const seq = ++this.seq;
       try {
         const boardRequest = gw('/admin/api/memo/board');
-        this.prefetchTags({ fresh: true });
+        if (refreshTags) this.prefetchTags({ fresh: true });
         const board = await boardRequest;
         if (seq !== this.seq || !this.root) return false;
         this.board = board;
@@ -654,8 +655,8 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
     /** 写操作（编辑关闭/归档/删除/恢复）后的统一刷新：
      *  看板与标签详情由 reload 渲染，搜索按当前关键词重查（F12），
      *  生命周期列表按正确的 status 重读（F09）。 */
-    async refreshAfterWrite() {
-      await this.reload({ silent: true });
+    async refreshAfterWrite({ refreshTags = true } = {}) {
+      await this.reload({ silent: true, refreshTags });
       if (!this.root) return;
       if (this.view === 'search') {
         await this.runSearch();
@@ -926,22 +927,86 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
 
     /* ---------- 阅读 / 生命周期 ---------- */
 
-    fetchEntry(id) {
-      return gw(`/admin/api/memo/entries/${id}`);
+    fetchEntry(id, { signal } = {}) {
+      return gw(`/admin/api/memo/entries/${id}`, signal ? { signal } : undefined);
     },
 
-    async openReader(id) {
+    cancelReader() {
+      this._readerSeq += 1;
+      this._readerId = null;
+      this._readerCurrent = null;
+      this._refreshReaderContent = null;
+      const pending = this._readerRequest;
+      this._readerRequest = null;
+      pending?.controller.abort();
+      this._readerRefreshController?.abort();
+      this._readerRefreshController = null;
+    },
+
+    cancelPendingReader() {
+      if (this._readerRequest) {
+        this.cancelReader();
+        return true;
+      }
+      // A saved-content refresh must not reopen a dismissed panel. Keep the
+      // loaded reader and its actions available when the desktop rail expands.
+      if (this._readerRefreshController) {
+        this._readerRefreshSeq = (this._readerRefreshSeq || 0) + 1;
+        this._readerRefreshController.abort();
+        this._readerRefreshController = null;
+      }
+      return false;
+    },
+
+    openReader(id) {
+      if (this._disposed || !this.root) return Promise.resolve();
+      if (this._readerRequest?.id === id && this._readerRequest.current()) {
+        return this._readerRequest.promise;
+      }
+      this.cancelReader();
+      // beginReader resets the parent's selection, which also cancels old reads.
+      const owner = beginReader?.(id);
       const seq = ++this._readerSeq;
       const epoch = this._epoch;
-      const owner = beginReader?.(id);
       const current = () => !this._disposed && this.root && epoch === this._epoch
         && seq === this._readerSeq && (!isReaderCurrent || isReaderCurrent(owner));
       this._readerId = id;
+      this._readerCurrent = current;
+      const request = { id, current, controller: new AbortController(), promise: null };
+      this._readerRequest = request;
+      request.promise = this._loadReader(id, owner, current, request.controller.signal).finally(() => {
+        if (this._readerRequest === request) this._readerRequest = null;
+      });
+      return request.promise;
+    },
+
+    _bindReaderClose(reader, current) {
+      if (!reader) return;
+      reader.root.querySelector('[data-reader-close]').onclick = () => {
+        if (!current()) return;
+        this.cancelReader();
+        reader.close();
+      };
+    },
+
+    async _loadReader(id, owner, current, signal) {
+      this._bindReaderClose(showReader?.(owner, {
+        title: '备忘录', html: loading('正在读取备忘录…'),
+        actions: '<button class="btn btn-quiet" data-reader-close>关闭</button>',
+      }), current);
       let entry;
       try {
-        entry = await this.fetchEntry(id);
+        entry = await this.fetchEntry(id, { signal });
       } catch (error) {
-        if (current()) toast(`读取失败：${error.message}`, 'err');
+        if (!current() || signal.aborted) return;
+        const reader = showReader?.(owner, {
+          title: '备忘录', html: errorBlock(`读取失败：${esc(error.message)}`),
+          actions: '<button class="btn btn-secondary" data-reader-retry>重试</button><button class="btn btn-quiet" data-reader-close>关闭</button>',
+        });
+        this._bindReaderClose(reader, current);
+        if (reader) reader.root.querySelector('[data-reader-retry]').onclick = () => {
+          if (current()) this.openReader(id);
+        };
         return;
       }
       if (!current() || !showReader) return;
@@ -967,11 +1032,7 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
         });
         if (!reader) return;
         const { root, close } = reader;
-        root.querySelector('[data-reader-close]').onclick = () => {
-          this._readerSeq += 1;
-          this._readerId = null;
-          close();
-        };
+        this._bindReaderClose(reader, current);
         // Assign handlers to each render's buttons; the sidebar has no accumulating listeners.
         root.querySelectorAll('[data-reader-edit],[data-reader-archive],[data-reader-delete]').forEach((button) => {
           button.onclick = (ev) => {
@@ -981,9 +1042,9 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
             if (el.hasAttribute('data-reader-edit')) {
               this.openEditor(entry.id);
             } else if (el.hasAttribute('data-reader-archive')) {
-              this.lifecycleEntry(entry.id, 'archive', () => { if (current()) close(); });
+              this.lifecycleEntry(entry.id, 'archive', () => { if (current()) close(); }, entry.content_version);
             } else if (el.hasAttribute('data-reader-delete')) {
-              this.lifecycleEntry(entry.id, 'delete', () => { if (current()) close(); });
+              this.lifecycleEntry(entry.id, 'delete', () => { if (current()) close(); }, entry.content_version);
             }
           };
         });
@@ -991,23 +1052,23 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
       this._refreshReaderContent(entry);
     },
 
-    async lifecycleEntry(id, action, closeReader = null) {
+    async lifecycleEntry(id, action, closeReader = null, expectedVersion = null) {
       if (action === 'delete' && !(await confirm(
         '确认删除这条备忘录？删除后将在回收站保留 72 小时，到期彻底删除、无法恢复。',
         { danger: true, okText: '删除', cancelText: '取消' },
       ))) return;
       try {
-        const entry = await this.fetchEntry(id);
+        const version = expectedVersion ?? (await this.fetchEntry(id)).content_version;
         await gw(`/admin/api/memo/entries/${id}/${action}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ expected_version: entry.content_version }),
+          body: JSON.stringify({ expected_version: version }),
         });
         toast(action === 'archive'
           ? '已归档，可在「归档」中找回'
           : '已删除，72 小时内可在「回收站」恢复');
         if (closeReader) closeReader();
-        await this.refreshAfterWrite();
+        await this.refreshAfterWrite({ refreshTags: false });
       } catch (error) {
         toast(`${action === 'archive' ? '归档' : '删除'}失败：${error.message}`, 'err');
       }
@@ -1715,17 +1776,23 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
 
     refreshReader(id) {
       // Keep selection identity: refreshing must never select an item after navigation.
+      if (this._readerId !== id || !this._readerCurrent?.()) return;
+      this._readerRefreshController?.abort();
+      const controller = new AbortController();
+      this._readerRefreshController = controller;
       const seq = this._readerSeq;
       const refreshSeq = this._readerRefreshSeq = (this._readerRefreshSeq || 0) + 1;
       const epoch = this._epoch;
-      this.fetchEntry(id).then((entry) => {
+      this.fetchEntry(id, { signal: controller.signal }).then((entry) => {
         if (this._disposed || epoch !== this._epoch || seq !== this._readerSeq || this._readerId !== id
             || refreshSeq !== this._readerRefreshSeq || !this._readerCurrent?.()) return;
         // Parent's owner still decides whether the same memo is visible.
         this._refreshReaderContent?.(entry);
       }).catch((error) => {
-        if (!this._disposed && epoch === this._epoch && seq === this._readerSeq
+        if (!controller.signal.aborted && !this._disposed && epoch === this._epoch && seq === this._readerSeq
             && refreshSeq === this._readerRefreshSeq && this._readerCurrent?.()) toast(`内容已保存，阅读详情更新失败：${error.message}`, 'warn');
+      }).finally(() => {
+        if (this._readerRefreshController === controller) this._readerRefreshController = null;
       });
     },
 
@@ -1877,6 +1944,7 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
 
     /** 切走备忘录页签：未保存内容立即保存（编辑器保持打开）。 */
     flushPending() {
+      this.cancelReader();
       if (this.editor) this.editor.autosave.flush();
     },
   };

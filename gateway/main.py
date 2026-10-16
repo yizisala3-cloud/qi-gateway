@@ -43,6 +43,7 @@ from .logging_events import (
     scrub_error_text,
 )
 from .memo_api import memo_api_routes
+from .memo import run_trash_maintenance
 from .memory_digest_api import memory_digest_routes
 from .memory_request_api import memory_request_routes
 from .memory_review_api import memory_review_routes
@@ -277,6 +278,18 @@ async def daily_task_loop():
         except Exception as e:
             memory_log.exception("记忆任务调度器异常: %s", e)
             await asyncio.sleep(300)
+
+
+async def memo_maintenance_loop():
+    """Serialize trash cleanup outside the interactive request executor."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            await asyncio.get_running_loop().run_in_executor(bg_executor, run_trash_maintenance)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.getLogger("gateway.memo").exception("备忘录后台回收站清扫失败")
 
 
 async def planning_loop():
@@ -520,6 +533,7 @@ async def lifespan(app):
     log.info(f"网关启动 Phase 4.5 Memory Digest | upstream={cfg.UPSTREAM_BASE_URL}")
     daily_task = track_task(daily_task_loop())
     planning_task = track_task(planning_loop())
+    memo_task = track_task(memo_maintenance_loop())
     try:
         async with memory_mcp.session_manager.run():
             yield
@@ -529,6 +543,7 @@ async def lifespan(app):
         _planning_running = False
         daily_task.cancel()
         planning_task.cancel()
+        memo_task.cancel()
         await http_client.aclose()
         bg_executor.shutdown(wait=False)
         # §36：先停止接收新事件，再做有时间上限的 flush；绝不因日志队列
