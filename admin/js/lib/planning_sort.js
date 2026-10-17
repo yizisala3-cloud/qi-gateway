@@ -1,6 +1,6 @@
 // Candidate order belongs to this controller until confirmation or cancellation.
-import { gw } from '../api.js?v=20261016-memo-detail-latency';
-import { toast } from '../ui.js?v=20261016-memo-detail-latency';
+import { gw } from '../api.js?v=20261016-planning-optimization';
+import { toast } from '../ui.js?v=20261016-planning-optimization';
 
 export function createPlanningSort({
   getRoot, getProgressList, getBoard, getActiveTab, getActiveSection,
@@ -21,7 +21,7 @@ export function createPlanningSort({
       .forEach((button) => { button.disabled = value; });
   };
   const sort = {
-    enterReorder() {
+    enterReorder({ render = true } = {}) {
       if (getReorderMode() || pending) return;
       if (getActiveTab() !== 'today') {
         toast('调整顺序只在「当前待办」页签可用');
@@ -32,14 +32,13 @@ export function createPlanningSort({
       if (getActiveSection() !== 'progress') selectSection('progress');
       session += 1;
       request = null;
-      expectedOrder = items.map(({ id, sort_order = 0, status = 'pending' }) => ({ id, sort_order, status }));
+      expectedOrder = items.map(({ id, sort_order = 0, status = 'pending', is_parked = false }) => ({ id, sort_order, status, is_parked }));
       invalidateToday();
       setReorderMode(true);
       feedback();
       busy(false);
       getRoot().querySelector('#planning-reorder-bar').style.display = '';
-      getRoot().querySelector('#planning-reorder-btn').disabled = true;
-      renderBoard();
+      if (render) renderBoard();
     },
 
     exitReorder() {
@@ -50,7 +49,6 @@ export function createPlanningSort({
       getProgressList()?.classList.remove('reordering');
       if (!getRoot()) return;
       getRoot().querySelector('#planning-reorder-bar').style.display = 'none';
-      getRoot().querySelector('#planning-reorder-btn').disabled = pending;
     },
 
     async confirmReorder() {
@@ -90,7 +88,6 @@ export function createPlanningSort({
         pending = false;
         if (root === getRoot()) {
           busy(false);
-          getRoot().querySelector('#planning-reorder-btn').disabled = getReorderMode();
         }
       }
       toast((saved?.recompute_enabled ?? getBoard()?.recompute?.enabled) === false
@@ -119,10 +116,13 @@ export function createPlanningSort({
     attachDragHandlers() {
       const list = getProgressList();
       if (!list) return;
-      list.classList.add('reordering');
+      list.classList.toggle('reordering', getReorderMode());
       list.querySelectorAll('.plan-item').forEach((item) => {
         item.onpointerdown = (e) => {
-          if (e.target.closest('.plan-handle')) sort.startDrag(e, item);
+          if (!e.target.closest('.plan-handle')) return;
+          if (!getReorderMode()) sort.enterReorder({ render: false });
+          list.classList.toggle('reordering', getReorderMode());
+          sort.startDrag(e, item);
         };
       });
     },
@@ -208,7 +208,12 @@ export function createPlanningSort({
         window.removeEventListener('resize', resize);
         observer?.disconnect();
         if (item.hasPointerCapture(e.pointerId)) item.releasePointerCapture(e.pointerId);
-        if (commit && index !== origin) candidate.forEach((el) => list.appendChild(el));
+        if (commit && index !== origin) {
+          // Parking is an independent scheduling fact. Dragging within either
+          // group never moves a parked row ahead of normal work.
+          candidate.sort((a, b) => Number(a.dataset.parked === 'true') - Number(b.dataset.parked === 'true'));
+          candidate.forEach((el) => list.appendChild(el));
+        }
         stopDrag = null;
       };
       const up = (ev) => { if (ev.pointerId === e.pointerId) { latestY = ev.clientY; cancelAnimationFrame(frame); draw(); finish(true); } };

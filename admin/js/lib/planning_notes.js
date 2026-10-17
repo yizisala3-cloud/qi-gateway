@@ -1,8 +1,15 @@
-import { gw } from '../api.js?v=20261016-memo-detail-latency';
-import { esc, icon, modal, toast } from '../ui.js?v=20261016-memo-detail-latency';
+import { gw } from '../api.js?v=20261016-planning-optimization';
+import { esc, icon, modal, toast } from '../ui.js?v=20261016-planning-optimization';
 
 // Count Unicode code points for display without limiting note length.
 export const noteLength = value => Array.from(String(value || '').replace(/\r\n?/g, '\n')).length;
+
+export function focusEditorEnd(input) {
+  if (!input || input.disabled) return;
+  input.focus({ preventScroll: true });
+  const end = input.value?.length;
+  if (typeof end === 'number') input.setSelectionRange?.(end, end);
+}
 
 export function noteInputHtml(value = '', id = 'task-note-text', rows = 5) {
   return `<div class="field task-note-field">
@@ -93,7 +100,7 @@ export function editTaskNoteInline(root, { taskId, onSaved = async () => {} }) {
       ready = true;
       save.disabled = false;
       feedback.textContent = '';
-      input.focus({ preventScroll: true });
+      focusEditorEnd(input);
     } catch (error) {
       if (!current()) return;
       feedback.textContent = `备注读取失败：${error.message}`;
@@ -173,7 +180,7 @@ export function openTaskNote({ taskId, note = '', readOnly = false, onSaved = as
       ready = true;
       feedback.textContent = '';
       editor.update();
-      editor.input.focus();
+      focusEditorEnd(editor.input);
     } catch (error) {
       if (!root.isConnected) return;
       feedback.textContent = `备注读取失败：${error.message}`;

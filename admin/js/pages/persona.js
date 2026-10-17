@@ -1,7 +1,7 @@
 // pages/persona.js - 人设与规则：人设 / 用户资料 / 互动规则
-import { query, update, insert, esc } from '../api.js?v=20261016-memo-detail-latency';
-import { loading, empty, tag, toast, modal, confirm, delegate, icon } from '../ui.js?v=20261016-memo-detail-latency';
-import { createMemoryBrowser } from './_memory_browser.js?v=20261016-memo-detail-latency';
+import { query, update, insert, esc } from '../api.js?v=20261016-planning-optimization';
+import { loading, empty, tag, toast, modal, confirm, delegate, icon } from '../ui.js?v=20261016-planning-optimization';
+import { createMemoryBrowser } from './_memory_browser.js?v=20261016-planning-optimization';
 
 const VIEW_TABS = [
   { key: 'persona', label: '人设' },

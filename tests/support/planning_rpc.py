@@ -603,7 +603,7 @@ def emulate_planning_recompute_batch(db, params):
         for key, value in e.items():
             if key == "id":
                 continue
-            if row.get(key) != value:
+            if row.get(key, False if key == "is_parked" else None) != value:
                 raise RuntimeError(
                     "planning_apply_recompute_batch: schedule inputs drifted "
                     "(stale recompute result)")
@@ -623,6 +623,7 @@ def emulate_planning_recompute_batch(db, params):
             row = rows_by_id[entry["id"]]
             # #25：写入前重核同一可排程条件（迁移语句 5 的 WHERE 同形）。
             if (row.get("status") != "pending"
+                    or row.get("is_parked", False)
                     or any(row.get(field)
                            for field in planning.LIFECYCLE_FACT_FIELDS)
                     or row.get("is_fixed")

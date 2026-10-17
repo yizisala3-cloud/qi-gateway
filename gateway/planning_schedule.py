@@ -28,6 +28,11 @@ def _freely_schedulable(occ: dict[str, Any], task: dict[str, Any]) -> bool:
     同源）——pending + actual_end / pending + partial_at 等脏状态行不得
     进入重新排程，不复制第二套判断。
     """
+    return not occ.get("is_parked", False) and _estimate_is_movable(occ)
+
+
+def _estimate_is_movable(occ: dict[str, Any]) -> bool:
+    """Automatic time ownership survives parking, which only removes scheduling eligibility."""
     return (
         occ["status"] == "pending"
         and not common._has_lifecycle_fact(occ)
@@ -303,7 +308,8 @@ def compute_schedule(
     * 窗口可行性复用 planning_window.window_feasible（与创建校验同一
       领域函数，仅 effective cursor 不同），不另写第二套窗口数学。
     """
-    ordered = sorted(open_rows, key=lambda r: (r.get("sort_order", 0), r["id"]))
+    ordered = sorted((r for r in open_rows if not r.get("is_parked", False)),
+                     key=lambda r: (r.get("sort_order", 0), r["id"]))
     slots: list[tuple[datetime, datetime]] = []
     for occ in ordered:
         if _freely_schedulable(occ, tasks.get(occ["task_id"], {})):

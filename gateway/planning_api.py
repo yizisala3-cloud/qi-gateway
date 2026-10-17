@@ -16,7 +16,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from . import planning, planning_goals
+from . import planning, planning_goals, planning_detail_edit
 from .config import cfg
 
 log = logging.getLogger("gateway.planning_api")
@@ -159,6 +159,20 @@ async def task_complete_early(request: Request) -> JSONResponse:
                            idempotency_key=key)
 
 
+async def task_detail_edit(request: Request) -> JSONResponse:
+    task_id = request.path_params["task_id"]
+    if request.method == "GET":
+        raw = request.query_params.get("occurrence_id")
+        if raw is not None and (not raw.isdecimal() or int(raw) < 1):
+            if not _authorized(request):
+                return _error("未登录或令牌无效", 401, "unauthorized")
+            return _error("当前轮次身份无效", 400, "invalid_payload")
+        return await _dispatch(request, planning_detail_edit.get_context,
+                               task_id, int(raw) if raw is not None else None)
+    return await _dispatch_json(request, planning_detail_edit.command, task_id,
+                               idempotency_key=request.headers.get("Idempotency-Key"))
+
+
 async def occurrences_collection(request: Request) -> JSONResponse:
     params = request.query_params
     return await _dispatch(
@@ -269,6 +283,7 @@ planning_api_routes = [
     Route("/admin/api/planning/today", today, methods=["GET"]),
     Route("/admin/api/planning/tasks", tasks_collection, methods=["GET", "POST"]),
     Route("/admin/api/planning/tasks/{task_id:int}", task_item, methods=["GET", "PATCH"]),
+    Route("/admin/api/planning/tasks/{task_id:int}/detail-edit", task_detail_edit, methods=["GET", "POST"]),
     Route("/admin/api/planning/tasks/{task_id:int}/complete-early", task_complete_early, methods=["POST"]),
     Route("/admin/api/planning/occurrences", occurrences_collection, methods=["GET"]),
     Route("/admin/api/planning/occurrences/{occurrence_id:int}", occurrence_item, methods=["GET", "PATCH"]),

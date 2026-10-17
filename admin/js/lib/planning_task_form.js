@@ -1,8 +1,8 @@
 // Task creation/edit form. Local submitting/committed state belongs to one opened form.
-import { gw } from '../api.js?v=20261016-memo-detail-latency';
-import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261016-memo-detail-latency';
-import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261016-memo-detail-latency';
-import { noteInputHtml, bindNoteInput } from './planning_notes.js?v=20261016-memo-detail-latency';
+import { gw } from '../api.js?v=20261016-planning-optimization';
+import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261016-planning-optimization';
+import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261016-planning-optimization';
+import { noteInputHtml, bindNoteInput } from './planning_notes.js?v=20261016-planning-optimization';
 
 export function openTaskForm(task, { occurrences, initRetroFields, onSaved,
   allowedTypes = TASK_TYPES, createTask = null, onCreated = null }) {
@@ -20,6 +20,7 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved,
       || occurrences.some((o) => o.task_id === task.id));
   const value = (field, fallback = '') => (task ? (task[field] ?? fallback) : fallback);
   const typeSelectOptions = TASK_TYPES.filter(t => allowedTypes.includes(t)).map((t) => ({ value: t, label: TASK_TYPE_LABELS[t] }));
+  if (!editing) typeSelectOptions.unshift({ value: '', label: '请选择待办类型' });
   const weekdayChecks = WEEKDAY_NAMES.map((name, index) => `
     <label class="inline"><input type="checkbox" data-weekday value="${index}"
       ${(value('weekdays') || []).includes(index) ? 'checked' : ''}>周${name}</label>`).join('');
@@ -31,7 +32,8 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved,
         <input type="text" id="pf-content" value="${esc(value('content'))}" placeholder="例如：背单词"></div>
       ${noteInputHtml(value('note'), 'pf-note', 3)}
       <div class="field"><label>类型</label>
-        <div class="retro-select" data-retro-select="pf-type" data-retro-value="${esc(value('task_type', 'daily'))}"></div></div>
+        <div class="retro-select" data-retro-select="pf-type" data-retro-value="${esc(editing ? value('task_type') : '')}"></div>
+        <div id="pf-type-error" role="alert" hidden></div></div>
       <div data-type-block="interval" style="display:none">
         <div class="field"><label>刷新方式</label>
           <div class="tag-row">
@@ -249,7 +251,8 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved,
         }
       }
       const type = typeSelect.value;
-      if (!allowedTypes.includes(type)) throw new Error('此入口仅允许创建有效的重复待办');
+      if (!type) throw new Error('请选择待办类型');
+      if (!allowedTypes.includes(type)) throw new Error('此入口仅允许创建有效的重复待办类型');
       const body = {
         content: root.querySelector('#pf-content').value.trim(),
         note: noteEditor.read(),
@@ -370,7 +373,8 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved,
         message = '未收到保存结果，请重试确认';
       }
       const area = root.querySelector(
-        message.includes('目标日期') || message.includes('单次待办已生成')
+        message.includes('待办类型') ? '#pf-type-error'
+          : message.includes('目标日期') || message.includes('单次待办已生成')
           ? '#pf-once-error'
           : (message.includes('间隔') || message.includes('after_completion'))
             ? '#pf-interval-error' : '#pf-window-error');

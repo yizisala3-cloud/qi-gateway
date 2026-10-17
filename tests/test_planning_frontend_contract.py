@@ -312,21 +312,17 @@ class PlanningPageContractTests(unittest.TestCase):
     def test_no_emoji_icons(self):
         self.assertIsNone(EMOJI_PATTERN.search(self.sources))
 
-    def test_detail_alarm_controls_patch_task(self):
-        # BUG-11：详情栏「提醒」行可操作（闹钟勾选 + 计时器文本框 + 保存提醒），
-        # 保存走 PATCH /admin/api/planning/tasks/{task_id}，留空传 null，成功后刷新详情与列表
+    def test_detail_alarm_controls_share_general_save(self):
+        # 原提醒位置统一保存详情及提醒，真实原子写入由 PG/浏览器验收覆盖。
         for marker in (
             "data-alarm-controls",
             'data-act="occ-save-alarm"',
             "data-alarm-start",
             "data-alarm-end",
             "data-timer-input",
-            "保存提醒",
+            "data-detail-save-slot",
             "saveOccurrenceAlarm",
-            "`/admin/api/planning/tasks/${taskId}`",
-            "timer_minutes: timer || null",
-            "alarm_start: host.querySelector('[data-alarm-start]').checked",
-            "if (fresh && this.selectionIsCurrent(owner)) this.showOccurrenceDetail(fresh, { preserveInputs: true });",
+            "this.detailEdit.saveCurrent(occ.task_id, occ)",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.page)

@@ -1,31 +1,36 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
 // 数据按需加载：今日看板保留 30 秒提醒轮询，首次/失效切入时刷新可见列表。
-import { gw } from '../api.js?v=20261016-memo-detail-latency';
+import { gw } from '../api.js?v=20261016-planning-optimization';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, esc,
   createDetailPanel,
-} from '../ui.js?v=20261016-memo-detail-latency';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261016-memo-detail-latency';
-import { createRetroSelectField } from '../lib/retro_select.js?v=20261016-memo-detail-latency';
+} from '../ui.js?v=20261016-planning-optimization';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261016-planning-optimization';
+import { createRetroSelectField } from '../lib/retro_select.js?v=20261016-planning-optimization';
 import {
   TASK_TYPE_LABELS, TASK_TYPES, STATUS_META, CLOSED_STATUSES,
   fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty, formatIntervalMinutes,
   itemMeta, isClosedOcc, formatLoggedDuration, durationText, durationDetailRows,
   itemBadges, itemHtml,
-} from '../lib/planning_display.js?v=20261016-memo-detail-latency';
-import { openTaskForm } from '../lib/planning_task_form.js?v=20261016-memo-detail-latency';
-import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261016-memo-detail-latency';
-import { createPlanningSort } from '../lib/planning_sort.js?v=20261016-memo-detail-latency';
-import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261016-memo-detail-latency';
-import { createPlanningMemo } from '../lib/planning_memo.js?v=20261016-memo-detail-latency';
-import { createPlanningReads } from '../lib/planning_reads.js?v=20261016-memo-detail-latency';
-import { taskNotePreview, openTaskNote, editTaskNoteInline } from '../lib/planning_notes.js?v=20261016-memo-detail-latency';
-import { mergeOrderReceipt, mergeOccurrencesFromBoard } from '../lib/planning_sync.js?v=20261016-memo-detail-latency';
-import { createPlanningGoals } from '../lib/planning_goals.js?v=20261016-memo-detail-latency';
+} from '../lib/planning_display.js?v=20261016-planning-optimization';
+import { openTaskForm } from '../lib/planning_task_form.js?v=20261016-planning-optimization';
+import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261016-planning-optimization';
+import { createPlanningSort } from '../lib/planning_sort.js?v=20261016-planning-optimization';
+import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261016-planning-optimization';
+import { createPlanningMemo } from '../lib/planning_memo.js?v=20261016-planning-optimization';
+import { createPlanningReads } from '../lib/planning_reads.js?v=20261016-planning-optimization';
+import { taskNotePreview, openTaskNote, editTaskNoteInline } from '../lib/planning_notes.js?v=20261016-planning-optimization';
+import { mergeOrderReceipt, mergeOccurrencesFromBoard } from '../lib/planning_sync.js?v=20261016-planning-optimization';
+import { createPlanningGoals } from '../lib/planning_goals.js?v=20261016-planning-optimization';
+import { createPlanningDetailEdit } from '../lib/planning_detail_edit.js?v=20261016-planning-optimization';
 
 const detailHeading = (label, name) => `<h4 class="plan-detail-section-title">${icon(name)}<span>${esc(label)}</span><span class="plan-detail-rule" aria-hidden="true"></span></h4>`;
 const detailRange = (start, end) => start && !end ? `${fmtClock(start)} ～` : fmtRange(start, end);
+const detailField = (taskId, field, html, editable, inline = false) => `<${inline ? 'span' : 'div'} class="v" data-detail-field="${field}">${editable
+  ? `<button class="plan-field-edit copyable-text" data-act="task-detail-edit" data-field="${field}" data-id="${taskId}" title="点击编辑${field === 'duration' ? '耗时' : '可安排时段'}">${html}</button>` : html}</${inline ? 'span' : 'div'}>`;
+const detailNote = (taskId, note, readOnly) => `<div data-detail-field="note">${taskNotePreview(taskId, note, { readOnly })
+  .replace('data-act="task-note"', readOnly ? 'data-act="task-note"' : 'data-act="task-detail-edit" data-field="note"')}</div>`;
 
 // 部分完成属于开放生命周期：实例仍在「进度中」，直到「已全部完成」才关闭
 const OPEN_STATUSES = ['pending', 'in_progress', 'deferred', 'partial'];
@@ -60,6 +65,7 @@ export default {
   taskForm: null,
   noteDialog: null,
   noteInline: null,
+  detailEdit: null,
   loadedTabs: null, // 仅用于备忘录的按需挂载
 
   async mount(root) {
@@ -133,7 +139,6 @@ export default {
           <div class="toolbar" style="margin-bottom:14px">
             <button class="btn btn-primary" data-act="new-task" data-toolbar-tab="today">${icon('plus')}新建待办</button>
             <button class="btn btn-secondary" data-act="recompute" data-toolbar-tab="todo">${icon('refresh')}重新计算时间</button>
-            <button class="btn btn-secondary" data-act="enter-reorder" id="planning-reorder-btn" data-toolbar-tab="todo">${icon('sort')}调整顺序</button>
             <button class="btn btn-primary" data-act="memo-new" data-toolbar-tab="memo" hidden>${icon('plus')}新建备忘录</button>
             <button class="btn btn-primary" data-goal-act="create" data-toolbar-tab="goals" hidden>${icon('plus')}新建目标</button>
           </div>
@@ -241,7 +246,21 @@ export default {
     this.detail = createDetailPanel(actionRoot, {
       fitViewport: true, centeredTablet: true,
       onDismiss: () => {
-        if (this.memo?.cancelPendingReader()) this.clearSelection();
+        if (this.selected && this.detailEdit?.isActive(this.selected.kind, this.selected.id)) this.clearSelection();
+        else if (this.memo?.cancelPendingReader()) this.clearSelection();
+      },
+    });
+    this.detailEdit ||= createPlanningDetailEdit({
+      getDetail: () => this.detail,
+      captureOwner: () => ({ selected: this.selected, reads: this.reads, tab: this.activeTab }),
+      isCurrent: owner => this.selectionIsCurrent(owner),
+      initRetroFields: scope => this.initRetroFields(scope),
+      onSaved: () => this.taskSaved(true),
+      onCancel: () => {
+        const row = this.selected?.kind === 'occ'
+          ? this.findOccurrence(this.selected.id) || this.occurrences.find(r => r.id === this.selected.id)
+          : this.tasks.find(t => t.id === this.selected?.id);
+        if (row) this.selected.kind === 'occ' ? this.showOccurrenceDetail(row) : this.showTaskDetail(row);
       },
     });
     this.goals ||= createPlanningGoals({ getDetail: () => this.detail,
@@ -574,11 +593,10 @@ export default {
     const progress = this.root.querySelector('#planning-progress');
     const attention = this.root.querySelector('#planning-attention');
     const done = this.root.querySelector('#planning-done');
-    const inReorder = this.reorderMode;
 
     progress.innerHTML = board.progress.length
       ? board.progress.map((occ) => this.itemHtml(occ, {
-        draggable: inReorder,
+        draggable: true,
         idle: occ.task_type === 'idle',
       })).join('')
       : miniEmpty('今天还没有待办，新建一个或等 0 点刷新');
@@ -608,7 +626,7 @@ export default {
       const occ = this.findOccurrence(this.selected.id);
       if (occ) this.showOccurrenceDetail(occ, { preserveInputs: true });
     }
-    if (inReorder) this.attachDragHandlers();
+    this.attachDragHandlers();
   },
 
   findOccurrence(id) {
@@ -686,6 +704,7 @@ export default {
   /* ---------- 详情栏 ---------- */
 
   clearSelection() {
+    this.detailEdit?.detach();
     this.memo?.cancelReader();
     this.selected = null;
     this.root?.querySelectorAll('.plan-item.selected').forEach((el) => el.classList.remove('selected'));
@@ -698,6 +717,8 @@ export default {
   },
 
   select(kind, id) {
+    if (this.selected?.kind === kind && this.selected.id === id && this.detailEdit?.isActive(kind, id)) return;
+    this.detailEdit?.detach();
     this.selected = { kind, id };
     this.root.querySelectorAll('.plan-item').forEach((el) => el.classList.remove('selected'));
     if (kind === 'occ') {
@@ -712,20 +733,24 @@ export default {
   async showOccurrenceDetail(occ, { preserveInputs = false } = {}) {
     if (!this.detail || this.selected?.kind !== 'occ' || this.selected.id !== occ.id
         || !['today', 'all'].includes(this.activeTab)) return;
+    if (this.detailEdit?.isActive('occ', occ.id)) return;
     this.markSelected(`[data-occ="${occ.id}"], [data-occ-all="${occ.id}"]`);
-    const title = `<span class="copyable-text">${esc(occ.content)}</span>`;
+    const title = occ.task_is_active && !(occ.task_type === 'once' && isClosedOcc(occ))
+      ? `<button class="plan-title-edit copyable-text" data-act="task-detail-edit" data-id="${occ.task_id}" aria-label="编辑待办名称">${esc(occ.content)}${icon('edit')}</button>`
+      : `<span class="copyable-text">${esc(occ.content)}</span>`;
     const badges = `<div class="tag-row">${tag(esc(TASK_TYPE_LABELS[occ.task_type] || ''), 'gold')}${this.itemBadges(occ)}</div>`;
+    const editable = occ.task_is_active && !(occ.task_type === 'once' && isClosedOcc(occ));
     const facts = `
       <section class="plan-detail-section" aria-label="时间安排">
         ${detailHeading('时间安排', 'clock')}
         <div class="plan-detail-times">
-          <div class="plan-detail-time"><span>${icon('clock')}预估时间</span><strong>${occ.time_updating ? '更新中…' : detailRange(occ.est_start, occ.est_end)}</strong></div>
-          <div class="plan-detail-time"><span>${icon('clock')}实际时间</span><strong>${detailRange(occ.actual_start, occ.actual_end)}</strong></div>
+          <div class="plan-detail-time" data-act="occ-edit-estimate" data-id="${occ.id}"><span class="plan-detail-duration-label"><span>${icon('clock')}预估时间</span>${detailField(occ.task_id, 'duration', `${occ.estimated_minutes ?? '-'}m`, editable, true)}</span><strong><button type="button" class="plan-time-edit" data-act="occ-edit-estimate" data-id="${occ.id}" aria-label="修改预估时间">${occ.is_parked ? '已沉底 · 暂不排程' : occ.time_updating ? '更新中…' : detailRange(occ.est_start, occ.est_end)}</button></strong></div>
+          <div class="plan-detail-time" data-act="occ-backfill" data-id="${occ.id}"><span>${icon('clock')}实际时间</span><strong><button type="button" class="plan-time-edit" data-act="occ-backfill" data-id="${occ.id}" aria-label="修改实际时间">${detailRange(occ.actual_start, occ.actual_end)}</button></strong></div>
         </div>
-        ${(occ.window_start_at || occ.window_end_at) ? `<div class="kv"><span class="k">可安排时段</span><span class="v">${[
+        ${(editable || occ.window_start_at || occ.window_end_at) ? `<div class="kv"><span class="k">可安排时段</span>${detailField(occ.task_id, 'window', [
           occ.window_start_at ? `不早于 ${fmtClock(occ.window_start_at)}` : '',
           occ.window_end_at ? `最晚完成 ${fmtClock(occ.window_end_at)}` : '',
-        ].filter(Boolean).join('，')}</span></div>` : ''}
+        ].filter(Boolean).join('，') || '未设置', editable)}</div>` : ''}
         ${occ.is_limited ? `<div class="kv"><span class="k">限时截止</span><span class="v">${fmtClock(occ.deadline_at)}</span></div>` : ''}
         ${occ.partial_note ? `<div class="kv kv-block"><div class="k">部分完成备注：</div><div class="v copyable-text">${esc(occ.partial_note)}</div></div>` : ''}
         ${occ.partial_at ? `<div class="kv"><span class="k">部分完成时间</span><span class="v">${fmtDue(occ.partial_at)}</span></div>` : ''}
@@ -733,7 +758,7 @@ export default {
 `;
     const state = `
         ${this.conflictById?.get(occ.id) ? `<div class="kv kv-block"><span class="k">排程冲突</span><span class="v">${esc(this.conflictById.get(occ.id).reason)}</span></div>` : ''}
-        ${taskNotePreview(occ.task_id, occ.note, { readOnly: !OPEN_STATUSES.includes(occ.status) })}`;
+        ${detailNote(occ.task_id, occ.note, !OPEN_STATUSES.includes(occ.status))}`;
     const actions = this.occurrenceActions(occ);
     const factsHost = this.detail.body.querySelector(`[data-occ-readonly="${occ.id}"]`);
     if (preserveInputs && factsHost) {
@@ -759,55 +784,22 @@ export default {
       }
       return;
     }
-    this.detail.render({ title, badges, actions, html: `
+    this.detail.render({ title, badges, actions, html: `<div data-detail-edit-slot></div>
       <div data-occ-readonly="${occ.id}">${facts}</div>
         <section class="plan-detail-section plan-detail-reminders" aria-label="提醒"><div class="plan-alarm-controls">
           <div class="tag-row" data-alarm-controls data-task-id="${occ.task_id}">
             <label class="inline"><input type="checkbox" data-alarm-start ${occ.alarm_start ? 'checked' : ''}> 开始闹钟</label>
             <label class="inline"><input type="checkbox" data-alarm-end ${occ.alarm_end ? 'checked' : ''}> 结束闹钟</label>
             <label class="plan-detail-timer"><span>计时器</span><input type="text" data-timer-input aria-label="计时器" placeholder="计时器，如 1h30m" value="${esc(occ.timer_minutes ?? '')}"></label>
-            <button class="btn btn-secondary btn-sm" data-act="occ-save-alarm" data-id="${occ.id}">${icon('check')}保存提醒</button>
+            <div data-detail-save-slot><button class="btn btn-secondary btn-sm" data-act="occ-save-alarm" data-id="${occ.id}">${icon('check')}保存</button></div>
           </div>
         </div></section>
       <section class="plan-detail-section plan-detail-state" data-occ-state>${state}</section>` });
   },
 
-  /** BUG-11：详情栏「保存提醒」→ PATCH 所属任务定义的闹钟/计时器字段。 */
   async saveOccurrenceAlarm(occId) {
-    const owner = { selected: this.selected, reads: this.reads, tab: this.activeTab };
-    const host = this.detail?.body?.querySelector('[data-alarm-controls]');
-    if (!host) return;
-    const taskId = Number(host.dataset.taskId);
-    const timer = host.querySelector('[data-timer-input]').value.trim();
-    const values = {
-      alarm_start: host.querySelector('[data-alarm-start]').checked,
-      alarm_end: host.querySelector('[data-alarm-end]').checked,
-      timer_minutes: timer || null,
-    };
-    try {
-      await gw(`/admin/api/planning/tasks/${taskId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(values),
-      });
-      this.planningChanged();
-      toast('提醒已保存');
-      if (this.selectionIsCurrent(owner)
-          && host === this.detail.body.querySelector('[data-alarm-controls]')) {
-        host.querySelector('[data-alarm-start]').defaultChecked = values.alarm_start;
-        host.querySelector('[data-alarm-end]').defaultChecked = values.alarm_end;
-        host.querySelector('[data-timer-input]').defaultValue = timer;
-      }
-      if (this.reads !== owner.reads || !this.root) return;
-      this.reads?.invalidate();
-      await this.loadToday();
-      if (this.reads !== owner.reads || !this.root) return;
-      await this.loadOccurrences();
-      const fresh = this.findOccurrence(occId) || this.occurrences.find((o) => o.id === occId);
-      if (fresh && this.selectionIsCurrent(owner)) this.showOccurrenceDetail(fresh, { preserveInputs: true });
-    } catch (error) {
-      toast(`保存提醒失败：${error.message}`, 'err');
-    }
+    const occ = this.findOccurrence(occId) || this.occurrences.find(row => row.id === occId);
+    if (occ) await this.detailEdit.saveCurrent(occ.task_id, occ);
   },
 
   occurrenceActions(occ) {
@@ -816,6 +808,7 @@ export default {
     const primary = [];
     const adjustments = [];
     const splits = [];
+    let parking = '';
     const danger = [];
     if (occ.status === 'pending') {
       primary.push(btn('start', '开始', 'check', 'btn-primary'));
@@ -835,8 +828,17 @@ export default {
       adjustments.push(btn('defer', '延后', 'clock'));
       adjustments.push(btn('discard-this', '此次不执行'));
       adjustments.push(btn('edit-time', '调整时段', 'edit'));
+      const rows = [...(this.board?.progress || []), ...(this.board?.done || []),
+        ...(this.board?.attention || []), ...this.occurrences];
+      const round = occ.phase ? [...new Map(rows.filter(r => r.task_id === occ.task_id
+        && r.round_key === occ.round_key && r.phase_group === occ.phase_group).map(r => [r.id, r])).values()] : [occ];
+      if ((!occ.phase || round.length === 2) && round.every(r => ['pending', 'deferred'].includes(r.status)
+        && !['actual_start', 'actual_end', 'partial_at', 'handled_at', 'closed_at'].some(k => r[k]))) {
+        parking = btn('park', occ.is_parked ? '恢复排程' : '当前轮沉底', 'sort');
+      }
       splits.push(btn('spawn-remaining', '剩余另建待办', 'plus'));
       splits.push(btn('split', '拆分待办', 'layers'));
+      if (parking) splits.push(parking);
       danger.push(btn('discard', '删除待办', 'trash', 'btn-danger-line'));
     }
     if (occ.status === 'timeout') {
@@ -845,15 +847,11 @@ export default {
       adjustments.push(btn('discard-this', '此次不执行'));
       danger.push(btn('discard', '删除待办', 'trash', 'btn-danger-line'));
     }
-    if (CLOSED_STATUSES.includes(occ.status)) {
-      // 已关闭历史不复活（过去不重写）：只允许补填实际时间
-      primary.push(btn('backfill', '补填实际时间', 'edit'));
-    }
     return [
       primary.length || adjustments.length || splits.length || danger.length ? detailHeading('操作', 'grid') : '',
       primary.length ? `<div class="plan-detail-actions plan-detail-actions-primary" role="group" aria-label="执行操作">${primary.join('')}</div>` : '',
       adjustments.length ? `<div class="plan-detail-actions" role="group" aria-label="调整待办">${adjustments.join('')}</div>` : '',
-      splits.length ? `<div class="plan-detail-actions plan-detail-actions-split" role="group" aria-label="拆分与续办">${splits.join('')}</div>` : '',
+      splits.length ? `<div class="plan-detail-actions plan-detail-actions-split${parking ? ' has-parking' : ''}" role="group" aria-label="拆分与续办">${splits.join('')}</div>` : '',
       danger.length ? `<div class="plan-detail-actions plan-detail-actions-danger" role="group" aria-label="删除操作">${danger.join('')}</div>` : '',
     ].join('');
   },
@@ -861,6 +859,7 @@ export default {
   async showTaskDetail(task) {
     if (!this.detail || this.activeTab !== 'all' || this.selected?.kind !== 'task'
         || this.selected.id !== task.id) return;
+    if (this.detailEdit?.isActive('task', task.id)) return;
     if (this.noteInline?.isActive() && this.noteInline.root.dataset.id === String(task.id)) return;
     this.markSelected(`[data-task="${task.id}"]`);
     const parts = [];
@@ -879,7 +878,7 @@ export default {
       const paused = task.refresh_enabled === false;
       parts.push(`<button class="btn btn-secondary btn-sm" data-act="${paused ? 'task-resume-refresh' : 'task-pause-refresh'}" data-id="${task.id}">${icon(paused ? 'refresh' : 'clock')}${paused ? '恢复刷新' : '暂停刷新'}</button>`);
     }
-    parts.push(`<button class="btn btn-secondary btn-sm" data-act="task-edit" data-id="${task.id}">${icon('edit')}编辑</button>`);
+    parts.push(`<button class="btn btn-secondary btn-sm" data-act="task-edit" data-id="${task.id}">${icon('edit')}重复规则与中空配置</button>`);
     if (task.is_active) {
       parts.push(`<button class="btn btn-danger-line btn-sm" data-act="task-discard" data-id="${task.id}">${icon('trash')}删除待办</button>`);
     } else if (task.deleted_at) {
@@ -893,9 +892,9 @@ export default {
       parts.push(`<button class="btn btn-secondary btn-sm" data-act="task-enable" data-id="${task.id}">${icon('refresh')}重新启用</button>`);
     }
     this.detail.render({
-      title: `<span class="copyable-text">${esc(task.content)}</span>`,
+      title: task.is_active ? `<button class="plan-title-edit copyable-text" data-act="task-detail-edit" data-id="${task.id}" aria-label="编辑待办名称">${esc(task.content)}${icon('edit')}</button>` : `<span class="copyable-text">${esc(task.content)}</span>`,
       badges: `<div class="tag-row">${tag(esc(TASK_TYPE_LABELS[task.task_type] || ''), 'gold')}${task.refresh_enabled === false && task.is_active ? tag('刷新已暂停', 'slate') : ''}${task.is_active ? '' : tag('已删除', 'red')}</div>`,
-      html: `
+      html: `<div data-detail-edit-slot></div>
       <section class="plan-detail-section" aria-label="重复与刷新">
         ${detailHeading('重复与刷新', 'calendar')}
         <div class="kv"><span class="k">重复规则</span><span class="v">${esc(taskTypeSummary(task))}</span></div>
@@ -906,10 +905,10 @@ export default {
       </section>
       <section class="plan-detail-section" aria-label="时间安排">
         ${detailHeading('时间安排', 'clock')}
-        <div class="kv"><span class="k">可安排时段</span><span class="v">${(task.window_start_tod || task.window_end_tod)
+        <div class="kv"><span class="k">可安排时段</span>${detailField(task.id, 'window', (task.window_start_tod || task.window_end_tod)
           ? `${esc(task.window_start_tod || '无')} ～ ${esc(task.window_end_tod || '无')}${(task.window_start_tod && task.window_end_tod && task.window_end_tod < task.window_start_tod) ? '（结束在次日）' : ''}`
-          : '未设置（正常自动排程）'}</span></div>
-        ${task.estimated_minutes ? `<div class="kv"><span class="k">预估耗时</span><span class="v">${task.estimated_minutes}m</span></div>` : ''}
+          : '未设置（正常自动排程）', task.is_active)}</div>
+        <div class="kv"><span class="k">预估耗时</span>${detailField(task.id, 'duration', task.is_hollow ? `开始 ${task.hollow_start_minutes}m · 结束 ${task.hollow_end_minutes}m` : `${task.estimated_minutes ?? '-'}m`, task.is_active)}</div>
         ${task.is_hollow ? `<div class="kv kv-block"><span class="k">中空待办</span><span class="v">
           开始：${esc(task.hollow_start_content || task.content)}（${task.hollow_start_minutes}m）
           → 中间 ${task.hollow_wait_minutes}m${task.hollow_wait_note ? `（${esc(task.hollow_wait_note)}）` : ''}
@@ -925,7 +924,7 @@ export default {
         ].filter(Boolean).join('、') || '无'}</span></div>
         ${task.next_due ? `<div class="kv muted text-sm"><span class="k">下次到期</span><span class="v">${fmtDue(task.next_due)}</span></div>` : ''}
         <div class="kv muted text-sm"><span class="k">生成游标</span><span class="v">${esc(task.cursor_date || '-')}</span></div>
-      </section>${taskNotePreview(task.id, task.note, { readOnly: !task.is_active })}`,
+      </section><div data-detail-save-slot></div>${detailNote(task.id, task.note, !task.is_active)}`,
       actions: `${detailHeading('操作', 'grid')}${parts.join('')}`,
     });
   },
@@ -1051,6 +1050,20 @@ export default {
   },
 
   async occurrenceAction(act, id) {
+    if (act === 'edit-estimate' || act === 'backfill') {
+      const occ = this.findOccurrence(id) || this.occurrences.find(row => row.id === id);
+      if (!occ) return;
+      if (this.detailEdit.isBlocked(occ.task_id)) { toast('请先等待或核实当前保存结果', 'warn'); return; }
+      const owner = { selected: this.selected, reads: this.reads, tab: this.activeTab };
+      if (!await this.detailEdit.finish() || !this.selectionIsCurrent(owner)) return;
+      this.showOccurrenceDetail(this.findOccurrence(id) || this.occurrences.find(row => row.id === id) || occ);
+      return act === 'edit-estimate' ? this.dialogs.askEstimateTime(id) : this.dialogs.askBackfill(id);
+    }
+    if (act === 'edit-detail' || act === 'park') {
+      const occ = this.findOccurrence(id) || this.occurrences.find(r => r.id === id);
+      if (occ) return act === 'park' ? this.detailEdit.park(occ) : this.detailEdit.open(occ.task_id, occ);
+      return;
+    }
     const reads = this.reads;
     const post = async (path, body) => {
       const result = await gw(`/admin/api/planning/occurrences/${id}${path}`, {
@@ -1081,7 +1094,6 @@ export default {
           ? '待办已删除：从未有过完成记录，相关业务记录已清除'
           : '待办已删除：完成历史已保留');
       } else if (act === 'edit-time') return this.askEditTime(id);
-      else if (act === 'backfill') return this.askBackfill(id);
       else if (act === 'split') return this.askSplit(id);
       else if (act === 'spawn-remaining') return this.askRemaining(id);
       toast('已更新');
@@ -1096,6 +1108,13 @@ export default {
   },
 
   async taskAction(act, id, el = null) {
+    if (act === 'detail-edit') {
+      const occ = this.selected?.kind === 'occ'
+        ? this.findOccurrence(this.selected.id) || this.occurrences.find(r => r.id === this.selected.id) : null;
+      if (occ && occ.task_id !== id) return;
+      if (!occ && (this.selected?.kind !== 'task' || this.selected.id !== id)) return;
+      return this.detailEdit.open(id, occ, el?.dataset.field || 'name');
+    }
     if (act === 'note') return this.openNoteForSelection(id);
     const owner = { selected: this.selected, reads: this.reads, tab: this.activeTab };
     try {
@@ -1259,14 +1278,23 @@ export default {
   /* ---------- 事件委托（详情动作） ---------- */
 
   bindDetailActions(scope, mountedReads) {
-    scope.addEventListener('click', (e) => {
+    scope.addEventListener('change', event => {
+      if (this.reads !== mountedReads || !event.target.closest('[data-alarm-controls] input')) return;
+      if (this.selected?.kind === 'occ') void this.saveOccurrenceAlarm(this.selected.id);
+    });
+    scope.addEventListener('click', async (e) => {
       if (this.reads !== mountedReads) return;
+      if (e.target.closest('.plan-inline-durations, [data-edit-title], #pe-note')) return;
       const el = e.target.closest('[data-act]');
       if (!el || el.disabled) return;
       const act = el.dataset.act;
       const id = Number(el.dataset.id);
+      if (el.closest('.detail-foot') && this.selected && this.detailEdit.isActive(this.selected.kind, this.selected.id)) {
+        const owner = { selected: this.selected, reads: this.reads, tab: this.activeTab };
+        if (!await this.detailEdit.finish() || !this.selectionIsCurrent(owner)) return;
+      }
       const selection = window.getSelection?.();
-      if (act === 'task-note' && selection && !selection.isCollapsed && el.contains(selection.anchorNode)) return;
+      if (['task-note', 'task-detail-edit'].includes(act) && selection && !selection.isCollapsed && el.contains(selection.anchorNode)) return;
       if (act.startsWith('occ-')) {
         e.stopPropagation();
         this.occurrenceAction(act.slice(4), id);
@@ -1278,15 +1306,16 @@ export default {
     scope.addEventListener('keydown', event => {
       if (this.reads !== mountedReads) return;
       if (event.target.closest('textarea, input, button')) return;
-      const note = event.target.closest('[data-act="task-note"]');
+      const note = event.target.closest('[data-act="task-note"], [data-act="task-detail-edit"]');
       if (!note || !['Enter', ' '].includes(event.key)) return;
       event.preventDefault();
-      this.openNoteForSelection(Number(note.dataset.id));
+      if (note.dataset.act === 'task-detail-edit') this.taskAction('detail-edit', Number(note.dataset.id), note);
+      else this.openNoteForSelection(Number(note.dataset.id));
     });
   },
 
   handleItemClick(e) {
-    if (this.reorderMode) return;
+    if (e.target.closest('.plan-handle')) return;
     const occEl = e.target.closest('[data-occ]');
     if (occEl) { this.select('occ', Number(occEl.dataset.occ)); return; }
     const occAllEl = e.target.closest('[data-occ-all]');

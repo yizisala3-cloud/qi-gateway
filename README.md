@@ -168,6 +168,41 @@
 
 取消字数上限还需应用 `supabase/migrations/20261015010000_planning_task_notes_unlimited.sql`，移除两张表原有的 60 字约束后再更新网关与前端；备注同步和历史保留规则保持不变。
 
+## 10.16 规划管理优化
+
+详情名称可原位编辑，并在同一详情区域修改备注、耗时与可安排时段。
+保存时明确显示生效范围：未开始的所选轮次与未来定义同步；已有执行事实时
+名称备注仍同步开放记录，时间只影响未来；已关闭历史保持原值。中空阶段名称
+可直接编辑，耗时与窗口按整轮校验。重复规则仍沿用原有未来轮次语义。
+
+新建待办类型初始未选择，包括目标内新建入口。当前列表常驻拖动把手，
+连续拖动后统一确认或取消。当前轮可以沉底并恢复：沉底退出排程、占用槽和
+冲突计算，保留原截止、生命周期、执行事实及提醒设置，新轮次不继承沉底。
+
+发布前按顺序应用以下增量迁移，再更新网关与前端：
+
+1. `supabase/migrations/20261017010000_planning_detail_edit_and_parking.sql`
+2. `supabase/migrations/20261017020000_planning_parked_recompute_guard.sql`
+3. `supabase/migrations/20261017030000_planning_detail_once_absence_guard.sql`
+4. `supabase/migrations/20261017040000_planning_detail_general_save.sql`
+
+本地已使用完整迁移链的一次性 PostgreSQL 验证；本轮没有执行或核验生产迁移，
+没有提交、推送或部署。所选轮次编辑通过 `GET/POST /admin/api/planning/tasks/{id}/detail-edit`
+获取生效范围与并发 token，再携带 UUID `Idempotency-Key` 保存。模板、当前轮和
+回执在同一事务提交；结果未知时重试原请求，冲突时保留草稿并明确重读范围。
+原任务 PATCH 保留只编辑定义的兼容语义。
+
+固定周期详情上下文先结清旧轴欠轮再冻结 token；单次空轮次在事务的任务锁内
+复核，生成抢先完成时整体拒绝。沉底排程资格与预估时间所有权分别判断。
+明确拒绝的未知保存结束恢复记录，未生成单次允许编辑合法耗时与窗口。
+
+专项：`pytest tests/test_planning_optimization_pgserver.py --db`。
+审查修复专项：`pytest tests/test_planning_detail_review_fixes_pgserver.py --db`；
+前端专项：`python tests/run_planning_optimization_browser.py tests/planning_detail_review_fixes.browser.cjs`。
+浏览器验收：`python tests/run_planning_optimization_browser.py`，自动启动并停止端口
+8026 的隔离 API/PG；需要本机 Edge 与 Playwright。Windows 测试设置
+`PYTHONUTF8=1`、`PGTZ=Asia/Shanghai`，避免旧用例的编码与时间字符串格式差异。
+
 ## 长期目标一期
 
 规划管理的“长期目标”支持目标增删改、重复待办一对一关联、目标内新建并关联、
@@ -232,3 +267,5 @@ Node 行为测试需要 PATH 中的 `node`，或已安装的 `nodejs-bin`；缺�
 - 跳过原因默认显示（pytest.ini 的 `-rs`）：不加 `--db` 的每次运行都会列出如何启用真库测试。
 
 另有一个未接入 pytest 的浏览器验收脚本 `tests/frontend_planning_create_latency.browser.cjs`（导出 `runPlanningTests`，需外部 Playwright harness 与本地预览服务驱动）；本仓库未安装 Playwright，需要时另行接入，勿与 quickjs/Node 前端测试混淆。
+
+规划详情支持按原样式无边框编辑，离开编辑位置自动保存；原提醒位置的通用“保存”将实际修改字段和提醒一起提交。该保存依赖新增迁移 `supabase/migrations/20261017040000_planning_detail_general_save.sql`，须在前三份规划详情迁移后执行。当前仅本地隔离验证，未发布。

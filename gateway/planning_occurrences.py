@@ -171,6 +171,7 @@ def _window_edit_gate(
 
 def _occurrence_window_edit(
     client, occ: dict[str, Any], task: dict[str, Any], payload: dict[str, Any], now: datetime,
+    *, round_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """当前实例窗口编辑：绝对时间收窄 / 平移 / 改单边 / 钉住（§18.3，批次 6）。
 
@@ -201,7 +202,7 @@ def _occurrence_window_edit(
 
     返回 ``(目标行补丁, 同轮另一阶段补丁 | None)``；两补丁均已含窗口字段。
     """
-    rows = _occurrence_round_rows(client, occ)
+    rows = round_rows if round_rows is not None else _occurrence_round_rows(client, occ)
     _window_edit_gate(rows, task)
     current = rows[0]
     start_raw = (payload["window_start_at"] if "window_start_at" in payload
@@ -250,7 +251,7 @@ def _occurrence_window_edit(
     anchored_equal_window = False
     for row in rows:
         slot = scheduler._slot_range(row)
-        if slot is None or scheduler._freely_schedulable(row, task):
+        if slot is None or scheduler._estimate_is_movable(row):
             continue
         slot_start, slot_end = slot
         slot_start_abs = slot_start.astimezone(timezone.utc)

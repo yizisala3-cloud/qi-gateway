@@ -36,6 +36,7 @@ function matchesSnapshot(occ, before, committed = null) {
 // clock rather than the browser clock. No lifecycle or scheduling writes occur.
 export function scheduleLabel(occ, now) {
   if (occ.status === 'timeout') return '超时';
+  if (occ.is_parked) return '已沉底';
   if (occ.status === 'deferred') return '落后';
   const clock = timestampMicros(now);
   if (clock === null) return occ.schedule_label;
@@ -95,7 +96,7 @@ export function mergeOrderReceipt(board, ids, result, expectedBoard, priorOrderB
   return { ...source, recompute,
     conflicts: result?.schedule_applied ? [] : source.conflicts,
     progress: source.progress.map((occ) => mergeFields(occ, committed.get(occ.id), source.now || expectedBoard.now))
-      .sort((a, b) => a.sort_order - b.sort_order),
+      .sort((a, b) => Number(!!a.is_parked) - Number(!!b.is_parked) || a.sort_order - b.sort_order),
   };
 }
 

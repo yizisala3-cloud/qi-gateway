@@ -32,7 +32,7 @@ class GoalSqlQuery:
     def in_(self, field, values):
         from psycopg import sql
         self.conditions.append(sql.SQL('{} = any(%s)').format(sql.Identifier(field)))
-        self.params.append(values)
+        self.params.append(list(values))
         return self
 
     def is_(self, field, value):

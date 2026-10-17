@@ -277,7 +277,7 @@ def today_board(now: datetime | None = None) -> dict[str, Any]:
             # 作为关闭记录进入收场周期「已完成」；窗口 sweep 超时（§18.2）
             # 仍走 attention。
             done.append(item)
-    progress.sort(key=lambda item: (item["sort_order"], item["id"]))
+    progress.sort(key=lambda item: (bool(item.get("is_parked")), item["sort_order"], item["id"]))
     done.sort(key=lambda item: (item.get("closed_at") or "", item["id"]), reverse=True)
 
     attention = []

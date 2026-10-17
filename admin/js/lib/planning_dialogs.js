@@ -1,7 +1,7 @@
 // Instance dialogs: form-local inputs and timeout retry identity stay in their closures.
-import { gw } from '../api.js?v=20261016-memo-detail-latency';
-import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261016-memo-detail-latency';
-import { createRetroTimeField } from './retro_time.js?v=20261016-memo-detail-latency';
+import { gw } from '../api.js?v=20261016-planning-optimization';
+import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261016-planning-optimization';
+import { createRetroTimeField } from './retro_time.js?v=20261016-planning-optimization';
 
 function initDialogTimes(root) {
   root.querySelectorAll('.retro-time[data-retro-for]').forEach(host => {
@@ -23,6 +23,17 @@ function initDialogTimes(root) {
         root.querySelectorAll('.retro-time-value').forEach(field => field.removeAttribute('aria-invalid'));
       });
     }
+  });
+}
+
+function bindTimeEnter(root) {
+  root.addEventListener('keydown', event => {
+    if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229 || event.shiftKey
+        || event.ctrlKey || event.metaKey || event.altKey
+        || !window.matchMedia('(hover: hover) and (pointer: fine)').matches
+        || !event.target.closest('.retro-time-field')) return;
+    event.preventDefault(); event.stopPropagation();
+    root.querySelector('[data-ok]').click();
   });
 }
 
@@ -228,6 +239,51 @@ export function createPlanningDialogs({
       };
     },
 
+    askEstimateTime(id) {
+      const occ = findOccurrence(id) || getOccurrences().find(row => row.id === id) || {};
+      const toLocal = iso => {
+        if (!iso) return '';
+        const d = new Date(iso), pad = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      };
+      const { root, close } = modal({
+        title: '修改预估时间',
+        body: `<div class="field"><label>预估开始</label><div class="retro-time" data-retro-for="planning-estimate-start" data-retro-value="${esc(toLocal(occ.est_start))}"></div></div>
+          <div class="field"><label>预估结束（可选）</label><div class="retro-time" data-retro-for="planning-estimate-end" data-retro-value="${esc(toLocal(occ.est_end))}"></div></div>
+          <p class="field-hint">只修改本次预估安排。结束留空时按预估耗时计算；保存后作为人工固定时间，不改变未来待办的时段。</p>
+          <p class="field-hint" data-time-feedback role="status"></p>`,
+        footer: '<button class="btn btn-secondary" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存</button>',
+      });
+      initDialogTimes(root);
+      bindTimeEnter(root);
+      root.querySelector('[data-cancel]').onclick = close;
+      root.querySelector('[data-ok]').onclick = async () => {
+        const save = root.querySelector('[data-ok]');
+        if (save.disabled) return;
+        const start = root.querySelector('#planning-estimate-start').value;
+        const end = root.querySelector('#planning-estimate-end').value;
+        const feedback = root.querySelector('[data-time-feedback]');
+        if (!start) { feedback.textContent = '请选择预估开始时间'; return; }
+        save.disabled = true;
+        try {
+          await gw(`/admin/api/planning/occurrences/${id}`, { method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+              est_start: new Date(start).toISOString(), ...(end ? { est_end: new Date(end).toISOString() } : {}),
+            }) });
+        } catch (error) {
+          save.disabled = false;
+          feedback.textContent = `未保存：${error.message}`;
+          return;
+        }
+        onChanged(); close(); toast('本次预估时间已更新');
+        try { await Promise.all([loadToday(), loadOccurrences()]); }
+        catch (error) {
+          console.error({ location: 'planning_dialogs.refreshEstimate', occurrenceId: id, stack: error.stack });
+          toast('预估时间已保存，列表更新失败，请刷新', 'warn');
+        }
+      };
+    },
+
     askBackfill(id) {
       const occ = findOccurrence(id) || {};
       const toLocal = (iso) => {
@@ -247,8 +303,11 @@ export function createPlanningDialogs({
                  <button class="btn btn-primary" data-ok>保存</button>`,
       });
       initDialogTimes(root);
+      bindTimeEnter(root);
       root.querySelector('[data-cancel]').onclick = close;
       root.querySelector('[data-ok]').onclick = async () => {
+        const save = root.querySelector('[data-ok]');
+        if (save.disabled) return;
         const start = root.querySelector('#planning-backfill-start').value;
         const end = root.querySelector('#planning-backfill-end').value;
         // 始终提交两个字段：留空 → null 即清除（BUG-6），actual_minutes 随之清空
@@ -256,18 +315,23 @@ export function createPlanningDialogs({
           actual_start: start ? new Date(start).toISOString() : null,
           actual_end: end ? new Date(end).toISOString() : null,
         };
+        save.disabled = true;
         try {
           await gw(`/admin/api/planning/occurrences/${id}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
           });
-          onChanged();
-          close();
-          toast('实际时间已更新');
-          await loadToday();
         } catch (error) {
+          save.disabled = false;
           toast(`保存失败：${error.message}`, 'err');
+          return;
+        }
+        onChanged(); close(); toast('实际时间已更新');
+        try { await loadToday(); }
+        catch (error) {
+          console.error({ location: 'planning_dialogs.refreshActual', occurrenceId: id, stack: error.stack });
+          toast('实际时间已保存，列表更新失败，请刷新', 'warn');
         }
       };
     },

@@ -35,6 +35,8 @@ def schedule_label(occ: dict[str, Any], task: dict[str, Any], now: datetime) -> 
     """排列状态标签：超时 / 落后 / 前进 / 正常（仅展示；「落后」避开与「延后」状态撞名）。"""
     if occ["status"] == "timeout":
         return "超时"
+    if occ.get("is_parked"):
+        return "已沉底"
     if occ["status"] == "deferred":
         return "落后"
     est_start = common._parse_dt(occ["est_start"], "est_start") if occ.get("est_start") else None
@@ -76,6 +78,7 @@ def serialize_occurrence(occ: dict[str, Any], task: dict[str, Any], now: datetim
         "time_mode": occ.get("time_mode_snapshot") or task["time_mode"],
         "task_is_active": task["is_active"],
         "status": occ["status"],
+        "is_parked": bool(occ.get("is_parked", False)),
         "est_start": occ.get("est_start"),
         "est_end": occ.get("est_end"),
         "nominal_start": occ.get("nominal_start"),

@@ -1,5 +1,5 @@
 // Planning display helpers: argument-only formatting and HTML; no DOM or network writes.
-import { tag, icon, esc } from '../ui.js?v=20261016-memo-detail-latency';
+import { tag, icon, esc } from '../ui.js?v=20261016-planning-optimization';
 
 export const TASK_TYPE_LABELS = {
   daily: '每日', interval: '间歇', weekly: '每周', monthly: '每月', once: '单次', idle: '闲时',
@@ -76,7 +76,8 @@ export function miniEmpty(msg) {
 
 export function itemMeta(occ) {
   const parts = [];
-  if (occ.time_updating) parts.push('预估时间更新中…');
+  if (occ.is_parked) parts.push('已沉底 · 暂不排程');
+  else if (occ.time_updating) parts.push('预估时间更新中…');
   else if (occ.est_start || occ.est_end) parts.push(`预估 ${fmtRange(occ.est_start, occ.est_end)}`);
   if (occ.actual_start || occ.actual_end) {
     parts.push(`实际 ${fmtRange(occ.actual_start, occ.actual_end)}`);
@@ -171,7 +172,8 @@ export function durationDetailRows(occ) {
 
 export function itemBadges(occ, conflictOccIds = null) {
   const badges = [statusTag(occ.status)];
-  if (occ.schedule_label && occ.schedule_label !== '正常') {
+  if (occ.is_parked) badges.push(tag('已沉底', 'slate'));
+  if (!occ.is_parked && occ.schedule_label && occ.schedule_label !== '正常') {
     badges.push(tag(esc(occ.schedule_label), occ.schedule_label === '超时' ? 'red' : 'amber'));
   }
   if (occ.is_fixed) badges.push(tag('固定', 'slate'));
@@ -185,8 +187,8 @@ export function itemBadges(occ, conflictOccIds = null) {
 export function itemHtml(occ, { draggable = false, closed = false, idle = false } = {}, conflictOccIds = null) {
   return `
     <div class="plan-item ${closed ? 'is-closed' : ''} ${idle ? 'is-idle' : ''}"
-         data-occ="${occ.id}" role="button" tabindex="0">
-      ${draggable ? `<span class="plan-handle" aria-hidden="true">${icon('menu')}</span>` : ''}
+         data-occ="${occ.id}" data-parked="${!!occ.is_parked}" role="button" tabindex="0">
+      ${draggable ? `<span class="plan-handle" aria-label="拖动调整顺序">${icon('menu')}</span>` : ''}
       <div class="plan-item-main">
         <div class="plan-item-title">${esc(occ.content)}</div>
         <div class="plan-item-meta"><span>${itemMeta(occ)}</span></div>

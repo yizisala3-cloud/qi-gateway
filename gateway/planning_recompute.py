@@ -54,6 +54,9 @@ def _recompute_expected_snapshot(occ: dict[str, Any]) -> dict[str, Any]:
         "is_fixed": bool(occ.get("is_fixed")),
         "schedule_managed": bool(occ.get("schedule_managed")),
         "sort_order": occ["sort_order"],
+        "is_parked": bool(occ.get("is_parked", False)),
+        "planned_minutes": occ.get("planned_minutes"),
+        "planned_wait_minutes": occ.get("planned_wait_minutes"),
     }
     # #25：生命周期事实字段集合单一来源（LIFECYCLE_FACT_FIELDS），与
     # _has_lifecycle_fact / 实例编辑门控同一集合，不复制第二份字段清单。
@@ -393,10 +396,14 @@ def save_order(ordered_ids: list[int], now: datetime | None = None, *,
     if missing:
         raise common.PlanningError("invalid_payload", "order must include every open occurrence of today")
     if expected_order is not None:
+        with_parking = isinstance(expected_order, list) and any(
+            isinstance(row, dict) and "is_parked" in row for row in expected_order)
+        keys = {"id", "sort_order", "status"} | ({"is_parked"} if with_parking else set())
         expected = [{"id": row["id"], "sort_order": row.get("sort_order", 0),
-                     "status": row["status"]} for row in open_rows]
+                     "status": row["status"], **({"is_parked": bool(row.get("is_parked"))} if with_parking else {})}
+                    for row in open_rows]
         if (not isinstance(expected_order, list)
-                or any(not isinstance(row, dict) or set(row) != {"id", "sort_order", "status"}
+                or any(not isinstance(row, dict) or set(row) != keys
                        for row in expected_order)
                 or sorted(expected_order, key=lambda row: str(row["id"]))
                 != sorted(expected, key=lambda row: str(row["id"]))):
@@ -404,6 +411,12 @@ def save_order(ordered_ids: list[int], now: datetime | None = None, *,
 
     # 中空待办的结束阶段必须排在其开始阶段之后。
     position = {occ_id: index for index, occ_id in enumerate(ordered_ids)}
+    parked_seen = False
+    for occ_id in ordered_ids:
+        if by_id[occ_id].get("is_parked"):
+            parked_seen = True
+        elif parked_seen:
+            raise common.PlanningError("schedule_conflict", "沉底待办必须保留在正常待办之后", 409)
     for occ_id, occ in by_id.items():
         if occ.get("phase") == "end":
             start_occ = next(

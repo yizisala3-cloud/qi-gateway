@@ -1,15 +1,15 @@
 // app.js - shell: login, sidebar, routing, theme, mobile drawers
-import { NAV, ROUTE_INDEX } from './routes.js?v=20261016-memo-detail-latency';
-import { loading, errorBlock, icon, esc } from './ui.js?v=20261016-memo-detail-latency';
-import { gw, getToken, setToken, clearToken } from './api.js?v=20261016-memo-detail-latency';
-import { initHeaderDivider } from './lib/header_divider.js?v=20261016-memo-detail-latency';
-import { initRetroSelects } from './lib/retro_select.js?v=20261016-memo-detail-latency';
-import { initRetroTooltips } from './lib/retro_tooltip.js?v=20261016-memo-detail-latency';
-import { initHelpNotes } from './lib/help_notes.js?v=20261016-memo-detail-latency';
-import { initScrollbars } from './lib/scrollbars.js?v=20261016-memo-detail-latency';
+import { NAV, ROUTE_INDEX } from './routes.js?v=20261016-planning-optimization';
+import { loading, errorBlock, icon, esc } from './ui.js?v=20261016-planning-optimization';
+import { gw, getToken, setToken, clearToken } from './api.js?v=20261016-planning-optimization';
+import { initHeaderDivider } from './lib/header_divider.js?v=20261016-planning-optimization';
+import { initRetroSelects } from './lib/retro_select.js?v=20261016-planning-optimization';
+import { initRetroTooltips } from './lib/retro_tooltip.js?v=20261016-planning-optimization';
+import { initHelpNotes } from './lib/help_notes.js?v=20261016-planning-optimization';
+import { initScrollbars } from './lib/scrollbars.js?v=20261016-planning-optimization';
 
 const DEFAULT_ROUTE = 'planning';
-const ASSET_VERSION = '20261016-memo-detail-latency';
+const ASSET_VERSION = '20261016-planning-optimization';
 
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);

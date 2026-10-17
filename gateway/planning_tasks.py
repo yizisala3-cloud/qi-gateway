@@ -1069,16 +1069,19 @@ def update_task(task_id: int, payload: Any, now: datetime | None = None) -> dict
         return _update_task(task_id, payload, now)
 
 
-def _update_task(task_id: int, payload: Any, now: datetime | None = None) -> dict[str, Any]:
+def _update_task(task_id: int, payload: Any, now: datetime | None = None, *,
+                 detail_edit=None) -> dict[str, Any]:
     now = now or runtime._now()
     client = runtime._require_client()
     task = runtime._fetch_task(client, task_id)
     if not task:
         raise common.PlanningError("not_found", "待办任务不存在", 404)
+    if detail_edit is not None and task != detail_edit.task:
+        raise common.ConcurrencyRejected("concurrent_modified", "待办定义已改变，请重读生效范围", 409)
     row = validate_task_payload(payload, partial=True)
     if not row:
         raise common.PlanningError("invalid_payload", "没有可修改的字段")
-    if set(row) == {"note"}:
+    if set(row) == {"note"} and detail_edit is None:
         # A database trigger updates the template and open snapshots in the
         # same transaction. Notes do not change scheduling or lifecycle facts.
         response = client.table("planning_task").update({
@@ -1120,6 +1123,14 @@ def _update_task(task_id: int, payload: Any, now: datetime | None = None) -> dic
             and common._canonical_template_value(field, row.get(field))
             != common._canonical_template_value(field, task.get(field))
             for field in common._ONCE_LOCKED_TEMPLATE_FIELDS)
+    if detail_edit is not None and detail_edit.occurrence_id is not None:
+        # A selected once round may edit its window atomically with its template.
+        # Its date, type and business identity remain locked.
+        once_identity_edit = once_identity_edit and any(
+            field in row and common._canonical_template_value(field, row[field])
+            != common._canonical_template_value(field, task.get(field))
+            for field in common._ONCE_LOCKED_TEMPLATE_FIELDS
+            if field not in ("window_start_tod", "window_end_tod"))
     if once_identity_edit:
         # 预检（友好错误；权威复核在写入阶段的锁内 RPC——最终修复问题 3）：
         # once 没有「未来轮次」可消费新模板，已生成实例存在时禁止实际变化
@@ -1271,6 +1282,8 @@ def _update_task(task_id: int, payload: Any, now: datetime | None = None) -> dic
     # 权威自批次 5 起为实例行 window_end_at）。任务模板编辑对已生成实例
     # 无任何同步（§18.3 / §28.1：已生成即已生成，不因模板编辑重新出生）。
 
+    if detail_edit is not None:
+        return detail_edit.commit(task, row, now)
     if once_identity_edit:
         # 最终修复（问题 3）：once 身份编辑的「检查无实例 → 保存新值」在
         # 数据库事务内以任务行 FOR UPDATE 锁原子完成（与生成的锁内插入
