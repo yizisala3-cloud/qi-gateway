@@ -15,7 +15,7 @@
 - F09/F10/F12 列表刷新：恢复按正确 status 重读；视图切换使旧响应失效；
   搜索中的写入按当前关键词重查；
 - F11 连续拖动：重排在途时不开新拖动；
-- F13 空标签删除入口：仅剩归档/回收站内容的标签也能从看板空态删除。
+- F13 空标签统一从标签管理处理，看板空态和标签详情不另设删除入口。
 
 所有断言基于真实执行的模块代码与保存泵，不接受「源码包含字符串」式替代。
 """
@@ -88,6 +88,12 @@ var __result = null, __error = null;
   let confirmResult = true;
   const confirmCalls = [];
   const confirm = (msg) => { confirmCalls.push(msg); return Promise.resolve(confirmResult); };
+
+  // 浏览器原生取消信号；共享 confirm 在专门的 Node/UI 测试中验证取消结算。
+  globalThis.AbortController = class {
+    constructor() { this.signal = { aborted: false }; }
+    abort() { this.signal.aborted = true; }
+  };
 
   const esc = (s) => String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -1136,7 +1142,7 @@ class MemoEditorBehaviorTests(unittest.TestCase):
 
     # ── F13：空标签删除入口 ───────────────────────────────────────
 
-    def test_f13_empty_tag_deletable_from_board_empty_state(self):
+    def test_f13_board_empty_and_tag_details_have_no_separate_delete_entry(self):
         scenario = r"""
         {
           const { m, body } = buildMemo();
@@ -1145,18 +1151,18 @@ class MemoEditorBehaviorTests(unittest.TestCase):
           m.tags = [{ id: 3, name: '只用过一次', position: 1 }];
           m.board = { sections: [] };
           m.render();
-          out.delete_button = body._html.includes('data-act="memo-delete-tag"')
-              && body._html.includes('data-tag-id="3"');
-          out.name_shown = body._html.includes('只用过一次');
+          out.board_no_delete = !body._html.includes('memo-delete-tag');
+          m.view = 'tag'; m.activeTagId = 3; m.render();
+          out.detail_no_delete = !body._html.includes('memo-delete-tag');
           // 未分类空态不提供删除
-          m.filterTagId = 'untagged';
+          m.activeTagId = 'untagged';
           m.render();
           out.untagged_no_delete = !body._html.includes('memo-delete-tag');
         }
         """
         out = self._run(scenario)
-        self.assertTrue(out["delete_button"], "空标签的看板空态必须提供删除入口（F13）")
-        self.assertTrue(out["name_shown"])
+        self.assertTrue(out["board_no_delete"])
+        self.assertTrue(out["detail_no_delete"])
         self.assertTrue(out["untagged_no_delete"])
 
 

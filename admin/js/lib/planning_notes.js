@@ -1,5 +1,5 @@
-import { gw } from '../api.js?v=20261016-planning-optimization';
-import { esc, icon, modal, toast } from '../ui.js?v=20261016-planning-optimization';
+import { gw } from '../api.js?v=20261017-hide-deleted-tasks';
+import { esc, icon, modal, toast } from '../ui.js?v=20261017-hide-deleted-tasks';
 
 // Count Unicode code points for display without limiting note length.
 export const noteLength = value => Array.from(String(value || '').replace(/\r\n?/g, '\n')).length;

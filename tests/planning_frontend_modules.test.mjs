@@ -192,6 +192,7 @@ const sortModule = await import(moduleUrl('lib/planning_sort.js'));
 const reminderModule = await import(moduleUrl('lib/planning_reminder.js'));
 const readsModule = await import(moduleUrl('lib/planning_reads.js'));
 const syncModule = await import(moduleUrl('lib/planning_sync.js'));
+const memoModule = await import(moduleUrl('lib/planning_memo.js'));
 const ui = await import(moduleUrl('ui.js'));
 const lastModal = () => masks.at(-1).querySelector('.modal');
 const response = (body = {}) => ({ ok: true, json: async () => body });
@@ -329,6 +330,196 @@ const checks = {
         await import(new URL(specifier, moduleUrl(file)));
       }
     }
+  },
+
+  async 'all-hide-deleted'() {
+    const active = { id: 1, content: '仍在刷新', task_type: 'daily', is_active: true, refresh_enabled: true };
+    const paused = { id: 2, content: '仅暂停刷新', task_type: 'daily', is_active: true, refresh_enabled: false };
+    const deleted = { id: 3, content: '删除且有完成历史', task_type: 'daily', is_active: false, deleted_at: '2026-10-17T17:00:00Z' };
+    const legacy = { id: 4, content: '旧停用且无完成历史', task_type: 'daily', is_active: false, deleted_at: null };
+    const activeHistory = { id: 11, task_id: 1, content: '有效任务的完成历史', task_type: 'daily', status: 'completed', task_is_active: true };
+    const pausedHistory = { id: 12, task_id: 2, content: '暂停任务的完成历史', task_type: 'daily', status: 'completed', task_is_active: true };
+    const deletedHistory = { id: 13, task_id: 3, content: '已删任务的完成历史', task_type: 'daily', status: 'completed', task_is_active: false };
+    const deletedOpen = { id: 14, task_id: 4, content: '已删任务的关闭实例', task_type: 'daily', status: 'discarded', task_is_active: false };
+    page.root = new Element(); page.activeTab = 'all'; page.selected = null;
+    page.tasks = [active, paused, deleted, legacy];
+    page.occurrences = [activeHistory, pausedHistory, deletedHistory, deletedOpen];
+    page.renderTasks(); page.renderOccurrences();
+    assert.deepEqual(page.tasks.map(t => t.id), [1, 2]);
+    assert.deepEqual(page.occurrences.map(o => o.id), [11, 12]);
+    assert.equal(page.root.querySelector('#planning-tasks-count').textContent, '2');
+    assert.equal(page.root.querySelector('#planning-occ-count').textContent, '2');
+    assert.ok(!page.root.querySelector('#planning-tasks').innerHTML.includes('data-task="3"'));
+    assert.ok(!page.root.querySelector('#planning-occurrences').innerHTML.includes('data-occ-all="13"'));
+    assert.equal(deleted.is_active, false); assert.equal(deletedHistory.status, 'completed');
+    // A stale response/cache merge cannot reintroduce a removed task or its count.
+    page.reads = readsModule.createPlanningReads();
+    page.readErrors = new Map();
+    respond = async ({ url }) => response(url.includes('/tasks?')
+      ? [active, paused, deleted, legacy] : [activeHistory, pausedHistory, deletedHistory, deletedOpen]);
+    await page.loadTasks(); await page.loadOccurrences();
+    assert.ok(requests.some(r => r.url.endsWith('/tasks?include_inactive=false')));
+    assert.ok(requests.some(r => r.url.endsWith('/occurrences?include_inactive=false')));
+    assert.deepEqual(page.tasks.map(t => t.id), [1, 2]);
+    assert.deepEqual(page.occurrences.map(o => o.id), [11, 12]);
+    // A selected record removed by a refresh also releases the detail panel.
+    const originalClear = page.clearSelection;
+    let cleared = 0;
+    page.clearSelection = () => { page.selected = null; cleared++; };
+    page.selected = { kind: 'task', id: 3 }; page.tasks = [deleted]; page.renderTasks();
+    assert.equal(cleared, 1); assert.equal(page.root.querySelector('#planning-tasks-count').textContent, '0');
+    assert.ok(page.root.querySelector('#planning-tasks').innerHTML.includes('还没有任务定义'));
+    page.selected = { kind: 'occ', id: 13 }; page.occurrences = [deletedHistory]; page.renderOccurrences();
+    assert.equal(cleared, 2); assert.equal(page.root.querySelector('#planning-occ-count').textContent, '0');
+    assert.ok(page.root.querySelector('#planning-occurrences').innerHTML.includes('没有符合筛选条件'));
+    page.clearSelection = originalClear;
+  },
+
+  async 'memo-tag-delete'() {
+    let tags = [{ id: 5, name: '购物' }, { id: 6, name: '<空标签>' }];
+    let tagFailure = false, deleteFailure = false, boardFailure = false;
+    const deleted = [];
+    respond = async ({ url: rawUrl, options }) => {
+      const url = new URL(rawUrl).pathname;
+      if (url === '/admin/api/memo/tags') {
+        if (tagFailure) throw new Error('offline');
+        return response(tags);
+      }
+      if (url.endsWith('/delete')) {
+        const id = Number(url.match(/tags\/(\d+)/)[1]);
+        if (deleteFailure && id === 6) return failure('删除失败');
+        assert.equal(options.method, 'POST');
+        deleted.push(id); tags = tags.filter(t => t.id !== id);
+        return response({ deleted: true });
+      }
+      if (boardFailure) throw new Error('board offline');
+      return response({ sections: [] });
+    };
+    const memo = memoModule.createPlanningMemo();
+    const root = new Element(); document.body.appendChild(root);
+    await memo.mount(root); await flush();
+    assert.ok(!root.innerHTML.includes('memo-manage-tags'), 'toolbar has no separate deletion action');
+    assert.ok(!root.innerHTML.includes('memo-delete-tag'));
+    memo.openTagManagement(); await flush();
+    let dialog = memo.tagDeletionModal;
+    let list = dialog.root.querySelector('[data-tag-delete-list]');
+    assert.ok(list.innerHTML.includes('&lt;空标签&gt;'), 'empty tags remain reachable and escaped');
+    assert.ok(list.innerHTML.includes('type="checkbox"'));
+    assert.ok(!list.innerHTML.includes('<button'), 'rows select tags rather than delete immediately');
+    assert.ok(!list.innerHTML.includes('未分类'), 'the virtual untagged group is not deletable');
+    memo.openTagManagement(); assert.equal(memo.tagDeletionModal, dialog);
+    const select = (id, checked = true, host = list) => {
+      const input = new Element(); input.checked = checked;
+      input.dataset.tagDeleteId = String(id); input.setAttribute('data-tag-delete-id', String(id));
+      return [...host.listeners.get('change')][0]({ target: input });
+    };
+    const submit = () => memo.tagDeletionModal.root.querySelector('[data-tag-delete-confirm]').onclick();
+    assert.equal(dialog.root.querySelector('[data-tag-delete-confirm]').disabled, true);
+    select(6);
+    assert.equal(dialog.root.querySelector('[data-tag-delete-confirm]').textContent, '确认删除（1）');
+    assert.deepEqual(deleted, [], 'selection itself never mutates tags');
+    dialog.root.querySelector('[data-tag-delete-close]').onclick();
+    assert.deepEqual(deleted, []);
+    memo.openTagManagement(); await flush(); dialog = memo.tagDeletionModal;
+    list = dialog.root.querySelector('[data-tag-delete-list]');
+    assert.equal(dialog.selectedTagIds.size, 0, 'cancel discards the pending selection');
+    select(6);
+    deleteFailure = true;
+    await submit();
+    assert.deepEqual(deleted, []);
+    assert.ok(dialog.selectedTagIds.has(6), 'failed tag stays selected for retry');
+    assert.ok(dialog.root.querySelector('[data-tag-delete-feedback]').textContent.includes('1 个标签未能删除'));
+    select(5); boardFailure = true; memo.filterTagId = 5;
+    let pending = submit();
+    await memo.deleteTags([5, 6]); // an in-flight batch cannot submit twice
+    await pending;
+    assert.deepEqual(deleted, [5], 'partial success only settles the committed tag');
+    assert.equal(memo.filterTagId, '');
+    assert.deepEqual(memo.tags.map(t => t.id), [6]);
+    assert.ok(!list.innerHTML.includes('data-tag-delete-id="5"'));
+    assert.ok(dialog.selectedTagIds.has(6));
+    assert.ok(memo.statusHost.innerHTML.includes('标签已删除，但列表刷新失败'));
+    assert.ok(memo.statusHost.innerHTML.includes('memo-reload'));
+    boardFailure = false; deleteFailure = false;
+    const refresh = new Element(); refresh.dataset.act = 'memo-reload'; refresh.setAttribute('data-act', 'memo-reload');
+    await memo.handleClick({ target: refresh });
+    assert.equal(memo.statusHost.innerHTML, '');
+    await submit();
+    assert.deepEqual(deleted, [5, 6]);
+    assert.ok(list.innerHTML.includes('还没有自定义标签'));
+    assert.equal(dialog.root.querySelector('[data-tag-delete-confirm]').disabled, true);
+    memo.dispose(); assert.equal(memo.tagDeletionModal, null);
+
+    tags = [{ id: 8, name: '重试读取' }];
+    const other = memoModule.createPlanningMemo();
+    const otherRoot = new Element(); document.body.appendChild(otherRoot);
+    await other.mount(otherRoot); await flush(); tagFailure = true;
+    other.openTagManagement(); await flush();
+    const otherList = other.tagDeletionModal.root.querySelector('[data-tag-delete-list]');
+    assert.ok(otherList.innerHTML.includes('标签读取失败'));
+    tagFailure = false;
+    const retry = new Element(); retry.setAttribute('data-tag-delete-retry', '');
+    await [...otherList.listeners.get('click')][0]({ target: retry });
+    assert.ok(otherList.innerHTML.includes('data-tag-delete-id="8"'));
+    tags = []; other.tagDeletionModal.close(); other.openTagManagement(); await flush();
+    assert.ok(other.tagDeletionModal.root.querySelector('[data-tag-delete-list]').innerHTML.includes('还没有自定义标签'));
+    other.dispose();
+
+    // Closing/reopening during a submitted delete must update the new dialog.
+    tags = [{ id: 7, name: '慢响应标签' }];
+    const racing = memoModule.createPlanningMemo();
+    const racingRoot = new Element(); document.body.appendChild(racingRoot);
+    await racing.mount(racingRoot); await flush();
+    racing.openTagManagement(); await flush();
+    const originalRespond = respond;
+    let releaseDelete;
+    const gate = new Promise(resolve => { releaseDelete = resolve; });
+    respond = async request => {
+      if (request.url.endsWith('/7/delete')) await gate;
+      return originalRespond(request);
+    };
+    select(7, true, racing.tagDeletionModal.root.querySelector('[data-tag-delete-list]'));
+    pending = racing.tagDeletionModal.root.querySelector('[data-tag-delete-confirm]').onclick(); await flush();
+    racing.tagDeletionModal.close(); racing.openTagManagement(); await flush();
+    const reopenedList = racing.tagDeletionModal.root.querySelector('[data-tag-delete-list]');
+    assert.ok(reopenedList.innerHTML.includes('disabled'));
+    releaseDelete(); await pending; await flush();
+    assert.ok(reopenedList.innerHTML.includes('还没有自定义标签'));
+    assert.ok(!reopenedList.innerHTML.includes('data-tag-delete-id="7"'));
+    racing.dispose();
+
+    // Unmount stops the remaining batch and isolates a late committed response.
+    tags = [{ id: 7, name: '在途标签' }, { id: 8, name: '未提交标签' }];
+    const disposed = memoModule.createPlanningMemo();
+    const disposedRoot = new Element(); document.body.appendChild(disposedRoot);
+    respond = originalRespond;
+    await disposed.mount(disposedRoot); await flush(); disposed.openTagManagement(); await flush();
+    const disposedList = disposed.tagDeletionModal.root.querySelector('[data-tag-delete-list]');
+    select(7, true, disposedList); select(8, true, disposedList);
+    let releaseLate;
+    const lateGate = new Promise(resolve => { releaseLate = resolve; });
+    respond = async request => { if (request.url.endsWith('/7/delete')) await lateGate; return originalRespond(request); };
+    pending = disposed.tagDeletionModal.root.querySelector('[data-tag-delete-confirm]').onclick(); await flush();
+    disposed.dispose(); releaseLate(); await pending; await flush();
+    assert.equal(disposed.tagDeletionModal, null);
+    assert.deepEqual(tags.map(t => t.id), [8], 'unmount does not submit the next selected tag');
+
+    // A lost response after commit is confirmed by re-reading existing tags.
+    tags = [{ id: 9, name: '回执丢失标签' }];
+    respond = async request => {
+      const result = await originalRespond(request);
+      if (request.url.endsWith('/9/delete')) throw new Error('response lost after commit');
+      return result;
+    };
+    const unknown = memoModule.createPlanningMemo();
+    const unknownRoot = new Element(); document.body.appendChild(unknownRoot);
+    await unknown.mount(unknownRoot); await flush(); unknown.openTagManagement(); await flush();
+    select(9, true, unknown.tagDeletionModal.root.querySelector('[data-tag-delete-list]'));
+    await unknown.tagDeletionModal.root.querySelector('[data-tag-delete-confirm]').onclick();
+    assert.ok(unknown._tagDeleteFeedback.includes('已删除 1 个标签'));
+    assert.ok(!unknown._tagDeleteFeedback.includes('未能删除'));
+    assert.equal(unknown.tagDeletionModal.selectedTagIds.size, 0);
+    unknown.dispose();
   },
 
   async 'B2-display'() {

@@ -318,6 +318,7 @@ def today_board(now: datetime | None = None) -> dict[str, Any]:
 def list_occurrences(
     *,
     task_type: str | None = None,
+    include_inactive: bool = True,
     status: str | None = None,
     for_date: str | None = None,
     schedule_date: str | None = None,
@@ -341,19 +342,24 @@ def list_occurrences(
 
     client = runtime._require_client()
 
-    # 类型筛选下推到 SQL：先取该类型的 task_id 集合，避免「先 limit 后
-    # 内存过滤」把更早的命中记录静默挤掉。
-    type_task_ids: list[int] | None = None
-    if task_type:
-        type_task_ids = [
-            row["id"] for row in runtime._rows(client, "planning_task", lambda q: q.eq("task_type", task_type))
-        ]
-        if not type_task_ids:
+    # 类型和启用状态都先筛任务，再限制实例条数；已删除历史不能占满 limit
+    # 而挤掉更早的有效任务记录。默认保留历史读取语义，全部待办显式关闭。
+    task_ids: list[int] | None = None
+    if task_type or not include_inactive:
+        def task_query(q):
+            if task_type:
+                q = q.eq("task_type", task_type)
+            if not include_inactive:
+                q = q.eq("is_active", True)
+            return q
+
+        task_ids = [row["id"] for row in runtime._rows(client, "planning_task", task_query)]
+        if not task_ids:
             return []
 
     def query(q):
-        if type_task_ids is not None:
-            q = q.in_("task_id", type_task_ids)
+        if task_ids is not None:
+            q = q.in_("task_id", task_ids)
         if for_date or schedule_date:
             # for_date is an old parameter name for the immutable schedule date.
             q = q.eq("schedule_date", common._parse_date(schedule_date or for_date, "schedule_date").isoformat())
@@ -373,6 +379,8 @@ def list_occurrences(
     for row in rows:
         task = tasks.get(row["task_id"])
         if not task:
+            continue
+        if not include_inactive and not task.get("is_active"):
             continue
         result.append(presentation.serialize_occurrence(row, task, now))
     return result

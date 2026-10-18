@@ -1,29 +1,29 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
 // 数据按需加载：今日看板保留 30 秒提醒轮询，首次/失效切入时刷新可见列表。
-import { gw } from '../api.js?v=20261016-planning-optimization';
+import { gw } from '../api.js?v=20261017-hide-deleted-tasks';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, esc,
   createDetailPanel,
-} from '../ui.js?v=20261016-planning-optimization';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261016-planning-optimization';
-import { createRetroSelectField } from '../lib/retro_select.js?v=20261016-planning-optimization';
+} from '../ui.js?v=20261017-hide-deleted-tasks';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261017-hide-deleted-tasks';
+import { createRetroSelectField } from '../lib/retro_select.js?v=20261017-hide-deleted-tasks';
 import {
   TASK_TYPE_LABELS, TASK_TYPES, STATUS_META, CLOSED_STATUSES,
   fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty, formatIntervalMinutes,
   itemMeta, isClosedOcc, formatLoggedDuration, durationText, durationDetailRows,
   itemBadges, itemHtml,
-} from '../lib/planning_display.js?v=20261016-planning-optimization';
-import { openTaskForm } from '../lib/planning_task_form.js?v=20261016-planning-optimization';
-import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261016-planning-optimization';
-import { createPlanningSort } from '../lib/planning_sort.js?v=20261016-planning-optimization';
-import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261016-planning-optimization';
-import { createPlanningMemo } from '../lib/planning_memo.js?v=20261016-planning-optimization';
-import { createPlanningReads } from '../lib/planning_reads.js?v=20261016-planning-optimization';
-import { taskNotePreview, openTaskNote, editTaskNoteInline } from '../lib/planning_notes.js?v=20261016-planning-optimization';
-import { mergeOrderReceipt, mergeOccurrencesFromBoard } from '../lib/planning_sync.js?v=20261016-planning-optimization';
-import { createPlanningGoals } from '../lib/planning_goals.js?v=20261016-planning-optimization';
-import { createPlanningDetailEdit } from '../lib/planning_detail_edit.js?v=20261016-planning-optimization';
+} from '../lib/planning_display.js?v=20261017-hide-deleted-tasks';
+import { openTaskForm } from '../lib/planning_task_form.js?v=20261017-hide-deleted-tasks';
+import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261017-hide-deleted-tasks';
+import { createPlanningSort } from '../lib/planning_sort.js?v=20261017-hide-deleted-tasks';
+import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261017-hide-deleted-tasks';
+import { createPlanningMemo } from '../lib/planning_memo.js?v=20261017-hide-deleted-tasks';
+import { createPlanningReads } from '../lib/planning_reads.js?v=20261017-hide-deleted-tasks';
+import { taskNotePreview, openTaskNote, editTaskNoteInline } from '../lib/planning_notes.js?v=20261017-hide-deleted-tasks';
+import { mergeOrderReceipt, mergeOccurrencesFromBoard } from '../lib/planning_sync.js?v=20261017-hide-deleted-tasks';
+import { createPlanningGoals } from '../lib/planning_goals.js?v=20261017-hide-deleted-tasks';
+import { createPlanningDetailEdit } from '../lib/planning_detail_edit.js?v=20261017-hide-deleted-tasks';
 
 const detailHeading = (label, name) => `<h4 class="plan-detail-section-title">${icon(name)}<span>${esc(label)}</span><span class="plan-detail-rule" aria-hidden="true"></span></h4>`;
 const detailRange = (start, end) => start && !end ? `${fmtClock(start)} ～` : fmtRange(start, end);
@@ -176,7 +176,7 @@ export default {
             <div class="card">
               <div class="plan-region-head">
                 <div class="plan-region-title">${icon('inbox')}全部待办</div>
-                <span class="plan-region-sub" data-help-note="全部待办">所有任务定义与出现记录，可筛选、编辑、提前完成</span>
+                <span class="plan-region-sub" data-help-note="全部待办">未删除的任务定义与出现记录，可筛选、编辑、提前完成</span>
               </div>
               <div class="toolbar" style="margin-bottom:6px">
                 <label class="inline">类型
@@ -474,7 +474,7 @@ export default {
   loadTasks(options = {}) {
     return this.loadList('tasks', {
       ...options,
-      request: () => gw('/admin/api/planning/tasks?include_inactive=true'),
+      request: () => gw('/admin/api/planning/tasks?include_inactive=false'),
       apply: (tasks) => { this.tasks = tasks; this.renderTasks(); },
     });
   },
@@ -484,6 +484,7 @@ export default {
     if (this.filters.task_type) params.set('task_type', this.filters.task_type);
     if (this.filters.status) params.set('status', this.filters.status);
     if (this.filters.schedule_date) params.set('schedule_date', this.filters.schedule_date);
+    params.set('include_inactive', 'false');
     const suffix = params.toString();
     return this.loadList('occurrences', {
       ...options, key: suffix,
@@ -640,6 +641,10 @@ export default {
   },
 
   renderTasks() {
+    // 全部待办不展示已删除/停用的定义；暂停刷新但仍启用的任务继续显示。
+    this.tasks = this.tasks.filter(task => task.is_active !== false);
+    if (this.activeTab === 'all' && this.selected?.kind === 'task'
+        && !this.tasks.some(task => task.id === this.selected.id)) this.clearSelection();
     const host = this.root.querySelector('#planning-tasks');
     this.root.querySelector('#planning-tasks-count').textContent = `${this.tasks.length}`;
     if (!this.tasks.length) {
@@ -674,6 +679,10 @@ export default {
   },
 
   renderOccurrences() {
+    // 历史仍在服务端保留；已删除任务的实例也从全部待办排除。
+    this.occurrences = this.occurrences.filter(occ => occ.task_is_active !== false);
+    if (this.activeTab === 'all' && this.selected?.kind === 'occ'
+        && !this.occurrences.some(occ => occ.id === this.selected.id)) this.clearSelection();
     const host = this.root.querySelector('#planning-occurrences');
     this.root.querySelector('#planning-occ-count').textContent = `${this.occurrences.length}`;
     if (!this.occurrences.length) {

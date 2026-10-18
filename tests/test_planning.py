@@ -810,6 +810,42 @@ class StatusTransitionTests(_Base):
         self.run_with(run)
 
 
+class ActiveTaskListTests(_Base):
+    def test_inactive_filter_precedes_limit_keeps_paused_and_does_not_delete_history(self):
+        def run(client):
+            from copy import deepcopy
+
+            self._seed_tasks(client, [
+                {"id": 1, "content": "正常刷新"},
+                {"id": 2, "task_type": "once", "content": "仅暂停刷新"},
+                {"id": 3, "content": "已删除有历史"},
+                {"id": 4, "content": "旧停用"},
+            ])
+            for task in client.rows["planning_task"]:
+                if task["id"] in (3, 4):
+                    task["is_active"] = False
+                if task["id"] == 2:
+                    task["refresh_enabled"] = False
+            self._seed(client, [
+                {"id": 11, "task_id": 1, "schedule_date": "2026-09-17", "status": "pending"},
+                {"id": 12, "task_id": 2, "schedule_date": "2026-09-18", "status": "completed"},
+                {"id": 13, "task_id": 3, "schedule_date": "2026-09-19", "status": "completed"},
+                {"id": 14, "task_id": 4, "schedule_date": "2026-09-20", "status": "discarded"},
+            ])
+            before = deepcopy(client.rows)
+            self.assertEqual([o["id"] for o in planning.list_occurrences(include_inactive=False, limit=1)], [12])
+            self.assertEqual([o["id"] for o in planning.list_occurrences(include_inactive=False, limit=2)], [12, 11])
+            self.assertEqual([o["id"] for o in planning.list_occurrences(include_inactive=False, task_type="daily")], [11])
+            self.assertEqual([o["id"] for o in planning.list_occurrences(include_inactive=False, status="completed")], [12])
+            self.assertEqual([o["id"] for o in planning.list_occurrences()], [14, 13, 12, 11])
+            self.assertEqual([t["id"] for t in planning.list_tasks(include_inactive=False)], [1, 2])
+            self.assertEqual(client.rows, before, "展示筛选不得删除历史数据")
+            for task in client.rows["planning_task"]:
+                task["is_active"] = False
+            self.assertEqual(planning.list_occurrences(include_inactive=False), [])
+        self.run_with(run)
+
+
 class CleanupAndMaintenanceTests(_Base):
     def test_cleanup_deletes_only_expired_discards(self):
         def run(client):

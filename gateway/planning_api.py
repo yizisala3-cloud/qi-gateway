@@ -179,6 +179,7 @@ async def occurrences_collection(request: Request) -> JSONResponse:
         request,
         planning.list_occurrences,
         task_type=params.get("task_type"),
+        include_inactive=_parse_bool(params.get("include_inactive"), True),
         status=params.get("status"),
         for_date=params.get("for_date"),
         schedule_date=params.get("schedule_date"),

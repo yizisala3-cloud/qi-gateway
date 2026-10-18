@@ -1,6 +1,6 @@
 // pages/emotion.js - 情感：Eventide 身体状态真实展示（只读）
-import { gw, esc } from '../api.js?v=20261016-planning-optimization';
-import { loading, empty, errorBlock, banner, tag, icon, fmtDate, delegate } from '../ui.js?v=20261016-planning-optimization';
+import { gw, esc } from '../api.js?v=20261017-hide-deleted-tasks';
+import { loading, empty, errorBlock, banner, tag, icon, fmtDate, delegate } from '../ui.js?v=20261017-hide-deleted-tasks';
 
 // 等级 → tag 色调：低→green、中低/中→slate、中高→amber、高→red
 const LEVEL_TONES = { '低': 'green', '中低': 'slate', '中': 'slate', '中高': 'amber', '高': 'red' };

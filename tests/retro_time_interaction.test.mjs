@@ -322,4 +322,32 @@ assert.equal(root.querySelector('#pf-adj-start-41').parentElement.querySelector(
 assert.equal(root.querySelector('#pf-adj-end-41').parentElement.querySelector('button').getAttribute('aria-label'), '背单词的最晚完成：08:00');
 cancel(); await flush();
 Date.now = actualNow;
+
+// A footer command belongs to the popup, never to the selected value.
+const tagHost = document.body.appendChild(new Element('span'));
+let managementCalls = 0, filterChanges = 0;
+const tagInput = createRetroSelectField(tagHost, {
+  id: 'tag-filter-fixture', value: '1',
+  options: [{ value: '', label: '全部标签' }, { value: '1', label: '读书' }],
+  footerAction: { label: '标签管理', onClick: () => { managementCalls++; } },
+});
+tagInput.addEventListener('change', () => { filterChanges++; });
+tagHost.querySelector('button').click(); await flush();
+let tagPop = document.querySelector('.retro-select-pop');
+assert.equal(tagPop.getAttribute('role'), 'dialog');
+assert.ok(tagPop.querySelector('[role="listbox"]'));
+const tagAction = tagPop.querySelector('.retro-select-action');
+assert.equal(tagAction.textContent, '标签管理');
+key('End'); assert.equal(document.activeElement, tagAction);
+tagAction.click(); await flush();
+assert.equal(managementCalls, 1);
+assert.equal(filterChanges, 0); assert.equal(tagInput.value, '1');
+assert.equal(tagPop.isConnected, false);
+assert.equal(document.activeElement, tagHost.querySelector('button'));
+tagHost.querySelector('button').click(); await flush();
+tagPop = document.querySelector('.retro-select-pop');
+tagPop.querySelector('[data-value=""]').click(); await flush();
+assert.equal(tagInput.value, ''); assert.equal(filterChanges, 1);
+assert.equal(managementCalls, 1);
+tagHost.remove();
 process.stdout.write('Shared time picker and six planning datetime regressions passed.\n');

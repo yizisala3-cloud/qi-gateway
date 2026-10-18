@@ -182,7 +182,7 @@ class PlanningPageContractTests(unittest.TestCase):
     def test_page_calls_planning_endpoints(self):
         for call in (
             "gw('/admin/api/planning/today')",
-            "gw('/admin/api/planning/tasks?include_inactive=true')",
+            "gw('/admin/api/planning/tasks?include_inactive=false')",
             "/admin/api/planning/occurrences",
             "gw('/admin/api/planning/recompute', { method: 'POST' })",
             "gw('/admin/api/planning/reorder'",

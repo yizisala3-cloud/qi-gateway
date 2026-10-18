@@ -15,12 +15,12 @@
 // 一期不实现清单勾选、待办互通与 AI 读写（F01–F03 仅预留稳定身份与
 // 可复用基础接口）。
 
-import { gw } from '../api.js?v=20261016-planning-optimization';
+import { gw } from '../api.js?v=20261017-hide-deleted-tasks';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, icon, esc,
-} from '../ui.js?v=20261016-planning-optimization';
-import { createRetroSelectField } from './retro_select.js?v=20261016-planning-optimization';
-import { renderMarkdown } from './memo_markdown.js?v=20261016-planning-optimization';
+} from '../ui.js?v=20261017-hide-deleted-tasks';
+import { createRetroSelectField } from './retro_select.js?v=20261017-hide-deleted-tasks';
+import { renderMarkdown } from './memo_markdown.js?v=20261017-hide-deleted-tasks';
 
 const KIND_LABELS = { pinned: '常驻备忘', note: '随笔' };
 const AUTOSAVE_DELAY_MS = 800;
@@ -450,6 +450,9 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
     reorderBusy: false,       // 重排保存/刷新期间暂停下一次拖动（F11）
     _openingEditor: false,    // 编辑器打开在途去重（F01 连点）
     editor: null,
+    tagDeletionModal: null,
+    _tagDeleteController: null,
+    _tagDeleteFeedback: '',
     _saveState: { status: 'idle', error: null },
     _epoch: 0,                // 构建生命周期代数：dispose 使待决异步构建失效（BUG-12）
     writeQueue: Promise.resolve(),  // 重排/模式写串行队列（BUG-06）
@@ -533,6 +536,10 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
       // await 返回后复核失败，不再创建旧编辑框或清草稿
       this._epoch += 1;
       this._disposed = true;
+      this._tagDeleteController?.abort();
+      this._tagDeleteController = null;
+      this.tagDeletionModal?.close();
+      this.tagDeletionModal = null;
       this.cancelReader();
       this.invalidateTags();
       this.tags = [];
@@ -581,6 +588,7 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
       this.tagsStatus = 'loading';
       this.tagsError = null;
       this.renderEditorTags();
+      this.tagDeletionModal?.renderTags?.();
       pending.promise = (async () => {
         try {
           const tags = await gw('/admin/api/memo/tags');
@@ -591,12 +599,14 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
           this._tagsLoadedAt = Date.now();
           this.mountFilter();
           this.renderEditorTags();
+          this.tagDeletionModal?.renderTags?.();
           return true;
         } catch (error) {
           if (this._disposed || epoch !== this._epoch || revision !== this._tagsRevision) return false;
           this.tagsStatus = 'error';
           this.tagsError = error;
           this.renderEditorTags();
+          this.tagDeletionModal?.renderTags?.();
           return false;
         } finally {
           if (this._tagsPending === pending) this._tagsPending = null;
@@ -695,6 +705,7 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
         id: 'memo-filter-tag',
         value: String(this.filterTagId),
         options,
+        footerAction: { label: '标签管理', onClick: () => this.openTagManagement() },
       });
       host.querySelector('button').setAttribute('aria-label', '标签筛选');
       input.addEventListener('change', () => {
@@ -733,19 +744,10 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
     renderBoard() {
       const sections = this.currentSections();
       if (!sections.length) {
-        // 空标签也要有可达的删除入口（F13）：标签可能只有归档/回收站内容
-        // 或尚未关联正常内容，不构成看板板块，此前无处可删。
-        const filterTagId = this.filterTagId;
-        const deletableTag = (filterTagId !== '' && filterTagId !== 'untagged')
-          ? this.tags.find((t) => t.id === Number(filterTagId))
-          : null;
         this.body.innerHTML = empty(
           '还没有备忘录内容',
           this.filterTagId === '' ? '点击「新建备忘录」开始记录' : '该标签下暂无内容',
-        ) + (deletableTag ? `
-          <div class="memo-empty-actions">
-            <button class="btn btn-danger-line btn-sm" data-act="memo-delete-tag" data-tag-id="${deletableTag.id}">${icon('x')}删除标签「${esc(deletableTag.name)}」</button>
-          </div>` : '');
+        );
         return;
       }
       const tagDragEnabled = this.filterTagId === '';
@@ -795,16 +797,11 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
       const tagName = this.activeTagId === 'untagged'
         ? '未分类'
         : ((this.tags.find((t) => t.id === this.activeTagId) || {}).name || '标签');
-      // 删除入口按标签身份提供（F13）：标签只剩归档/回收站内容时不构成
-      // 板块，此前详情里没有删除按钮。
-      const tagExists = this.activeTagId !== 'untagged'
-        && this.tags.some((t) => t.id === this.activeTagId);
       const head = `
         <div class="memo-detail-head">
           <button class="btn btn-quiet btn-sm" data-act="memo-back">${icon('chevron-left')}返回</button>
           <h3 class="memo-detail-title">${esc(tagName)}</h3>
           <span class="grow"></span>
-          ${tagExists ? `<button class="btn btn-danger-line btn-sm" data-act="memo-delete-tag" data-tag-id="${this.activeTagId}">${icon('x')}删除标签</button>` : ''}
         </div>`;
       if (!section) {
         this.body.innerHTML = head + empty('该标签下暂无内容', '新建备忘录时可选择该标签');
@@ -888,6 +885,10 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
       if (el && !el.disabled) {
         const act = el.dataset.act;
         if (act === 'memo-new') return this.openEditor(null);
+        if (act === 'memo-reload') {
+          this.statusHost.innerHTML = '';
+          return this.reload();
+        }
         if (act === 'memo-view-tag') {
           this.switchView('tag');
           this.activeTagId = el.dataset.tagId === 'untagged' ? 'untagged' : Number(el.dataset.tagId);
@@ -913,7 +914,6 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
           return this.renderLifecycleList(VIEW_STATUS.trash);
         }
         if (act === 'memo-note-mode') return this.setNoteMode(el.dataset.mode);
-        if (act === 'memo-delete-tag') return this.deleteTag(Number(el.dataset.tagId));
         if (act === 'memo-restore') return this.restoreEntry(Number(el.dataset.id));
         if (act === 'memo-lifecycle-delete') return this.lifecycleEntry(Number(el.dataset.id), 'delete');
         return;
@@ -1091,6 +1091,82 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
 
     /* ---------- 标签操作 ---------- */
 
+    openTagManagement() {
+      if (this._disposed || !this.root || this.tagDeletionModal) return;
+      if (!this._tagDeleteController) this._tagDeleteFeedback = '';
+      const dialog = modal({
+        title: '标签管理',
+        body: `<p class="muted text-sm">勾选要删除的标签，再点击「确认删除」。只删除标签，备忘录内容会保留；没有标签的备忘录归入「未分类」。</p>
+          <div class="memo-tag-delete-list" data-tag-delete-list>${loading()}</div>
+          <div class="memo-tag-delete-feedback muted text-sm" data-tag-delete-feedback role="status"></div>`,
+        footer: `<button class="btn btn-secondary" data-tag-delete-close>取消</button>
+          <button class="btn btn-danger" data-tag-delete-confirm disabled>确认删除</button>`,
+        onDismiss: () => {
+          if (this.tagDeletionModal === dialog) {
+            this.tagDeletionModal = null;
+            if (!this._disposed) this.root?.querySelector('[data-memo-filter]')?.querySelector('button')?.focus();
+          }
+        },
+      });
+      this.tagDeletionModal = dialog;
+      dialog.selectedTagIds = new Set();
+      const list = dialog.root.querySelector('[data-tag-delete-list]');
+      const confirmButton = dialog.root.querySelector('[data-tag-delete-confirm]');
+      const isCurrent = () => !this._disposed && this.tagDeletionModal === dialog;
+      const update = () => {
+        if (!isCurrent()) return;
+        const busy = !!this._tagDeleteController;
+        confirmButton.disabled = busy || this.tagsStatus !== 'ready' || !dialog.selectedTagIds.size;
+        confirmButton.textContent = busy ? '正在删除…'
+          : (dialog.selectedTagIds.size ? `确认删除（${dialog.selectedTagIds.size}）` : '确认删除');
+        dialog.root.querySelector('[data-tag-delete-feedback]').textContent = this._tagDeleteFeedback;
+      };
+      const render = () => {
+        if (!isCurrent()) return;
+        if (this.tagsStatus === 'ready') {
+          const validIds = new Set(this.tags.map(t => t.id));
+          for (const id of dialog.selectedTagIds) if (!validIds.has(id)) dialog.selectedTagIds.delete(id);
+        }
+        update();
+        if (this.tagsStatus === 'loading' || this.tagsStatus === 'unloaded') {
+          list.innerHTML = loading();
+          return;
+        }
+        if (this.tagsStatus === 'error') {
+          list.innerHTML = errorBlock('标签读取失败，请重试')
+            + '<button class="btn btn-secondary btn-sm" data-tag-delete-retry>重试</button>';
+          return;
+        }
+        list.innerHTML = this.tags.length ? this.tags.map((t) => `
+          <label class="memo-tag-delete-row">
+            <input type="checkbox" data-tag-delete-id="${t.id}" value="${t.id}"
+              ${dialog.selectedTagIds.has(t.id) ? 'checked' : ''} ${this._tagDeleteController ? 'disabled' : ''}>
+            <span>${esc(t.name)}</span>
+          </label>`).join('') : empty('还没有自定义标签', '新建备忘录时可以添加标签');
+      };
+      dialog.renderTags = render;
+      const load = async () => {
+        list.innerHTML = loading();
+        await this.prefetchTags({ fresh: true });
+        render();
+      };
+      list.addEventListener('click', (event) => {
+        const retry = event.target.closest('[data-tag-delete-retry]');
+        if (retry) return load();
+      });
+      list.addEventListener('change', (event) => {
+        const input = event.target.closest('[data-tag-delete-id]');
+        if (!input || input.disabled || this._tagDeleteController) return;
+        const id = Number(input.dataset.tagDeleteId);
+        if (input.checked) dialog.selectedTagIds.add(id);
+        else dialog.selectedTagIds.delete(id);
+        update();
+      });
+      confirmButton.onclick = () => this.deleteTags([...dialog.selectedTagIds]);
+      dialog.root.querySelector('[data-tag-delete-close]').onclick = () => dialog.close();
+      load();
+    },
+
     setNoteMode(mode) {
       // 模式切换与重排共用同一条写队列（BUG-06）：快速 manual→latest 按
       // 点击顺序逐个提交，服务端最终状态与最后一次有效选择一致，不靠
@@ -1137,29 +1213,71 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
       this.renderStaleRefreshNotice();
     },
 
-    async deleteTag(tagId) {
-      if (!(await confirm(
-        '确认删除该标签？只解除分类关系，内容不会被删除；失去标签的内容会进入「未分类」。',
-        { danger: true, okText: '删除标签', cancelText: '取消' },
-      ))) return;
+    async deleteTags(tagIds) {
+      if (this._disposed || this._tagDeleteController) return;
+      const selected = this.tags.filter(t => tagIds.includes(t.id));
+      if (!selected.length || this.tagsStatus !== 'ready') return;
       const epoch = this._epoch;
-      this.invalidateTags();
+      const controller = new AbortController();
+      this._tagDeleteController = controller;
+      this._tagDeleteFeedback = '';
+      this.tagDeletionModal?.renderTags?.();
+      const deleted = new Set();
+      const failed = [];
       try {
-        await gw(`/admin/api/memo/tags/${tagId}/delete`, { method: 'POST' });
-        toast('标签已删除');
-        if (this._disposed || epoch !== this._epoch) return;
         this.invalidateTags();
-        this.tags = this.tags.filter((t) => t.id !== tagId);
-        this.editor?.selectedTagIds.delete(tagId);
-        this.renderEditorTags();
-        this.switchView('board');
-        this.activeTagId = null;
-        // 被删的正是当前筛选项（BUG-09）：同步清掉筛选身份，否则剩余
-        // 内容被不存在的标签过滤成空白；其他有效标签筛选不受影响
-        if (this.filterTagId === tagId) this.filterTagId = '';
-        await this.reload({ silent: true });
+        for (const selectedTag of selected) {
+          if (this._disposed || epoch !== this._epoch || controller.signal.aborted) return;
+          try {
+            await gw(`/admin/api/memo/tags/${selectedTag.id}/delete`, { method: 'POST' });
+            deleted.add(selectedTag.id);
+          } catch (error) {
+            failed.push({ tag: selectedTag, error });
+          }
+        }
+        if (this._disposed || epoch !== this._epoch) return;
+        // 网络错误可能发生在服务端已删除之后；重读确认，避免把已移除标签
+        // 留在重试集合里。只有确认标签已不存在才按成功结算。
+        if (failed.length && await this.prefetchTags({ fresh: true })) {
+          for (let index = failed.length - 1; index >= 0; index--) {
+            if (!this.tags.some(t => t.id === failed[index].tag.id)) {
+              deleted.add(failed[index].tag.id);
+              failed.splice(index, 1);
+            }
+          }
+        }
+        if (this._disposed || epoch !== this._epoch) return;
+        this._tagDeleteFeedback = failed.length
+          ? `${deleted.size ? `已删除 ${deleted.size} 个标签；` : ''}${failed.length} 个标签未能删除，可重试。${failed.map(f => `「${f.tag.name}」：${f.error.message}`).join('；')}`
+          : `已删除 ${deleted.size} 个标签，备忘录内容已保留。`;
+        for (const { tag: failedTag } of failed) this.tagDeletionModal?.selectedTagIds.add(failedTag.id);
+        if (deleted.size) {
+          this.invalidateTags();
+          this.tags = this.tags.filter(t => !deleted.has(t.id));
+          for (const id of deleted) this.editor?.selectedTagIds.delete(id);
+          this.renderEditorTags();
+          this.switchView('board');
+          this.activeTagId = null;
+          if (deleted.has(this.filterTagId)) this.filterTagId = '';
+          this.mountFilter();
+          if (this._readerId !== null) this.refreshReader(this._readerId, { message: '标签已删除' });
+          // 单个标签接口各自提交：成功项立即结算，失败项保留勾选供重试。
+          if (!(await this.reload()) && !this._disposed && epoch === this._epoch && this.statusHost) {
+            this.statusHost.innerHTML = errorBlock('标签已删除，但列表刷新失败')
+              + '<button class="btn btn-secondary btn-sm" data-act="memo-reload">重试刷新</button>';
+          }
+        }
+        if (!this._disposed && epoch === this._epoch) toast(failed.length ? '部分标签未能删除，请重试' : '标签已删除', failed.length ? 'warn' : 'ok');
       } catch (error) {
-        toast(`删除标签失败：${error.message}`, 'err');
+        if (!this._disposed && epoch === this._epoch) {
+          this._tagDeleteFeedback = `标签操作未完成，请刷新后重试：${error.message}`;
+          toast(this._tagDeleteFeedback, 'err');
+        }
+      } finally {
+        if (this._tagDeleteController === controller) {
+          this._tagDeleteController = null;
+          this.tagDeletionModal?.renderTags?.();
+        }
       }
     },
 
@@ -1774,7 +1892,7 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
       return applied ? saved : { ...saved, applied: false };
     },
 
-    refreshReader(id) {
+    refreshReader(id, { message = '内容已保存' } = {}) {
       // Keep selection identity: refreshing must never select an item after navigation.
       if (this._readerId !== id || !this._readerCurrent?.()) return;
       this._readerRefreshController?.abort();
@@ -1790,7 +1908,7 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
         this._refreshReaderContent?.(entry);
       }).catch((error) => {
         if (!controller.signal.aborted && !this._disposed && epoch === this._epoch && seq === this._readerSeq
-            && refreshSeq === this._readerRefreshSeq && this._readerCurrent?.()) toast(`内容已保存，阅读详情更新失败：${error.message}`, 'warn');
+            && refreshSeq === this._readerRefreshSeq && this._readerCurrent?.()) toast(`${message}，阅读详情更新失败：${error.message}`, 'warn');
       }).finally(() => {
         if (this._readerRefreshController === controller) this._readerRefreshController = null;
       });

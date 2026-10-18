@@ -1,7 +1,7 @@
 // Field editors keep the existing detail layout, selection and atomic receipt.
-import { gw } from '../api.js?v=20261016-planning-optimization';
-import { esc, toast, icon } from '../ui.js?v=20261016-planning-optimization';
-import { bindNoteInput, focusEditorEnd } from './planning_notes.js?v=20261016-planning-optimization';
+import { gw } from '../api.js?v=20261017-hide-deleted-tasks';
+import { esc, toast, icon } from '../ui.js?v=20261017-hide-deleted-tasks';
+import { bindNoteInput, focusEditorEnd } from './planning_notes.js?v=20261017-hide-deleted-tasks';
 
 export const resultUnknown = error => error?.resultUnknown || !error?.status || error.status >= 500;
 const scopeText = value => value === 'current_and_future' ? '当前及未来' : '仅未来';

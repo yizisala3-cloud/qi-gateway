@@ -1,6 +1,6 @@
 // Shared paper calendar and time picker. Hidden values retain the caller's id/value
 // and input-event contract; memory continues to normalize/preserve timestamps itself.
-import { esc, icon, registerFloatingSurface } from '../ui.js?v=20261016-planning-optimization';
+import { esc, icon, registerFloatingSurface } from '../ui.js?v=20261017-hide-deleted-tasks';
 
 let activeRetroTimePop = null;
 let sequence = 0;

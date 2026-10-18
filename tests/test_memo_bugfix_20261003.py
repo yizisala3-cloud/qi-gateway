@@ -462,14 +462,15 @@ class MemoBugfix20261003Tests(unittest.TestCase):
           m.tags = [{ id: 5, name: '被删标签', position: 1 },
                     { id: 6, name: '其他标签', position: 2 }];
           m.board = { sections: [] };
+          m.tagsStatus = 'ready';
           m.filterTagId = 5;
           gwApi = async (url) => url === '/admin/api/memo/board'
             ? { sections: [] } : url === '/admin/api/memo/tags' ? m.tags : [];
           // 先删非当前筛选标签：筛选保持
-          await m.deleteTag(6);
+          await m.deleteTags([6]);
           out.filter_kept = m.filterTagId === 5;
           // 再删当前筛选标签：筛选同步重置
-          await m.deleteTag(5);
+          await m.deleteTags([5]);
           out.filter_reset = m.filterTagId === '';
           out.view_board = m.view === 'board';
         }

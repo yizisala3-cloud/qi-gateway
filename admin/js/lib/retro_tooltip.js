@@ -1,5 +1,5 @@
 // Auxiliary paper hints. Required/locked/unavailable explanations belong in visible page text.
-import { registerFloatingSurface } from '../ui.js?v=20261016-planning-optimization';
+import { registerFloatingSurface } from '../ui.js?v=20261017-hide-deleted-tasks';
 
 const initializers = new WeakMap();
 let descriptionSequence = 0;

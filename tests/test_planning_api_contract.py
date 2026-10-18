@@ -70,6 +70,16 @@ class PlanningApiContractTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 401)
                 self.assertEqual(response.json()["error_code"], "unauthorized")
 
+    def test_occurrence_read_can_exclude_inactive_tasks_without_changing_default_history(self):
+        with mock.patch.object(planning, "list_occurrences", return_value=[]) as listing:
+            response = self.http.get(
+                "/admin/api/planning/occurrences?include_inactive=false", headers=self.auth)
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(listing.call_args.kwargs["include_inactive"])
+            response = self.http.get("/admin/api/planning/occurrences", headers=self.auth)
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(listing.call_args.kwargs["include_inactive"])
+
     def test_create_task_returns_201(self):
         response = self.http.post(
             "/admin/api/planning/tasks",

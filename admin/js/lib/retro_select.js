@@ -1,6 +1,6 @@
 // 共享纸面下拉：手动字段与页面原有单选 select 共用同一浮层。
 // 原 select 保留 id/name/options/value、校验及业务监听；展示按钮不提交表单。
-import { esc, icon, registerFloatingSurface } from '../ui.js?v=20261016-planning-optimization';
+import { esc, icon, registerFloatingSurface } from '../ui.js?v=20261017-hide-deleted-tasks';
 
 let activeRetroSelectPop = null;
 let popSequence = 0;
@@ -39,11 +39,11 @@ function fieldButton(host) {
   return button;
 }
 
-function bindTrigger(anchor, input, apply, getOptions) {
+function bindTrigger(anchor, input, apply, getOptions, footerAction = null) {
   const open = () => {
     if (anchor.disabled || input.disabled) return;
     if (activeRetroSelectPop?._forInput === input) closeRetroSelectPop(true);
-    else openRetroSelectPop(anchor, input, apply, getOptions());
+    else openRetroSelectPop(anchor, input, apply, getOptions(), { footerAction });
   };
   const onKey = event => {
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -60,12 +60,13 @@ function bindTrigger(anchor, input, apply, getOptions) {
 }
 
 /** 手动挂载，保留既有隐藏 input / _applyRetroValue(value, silent) 契约。 */
-export function createRetroSelectField(host, { id, value = '', options = [] } = {}) {
+export function createRetroSelectField(host, { id, value = '', options = [], footerAction = null } = {}) {
   if (activeRetroSelectPop && host.contains(activeRetroSelectPop._anchor)) closeRetroSelectPop();
   host.classList.add('retro-select');
   host.innerHTML = `<input type="hidden" id="${esc(id)}" class="retro-select-value">`;
   const input = host.querySelector('input');
   const button = fieldButton(host);
+  if (footerAction) button.setAttribute('aria-haspopup', 'dialog');
   const text = button.querySelector('.retro-select-text');
   const name = fieldName(input, host);
   const apply = (localValue, silent) => {
@@ -76,21 +77,21 @@ export function createRetroSelectField(host, { id, value = '', options = [] } = 
   };
   apply(value, true);
   input._applyRetroValue = apply;
-  bindTrigger(button, input, apply, () => options);
+  bindTrigger(button, input, apply, () => options, footerAction);
   return input;
 }
 
 /** 单一活动浮层；方向键只移动焦点，Enter/Space 才提交，Escape 取消。 */
-export function openRetroSelectPop(anchor, input, apply, options) {
+export function openRetroSelectPop(anchor, input, apply, options, { footerAction = null } = {}) {
   closeRetroSelectPop();
   const pop = document.createElement('div');
-  pop.className = 'retro-select-pop';
+  pop.className = `retro-select-pop${footerAction ? ' has-footer' : ''}`;
   pop.id = `retro-select-list-${++popSequence}`;
-  pop.setAttribute('role', 'listbox');
+  pop.setAttribute('role', footerAction ? 'dialog' : 'listbox');
   pop.setAttribute('aria-label', anchor.getAttribute('aria-label') || '选择');
   pop._forInput = input;
   pop._anchor = anchor;
-  pop.innerHTML = options.map((option, index) => {
+  const optionsHtml = options.map((option, index) => {
     const selected = option.selected ?? (String(option.value) === String(input.value ?? ''));
     return `<button type="button" role="option" tabindex="-1"
       aria-selected="${selected}" aria-disabled="${!!option.disabled}"
@@ -99,22 +100,32 @@ export function openRetroSelectPop(anchor, input, apply, options) {
       <span>${esc(option.label)}</span><span class="retro-select-check" aria-hidden="true">${icon('check')}</span>
     </button>`;
   }).join('');
+  pop.innerHTML = footerAction
+    ? `<div class="retro-select-options" role="listbox" aria-label="${esc(anchor.getAttribute('aria-label') || '选择')}">${optionsHtml}</div>
+       <div class="retro-select-footer"><button type="button" class="retro-select-action" tabindex="-1">${esc(footerAction.label)}</button></div>`
+    : optionsHtml;
   // 时间面板子列表留在父面板内，父级外点处理不会提前关闭日历。
   (anchor.closest('.retro-time-pop') || document.body).appendChild(pop);
   activeRetroSelectPop = pop;
   anchor.closest('.retro-select')?.classList.add('is-open');
   anchor.setAttribute('aria-expanded', 'true');
   anchor.setAttribute('aria-controls', pop.id);
-  const buttons = [...pop.querySelectorAll('.retro-select-option:not(:disabled)')];
+  const optionsButtons = [...pop.querySelectorAll('.retro-select-option:not(:disabled)')];
+  const actionButton = footerAction ? pop.querySelector('.retro-select-action') : null;
+  const buttons = [...optionsButtons, ...(actionButton ? [actionButton] : [])];
   const focus = button => {
     button?.focus({ preventScroll: true });
     button?.scrollIntoView({ block: 'nearest' });
   };
-  buttons.forEach(button => button.addEventListener('click', () => {
+  optionsButtons.forEach(button => button.addEventListener('click', () => {
     // 先回收再派发业务事件：事件可同步重绘字段或打开另一个面板。
     closeRetroSelectPop(true);
     apply(button.dataset.value, false, Number(button.dataset.index));
   }));
+  actionButton?.addEventListener('click', () => {
+    closeRetroSelectPop(true);
+    footerAction.onClick();
+  });
   let search = '';
   let lastTyped = 0;
   pop.addEventListener('keydown', event => {

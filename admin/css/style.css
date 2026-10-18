@@ -2394,7 +2394,11 @@ select.retro-select-source {
   flex-direction: column;
   gap: 2px;
 }
-.retro-select-option {
+.retro-select-pop.has-footer { overflow: hidden; }
+.retro-select-options { display: flex; flex-direction: column; gap: 2px; min-height: 0; overflow-y: auto; }
+.retro-select-footer { flex: none; border-top: 1px solid var(--gold-faint); margin-top: 4px; padding-top: 6px; }
+.retro-select-action { width: 100%; }
+.retro-select-option, .retro-select-action {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2412,8 +2416,8 @@ select.retro-select-source {
   border-radius: 6px;
   cursor: pointer;
 }
-.retro-select-option:hover { background: var(--gold-soft); }
-.retro-select-option:focus-visible { background: var(--gold-soft); outline: 1px solid var(--gold); outline-offset: -2px; }
+.retro-select-option:hover, .retro-select-action:hover { background: var(--gold-soft); }
+.retro-select-option:focus-visible, .retro-select-action:focus-visible { background: var(--gold-soft); outline: 1px solid var(--gold); outline-offset: -2px; }
 .retro-select-option:disabled { opacity: 0.45; cursor: not-allowed; }
 .retro-select-check { display: inline-flex; flex: none; opacity: 0; }
 .retro-select-check .ico { width: 14px; height: 14px; }
@@ -2760,7 +2764,14 @@ body.memo-dragging .memo-handle { cursor: grabbing; }
 .memo-detail-title { margin: 0; font-size: 16px; font-weight: 600; color: var(--ink); }
 .memo-mode-tabs { margin-bottom: 10px; }
 
-.memo-empty-actions { margin-top: 14px; }
+.memo-tag-delete-list { display: flex; flex-direction: column; gap: 8px; }
+.memo-tag-delete-row {
+  display: flex; align-items: center; gap: 10px; cursor: pointer;
+  padding: 8px 0; border-bottom: 1px solid var(--gold-faint);
+}
+.memo-tag-delete-row > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.memo-tag-delete-row > input { flex: none; margin: 0; }
+.memo-tag-delete-feedback { margin-top: 10px; overflow-wrap: anywhere; }
 
 /* ── 编辑器 ── */
 .memo-tag-chips { display: flex; flex-wrap: wrap; gap: 8px; }

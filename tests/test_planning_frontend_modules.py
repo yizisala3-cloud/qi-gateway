@@ -48,6 +48,12 @@ class PlanningFrontendModulesTests(unittest.TestCase):
     def test_native_es_import_graph_and_versions(self):
         self._run_group("graph")
 
+    def test_all_tasks_hide_deleted_definitions_and_occurrences_but_keep_paused(self):
+        self._run_group("all-hide-deleted")
+
+    def test_memo_tag_deletion_entry_confirmation_and_lifecycle(self):
+        self._run_group("memo-tag-delete")
+
     def test_display_business_outputs(self):
         self._run_group("B2-display")
 

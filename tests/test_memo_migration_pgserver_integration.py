@@ -391,6 +391,32 @@ class MemoPhase1PostgresTests(unittest.TestCase):
             self._query("select count(*) from public.memo_tag where id = %s", (tag_a,))[0][0],
             0)
 
+    def test_delete_selected_tags_preserves_bodies_lifecycle_and_remaining_tags(self):
+        self._reset_untagged()
+        tag_a = self._make_tag("批量删除A")["id"]
+        tag_b = self._make_tag("批量删除B")["id"]
+        tag_c = self._make_tag("批量保留C")["id"]
+        orphan = self._make_entry({"kind": "pinned", "content": "最后两个标签被删除，正文保留",
+                                   "tag_ids": [tag_a, tag_b]})["id"]
+        keeper = self._make_entry({"kind": "note", "content": "保留第三个标签和正文",
+                                   "tag_ids": [tag_a, tag_b, tag_c]})["id"]
+        archived = self._make_entry({"kind": "pinned", "content": "归档正文保留",
+                                     "tag_ids": [tag_a, tag_b]})["id"]
+        trashed = self._make_entry({"kind": "note", "content": "回收站正文保留",
+                                    "tag_ids": [tag_a, tag_b]})["id"]
+        self._call(_lifecycle_sql(archived, "archive", 1))
+        self._call(_lifecycle_sql(trashed, "delete", 1))
+        ids = [orphan, keeper, archived, trashed]
+        before = self._query("select id,content,status,content_version from public.memo_entry where id=any(%s) order by id", (ids,))
+        for tag_id in [tag_a, tag_b]:
+            self._call(("select public.memo_delete_tag(%s,%s::timestamptz) as out", [tag_id, NOW]))
+        self.assertEqual(before, self._query(
+            "select id,content,status,content_version from public.memo_entry where id=any(%s) order by id", (ids,)))
+        self.assertEqual(self._query(
+            "select entry_id,tag_id from public.memo_entry_tag where entry_id=any(%s)", (ids,)), [(keeper, tag_c)])
+        self.assertIn((orphan, 1), self._untagged_positions())
+        self.assertFalse(any(entry_id in [keeper, archived, trashed] for entry_id, _ in self._untagged_positions()))
+
     def test_delete_tag_with_manual_untagged_group_positions_note(self):
         self._reset_untagged()
         tag_a = self._make_tag("未分类手动组")["id"]
