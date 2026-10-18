@@ -1,5 +1,5 @@
 // Optional explanations use native disclosures; the original node and IDs stay intact.
-import { icon } from '../ui.js?v=20261017-hide-deleted-tasks';
+import { icon } from '../ui.js?v=20261018-planning-latency';
 
 const initializers = new WeakMap();
 

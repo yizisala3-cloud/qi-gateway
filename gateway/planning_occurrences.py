@@ -879,7 +879,7 @@ def split_occurrence(occurrence_id: int, payload: Any, now: datetime | None = No
     # quiet 语义；失败由用户手动重算 / 后续维护循环兜底）。
     recompute._request_recompute_quietly("split", now)
     # 即时生成：拆分出的当日单次待办立刻出现在列表里。
-    task_service._generate_due_quietly(client, now)
+    task_service._generate_saved_tasks_quietly(created_ids, now, cycles.PlanningRequestContext(now))
     return {"created_task_ids": created_ids, "split_from": occurrence_id}
 
 
@@ -1016,9 +1016,10 @@ def complete_task_early(
 
     # 只对本任务做生命周期校正（生成 / 到期清理 / 顺延），不触碰其他任务：
     # 本请求后续写入失败时，无关任务不得已被改变（B9）。
-    configured, transition, absorbed = cycles._load_boundary_state(now)
+    context = cycles.PlanningRequestContext(now)
+    configured, transition, absorbed = context.boundary_state()
     cycle = planning_cycle_at(now, configured, transition)
-    daily_enabled = cycles.get_cycle_settings(now)["daily_refresh_enabled"]
+    daily_enabled = context.daily_refresh_enabled
     try:
         _, _, events = generation._reconcile_task_rounds(
             client, task, cycle, now, configured, transition, absorbed, daily_enabled,
@@ -1094,7 +1095,7 @@ def complete_task_early(
             ]
             if prior_extra:
                 return presentation.serialize_occurrence(prior_extra[-1], task, now)
-        today = cycles._current_cycle(now).key
+        today = cycle.key
         request_key = idempotency_key or str(uuid.uuid4())
         round_key = timed_round_key("early", today, request_key)
         identity = OccurrenceIdentity(task_id, round_key, today, today)

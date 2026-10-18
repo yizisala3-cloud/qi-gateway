@@ -193,6 +193,7 @@ const reminderModule = await import(moduleUrl('lib/planning_reminder.js'));
 const readsModule = await import(moduleUrl('lib/planning_reads.js'));
 const syncModule = await import(moduleUrl('lib/planning_sync.js'));
 const memoModule = await import(moduleUrl('lib/planning_memo.js'));
+const actionsModule = await import(moduleUrl('lib/planning_actions.js'));
 const ui = await import(moduleUrl('ui.js'));
 const lastModal = () => masks.at(-1).querySelector('.modal');
 const response = (body = {}) => ({ ok: true, json: async () => body });
@@ -225,6 +226,115 @@ const readPaths = () => requests.filter(({ options }) => !options.method)
   .map(({ url }) => new URL(url).pathname);
 
 const checks = {
+  async 'latency-recompute-remount'() {
+    for (const initialReadCompleted of [false, true]) for (const outcome of ['success', 'conflict', 'failure']) {
+      respond = async () => response(emptyBoard());
+      await page.mount(new Element());
+      const oldRoot = page.root;
+      let finishPost;
+      const initialReads = [];
+      respond = ({ url, options }) => {
+        if (options.method) return new Promise(resolve => { finishPost = resolve; });
+        if (!url.includes('/planning/today')) return Promise.resolve(response([]));
+        return new Promise(resolve => { initialReads.push(resolve); });
+      };
+      const oldPost = page.runRecompute();
+      page.unmount();
+      const oldHtml = oldRoot.querySelector('#planning-progress').innerHTML;
+      const remount = page.mount(new Element());
+      const currentReads = page.reads;
+      await flush();
+      assert.equal(initialReads.length, 1);
+      if (initialReadCompleted) {
+        initialReads[0](response(boardWith(1, 'old-schedule')));
+        await remount;
+      }
+      const maskCount = masks.length;
+      finishPost(outcome === 'failure' ? failure('recompute failed') : response({ updated: 1,
+        conflicts: outcome === 'conflict' ? [{ occurrence_id: 1, reason: 'conflict' }] : [] }));
+      await flush();
+      assert.equal(page.reads, currentReads);
+      assert.equal(masks.length, maskCount, 'old mount must not open a conflict dialog in the new mount');
+      assert.equal(initialReads.length, outcome === 'failure' ? 1 : 2,
+        'a committed recompute must replace any read it invalidates in the current mount');
+      if (outcome !== 'failure') initialReads[1](response(boardWith(2, 'new-schedule')));
+      await oldPost;
+      if (!initialReadCompleted) initialReads[0](response(boardWith(1, 'old-schedule')));
+      await remount;
+      assert.equal(page.board.progress[0].content, outcome === 'failure' ? 'old-schedule' : 'new-schedule');
+      assert.equal(page.reads.needsRead('today'), false);
+      assert.equal(page.reads.hasData('today'), true);
+      assert.equal(oldRoot.querySelector('#planning-progress').innerHTML, oldHtml);
+      assert.equal(intervals.size, 1);
+      assert.equal([...intervals.values()][0].ms, 30000);
+      page.unmount();
+    }
+    respond = async () => response(emptyBoard());
+    await page.mount(new Element());
+    let finishPost;
+    requests.length = 0;
+    respond = () => new Promise(resolve => { finishPost = resolve; });
+    const pending = page.runRecompute();
+    page.unmount();
+    finishPost(response({ updated: 1 }));
+    await pending;
+    assert.equal(page.root, null);
+    assert.deepEqual(readPaths(), []);
+    assert.equal(intervals.size, 0);
+  },
+
+  async 'latency-actions'() {
+    const actions = actionsModule.createPlanningActions();
+    const button = new Element();
+    document.body.appendChild(button);
+    button.innerHTML = '<span>恢复</span>';
+    let resolveWrite, calls = 0;
+    const operation = () => { calls++; return new Promise(resolve => { resolveWrite = resolve; }); };
+    const first = actions.run('restore:1', { button, label: '正在恢复…' }, operation);
+    const duplicate = actions.run('restore:1', { button }, operation);
+    assert.equal(calls, 1);
+    assert.equal(first, duplicate);
+    assert.equal(button.disabled, true);
+    assert.equal(button.textContent, '正在恢复…');
+    assert.equal(button.getAttribute('aria-busy'), 'true');
+    resolveWrite('saved');
+    assert.equal(await first, 'saved');
+    assert.equal(button.disabled, false);
+    assert.equal(button.innerHTML, '<span>恢复</span>');
+    assert.equal(button.getAttribute('aria-busy'), null);
+    await assert.rejects(actions.run('restore:1', { button }, () => { throw new Error('failed'); }), /failed/);
+    assert.equal(button.disabled, false);
+    const detached = actions.run('restore:1', { button }, operation);
+    button.remove(); button.innerHTML = 'new owner';
+    resolveWrite(); await detached;
+    assert.equal(button.innerHTML, 'new owner');
+  },
+
+  async 'latency-visible-writes'() {
+    respond = async ({ url, options }) => response(options.method ? { updated: 1 }
+      : url.includes('/today') ? emptyBoard() : []);
+    await page.mount(new Element());
+    requests.length = 0;
+    await page.occurrenceAction('start', 1);
+    assert.deepEqual(readPaths(), ['/admin/api/planning/today']);
+    assert.equal(page.reads.needsRead('occurrences'), true);
+    page.switchTab('all'); await page.refreshVisible();
+    const visible = { id: 1, task_id: 1, content: 'fresh visible' };
+    page.occurrences = [visible];
+    page.board = boardWith(1, 'stale hidden');
+    page.reads.invalidate(['today']);
+    assert.equal(page.findOccurrence(1), visible);
+    assert.equal(page.findOccurrence(2), null);
+    requests.length = 0;
+    await page.taskAction('enable', 1);
+    assert.deepEqual(readPaths().sort(), ['/admin/api/planning/occurrences', '/admin/api/planning/tasks']);
+    requests.length = 0;
+    await page.runRecompute();
+    assert.deepEqual(readPaths(), ['/admin/api/planning/occurrences']);
+    assert.equal(page.reads.needsRead('today'), true);
+    page.unmount();
+  },
+
   async 'C8-note-remount'() {
     // Deferred promises control commit order; polling/timers never run here.
     let stored = '旧备注';

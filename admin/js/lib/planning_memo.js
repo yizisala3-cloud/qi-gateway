@@ -15,12 +15,13 @@
 // 一期不实现清单勾选、待办互通与 AI 读写（F01–F03 仅预留稳定身份与
 // 可复用基础接口）。
 
-import { gw } from '../api.js?v=20261017-hide-deleted-tasks';
+import { gw } from '../api.js?v=20261018-planning-latency';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, icon, esc,
-} from '../ui.js?v=20261017-hide-deleted-tasks';
-import { createRetroSelectField } from './retro_select.js?v=20261017-hide-deleted-tasks';
-import { renderMarkdown } from './memo_markdown.js?v=20261017-hide-deleted-tasks';
+} from '../ui.js?v=20261018-planning-latency';
+import { createRetroSelectField } from './retro_select.js?v=20261018-planning-latency';
+import { renderMarkdown } from './memo_markdown.js?v=20261018-planning-latency';
+import { createPlanningActions } from './planning_actions.js?v=20261018-planning-latency';
 
 const KIND_LABELS = { pinned: '常驻备忘', note: '随笔' };
 const AUTOSAVE_DELAY_MS = 800;
@@ -418,6 +419,7 @@ function startHandleDrag(e, handle, list, item, onMoved) {
 /* ═══════════════ 主模块 ═══════════════ */
 
 export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } = {}) {
+  const actionFeedback = createPlanningActions();
   const memo = {
     root: null,
     body: null,
@@ -425,6 +427,7 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
     filterInput: null,
     view: 'board',            // board | tag | search | archived | trash
     board: null,
+    boardDirty: false,
     tags: [],
     tagsStatus: 'unloaded',
     tagsError: null,
@@ -443,6 +446,7 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
     seq: 0,
     searchSeq: 0,
     searchTimer: null,
+    searchController: null,
     suppressClick: false,
     pagehideHandler: null,
     pageshowHandler: null,
@@ -481,6 +485,9 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
       root.addEventListener('click', (e) => this.handleClick(e));
       root.querySelector('[data-memo-search]').addEventListener('input', (e) => {
         const value = e.target.value;
+        this.searchController?.abort();
+        this.searchSeq += 1;
+        this.statusHost.innerHTML = value.trim() ? loading('正在搜索…') : '';
         if (this.searchTimer) clearTimeout(this.searchTimer);
         this.searchTimer = setTimeout(() => {
           this.searchTimer = null;
@@ -518,17 +525,15 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
     /** 切到备忘录页签时由 planning 页调用（数据按需加载）。 */
     async show() {
       if (!this.root) return;
-      await this.reload();
-      if (!this.root) return;
-      // 重返按当前视图刷新（BUG-08）：reload 推进的 seq 已使在途的旧
-      // 生命周期/搜索请求失效，但它本身只接上看板数据——归档/回收站
-      // 必须重发当前视图的读取，否则页面停在「正在载入」；已显示的
-      // 搜索/生命周期列表重返时同样重读，反映其他设备的变化。
       if (this.view === 'archived' || this.view === 'trash') {
+        this.invalidateBoard();
+        this.prefetchTags({ fresh: true });
         await this.renderLifecycleList(VIEW_STATUS[this.view]);
       } else if (this.view === 'search') {
+        this.invalidateBoard();
+        this.prefetchTags({ fresh: true });
         await this.runSearch();
-      }
+      } else await this.reload();
     },
 
     dispose() {
@@ -536,6 +541,8 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
       // await 返回后复核失败，不再创建旧编辑框或清草稿
       this._epoch += 1;
       this._disposed = true;
+      this.searchController?.abort();
+      this.searchController = null;
       this._tagDeleteController?.abort();
       this._tagDeleteController = null;
       this.tagDeletionModal?.close();
@@ -569,6 +576,11 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
     },
 
     /* ---------- 数据 ---------- */
+
+    invalidateBoard() {
+      this.seq += 1;
+      this.boardDirty = true;
+    },
 
     invalidateTags() {
       this._tagsRevision += 1;
@@ -618,6 +630,11 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
     /** 视图切换统一入口：使在途的旧视图加载失效（F10）。
      *  reload / renderLifecycleList 以 seq 识别过期响应。 */
     switchView(view) {
+      this.searchController?.abort();
+      this.searchController = null;
+      if (this.searchTimer || this.view === 'search') {
+        if (this.statusHost) this.statusHost.innerHTML = '';
+      }
       this.view = view;
       this.seq += 1;
       // 输入去抖的旧 timer 持有关键词，不清掉会在到期时把视图拖回 search
@@ -642,6 +659,7 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
         const board = await boardRequest;
         if (seq !== this.seq || !this.root) return false;
         this.board = board;
+        this.boardDirty = false;
         // 上一次重排/模式写入的待确认刷新到此完成（BUG-06）：缓存已反映
         // 服务端最新顺序，恢复放行下一次拖动
         if (this._pendingRefresh) {
@@ -666,27 +684,36 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
      *  看板与标签详情由 reload 渲染，搜索按当前关键词重查（F12），
      *  生命周期列表按正确的 status 重读（F09）。 */
     async refreshAfterWrite({ refreshTags = true } = {}) {
-      await this.reload({ silent: true, refreshTags });
       if (!this.root) return;
+      this.invalidateBoard();
       if (this.view === 'search') {
+        if (refreshTags) this.prefetchTags({ fresh: true });
         await this.runSearch();
       } else if (this.view === 'archived' || this.view === 'trash') {
-        this.renderLifecycleList(VIEW_STATUS[this.view]);
-      }
+        if (refreshTags) this.prefetchTags({ fresh: true });
+        await this.renderLifecycleList(VIEW_STATUS[this.view]);
+      } else await this.reload({ silent: true, refreshTags });
     },
 
     async runSearch() {
       const seq = ++this.searchSeq;
+      this.searchController?.abort();
+      const controller = new AbortController();
+      this.searchController = controller;
+      if (this.statusHost) this.statusHost.innerHTML = loading('正在搜索…');
       try {
         const results = await gw(
-          `/admin/api/memo/entries?status=active&q=${encodeURIComponent(this.searchQuery)}`);
-        if (seq !== this.searchSeq || !this.root) return;   // 旧响应不覆盖新页面
+          `/admin/api/memo/entries?status=active&q=${encodeURIComponent(this.searchQuery)}`, { signal: controller.signal });
+        if (seq !== this.searchSeq || !this.root || controller.signal.aborted) return;
         this.searchResults = results;
+        if (this.statusHost) this.statusHost.innerHTML = '';
         this.render();
       } catch (error) {
-        if (seq !== this.searchSeq || !this.root) return;
+        if (seq !== this.searchSeq || !this.root || controller.signal.aborted) return;
         this.searchResults = [];
         this.statusHost.innerHTML = errorBlock(`搜索失败：${esc(error.message)}`);
+      } finally {
+        if (this.searchController === controller) this.searchController = null;
       }
     },
 
@@ -730,6 +757,11 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
 
     render() {
       if (!this.root || !this.body) return;
+      if (this.boardDirty && (this.view === 'board' || this.view === 'tag')) {
+        this.body.innerHTML = loading('正在更新备忘录…');
+        void this.reload({ refreshTags: false });
+        return;
+      }
       if (this.view === 'board') return this.renderBoard();
       if (this.view === 'tag') return this.renderTagDetail();
       if (this.view === 'search') return this.renderSearch();
@@ -914,8 +946,8 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
           return this.renderLifecycleList(VIEW_STATUS.trash);
         }
         if (act === 'memo-note-mode') return this.setNoteMode(el.dataset.mode);
-        if (act === 'memo-restore') return this.restoreEntry(Number(el.dataset.id));
-        if (act === 'memo-lifecycle-delete') return this.lifecycleEntry(Number(el.dataset.id), 'delete');
+        if (act === 'memo-restore') return this.restoreEntry(Number(el.dataset.id), el);
+        if (act === 'memo-lifecycle-delete') return this.lifecycleEntry(Number(el.dataset.id), 'delete', null, null, el);
         return;
       }
       // 拖动把手不触发阅读；列表项点击 = 阅读完整正文（§2.3/M07）
@@ -1042,9 +1074,9 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
             if (el.hasAttribute('data-reader-edit')) {
               this.openEditor(entry.id);
             } else if (el.hasAttribute('data-reader-archive')) {
-              this.lifecycleEntry(entry.id, 'archive', () => { if (current()) close(); }, entry.content_version);
+              this.lifecycleEntry(entry.id, 'archive', () => { if (current()) close(); }, entry.content_version, el);
             } else if (el.hasAttribute('data-reader-delete')) {
-              this.lifecycleEntry(entry.id, 'delete', () => { if (current()) close(); }, entry.content_version);
+              this.lifecycleEntry(entry.id, 'delete', () => { if (current()) close(); }, entry.content_version, el);
             }
           };
         });
@@ -1052,41 +1084,45 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
       this._refreshReaderContent(entry);
     },
 
-    async lifecycleEntry(id, action, closeReader = null, expectedVersion = null) {
-      if (action === 'delete' && !(await confirm(
-        '确认删除这条备忘录？删除后将在回收站保留 72 小时，到期彻底删除、无法恢复。',
-        { danger: true, okText: '删除', cancelText: '取消' },
-      ))) return;
-      try {
-        const version = expectedVersion ?? (await this.fetchEntry(id)).content_version;
-        await gw(`/admin/api/memo/entries/${id}/${action}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ expected_version: version }),
-        });
-        toast(action === 'archive'
-          ? '已归档，可在「归档」中找回'
-          : '已删除，72 小时内可在「回收站」恢复');
-        if (closeReader) closeReader();
-        await this.refreshAfterWrite({ refreshTags: false });
-      } catch (error) {
-        toast(`${action === 'archive' ? '归档' : '删除'}失败：${error.message}`, 'err');
-      }
+    async lifecycleEntry(id, action, closeReader = null, expectedVersion = null, button = null) {
+      return actionFeedback.run(`lifecycle:${id}`, { button, label: action === 'archive' ? '正在归档…' : '正在删除…' }, async () => {
+        if (action === 'delete' && !(await confirm(
+          '确认删除这条备忘录？删除后将在回收站保留 72 小时，到期彻底删除、无法恢复。',
+          { danger: true, okText: '删除', cancelText: '取消' },
+        ))) return;
+        try {
+          const version = expectedVersion ?? (await this.fetchEntry(id)).content_version;
+          await gw(`/admin/api/memo/entries/${id}/${action}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ expected_version: version }),
+          });
+          toast(action === 'archive'
+            ? '已归档，可在「归档」中找回'
+            : '已删除，72 小时内可在「回收站」恢复');
+          if (closeReader) closeReader();
+          await this.refreshAfterWrite({ refreshTags: false });
+        } catch (error) {
+          toast(`${action === 'archive' ? '归档' : '删除'}失败：${error.message}`, 'err');
+        }
+      });
     },
 
-    async restoreEntry(id) {
-      try {
-        const entry = await this.fetchEntry(id);
-        await gw(`/admin/api/memo/entries/${id}/restore`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ expected_version: entry.content_version }),
-        });
-        toast('已恢复');
-        await this.refreshAfterWrite();
-      } catch (error) {
-        toast(`恢复失败：${error.message}`, 'err');
-      }
+    async restoreEntry(id, button = null) {
+      return actionFeedback.run(`lifecycle:${id}`, { button, label: '正在恢复…' }, async () => {
+        try {
+          const entry = await this.fetchEntry(id);
+          await gw(`/admin/api/memo/entries/${id}/restore`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ expected_version: entry.content_version }),
+          });
+          toast('已恢复');
+          await this.refreshAfterWrite();
+        } catch (error) {
+          toast(`恢复失败：${error.message}`, 'err');
+        }
+      });
     },
 
     /* ---------- 标签操作 ---------- */
@@ -1195,7 +1231,7 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
           this._markRefreshUnconfirmed();
           return;
         }
-        const applied = await this.reload({ silent: true });
+        const applied = await this.reload({ silent: true, refreshTags: false });
         if (!applied) {
           // 刷新失败或被切视图打断：缓存可能落后于服务端模式/顺序，
           // 保持拖动暂停并给出可重试入口（任一次成功 reload 自动恢复）
@@ -1396,7 +1432,7 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
           this._markRefreshUnconfirmed();
           return;
         }
-        const applied = await this.reload({ silent: true });
+        const applied = await this.reload({ silent: true, refreshTags: false });
         if (!applied) {
           this._markRefreshUnconfirmed();
         }
@@ -1450,10 +1486,13 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
       this.prefetchTags();
       this._openingEditor = true;
       const epoch = this._epoch;
+      const notice = entryId ? loading('正在读取编辑内容…') : null;
+      if (notice && this.statusHost) this.statusHost.innerHTML = notice;
       this.fetchEntryOrBlank(entryId).then((seed) => {
         this._openingEditor = false;
         // 打开在途卸载（BUG-12）：fetch 期间模块已 dispose 时不得继续构建
         if (epoch !== this._epoch) return;
+        if (notice && this.statusHost?.innerHTML === notice) this.statusHost.innerHTML = '';
         if (seed && this.root && !this.editor) {
           // 构建期间（含草稿恢复决策的确认）继续挡住连点
           this._openingEditor = true;
@@ -1992,7 +2031,9 @@ export function createPlanningMemo({ beginReader, isReaderCurrent, showReader } 
       // 不再各自等待同一失败 flush 并各建一个确认框；确认「返回编辑」后
       // 守卫解除，可再次发起关闭。
       if (editor.closeInFlight) return editor.closeInFlight;
-      editor.closeInFlight = this._runEditorClose(editor).finally(() => {
+      editor.closeInFlight = actionFeedback.run(editor, {
+        button: editor.modal.root.querySelector('[data-editor-close]'), label: '正在完成保存…',
+      }, () => this._runEditorClose(editor)).finally(() => {
         editor.closeInFlight = null;
       });
       return editor.closeInFlight;

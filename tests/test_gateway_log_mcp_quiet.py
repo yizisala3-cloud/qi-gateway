@@ -360,12 +360,7 @@ class PlanningQuietOutcomeTests(unittest.TestCase):
                 mock.patch.object(
                     runtime, "_rows",
                     return_value=[{"id": 9, "is_active": True}]), \
-                mock.patch.object(
-                    cycles, "_load_boundary_state",
-                    return_value=(time(3, 0), None, frozenset())), \
-                mock.patch.object(
-                    cycles, "get_cycle_settings",
-                    return_value={"daily_refresh_enabled": True}), \
+                mock.patch.object(cycles.db, "load_app_settings", side_effect=lambda keys: {key: None for key in keys}), \
                 mock.patch.object(
                     planning_generation, "_reconcile_task_rounds",
                     side_effect=RuntimeError("maintenance boom")):

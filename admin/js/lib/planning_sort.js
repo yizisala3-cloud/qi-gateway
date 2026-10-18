@@ -1,6 +1,6 @@
 // Candidate order belongs to this controller until confirmation or cancellation.
-import { gw } from '../api.js?v=20261017-hide-deleted-tasks';
-import { toast } from '../ui.js?v=20261017-hide-deleted-tasks';
+import { gw } from '../api.js?v=20261018-planning-latency';
+import { toast } from '../ui.js?v=20261018-planning-latency';
 
 export function createPlanningSort({
   getRoot, getProgressList, getBoard, getActiveTab, getActiveSection,

@@ -200,4 +200,39 @@ for (const outcome of ['success', 'unknown', 'rejected']) {
   assert.ok(f.detail.html.includes('data-goal-act="full"'));
   f.dispose();
 }
+{
+  const f = fixture(); await f.controller.show();
+  const detail = deferred(), candidates = deferred();
+  f.requests.length = 0;
+  f.setRespond(request => request.url.endsWith('/candidates') ? candidates.promise : detail.promise);
+  const button = f.fire('link');
+  assert.equal(button.textContent, '正在读取…');
+  await settle();
+  assert.deepEqual(f.requests.map(request => request.url.split('/').pop()).sort(), ['1', 'candidates']);
+  detail.resolve(ok(goal())); candidates.resolve(ok([{ id: 5, goal_id: 1, content: '每日阅读', task_type: 'daily' }]));
+  await settle();
+  assert.deepEqual(modalTitles(), ['更换关联待办']);
+  f.dispose();
+}
+
+{
+  const f = fixture(); await f.controller.show(); f.fire('create'); await settle();
+  const editor = document.querySelector('.modal');
+  editor.querySelector('#goal-content').value = '及时反馈';
+  editor.querySelector('#goal-value').value = '1';
+  editor.querySelector('#goal-unit').value = '页';
+  editor.querySelector('#goal-planned').value = '3';
+  const refresh = deferred();
+  f.setRespond(request => request.options.method ? ok(goal(3)) : refresh.promise);
+  let finished = false;
+  const saved = editor.querySelector('[data-save]').onclick().then(() => { finished = true; });
+  await settle();
+  assert.equal(finished, true, 'confirmed save must not wait for list refresh');
+  assert.ok(toasts().includes('目标已保存'));
+  assert.equal(editor.isConnected, false);
+  refresh.resolve({ ok: false, status: 503, json: async () => ({ error: 'synthetic refresh failure' }) });
+  await saved; await settle();
+  assert.ok(f.host.textContent.includes('目标读取失败'));
+  f.dispose();
+}
 process.stdout.write('goal race regressions passed\n');

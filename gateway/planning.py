@@ -249,7 +249,8 @@ get_client = runtime.get_client
 def today_board(now: datetime | None = None) -> dict[str, Any]:
     """当前待办三分区（进度中 / 待处理 / 已完成）+ 重算等待状态。"""
     now = now or runtime._now()
-    cycle = cycles._current_cycle(now)
+    context = cycles.PlanningRequestContext(now, include_recompute=True)
+    cycle = context.cycle
     today = cycle.key
     client = runtime._require_client()
     today_rows = runtime._rows(
@@ -307,7 +308,7 @@ def today_board(now: datetime | None = None) -> dict[str, Any]:
         "cycle_start": cycle.start.isoformat(),
         "cycle_end": cycle.end.isoformat(),
         "now": common._iso(now),
-        "recompute": recompute.get_recompute_state(now),
+        "recompute": recompute.get_recompute_state(now, context=context),
         "conflicts": conflicts,
         "progress": progress,
         "attention": attention,

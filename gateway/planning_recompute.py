@@ -237,11 +237,14 @@ def _recompute_for_cycle(now: datetime, cycle: PlanningCycle) -> dict[str, Any]:
 
 # ── 重算等待标记 ──────────────────────────────────────────────────
 
-def _auto_recompute_config(now: datetime) -> tuple[bool, timedelta]:
+def _auto_recompute_config(now: datetime, context=None) -> tuple[bool, timedelta]:
     """自动重算开关与等待时长；读取失败时保持既有默认（开启 / 30 分钟）。"""
-    enabled_raw = db.load_app_setting(common.PLANNING_AUTO_RECOMPUTE_ENABLED_KEY)
+    keys = (common.PLANNING_AUTO_RECOMPUTE_ENABLED_KEY, common.PLANNING_AUTO_RECOMPUTE_WAIT_KEY)
+    values = ({key: context._setting(key) for key in keys} if context is not None
+              else db.load_app_settings(keys))
+    enabled_raw = values[common.PLANNING_AUTO_RECOMPUTE_ENABLED_KEY]
     enabled = True if not isinstance(enabled_raw, bool) else enabled_raw
-    wait_raw = db.load_app_setting(common.PLANNING_AUTO_RECOMPUTE_WAIT_KEY)
+    wait_raw = values[common.PLANNING_AUTO_RECOMPUTE_WAIT_KEY]
     minutes = (wait_raw if isinstance(wait_raw, int) and 1 <= wait_raw <= 1440
                else int(common.RECOMPUTE_WAIT.total_seconds() // 60))
     return enabled, timedelta(minutes=minutes)
@@ -311,9 +314,9 @@ def clear_recompute_mark(now: datetime | None = None,
     }).execute()
 
 
-def get_recompute_state(now: datetime | None = None) -> dict[str, Any]:
+def get_recompute_state(now: datetime | None = None, *, context=None) -> dict[str, Any]:
     now = now or runtime._now()
-    enabled, wait = _auto_recompute_config(now)
+    enabled, wait = _auto_recompute_config(now, context)
     client = runtime._require_client()
     rows = runtime._rows(client, "planning_recompute_state", lambda q: q.eq("id", 1).limit(1))
     requested_at = rows[0].get("requested_at") if rows else None

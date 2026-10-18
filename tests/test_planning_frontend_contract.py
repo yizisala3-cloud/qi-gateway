@@ -403,8 +403,8 @@ class PlanningPageContractTests(unittest.TestCase):
             "rows.length >= 10 ? 'none' : ''",  # 达到 10 个隐藏添加按钮
             "').length <= 1) return;",          # 至少保留 1 项，不允许删到 0
             "请至少填写一个待办内容",
-            "if (submit.disabled) return;",     # 防双击：请求期间禁用提交
-            "submit.disabled = true;",
+            "button.onclick = () => feedback.run(root,",
+            "bindSave(root, async () => {",
             "submit.disabled = false;",         # 失败恢复按钮
         ):
             with self.subTest(marker=marker):

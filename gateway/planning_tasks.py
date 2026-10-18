@@ -887,25 +887,33 @@ def _prepare_refresh_definition(row: dict[str, Any], now: datetime, current: dic
 def _generate_created_task_quietly(
     task_id: int, now: datetime, context: cycles.PlanningRequestContext,
 ) -> None:
+    _generate_saved_tasks_quietly([task_id], now, context)
+
+
+def _generate_saved_tasks_quietly(
+    task_ids: list[int], now: datetime, context: cycles.PlanningRequestContext,
+) -> None:
     """Create the new task's due round immediately, then schedule the whole cycle."""
     with runtime._maintenance_lock:
-        try:
-            # BUG-10：quiet 作用域让内层捕获（generate_task 内部 log.exception
-            # 并返回 errors）把 outcome 标成 committed_side_effect_failed。
-            with generation.quiet_generation_scope():
-                result = generation.generate_task(task_id, now, context=context)
-        except Exception:
-            log.exception(
-                "planning 新任务同步生成失败（等待后台循环重试）: task=%s", task_id,
-                extra={"evt": {
-                    "module": "planning", "operation": "generate_created_task",
-                    "error_code": "quiet_generate_failed",
-                    "message_zh": "待办已保存，但新任务轮次生成失败，将由维护流程重试",
-                    "outcome": "committed_side_effect_failed",
-                    "safe_context": {"task_id": task_id},
-                }},
-            )
-            return
+        result = {"created": 0, "errors": []}
+        for task_id in task_ids:
+            try:
+                with generation.quiet_generation_scope():
+                    generated = generation.generate_task(task_id, now, context=context)
+                result["created"] += generated.get("created", 0)
+                result["errors"].extend(generated.get("errors", []))
+            except Exception as exc:
+                result["errors"].append({"task_id": task_id, "error": type(exc).__name__})
+                log.exception(
+                    "planning 新任务同步生成失败（等待后台循环重试）: task=%s", task_id,
+                    extra={"evt": {
+                        "module": "planning", "operation": "generate_created_task",
+                        "error_code": "quiet_generate_failed",
+                        "message_zh": "待办已保存，但新任务轮次生成失败，将由维护流程重试",
+                        "outcome": "committed_side_effect_failed",
+                        "safe_context": {"task_id": task_id},
+                    }},
+                )
         if not common._should_recompute_after_generation(result):
             return
         try:
@@ -978,9 +986,10 @@ def _close_out_recurrence_before_switch(client, old_task: dict[str, Any], now: d
     一律不保存（Phase B 不执行），已补齐的旧轴轮次是旧规则欠下的合法
     事实，重试整个编辑时 Phase A 幂等（轮次唯一键）。
     """
-    configured, transition, absorbed = cycles._load_boundary_state(now)
+    context = cycles.PlanningRequestContext(now)
+    configured, transition, absorbed = context.boundary_state()
     cycle = planning_cycle_at(now, configured, transition)
-    daily_enabled = cycles.get_cycle_settings(now)["daily_refresh_enabled"]
+    daily_enabled = context.daily_refresh_enabled
     generation._reconcile_task_rounds(
         client, old_task, cycle, now, configured, transition, absorbed, daily_enabled,
     )
@@ -1313,7 +1322,7 @@ def _update_task(task_id: int, payload: Any, now: datetime | None = None, *,
         # 停用命令（is_active=False）不得触发补生成——废弃后新轮次必须
         # 不存在（最终 Debug 问题 1A：single-transaction discard）。
         # 规则变更后只尝试当前应有轮次；唯一键保护既有轮次。
-        _generate_due_quietly(client, now)
+        _generate_created_task_quietly(task_id, now, cycles.PlanningRequestContext(now))
     return presentation.serialize_task(updated, now)
 
 

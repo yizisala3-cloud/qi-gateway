@@ -125,16 +125,19 @@ class PlanningRequestContext:
     task insert; validation only interprets the boundary when it needs it.
     """
 
-    def __init__(self, now: datetime):
+    def __init__(self, now: datetime, *, include_recompute: bool = False):
         self.now = now
+        self._keys = (common.PLANNING_BOUNDARY_STATE_KEY, common.PLANNING_DAILY_REFRESH_KEY)
+        if include_recompute:
+            self._keys += (common.PLANNING_AUTO_RECOMPUTE_ENABLED_KEY, common.PLANNING_AUTO_RECOMPUTE_WAIT_KEY)
         self._values: dict[str, Any] | None = None
         self._boundary: tuple[time, BoundaryTransition | None, frozenset[date]] | None = None
 
     def _setting(self, key: str) -> Any:
         if self._values is None:
-            self._values = db.load_app_settings((
-                common.PLANNING_BOUNDARY_STATE_KEY, common.PLANNING_DAILY_REFRESH_KEY,
-            ))
+            self._values = db.load_app_settings(self._keys)
+        if key not in self._values:
+            self._values.update(db.load_app_settings((key,)))
         return self._values.get(key)
 
     def boundary_state(self) -> tuple[time, BoundaryTransition | None, frozenset[date]]:
@@ -165,13 +168,9 @@ def get_cycle_settings(now: datetime | None = None) -> dict[str, Any]:
     first occurs, no matter how many times the boundary is re-configured.
     """
     now = now or runtime._now()
-    boundary, transition, _ = _load_boundary_state(now)
-    daily_raw = db.load_app_setting(common.PLANNING_DAILY_REFRESH_KEY)
-    if daily_raw is db.APP_SETTING_QUERY_FAILED:
-        raise common.PlanningError("database_unavailable", "每日刷新配置暂时无法读取", 503)
-    # An absent or malformed switch keeps the established enabled default.
-    if not isinstance(daily_raw, bool):
-        daily_raw = True
+    context = PlanningRequestContext(now, include_recompute=True)
+    boundary, transition, _ = context.boundary_state()
+    daily_raw = context.daily_refresh_enabled
     cycle = planning_cycle_at(now, boundary, transition)
     result = {
         "refresh_boundary_time": boundary.strftime("%H:%M"),
@@ -188,11 +187,11 @@ def get_cycle_settings(now: datetime | None = None) -> dict[str, Any]:
             "change_at": transition.change_at.isoformat(),
             "effective_at": transition.effective_at.isoformat(),
         }
-    auto_enabled_raw = db.load_app_setting(common.PLANNING_AUTO_RECOMPUTE_ENABLED_KEY)
+    auto_enabled_raw = context._setting(common.PLANNING_AUTO_RECOMPUTE_ENABLED_KEY)
     if auto_enabled_raw is db.APP_SETTING_QUERY_FAILED:
         raise common.PlanningError("database_unavailable", "自动重算配置暂时无法读取", 503)
     result["auto_recompute_enabled"] = True if not isinstance(auto_enabled_raw, bool) else auto_enabled_raw
-    wait_raw = db.load_app_setting(common.PLANNING_AUTO_RECOMPUTE_WAIT_KEY)
+    wait_raw = context._setting(common.PLANNING_AUTO_RECOMPUTE_WAIT_KEY)
     if wait_raw is db.APP_SETTING_QUERY_FAILED:
         raise common.PlanningError("database_unavailable", "自动重算配置暂时无法读取", 503)
     result["auto_recompute_wait_minutes"] = (

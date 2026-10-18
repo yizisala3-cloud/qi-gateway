@@ -161,7 +161,7 @@ def test_create_leaves_unrelated_missing_daily_rounds_to_full_maintenance(client
                            wraps=planning_generation._reconcile_task_rounds) as reconcile:
         result = planning.generate_due(at(24, 8))
     assert result["created"] == 2
-    assert {call.args[1]["id"] for call in reconcile.call_args_list} == {1, 2, task["id"]}
+    assert {call.args[1]["id"] for call in reconcile.call_args_list} == {1, 2}
     assert {row["task_id"] for row in client.rows["planning_occurrence"]} == {1, 2, task["id"]}
 
 
@@ -466,7 +466,7 @@ def test_created_task_is_reread_after_taking_the_shared_maintenance_lock(client,
         assert client.rows["planning_occurrence"][0]["content_snapshot"] == edit["content"]
 
 
-def test_update_and_split_keep_their_existing_full_generation_side_effect(client):
+def test_update_and_split_generate_only_affected_tasks(client):
     task = create()
     seed_task(client, 2)
     client.rows["planning_task"][-1].update({"created_at": at(23, 7).isoformat(),
@@ -475,8 +475,8 @@ def test_update_and_split_keep_their_existing_full_generation_side_effect(client
     with mock.patch.object(planning_generation, "_reconcile_task_rounds",
                            wraps=planning_generation._reconcile_task_rounds) as reconcile:
         planning.update_task(task["id"], {"estimated_minutes": 31}, at(24, 8))
-    assert {call.args[1]["id"] for call in reconcile.call_args_list} == {1, 2}
-    assert {row["task_id"] for row in client.rows["planning_occurrence"]} == {1, 2}
+    assert {call.args[1]["id"] for call in reconcile.call_args_list} == {1}
+    assert {row["task_id"] for row in client.rows["planning_occurrence"]} == {1}
     occurrence = next(row for row in client.rows["planning_occurrence"] if row["task_id"] == 1)
     result = planning.split_occurrence(occurrence["id"], {
         "parts": [{"content": "拆出单次", "estimated_minutes": 30}],
@@ -485,3 +485,4 @@ def test_update_and_split_keep_their_existing_full_generation_side_effect(client
     assert occurrence["status"] == "discarded_this"
     assert len([row for row in client.rows["planning_occurrence"] if row["task_id"] == child_id]) == 1
     assert next(row for row in client.rows["planning_task"] if row["id"] == child_id)["task_type"] == "once"
+    assert not any(row["task_id"] == 2 for row in client.rows["planning_occurrence"])

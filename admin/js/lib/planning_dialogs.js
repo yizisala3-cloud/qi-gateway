@@ -1,7 +1,8 @@
 // Instance dialogs: form-local inputs and timeout retry identity stay in their closures.
-import { gw } from '../api.js?v=20261017-hide-deleted-tasks';
-import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261017-hide-deleted-tasks';
-import { createRetroTimeField } from './retro_time.js?v=20261017-hide-deleted-tasks';
+import { gw } from '../api.js?v=20261018-planning-latency';
+import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261018-planning-latency';
+import { createRetroTimeField } from './retro_time.js?v=20261018-planning-latency';
+import { createPlanningActions } from './planning_actions.js?v=20261018-planning-latency';
 
 function initDialogTimes(root) {
   root.querySelectorAll('.retro-time[data-retro-for]').forEach(host => {
@@ -39,8 +40,23 @@ function bindTimeEnter(root) {
 
 export function createPlanningDialogs({
   findOccurrence, getOccurrences, getTasks, openTaskForm,
-  loadToday, loadTasks, loadOccurrences, onChanged = () => {},
+  loadToday, loadTasks, loadOccurrences, onChanged = () => {}, refreshVisible = null,
 }) {
+  const feedback = createPlanningActions();
+  const bindSave = (root, operation) => {
+    const button = root.querySelector('[data-ok]');
+    button.onclick = () => feedback.run(root, { button, label: '正在保存…' }, operation);
+  };
+  const refreshAfterWrite = async (includeTasks = false) => {
+    try {
+      const result = refreshVisible ? await refreshVisible()
+        : (await Promise.all([loadToday(), loadOccurrences(), ...(includeTasks ? [loadTasks()] : [])])).every(value => value !== false);
+      if (result === false) toast('操作已保存，列表更新失败，请刷新重试', 'warn');
+    } catch (error) {
+      console.error({ location: 'planning_dialogs.refreshAfterWrite', stack: error.stack });
+      toast('操作已保存，列表更新失败，请刷新重试', 'warn');
+    }
+  };
   return {
     askCompleteDuration(id, post) {
       const { root, close } = modal({
@@ -55,10 +71,8 @@ export function createPlanningDialogs({
                  <button class="btn btn-primary" data-ok>完成</button>`,
       });
       root.querySelector('[data-cancel]').onclick = close;
-      root.querySelector('[data-ok]').onclick = async () => {
+      bindSave(root, async () => {
         const submit = root.querySelector('[data-ok]');
-        if (submit.disabled) return;
-        submit.disabled = true;
         const text = root.querySelector('[data-actual-duration]').value.trim();
         const body = {};
         if (text) body.actual_logged_duration = text;
@@ -67,12 +81,12 @@ export function createPlanningDialogs({
           onChanged();
           close();
           toast('已完成');
-          await Promise.all([loadToday(), loadOccurrences()]);
+          await refreshAfterWrite();
         } catch (error) {
           submit.disabled = false;
           toast(`操作失败：${error.message}`, 'err');
         }
-      };
+      });
     },
 
     askPartial(id) {
@@ -85,7 +99,7 @@ export function createPlanningDialogs({
                  <button class="btn btn-primary" data-ok>保存</button>`,
       });
       root.querySelector('[data-cancel]').onclick = close;
-      root.querySelector('[data-ok]').onclick = async () => {
+      bindSave(root, async () => {
         const note = root.querySelector('#planning-partial-note').value.trim();
         if (!note) { toast('请填写完成说明', 'err'); return; }
         try {
@@ -97,12 +111,11 @@ export function createPlanningDialogs({
           onChanged();
           close();
           toast('已记录部分完成；待办保持开放，可继续处理');
-          await loadToday();
-          await loadOccurrences();
+          await refreshAfterWrite();
         } catch (error) {
           toast(`操作失败：${error.message}`, 'err');
         }
-      };
+      });
     },
 
     async askRescheduleTimeout(id) {
@@ -121,7 +134,7 @@ export function createPlanningDialogs({
       });
       initDialogTimes(root);
       root.querySelector('[data-cancel]').onclick = close;
-      root.querySelector('[data-ok]').onclick = async () => {
+      bindSave(root, async () => {
         const value = root.querySelector('#planning-reschedule-time').value;
         if (!value) { toast('请选择时间', 'err'); return; }
         if (idempotencyKey === null || lastSubmittedTime !== value) {
@@ -137,12 +150,11 @@ export function createPlanningDialogs({
           onChanged();
           close();
           toast('已保存新的执行时间；原超时记录保留');
-          await loadToday();
-          await loadOccurrences();
+          await refreshAfterWrite();
         } catch (error) {
           toast(`操作失败：${error.message}`, 'err');
         }
-      };
+      });
     },
 
     askNewTime(id, targetStatus, title) {
@@ -155,7 +167,7 @@ export function createPlanningDialogs({
       });
       initDialogTimes(root);
       root.querySelector('[data-cancel]').onclick = close;
-      root.querySelector('[data-ok]').onclick = async () => {
+      bindSave(root, async () => {
         const value = root.querySelector('#planning-new-time').value;
         if (!value) { toast('请选择时间', 'err'); return; }
         try {
@@ -167,12 +179,11 @@ export function createPlanningDialogs({
           onChanged();
           close();
           toast(targetStatus === 'deferred' ? '已延后' : '已重新安排');
-          await loadToday();
-          await loadOccurrences();
+          await refreshAfterWrite();
         } catch (error) {
           toast(`操作失败：${error.message}`, 'err');
         }
-      };
+      });
     },
 
     askEditTime(id) {
@@ -208,7 +219,7 @@ export function createPlanningDialogs({
       });
       initDialogTimes(root);
       root.querySelector('[data-cancel]').onclick = close;
-      root.querySelector('[data-ok]').onclick = async () => {
+      bindSave(root, async () => {
         const start = root.querySelector('#planning-adj-window-start').value;
         const end = root.querySelector('#planning-adj-window-end').value;
         try {
@@ -223,8 +234,7 @@ export function createPlanningDialogs({
           onChanged();
           close();
           toast('时段已更新；待办时间将按新时段重新安排');
-          await loadToday();
-          await loadOccurrences();
+          await refreshAfterWrite();
         } catch (error) {
           const message = String(error.message || '');
           const area = root.querySelector('#pf-adj-error');
@@ -236,7 +246,7 @@ export function createPlanningDialogs({
           }
           toast(`保存失败：${error.message}`, 'err');
         }
-      };
+      });
     },
 
     askEstimateTime(id) {
@@ -257,14 +267,12 @@ export function createPlanningDialogs({
       initDialogTimes(root);
       bindTimeEnter(root);
       root.querySelector('[data-cancel]').onclick = close;
-      root.querySelector('[data-ok]').onclick = async () => {
+      bindSave(root, async () => {
         const save = root.querySelector('[data-ok]');
-        if (save.disabled) return;
         const start = root.querySelector('#planning-estimate-start').value;
         const end = root.querySelector('#planning-estimate-end').value;
         const feedback = root.querySelector('[data-time-feedback]');
         if (!start) { feedback.textContent = '请选择预估开始时间'; return; }
-        save.disabled = true;
         try {
           await gw(`/admin/api/planning/occurrences/${id}`, { method: 'PATCH',
             headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
@@ -276,12 +284,12 @@ export function createPlanningDialogs({
           return;
         }
         onChanged(); close(); toast('本次预估时间已更新');
-        try { await Promise.all([loadToday(), loadOccurrences()]); }
+        try { await refreshAfterWrite(); }
         catch (error) {
           console.error({ location: 'planning_dialogs.refreshEstimate', occurrenceId: id, stack: error.stack });
           toast('预估时间已保存，列表更新失败，请刷新', 'warn');
         }
-      };
+      });
     },
 
     askBackfill(id) {
@@ -305,9 +313,8 @@ export function createPlanningDialogs({
       initDialogTimes(root);
       bindTimeEnter(root);
       root.querySelector('[data-cancel]').onclick = close;
-      root.querySelector('[data-ok]').onclick = async () => {
+      bindSave(root, async () => {
         const save = root.querySelector('[data-ok]');
-        if (save.disabled) return;
         const start = root.querySelector('#planning-backfill-start').value;
         const end = root.querySelector('#planning-backfill-end').value;
         // 始终提交两个字段：留空 → null 即清除（BUG-6），actual_minutes 随之清空
@@ -315,7 +322,6 @@ export function createPlanningDialogs({
           actual_start: start ? new Date(start).toISOString() : null,
           actual_end: end ? new Date(end).toISOString() : null,
         };
-        save.disabled = true;
         try {
           await gw(`/admin/api/planning/occurrences/${id}`, {
             method: 'PATCH',
@@ -328,12 +334,12 @@ export function createPlanningDialogs({
           return;
         }
         onChanged(); close(); toast('实际时间已更新');
-        try { await loadToday(); }
+        try { await refreshAfterWrite(); }
         catch (error) {
           console.error({ location: 'planning_dialogs.refreshActual', occurrenceId: id, stack: error.stack });
           toast('实际时间已保存，列表更新失败，请刷新', 'warn');
         }
-      };
+      });
     },
 
     askSplit(id) {
@@ -388,7 +394,7 @@ export function createPlanningDialogs({
       });
       syncRows();
       root.querySelector('[data-cancel]').onclick = close;
-      root.querySelector('[data-ok]').onclick = async () => {
+      bindSave(root, async () => {
         const parts = [...root.querySelectorAll('[data-part-row]')]
           .map((rowEl) => ({
             content: rowEl.querySelector('[data-part-content]').value.trim(),
@@ -399,8 +405,6 @@ export function createPlanningDialogs({
         // 防双击：请求进行中禁用提交按钮；失败恢复以便重试（后端仍有
         // 「已关闭实例拒绝再次拆分」的业务兜底）
         const submit = root.querySelector('[data-ok]');
-        if (submit.disabled) return;
-        submit.disabled = true;
         try {
           await gw(`/admin/api/planning/occurrences/${id}/split`, {
             method: 'POST',
@@ -410,12 +414,12 @@ export function createPlanningDialogs({
           onChanged();
           close();
           toast('已拆分：原待办按「此次不执行」收口，新待办已创建');
-          await Promise.all([loadToday(), loadTasks(), loadOccurrences()]);
+          await refreshAfterWrite(true);
         } catch (error) {
           submit.disabled = false;
           toast(`拆分失败：${error.message}`, 'err');
         }
-      };
+      });
     },
 
     askRemaining(occ) {

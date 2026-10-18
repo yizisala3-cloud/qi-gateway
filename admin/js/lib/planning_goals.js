@@ -1,9 +1,9 @@
 // Goal UI owns its reads, drafts and durable operation identities. Progress is
 // always supplied by the server; task creation reuses the existing task form.
-import { gw } from '../api.js?v=20261017-hide-deleted-tasks';
-import { modal, confirm, toast, esc, icon, loading, empty, errorBlock } from '../ui.js?v=20261017-hide-deleted-tasks';
-import { createRetroSelectField } from './retro_select.js?v=20261017-hide-deleted-tasks';
-import { TASK_TYPE_LABELS } from './planning_display.js?v=20261017-hide-deleted-tasks';
+import { gw } from '../api.js?v=20261018-planning-latency';
+import { modal, confirm, toast, esc, icon, loading, empty, errorBlock } from '../ui.js?v=20261018-planning-latency';
+import { createRetroSelectField } from './retro_select.js?v=20261018-planning-latency';
+import { TASK_TYPE_LABELS } from './planning_display.js?v=20261018-planning-latency';
 
 export const GOAL_TASK_TYPES = ['daily', 'interval', 'weekly', 'monthly'];
 const BASE = '/admin/api/planning/goals';
@@ -195,7 +195,10 @@ export function createPlanningGoals({ getDetail, clearSelection, openTaskForm, o
       try {
         const result = await sendGoalOperation(op);
         operations.delete(op.key); persist();
-        await changed();
+        void changed().catch(error => {
+          console.error({ location: 'planning_goals.refreshAfterCommit', goalId: op.goalId, stack: error.stack });
+          toast('目标操作已保存，列表更新失败，请重新读取', 'warn');
+        });
         return result;
       } catch (error) {
         if (!resultUnknown(error)) operations.delete(op.key);
@@ -285,9 +288,8 @@ export function createPlanningGoals({ getDetail, clearSelection, openTaskForm, o
 
   async function linkExisting(id, owner) {
     if (editor?.root.isConnected) return;
-    let goal = await fresh(id);
-    if (!canPresent(owner)) return;
-    const options = await gw(`${BASE}/candidates`);
+    const [latest, options] = await Promise.all([fresh(id), gw(`${BASE}/candidates`)]);
+    let goal = latest;
     if (!canPresent(owner) || editor?.root.isConnected) return;
     const available = options.filter(task => !task.goal_id || task.goal_id === id);
     let op = null, submitting = false, conflicted = false;
@@ -430,7 +432,9 @@ export function createPlanningGoals({ getDetail, clearSelection, openTaskForm, o
     const key = `${kind}:${rawId}`;
     if (busy.has(key)) return;
     const owner = beginPresentation();
+    const originalButton = button.innerHTML;
     busy.add(key); button.disabled = true;
+    button.textContent = ['edit', 'adjust', 'link', 'new-task'].includes(kind) ? '正在读取…' : '正在处理…';
     try {
       if (kind === 'reload') await load();
       else if (kind === 'create') {
@@ -459,7 +463,7 @@ export function createPlanningGoals({ getDetail, clearSelection, openTaskForm, o
       if (canPresent(owner)) toast(resultUnknown(error) && (operations.size || flows.size)
         ? '结果暂时无法确认，请在目标页按原操作核实' : error.message, 'err');
     }
-    finally { busy.delete(key); if (button.isConnected) button.disabled = false; }
+    finally { busy.delete(key); if (button.isConnected) { button.disabled = false; button.innerHTML = originalButton; } }
   }
 
   const focus = () => { if (shown && root && !document.hidden) load(); };

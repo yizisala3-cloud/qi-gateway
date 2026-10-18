@@ -16,12 +16,14 @@ RPC 错误码（5 字符 SQLSTATE）：
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .db import get_client
 
 log = logging.getLogger("gateway.memo")
+_read_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="memo-read")
 
 # 时间基准与网关其他模块一致（Asia/Shanghai）
 _CST = timezone(timedelta(hours=8))
@@ -473,13 +475,32 @@ def _match_fragment(content: str, needle: str) -> str:
 
 # ── 读取端点 ──────────────────────────────────────────────────────
 
+def _parallel_rows(client, specifications):
+    futures = [_read_pool.submit(_rows, client, table, query_fn, order_by=order_by)
+               for table, query_fn, order_by in specifications]
+    results = []
+    failure = None
+    for future in futures:
+        try:
+            results.append(future.result())
+        except Exception as exc:
+            results.append(None)
+            if failure is None:
+                failure = exc
+    if failure is not None:
+        raise failure
+    return results
+
+
 def get_board() -> dict:
     client = _require_client()
-    tags = _rows(client, "memo_tag", order_by=("position", "id"))
-    groups = _rows(client, "memo_group")
-    entries = _rows(client, "memo_entry", lambda q: q.eq("status", "active"))
-    entry_tags = _rows(client, "memo_entry_tag")
-    positions = _rows(client, "memo_position")
+    tags, groups, entries, entry_tags, positions = _parallel_rows(client, (
+        ("memo_tag", None, ("position", "id")),
+        ("memo_group", None, None),
+        ("memo_entry", lambda query: query.eq("status", "active"), None),
+        ("memo_entry_tag", None, None),
+        ("memo_position", None, None),
+    ))
     return build_board(tags, groups, entries, entry_tags, positions)
 
 
@@ -498,13 +519,15 @@ def list_entries(status: str = "active", query: str | None = None) -> list[dict]
     if status not in STATUSES:
         raise MemoError(f"未知状态：{status}", 400, "invalid_payload")
     client = _require_client()
-    entries = _rows(client, "memo_entry", lambda q: q.eq("status", status))
+    entries, entry_tags, tags = _parallel_rows(client, (
+        ("memo_entry", lambda request: request.eq("status", status), None),
+        ("memo_entry_tag", None, None),
+        ("memo_tag", None, None),
+    ))
     if status == "deleted":
         cutoff = _now() - timedelta(hours=72)
         entries = [entry for entry in entries if entry.get("deleted_at") is None
                    or datetime.fromisoformat(entry["deleted_at"].replace("Z", "+00:00")) > cutoff]
-    entry_tags = _rows(client, "memo_entry_tag")
-    tags = _rows(client, "memo_tag")
     tags_map = _entry_tags_map(entry_tags)
     tag_by_id = {t["id"]: t for t in tags}
 

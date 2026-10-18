@@ -3848,7 +3848,7 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
                 planning_recompute, "request_recompute",
                 side_effect=RuntimeError("registration unavailable")))
             generation = stack.enter_context(mock.patch.object(
-                planning_tasks, "_generate_due_quietly"))
+                planning_tasks, "_generate_saved_tasks_quietly"))
             stack.enter_context(mock.patch.object(cfg, "GATEWAY_TOKEN", "pg-suite-token"))
             http = TestClient(Starlette(routes=planning_api_routes),
                               raise_server_exceptions=False)
@@ -3865,6 +3865,7 @@ class PlanningInvariantsOnPostgresTests(unittest.TestCase):
         self.assertEqual(body["split_from"], occ_id)
         self.assertTrue(generation.called,
                         "登记失败不得短路即时生成")
+        self.assertEqual(generation.call_args.args[0], body["created_task_ids"])
         row = self._business_fetch("planning_occurrence", occ_id)
         self.assertEqual(row["status"], "discarded_this")
         self.assertEqual(row["handled_at"], "2026-09-24T13:00:00+08:00")

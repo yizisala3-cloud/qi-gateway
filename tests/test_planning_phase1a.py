@@ -278,6 +278,7 @@ class PlanningBoundaryApiTests(unittest.TestCase):
             tokens = [
                 mock.patch.object(planning_runtime, "get_client", return_value=_Database()),
                 mock.patch.object(planning.db, "load_app_setting", load),
+                mock.patch.object(planning.db, "load_app_settings", lambda keys: {key: load(key) for key in keys}),
                 mock.patch.object(planning.db, "save_app_setting", save),
             ]
             for token in tokens:
@@ -424,6 +425,7 @@ class PlanningBoundaryApiTests(unittest.TestCase):
 
         instant = datetime(2026, 9, 24, 7, tzinfo=BEIJING)
         with mock.patch.object(planning.db, "load_app_setting", load), \
+             mock.patch.object(planning.db, "load_app_settings", lambda keys: {key: load(key) for key in keys}), \
              mock.patch.object(planning.db, "save_app_setting", save):
             settings = planning.get_cycle_settings(instant)
             self.assertTrue(settings["auto_recompute_enabled"])
@@ -631,9 +633,10 @@ class PlanningIdentityPathTests(unittest.TestCase):
         task = self.db.rows["planning_task"][0]
         occ = self.db.rows["planning_occurrence"][0]
         self.assertEqual(occ["est_start"], datetime(2026, 9, 24, 8, tzinfo=BEIJING).isoformat())
-        with mock.patch.object(planning_tasks, "_generate_due_quietly") as generate:
+        with mock.patch.object(planning_tasks, "_generate_created_task_quietly") as generate:
             planning.update_task(task["id"], {"estimated_minutes": 90}, self.now)
         generate.assert_called_once()
+        self.assertEqual(generate.call_args.args[0], task["id"])
         self.assertEqual((occ["est_start"], occ["estimated_time_source"], occ["fixed_source"],
                           occ["is_fixed"], occ["schedule_managed"]),
                          (datetime(2026, 9, 24, 8, tzinfo=BEIJING).isoformat(), "rule", "rule",

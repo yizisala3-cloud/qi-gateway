@@ -48,6 +48,15 @@ class PlanningFrontendModulesTests(unittest.TestCase):
     def test_native_es_import_graph_and_versions(self):
         self._run_group("graph")
 
+    def test_latency_feedback_is_immediate_shared_and_restored(self):
+        self._run_group("latency-actions")
+
+    def test_latency_writes_refresh_only_visible_authoritative_lists(self):
+        self._run_group("latency-visible-writes")
+
+    def test_recompute_receipt_refreshes_current_mount_without_polling(self):
+        self._run_group("latency-recompute-remount")
+
     def test_all_tasks_hide_deleted_definitions_and_occurrences_but_keep_paused(self):
         self._run_group("all-hide-deleted")
 

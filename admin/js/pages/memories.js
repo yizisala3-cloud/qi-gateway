@@ -1,5 +1,5 @@
 // pages/memories.js - 记忆管理：记忆库 + 审核申请
-import { createMemoryBrowser } from './_memory_browser.js?v=20261017-hide-deleted-tasks';
+import { createMemoryBrowser } from './_memory_browser.js?v=20261018-planning-latency';
 
 export default {
   browser: null,

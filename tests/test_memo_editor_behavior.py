@@ -41,7 +41,9 @@ def _module_source():
     src = MEMO_MODULE.read_text(encoding="utf-8")
     src = re.sub(r"import\s[^;]*?;", "", src, flags=re.S)
     src = re.sub(r"\bexport\s+(?=(async\s+)?(function|const|let|class|var)\b)", "", src)
-    return src
+    actions = (ROOT / "admin" / "js" / "lib" / "planning_actions.js").read_text(encoding="utf-8")
+    actions = re.sub(r"\bexport\s+(?=(async\s+)?(function|const|let|class|var)\b)", "", actions)
+    return actions + "\n" + src
 
 
 HARNESS_PRELUDE = r"""

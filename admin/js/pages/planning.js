@@ -1,29 +1,30 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
 // 数据按需加载：今日看板保留 30 秒提醒轮询，首次/失效切入时刷新可见列表。
-import { gw } from '../api.js?v=20261017-hide-deleted-tasks';
+import { gw } from '../api.js?v=20261018-planning-latency';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, esc,
   createDetailPanel,
-} from '../ui.js?v=20261017-hide-deleted-tasks';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261017-hide-deleted-tasks';
-import { createRetroSelectField } from '../lib/retro_select.js?v=20261017-hide-deleted-tasks';
+} from '../ui.js?v=20261018-planning-latency';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261018-planning-latency';
+import { createRetroSelectField } from '../lib/retro_select.js?v=20261018-planning-latency';
 import {
   TASK_TYPE_LABELS, TASK_TYPES, STATUS_META, CLOSED_STATUSES,
   fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty, formatIntervalMinutes,
   itemMeta, isClosedOcc, formatLoggedDuration, durationText, durationDetailRows,
   itemBadges, itemHtml,
-} from '../lib/planning_display.js?v=20261017-hide-deleted-tasks';
-import { openTaskForm } from '../lib/planning_task_form.js?v=20261017-hide-deleted-tasks';
-import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261017-hide-deleted-tasks';
-import { createPlanningSort } from '../lib/planning_sort.js?v=20261017-hide-deleted-tasks';
-import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261017-hide-deleted-tasks';
-import { createPlanningMemo } from '../lib/planning_memo.js?v=20261017-hide-deleted-tasks';
-import { createPlanningReads } from '../lib/planning_reads.js?v=20261017-hide-deleted-tasks';
-import { taskNotePreview, openTaskNote, editTaskNoteInline } from '../lib/planning_notes.js?v=20261017-hide-deleted-tasks';
-import { mergeOrderReceipt, mergeOccurrencesFromBoard } from '../lib/planning_sync.js?v=20261017-hide-deleted-tasks';
-import { createPlanningGoals } from '../lib/planning_goals.js?v=20261017-hide-deleted-tasks';
-import { createPlanningDetailEdit } from '../lib/planning_detail_edit.js?v=20261017-hide-deleted-tasks';
+} from '../lib/planning_display.js?v=20261018-planning-latency';
+import { openTaskForm } from '../lib/planning_task_form.js?v=20261018-planning-latency';
+import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261018-planning-latency';
+import { createPlanningSort } from '../lib/planning_sort.js?v=20261018-planning-latency';
+import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261018-planning-latency';
+import { createPlanningMemo } from '../lib/planning_memo.js?v=20261018-planning-latency';
+import { createPlanningReads } from '../lib/planning_reads.js?v=20261018-planning-latency';
+import { createPlanningActions } from '../lib/planning_actions.js?v=20261018-planning-latency';
+import { taskNotePreview, openTaskNote, editTaskNoteInline } from '../lib/planning_notes.js?v=20261018-planning-latency';
+import { mergeOrderReceipt, mergeOccurrencesFromBoard } from '../lib/planning_sync.js?v=20261018-planning-latency';
+import { createPlanningGoals } from '../lib/planning_goals.js?v=20261018-planning-latency';
+import { createPlanningDetailEdit } from '../lib/planning_detail_edit.js?v=20261018-planning-latency';
 
 const detailHeading = (label, name) => `<h4 class="plan-detail-section-title">${icon(name)}<span>${esc(label)}</span><span class="plan-detail-rule" aria-hidden="true"></span></h4>`;
 const detailRange = (start, end) => start && !end ? `${fmtClock(start)} ～` : fmtRange(start, end);
@@ -76,6 +77,7 @@ export default {
     this.occurrences = [];
     this.root = root;
     this.reads = createPlanningReads();
+    this.actionFeedback = createPlanningActions();
     if (this.board) this.reads.seed('today');
     this.readErrors = new Map();
     this.savedRefresh = null;
@@ -90,6 +92,7 @@ export default {
       loadToday: () => this.loadToday({ fresh: true }),
       loadTasks: () => this.loadTasks({ fresh: true }),
       loadOccurrences: () => this.loadOccurrences({ fresh: true }),
+      refreshVisible: () => this.refreshVisible(),
     });
     this.sort = createPlanningSort({
       getRoot: () => this.reads === mountedReads ? this.root : null,
@@ -278,7 +281,7 @@ export default {
 
     const actions = {
       'new-task': () => this.openTaskForm(null),
-      recompute: () => this.runRecompute(),
+      recompute: (button) => this.actionFeedback.run('recompute', { button, label: '正在重算…' }, () => this.runRecompute()),
       // 工具栏「新建备忘录」（2026-10-03 移位）：委托给备忘录模块；模块
       // 自身的单实例守卫覆盖连点与在途打开
       'memo-new': () => this.memo?.openEditor(null),
@@ -507,11 +510,11 @@ export default {
     return results.every(Boolean);
   },
 
-  planningChanged() {
+  planningChanged(names) {
     this.orderRevision += 1;
     this.pendingOrder = null;
     this.lastOrderBoard = null;
-    this.reads?.invalidate();
+    this.reads?.invalidate(names);
   },
 
   async taskSaved(editing) {
@@ -631,6 +634,11 @@ export default {
   },
 
   findOccurrence(id) {
+    if (this.activeTab === 'all') {
+      const visible = this.occurrences.find(occurrence => occurrence.id === id);
+      if (visible) return visible;
+      if (this.reads?.needsRead('today')) return null;
+    }
     const b = this.board;
     if (!b) return null;
     for (const key of ['progress', 'attention', 'done']) {
@@ -1017,17 +1025,19 @@ export default {
   /* ---------- 动作 ---------- */
 
   async runRecompute() {
+    const mountedReads = this.reads;
     try {
       const result = await gw('/admin/api/planning/recompute', { method: 'POST' });
-      this.planningChanged();
+      this.planningChanged(['today', 'occurrences']);
       if (result.conflicts?.length) {
         // 冲突 = 本轮整体未生效（既有 est 保留）：三要素逐条呈现
-        this.showConflictsModal(result.conflicts, result.updated);
+        if (this.root && this.reads === mountedReads) this.showConflictsModal(result.conflicts, result.updated);
+        else toast('重算存在排程冲突，既有时间保持不变', 'warn');
       } else {
         toast(`已重新计算，更新了 ${result.updated} 项待办时间`);
       }
-      this.reads?.invalidate(['today', 'occurrences']);
-      await this.loadToday();
+      if (!this.root) return;
+      await this.refreshVisible({ onlyInvalid: true });
     } catch (error) {
       toast(`重算失败：${error.message}`, 'err');
     }
@@ -1108,9 +1118,7 @@ export default {
       toast('已更新');
       if (!this.root || this.reads !== reads) return;
       reads.invalidate();
-      await this.loadToday();
-      if (!this.root || this.reads !== reads) return;
-      await this.loadOccurrences();
+      await this.refreshVisible();
     } catch (error) {
       toast(`操作失败：${error.message}`, 'err');
     }
@@ -1192,7 +1200,7 @@ export default {
       this.planningChanged();
       if (this.reads !== owner.reads || !this.root) return;
       this.reads?.invalidate();
-      await Promise.all([this.loadTasks(), this.loadToday()]);
+      await this.refreshVisible();
       if (act === 'pause-refresh' || act === 'resume-refresh') {
         // 按钮状态只来自服务端持久化数据，刷新页面后同样正确（需求 24H）
         const fresh = this.tasks.find((t) => t.id === id);
@@ -1287,6 +1295,7 @@ export default {
   /* ---------- 事件委托（详情动作） ---------- */
 
   bindDetailActions(scope, mountedReads) {
+    this.actionFeedback ||= createPlanningActions();
     scope.addEventListener('change', event => {
       if (this.reads !== mountedReads || !event.target.closest('[data-alarm-controls] input')) return;
       if (this.selected?.kind === 'occ') void this.saveOccurrenceAlarm(this.selected.id);
@@ -1298,18 +1307,26 @@ export default {
       if (!el || el.disabled) return;
       const act = el.dataset.act;
       const id = Number(el.dataset.id);
-      if (el.closest('.detail-foot') && this.selected && this.detailEdit.isActive(this.selected.kind, this.selected.id)) {
-        const owner = { selected: this.selected, reads: this.reads, tab: this.activeTab };
-        if (!await this.detailEdit.finish() || !this.selectionIsCurrent(owner)) return;
-      }
       const selection = window.getSelection?.();
       if (['task-note', 'task-detail-edit'].includes(act) && selection && !selection.isCollapsed && el.contains(selection.anchorNode)) return;
-      if (act.startsWith('occ-')) {
-        e.stopPropagation();
-        this.occurrenceAction(act.slice(4), id);
-      } else if (act.startsWith('task-')) {
-        e.stopPropagation();
-        this.taskAction(act.slice(5), id, el);
+      if (!act.startsWith('occ-') && !act.startsWith('task-')) return;
+      e.stopPropagation();
+      const operation = async () => {
+        if (el.closest('.detail-foot') && this.selected && this.detailEdit.isActive(this.selected.kind, this.selected.id)) {
+          const owner = { selected: this.selected, reads: this.reads, tab: this.activeTab };
+          if (!await this.detailEdit.finish() || !this.selectionIsCurrent(owner)) return;
+        }
+        return act.startsWith('occ-') ? this.occurrenceAction(act.slice(4), id) : this.taskAction(act.slice(5), id, el);
+      };
+      const labels = { 'occ-start': '正在开始…', 'occ-park': '正在更新排程…',
+        'task-early': '正在记录完成…', 'task-pause-refresh': '正在暂停…',
+        'task-resume-refresh': '正在恢复…', 'task-enable': '正在启用…' };
+      try {
+        if (labels[act]) await this.actionFeedback.run(`${act}:${id}`, { button: el, label: labels[act] }, operation);
+        else await operation();
+      } catch (error) {
+        console.error({ location: 'planning.detailAction', action: act, id, stack: error.stack });
+        toast(`操作未完成：${error.message}`, 'err');
       }
     });
     scope.addEventListener('keydown', event => {

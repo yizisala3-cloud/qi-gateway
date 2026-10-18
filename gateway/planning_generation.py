@@ -918,6 +918,59 @@ def generate_task(
     return result
 
 
+def _settled_daily_tasks(client, tasks, cycle, daily_enabled):
+    if not daily_enabled:
+        return set()
+    candidates = [task for task in tasks if task.get("task_type") == "daily"
+                  and task.get("refresh_mode") == "daily" and task.get("time_mode") == "duration"
+                  and task.get("refresh_enabled") is not False and task.get("request_state") != "superseded"]
+    if not candidates:
+        return set()
+    task_ids = [task["id"] for task in candidates]
+
+    def grouped_rows(query_fn):
+        grouped = {}
+        for offset in range(0, len(task_ids), 200):
+            identifiers = task_ids[offset:offset + 200]
+            after_id = 0
+            while True:
+                batch = runtime._rows(client, "planning_occurrence", lambda query: query_fn(
+                    query.in_("task_id", identifiers)).gte("id", after_id + 1).order("id").limit(500))
+                for row in batch:
+                    grouped.setdefault(row["task_id"], []).append(row)
+                if len(batch) < 500:
+                    break
+                after_id = max(row["id"] for row in batch)
+        return grouped
+
+    try:
+        round_key = calendar_round_key(cycle.key)
+        current = grouped_rows(lambda query: query.eq("round_key", round_key))
+        opened = grouped_rows(lambda query: query.in_("status", list(common.OPEN_STATUSES)))
+    except Exception:
+        log.warning("planning 稳态预读取失败，继续逐任务生命周期检查", exc_info=True,
+                    extra={"evt": {"module": "planning", "operation": "settled_daily_tasks",
+                                   "safe_context": {"task_count": len(task_ids)}}})
+        return set()
+    settled = set()
+    day = cycle.key.isoformat()
+    for task in candidates:
+        rows = current.get(task["id"], [])
+        phases = {"start", "end"} if task.get("is_hollow") else {None}
+        if len(rows) != len(phases) or {row.get("phase") for row in rows} != phases:
+            continue
+        if task.get("is_hollow") and any(row.get("phase_group") != round_phase_group(task["id"], round_key) for row in rows):
+            continue
+        relevant = rows + [row for row in opened.get(task["id"], []) if row.get("round_key")]
+        if any(not row.get("schedule_date") or row["schedule_date"] < day
+               or not row.get("display_cycle_date") or row["display_cycle_date"] < day for row in relevant):
+            continue
+        if any(row["schedule_date"] != day for row in rows):
+            continue
+        settled.add(task["id"])
+    return settled
+
+
 def generate_due(now: datetime | None = None) -> dict[str, Any]:
     """Generate stable rounds from their own refresh model, never legacy cursors.
 
@@ -929,16 +982,20 @@ def generate_due(now: datetime | None = None) -> dict[str, Any]:
     ``timed_out`` 汇总只计成功完成的任务。
     """
     now = now or runtime._now()
-    configured, transition, absorbed = cycles._load_boundary_state(now)
+    context = cycles.PlanningRequestContext(now)
+    configured, transition, absorbed = context.boundary_state()
     cycle = planning_cycle_at(now, configured, transition)
     today = cycle.key
-    daily_enabled = cycles.get_cycle_settings(now)["daily_refresh_enabled"]
+    daily_enabled = context.daily_refresh_enabled
     client = runtime._require_client()
     tasks = runtime._rows(client, "planning_task", lambda q: q.eq("is_active", True))
+    settled = _settled_daily_tasks(client, tasks, cycle, daily_enabled)
     created = 0
     timed_out = 0
     errors: list[dict[str, Any]] = []
     for task in tasks:
+        if task["id"] in settled:
+            continue
         try:
             task_created, task_timed_out, _ = _reconcile_task_rounds(
                 client, task, cycle, now, configured, transition, absorbed, daily_enabled,
