@@ -225,6 +225,7 @@ def _occurrence_row(
         "est_end": common._iso(est_end) if est_end else None,
         "nominal_start": common._iso(est_start) if est_start else None,
         "status": "pending",
+        "is_parked": bool(task.get("is_parked", False)),
         "planned_minutes": (
             task.get("hollow_start_minutes" if phase == "start" else "hollow_end_minutes")
             if task.get("is_hollow") else task.get("estimated_minutes")

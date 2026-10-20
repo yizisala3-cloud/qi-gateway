@@ -1,8 +1,8 @@
 // Task creation/edit form. Local submitting/committed state belongs to one opened form.
-import { gw } from '../api.js?v=20261018-planning-latency';
-import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261018-planning-latency';
-import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261018-planning-latency';
-import { noteInputHtml, bindNoteInput } from './planning_notes.js?v=20261018-planning-latency';
+import { gw } from '../api.js?v=20261020-memory-initial-intent';
+import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261020-memory-initial-intent';
+import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261020-memory-initial-intent';
+import { noteInputHtml, bindNoteInput } from './planning_notes.js?v=20261020-memory-initial-intent';
 
 export function openTaskForm(task, { occurrences, initRetroFields, onSaved,
   allowedTypes = TASK_TYPES, createTask = null, onCreated = null }) {

@@ -1,7 +1,6 @@
 """记忆搜索模块：关键词 + 向量双通道混合检索。"""
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -144,6 +143,7 @@ def _keyword_search(keywords: list[str], limit: int = 20) -> list[dict]:
     resp = client.rpc("search_memories_by_keywords", {
         "search_keywords": bounded_keywords,
         "result_limit": min(max(int(limit), 1), MAX_CANDIDATES),
+        "cooldown_seconds": cfg.MEMORY_RECALL_COOLDOWN_MINUTES * 60,
     }).execute()
     return resp.data or []
 
@@ -159,53 +159,9 @@ def _vector_search_sync(embedding: list[float], limit: int = 20) -> list[dict]:
         "query_embedding": embedding,
         "match_threshold": 0.5,
         "match_count": limit,
+        "cooldown_seconds": cfg.MEMORY_RECALL_COOLDOWN_MINUTES * 60,
     }).execute()
     return resp.data or []
-
-
-@safe_query
-def _boost_heat(memories: list[dict]):
-    client = get_client()
-    if not client or not memories:
-        return
-    now = datetime.now(timezone.utc).isoformat()
-    for memory in memories:
-        memory_id = memory.get("id")
-        if memory_id is None:
-            continue
-        client.rpc("boost_memory_heat", {
-            "memory_id": memory_id,
-            "boost_amount": 8,
-            "recalled_at": now,
-        }).execute()
-
-
-# 记忆升温后台执行器：boost_memory_heat 幂等（饱和升温曲线），无需去重；
-# 不 import gateway.main 的执行器，避免循环依赖。
-_heat_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="memory-heat")
-
-
-def _boost_heat_in_background(memories: list[dict]) -> None:
-    """把升温挪到后台：召回选完立即返回，绝不阻塞聊天回复路径。"""
-    snapshot = [
-        {"id": memory.get("id")}
-        for memory in (memories or [])
-        if memory.get("id") is not None
-    ]
-    if not snapshot:
-        return
-
-    def _job():
-        try:
-            _boost_heat(snapshot)
-        except Exception as exc:
-            log.warning("记忆升温后台任务失败: %s", type(exc).__name__)
-
-    try:
-        _heat_executor.submit(_job)
-    except RuntimeError:
-        # 解释器退出时执行器已关闭：升温是幂等的辅助操作，丢弃即可。
-        log.warning("记忆升温后台任务未调度（执行器已关闭）")
 
 
 def _clamp(value: object, minimum: float = 0.0, maximum: float = 1.0) -> float:
@@ -440,7 +396,6 @@ async def search_memories(
         candidate_limit,
     )
     selected = _select_memories_for_injection(ranked_candidates, bounded_top_k)
-    _boost_heat_in_background(selected)
     log.info(
         "记忆搜索完成: query=%s 关键词=%s keyword=%d vector=%d selected=%d",
         query[:30], keywords, len(keyword_results), len(vector_results), len(selected),

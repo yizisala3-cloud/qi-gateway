@@ -1,7 +1,7 @@
 // pages/persona.js - 人设与规则：人设 / 用户资料 / 互动规则
-import { query, update, insert, esc } from '../api.js?v=20261018-planning-latency';
-import { loading, empty, tag, toast, modal, confirm, delegate, icon } from '../ui.js?v=20261018-planning-latency';
-import { createMemoryBrowser } from './_memory_browser.js?v=20261018-planning-latency';
+import { query, update, insert, esc } from '../api.js?v=20261020-memory-initial-intent';
+import { loading, empty, tag, toast, modal, confirm, delegate, icon } from '../ui.js?v=20261020-memory-initial-intent';
+import { createMemoryBrowser } from './_memory_browser.js?v=20261020-memory-initial-intent';
 
 const VIEW_TABS = [
   { key: 'persona', label: '人设' },
@@ -18,7 +18,7 @@ export default {
     this.browser = null;
     const initial = { persona: 'persona', profile: 'profile', rule: 'rule' }[params.tab] || 'persona';
     this.renderShell(initial);
-    delegate(this.root, {
+    this.removeDelegation = delegate(this.root, {
       tab: async (el) => {
         this.renderShell(el.dataset.tab);
         await this.renderView();
@@ -31,6 +31,8 @@ export default {
   },
 
   renderShell(view) {
+    this.browser?.destroy();
+    this.browser = null;
     this.view = view;
     this.root.innerHTML = `
       <div class="toolbar" style="margin-bottom:14px">
@@ -140,7 +142,11 @@ export default {
     }
   },
 
-  unmount() { this.browser = null; },
+  unmount() {
+    this.browser?.destroy();
+    this.browser = null;
+    this.removeDelegation?.();
+  },
 };
 
 function fmtUpdatedAt(value) {

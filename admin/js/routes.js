@@ -4,7 +4,7 @@ export const NAV = [
     title: '',
     items: [
       { key: 'planning', icon: 'calendar', label: '规划管理', desc: '待办排程与时间管理' },
-      { key: 'memories', icon: 'book', label: '记忆管理', desc: '记忆库与审核申请' },
+      { key: 'memories', icon: 'book', label: '记忆管理', desc: '记忆库、审核申请与召回记录' },
       { key: 'digest', icon: 'scroll', label: '记忆总结', desc: '连续感总结的执行与运行记录' },
       { key: 'emotion', icon: 'heart', label: '情感', desc: 'Eventide 身体状态' },
     ],

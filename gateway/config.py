@@ -62,6 +62,11 @@ class Config:
     RUMINATION_DAILY_HOUR: int = max(0, min(23, int(os.getenv("RUMINATION_DAILY_HOUR", "6"))))
     # 记忆总结。assistant_id 留空时从 chat_messages 最新有效记录自动发现。
     MEMORY_ASSISTANT_ID: str = os.getenv("MEMORY_ASSISTANT_ID", "")
+    # 聊天检索冷却：分钟，0 关闭；用户资料 / 互动规则始终豁免。
+    # 启动时读取，聊天不为此新增数据库查询。
+    MEMORY_RECALL_COOLDOWN_MINUTES: int = _clamped_env_int(
+        "MEMORY_RECALL_COOLDOWN_MINUTES", 60, 0, 10080
+    )
     MEMORY_DIGEST_MAX_MESSAGES: int = int(os.getenv("MEMORY_DIGEST_MAX_MESSAGES", "60"))
     MEMORY_DIGEST_MAX_CHARS: int = int(os.getenv("MEMORY_DIGEST_MAX_CHARS", "12000"))
     # OrangeChat request_memory tool. Keep this token separate from gateway and

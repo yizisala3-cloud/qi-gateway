@@ -18,6 +18,12 @@ from .config import cfg
 log = logging.getLogger("gateway.admin_api")
 
 _TABLES: dict[str, dict[str, Any]] = {
+    "memory_recall_history": {
+        "read": {"id", "batch_id", "memory_id", "recalled_at", "position",
+                 "title", "continuity_type", "injection_text"},
+        "write": set(), "insert": False, "update": False, "delete": False,
+        "default_order": "recalled_at", "max_limit": 150,
+    },
     "memories": {
         "read": {
             "id", "content", "title", "tags", "heat", "importance",
@@ -199,8 +205,15 @@ def _execute_list(
         response = query.limit(1).execute()
         return {"data": [], "count": response.count or 0}
 
+    if table == "memory_recall_history":
+        # A single bounded snapshot avoids offsets drifting between two reads.
+        query = (query.order("recalled_at", desc=True)
+                 .order("batch_id", desc=True).order("position", desc=False)
+                 .order("id", desc=True))
+    else:
+        query = query.order(order, desc=not ascending)
     response = (
-        query.order(order, desc=not ascending)
+        query
         .range(offset, offset + limit - 1)
         .execute()
     )
@@ -242,7 +255,7 @@ async def admin_collection(request: Request):
                 raise ValueError("unsupported order field")
             ascending = params.get("asc", "false").lower() == "true"
             offset = _parse_int(params.get("offset"), 0, 0, 1_000_000)
-            limit = _parse_int(params.get("limit"), 50, 1, 100)
+            limit = _parse_int(params.get("limit"), 50, 1, config.get("max_limit", 100))
             search = (params.get("search") or "").strip()
             count_only = params.get("count", "false").lower() == "true"
             result = await asyncio.to_thread(

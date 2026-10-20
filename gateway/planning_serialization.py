@@ -132,6 +132,7 @@ def serialize_task(task: dict[str, Any], now: datetime) -> dict[str, Any]:
         "last_handled_at": task.get("last_handled_at"),
         "refresh_next_due_at": task.get("refresh_next_due_at"),
         "refresh_enabled": task.get("refresh_enabled"),
+        "is_parked": bool(task.get("is_parked", False)),
         "refresh_generated_through": task.get("refresh_generated_through"),
         # 删除标记（§25，2026-10-07）：非空 = 用户明确删除（区别于暂停刷新
         # 等其他停用）；有事实者任务行保留为历史归档载体。

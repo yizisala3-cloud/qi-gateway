@@ -1,4 +1,4 @@
-"""Selected-round edits and parking, committed together with optimistic guards.
+"""Selected-round edits and persistent parking with optimistic guards.
 
 The existing task/window validators remain authoritative. A durable receipt makes
 an uncertain response retryable without applying an old edit to newer facts.
@@ -217,7 +217,7 @@ def command(task_id: int, payload, *, idempotency_key: str | None, now=None):
                 if not payload["parked"] and r.get("is_parked") and not r.get("is_fixed") and r["status"] == "pending":
                     patch.update(common._estimate_patch(None, None, source="unassigned"))
                 patches.append(patch)
-            result = edit._write({}, patches, now)
+            result = edit._write({"is_parked": payload["parked"], "updated_at": common._iso(now)}, patches, now)
             return result
         changes = payload.get("changes")
         if not isinstance(changes, dict) or not changes or set(changes) - EDIT_FIELDS:

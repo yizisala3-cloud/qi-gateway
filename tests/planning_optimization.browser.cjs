@@ -25,7 +25,8 @@ const deferred=()=>{ let resolve; return {promise:new Promise(r=>{resolve=r;}),r
   };
   const oid=key=>ids[key].occurrences[0], tid=key=>ids[key].task;
   const refresh=()=>page.evaluate(async()=>{
-    const p=(await import('/admin/js/pages/planning.js?v=20261016-planning-optimization')).default;
+    const version=new URL(document.querySelector('script[type="module"][src*="/js/app.js"]').src).searchParams.get('v');
+    const p=(await import(`/admin/js/pages/planning.js?v=${version}`)).default;
     await p.loadToday({fresh:true});
   });
   const select=async key=>{
@@ -123,17 +124,22 @@ const deferred=()=>{ let resolve; return {promise:new Promise(r=>{resolve=r;}),r
     results.push('A10/A12: resident handles, multiple drags, no early persistence, cancel/confirm');
 
     await select('ordinary');
+    assert.equal((await page.locator('[data-act="occ-park"]').textContent()).trim(),'沉底');
     await page.locator('[data-act="occ-park"]').click();
     await page.locator(`[data-occ="${oid('ordinary')}"][data-parked="true"]`).waitFor();
     assert.equal((await order()).at(-1),oid('ordinary'));
     assert.ok((await page.locator(`[data-occ="${oid('ordinary')}"]`).textContent()).includes('暂不排程'));
     await api('recompute','POST');await refresh();
     assert.equal((await api(`occurrences/${oid('ordinary')}`)).is_parked,true);
+    assert.equal((await api(`tasks/${tid('ordinary')}`)).is_parked,true);
+    assert.equal((await page.locator('[data-act="occ-park"]').textContent()).trim(),'恢复排程');
     await page.screenshot({path:path.join(output,'desktop-parked.png'),fullPage:true});
     await page.locator('[data-act="occ-park"]').click();
     await page.locator(`[data-occ="${oid('ordinary')}"][data-parked="false"]`).waitFor();
     await api('recompute','POST');await refresh();
     assert.ok((await api(`occurrences/${oid('ordinary')}`)).est_start);
+    assert.equal((await api(`tasks/${tid('ordinary')}`)).is_parked,false);
+    assert.equal((await page.locator('[data-act="occ-park"]').textContent()).trim(),'沉底');
     results.push('A13/A16/A19: park/restore, recompute and bottom grouping; goal count unchanged');
 
     await open('started');

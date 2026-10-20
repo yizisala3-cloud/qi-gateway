@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from .persona import load_persona
 from .memory_search import search_memories, format_memories_for_injection, format_event_time
+from .memory_recall import record_memories_in_background
 from . import app_settings
 from . import db
 from . import eventide_bridge
@@ -198,6 +199,7 @@ def build_context(user_message: str = "", history_turns=None) -> str:
 
     # 记忆搜索
     memories_text = ""
+    memories = []
     if user_message.strip():
         try:
             loop = asyncio.new_event_loop()
@@ -232,6 +234,7 @@ def build_context(user_message: str = "", history_turns=None) -> str:
 
     if memories_text:
         parts.append(memories_text)
+        record_memories_in_background(memories)
 
     if results["recent_chat"]:
         parts.append(results["recent_chat"])

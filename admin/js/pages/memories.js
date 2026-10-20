@@ -1,20 +1,19 @@
-// pages/memories.js - 记忆管理：记忆库 + 审核申请
-import { createMemoryBrowser } from './_memory_browser.js?v=20261018-planning-latency';
+// pages/memories.js - 记忆管理：记忆库 + 审核申请 + 召回记录
+import { createMemoryBrowser } from './_memory_browser.js?v=20261020-memory-initial-intent';
 
 export default {
   browser: null,
 
   async mount(root, params = {}) {
-    this.browser = createMemoryBrowser({
+    const browser = this.browser = createMemoryBrowser({
       host: root,
       showViewTabs: true,
       showTypeFilter: true,
-      defaultView: params.view === 'requests' ? 'requests' : 'library',
+      showRecallTab: true,
+      defaultView: ['requests', 'recall'].includes(params.view) ? params.view : 'library',
     });
-    await this.browser.mount();
-    if (params.memory) await this.browser.openMemory(params.memory);
-    else if (params.request) await this.browser.openRequest(params.request);
+    await browser.mount({ memoryId: params.memory, requestId: params.request });
   },
 
-  unmount() { this.browser = null; },
+  unmount() { this.browser?.destroy(); this.browser = null; },
 };

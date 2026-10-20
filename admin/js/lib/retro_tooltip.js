@@ -1,5 +1,5 @@
 // Auxiliary paper hints. Required/locked/unavailable explanations belong in visible page text.
-import { registerFloatingSurface } from '../ui.js?v=20261018-planning-latency';
+import { registerFloatingSurface } from '../ui.js?v=20261020-memory-initial-intent';
 
 const initializers = new WeakMap();
 let descriptionSequence = 0;

@@ -285,7 +285,11 @@ class MigrationExecutionOnPostgresTests(unittest.TestCase):
     @classmethod
     def _apply_history(cls):
         for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
-            if path.name == NEW_MIGRATION.name:
+            # This suite seeds the pre-retirement shape, then explicitly
+            # executes NEW_MIGRATION. Later migrations belong to the other
+            # full-history suites; replaying them before this historical target
+            # can recreate incompatible/ambiguous function overloads.
+            if path.name >= NEW_MIGRATION.name:
                 continue
             sql = path.read_text(encoding="utf-8")
             if path.name == PG_TRGM_FILE:

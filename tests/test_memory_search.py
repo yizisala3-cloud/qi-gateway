@@ -24,8 +24,6 @@ from gateway.memory_search import (
     MAX_VECTOR_QUERY_CHARS,
     MEMORY_CONTEXT_HEADER,
     build_vector_query,
-    _boost_heat,
-    _boost_heat_in_background,
     _event_time_value,
     _freshness_time,
     _get_embedding,
@@ -87,52 +85,6 @@ class KeywordQueryTests(unittest.TestCase):
         memory = _memory(1, "正文没有目标词", tags=["内部梗", "旅行"])
         self.assertGreater(_keyword_relevance(memory, ["内部梗"]), 0)
 
-
-class HeatBoostTests(unittest.TestCase):
-    def test_recollection_boost_uses_the_unified_full_content_amount(self):
-        client = MagicMock()
-        with patch(f"{MODULE}.get_client", return_value=client):
-            _boost_heat([{"id": 1}, {"id": 2}])
-
-        calls = client.rpc.call_args_list
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0].args[0], "boost_memory_heat")
-        self.assertEqual(calls[0].args[1]["memory_id"], 1)
-        self.assertEqual(calls[0].args[1]["boost_amount"], 8)
-        self.assertEqual(calls[1].args[1]["memory_id"], 2)
-        self.assertEqual(calls[1].args[1]["boost_amount"], 8)
-
-    def test_background_boost_submits_one_job_with_id_snapshot(self):
-        executor = MagicMock()
-        with (
-            patch(f"{MODULE}._heat_executor", executor),
-            patch(f"{MODULE}._boost_heat") as boost,
-        ):
-            _boost_heat_in_background([{"id": 1, "content": "甲"}, {"id": 2, "content": "乙"}])
-            job = executor.submit.call_args.args[0]
-            job()
-
-        executor.submit.assert_called_once()
-        calls = boost.call_args_list
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0].args[0], [{"id": 1}, {"id": 2}])
-
-    def test_background_boost_swallows_exceptions_and_never_propagates(self):
-        executor = MagicMock()
-        with (
-            patch(f"{MODULE}._heat_executor", executor),
-            patch(f"{MODULE}._boost_heat", side_effect=RuntimeError("db down")),
-        ):
-            _boost_heat_in_background([{"id": 7}])
-            job = executor.submit.call_args.args[0]
-            job()  # 不应抛出
-
-    def test_background_boost_skips_memories_without_ids(self):
-        executor = MagicMock()
-        with patch(f"{MODULE}._heat_executor", executor):
-            _boost_heat_in_background([{"content": "没有 id"}, {"id": None}])
-
-        executor.submit.assert_not_called()
 
 
 class HybridRankingTests(unittest.TestCase):
@@ -572,28 +524,24 @@ class SearchFlowTests(unittest.IsolatedAsyncioTestCase):
             patch(f"{MODULE}._keyword_search", return_value=keyword_rows),
             patch(f"{MODULE}._get_embedding", new=AsyncMock(return_value=None)),
             patch(f"{MODULE}._vector_search_sync") as vector_search,
-            patch(f"{MODULE}._boost_heat_in_background") as boost,
         ):
             result = await search_memories("还记得我喜欢什么时候散步吗？", top_k=1)
 
         vector_search.assert_not_called()
-        boost.assert_called_once_with(result)
         self.assertEqual([item["id"] for item in result], [1])
         self.assertIn("injection_text", result[0])
         self.assertFalse(any(key.startswith("_") for key in result[0]))
 
-    async def test_empty_query_never_searches_or_boosts(self):
+    async def test_empty_query_never_searches(self):
         with (
             patch(f"{MODULE}._keyword_search") as keyword_search,
-            patch(f"{MODULE}._boost_heat_in_background") as boost,
         ):
             result = await search_memories("   ")
 
         self.assertEqual(result, [])
         keyword_search.assert_not_called()
-        boost.assert_not_called()
 
-    async def test_only_memories_selected_for_injection_are_boosted(self):
+    async def test_only_memories_selected_for_injection_are_returned(self):
         keyword_rows = [
             _memory(1, "第一条记忆", heat=20),
             _memory(2, "第二条记忆", heat=20),
@@ -607,12 +555,10 @@ class SearchFlowTests(unittest.IsolatedAsyncioTestCase):
             patch(f"{MODULE}._keyword_search", return_value=keyword_rows),
             patch(f"{MODULE}._get_embedding", new=AsyncMock(return_value=None)),
             patch(f"{MODULE}._hybrid_rank", return_value=ranked),
-            patch(f"{MODULE}._boost_heat_in_background") as boost,
         ):
             result = await search_memories("记忆", top_k=1)
 
         self.assertEqual([item["id"] for item in result], [1])
-        boost.assert_called_once_with(result)
 
     async def test_vector_channel_uses_labeled_multi_turn_input_keyword_channel_stays_current(self):
         captured = {}
@@ -626,7 +572,6 @@ class SearchFlowTests(unittest.IsolatedAsyncioTestCase):
             patch(f"{MODULE}._keyword_search", return_value=[]) as keyword_search,
             patch(f"{MODULE}._get_embedding", side_effect=fake_embedding),
             patch(f"{MODULE}._vector_search_sync", return_value=[]),
-            patch(f"{MODULE}._boost_heat_in_background"),
         ):
             await search_memories(
                 "那它以后怎么办",
@@ -663,7 +608,6 @@ class SearchFlowTests(unittest.IsolatedAsyncioTestCase):
                     patch(f"{MODULE}._keyword_search", return_value=keyword_rows),
                     patch(f"{MODULE}._get_embedding", new=AsyncMock(return_value=None)),
                     patch(f"{MODULE}._vector_search_sync") as vector_search,
-                    patch(f"{MODULE}._boost_heat_in_background"),
                 ):
                     result = await search_memories("用户喜欢清晨散步", top_k=1)
 

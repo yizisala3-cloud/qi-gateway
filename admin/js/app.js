@@ -1,15 +1,15 @@
 // app.js - shell: login, sidebar, routing, theme, mobile drawers
-import { NAV, ROUTE_INDEX } from './routes.js?v=20261018-planning-latency';
-import { loading, errorBlock, icon, esc } from './ui.js?v=20261018-planning-latency';
-import { gw, getToken, setToken, clearToken } from './api.js?v=20261018-planning-latency';
-import { initHeaderDivider } from './lib/header_divider.js?v=20261018-planning-latency';
-import { initRetroSelects } from './lib/retro_select.js?v=20261018-planning-latency';
-import { initRetroTooltips } from './lib/retro_tooltip.js?v=20261018-planning-latency';
-import { initHelpNotes } from './lib/help_notes.js?v=20261018-planning-latency';
-import { initScrollbars } from './lib/scrollbars.js?v=20261018-planning-latency';
+import { NAV, ROUTE_INDEX } from './routes.js?v=20261020-memory-initial-intent';
+import { loading, errorBlock, icon, esc } from './ui.js?v=20261020-memory-initial-intent';
+import { gw, getToken, setToken, clearToken } from './api.js?v=20261020-memory-initial-intent';
+import { initHeaderDivider } from './lib/header_divider.js?v=20261020-memory-initial-intent';
+import { initRetroSelects } from './lib/retro_select.js?v=20261020-memory-initial-intent';
+import { initRetroTooltips } from './lib/retro_tooltip.js?v=20261020-memory-initial-intent';
+import { initHelpNotes } from './lib/help_notes.js?v=20261020-memory-initial-intent';
+import { initScrollbars } from './lib/scrollbars.js?v=20261020-memory-initial-intent';
 
 const DEFAULT_ROUTE = 'planning';
-const ASSET_VERSION = '20261018-planning-latency';
+const ASSET_VERSION = '20261020-memory-initial-intent';
 
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);

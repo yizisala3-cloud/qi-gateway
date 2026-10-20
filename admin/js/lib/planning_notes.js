@@ -1,5 +1,5 @@
-import { gw } from '../api.js?v=20261018-planning-latency';
-import { esc, icon, modal, toast } from '../ui.js?v=20261018-planning-latency';
+import { gw } from '../api.js?v=20261020-memory-initial-intent';
+import { esc, icon, modal, toast } from '../ui.js?v=20261020-memory-initial-intent';
 
 // Count Unicode code points for display without limiting note length.
 export const noteLength = value => Array.from(String(value || '').replace(/\r\n?/g, '\n')).length;

@@ -1,5 +1,5 @@
 // ui.js - shared retro UI components: icons, tags, modal, toast, detail panel
-export const ASSET_VERSION = '20261018-planning-latency';
+export const ASSET_VERSION = '20261020-memory-initial-intent';
 
 /* ---------- SVG icons (stroke, no emoji; object entries = fill icons with own viewBox) ---------- */
 const ICON_PATHS = {
@@ -429,12 +429,14 @@ export function confirm(msg, { title = '请确认', okText = '确认', cancelTex
 
 /* ---------- event delegation ---------- */
 export function delegate(root, actions) {
-  root.addEventListener('click', e => {
+  const onClick = e => {
     const el = e.target.closest('[data-act]');
     if (!el || el.disabled) return;
     const act = el.dataset.act;
     if (actions[act]) actions[act](el, e);
-  });
+  };
+  root.addEventListener('click', onClick);
+  return () => root.removeEventListener('click', onClick);
 }
 
 /* ---------- detail panel (right column / mobile drawer) ---------- */

@@ -1,7 +1,7 @@
 // Field editors keep the existing detail layout, selection and atomic receipt.
-import { gw } from '../api.js?v=20261018-planning-latency';
-import { esc, toast, icon } from '../ui.js?v=20261018-planning-latency';
-import { bindNoteInput, focusEditorEnd } from './planning_notes.js?v=20261018-planning-latency';
+import { gw } from '../api.js?v=20261020-memory-initial-intent';
+import { esc, toast, icon } from '../ui.js?v=20261020-memory-initial-intent';
+import { bindNoteInput, focusEditorEnd } from './planning_notes.js?v=20261020-memory-initial-intent';
 
 export const resultUnknown = error => error?.resultUnknown || !error?.status || error.status >= 500;
 const scopeText = value => value === 'current_and_future' ? '当前及未来' : '仅未来';
@@ -408,7 +408,7 @@ export function createPlanningDetailEdit({ getDetail, captureOwner, isCurrent, i
         await gw(`/admin/api/planning/tasks/${taskId}/detail-edit`, { method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Idempotency-Key': op.key }, body: JSON.stringify(op.body) });
         parking.delete(occurrence.id);
-        toast(op.body.parked ? '当前轮已沉底；截止和提醒仍按原设置' : '已恢复参与排程，将按当前约束重新计算');
+        toast(op.body.parked ? '当前及后续所有轮次已沉底；截止和提醒仍按原设置' : '当前及后续所有轮次已恢复排程，将按当前约束重新计算');
         await notifySaved(taskId);
       } catch (error) {
         if (!resultUnknown(error)) parking.delete(occurrence.id);

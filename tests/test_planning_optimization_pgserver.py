@@ -1,6 +1,8 @@
 """10.16 acceptance: actual services, complete migrations, isolated PostgreSQL."""
 import json
+import re
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
@@ -229,19 +231,235 @@ class OptimizationPostgresTests(unittest.TestCase):
         self.assertEqual(result.conflicts,[])
         self.assertEqual(self.row()['window_end_at'],'2026-10-16T07:10:00+08:00')
 
-    def test_restore_does_not_reuse_old_automatic_slot_and_new_round_not_parked(self):
+    def test_restore_does_not_reuse_old_automatic_slot_and_parking_persists(self):
         self.conn.execute("update planning_occurrence set est_start='2026-10-16T06:00+08',est_end='2026-10-16T06:30+08',estimated_time_source='automatic' where id=%s", (self.occ_id,))
         self.save(self.payload(parked=True))
         self.assertTrue(self.row()['is_parked'])
+        self.assertTrue(self.task()['is_parked'])
         self.save(self.payload(parked=False))
         row = self.row()
         self.assertFalse(row['is_parked'])
+        self.assertFalse(self.task()['is_parked'])
         self.assertIsNone(row['est_start'])
         self.assertEqual(schedule.compute_schedule([row],{self.task_id:self.task()},NOW).placed[self.occ_id][0],NOW)
         self.save(self.payload(parked=True))
         self.conn.execute("update planning_occurrence set display_cycle_date='2026-10-17',display_reason='carryover' where id=%s",(self.occ_id,))
         self.assertTrue(self.row()['is_parked'])
-        self.assertFalse(self.row(self.helper.occurrence(self.task_id,'2026-10-17')[0])['is_parked'])
+        self.assertTrue(self.row(self.helper.occurrence(self.task_id,'2026-10-17')[0])['is_parked'])
+
+    def test_future_generation_uses_live_parking_after_stale_snapshot_and_restore(self):
+        stale = self.task()
+        result = self.save(self.payload(parked=True))
+        self.assertTrue(result['task']['is_parked'])
+        tomorrow = NOW + timedelta(days=1)
+        generation._create_occurrences(self.client, stale, tomorrow.date(), tomorrow)
+        future = self.conn.execute('select to_jsonb(o) from planning_occurrence o where task_id=%s and schedule_date=%s',
+                                   (self.task_id, tomorrow.date())).fetchone()[0]
+        self.assertTrue(future['is_parked'])
+        self.assertEqual(schedule.compute_schedule([future], {self.task_id: self.task()}, tomorrow).placed, {})
+        stale_parked = self.task()
+        result = self.save(self.payload(parked=False))
+        self.assertFalse(result['task']['is_parked'])
+        self.assertFalse(self.row(future['id'])['is_parked'])
+        later = tomorrow + timedelta(days=1)
+        generation._create_occurrences(self.client, stale_parked, later.date(), later)
+        self.assertFalse(self.conn.execute('select is_parked from planning_occurrence where task_id=%s and schedule_date=%s',
+                                          (self.task_id, later.date())).fetchone()[0])
+
+    def test_hollow_future_generation_and_restore_inherit_as_a_complete_round(self):
+        self.task_id = self.helper.task(True)
+        self.occ_id, end = self.helper.occurrence(self.task_id, hollow=True)
+        self.save(self.payload(parked=True))
+        tomorrow = NOW + timedelta(days=1)
+        generation._create_occurrences(self.client, self.task(), tomorrow.date(), tomorrow)
+        future = self.conn.execute('select id,is_parked from planning_occurrence where task_id=%s and schedule_date=%s order by id',
+                                   (self.task_id, tomorrow.date())).fetchall()
+        self.assertEqual(len(future), 2)
+        self.assertTrue(all(parked for _, parked in future))
+        self.save(self.payload(parked=False, oid=future[1][0]))
+        self.assertFalse(self.task()['is_parked'])
+        self.assertTrue(self.row()['is_parked'] and self.row(end)['is_parked'])
+        self.conn.execute((chain.MIGRATIONS_DIR/'20261020010000_planning_persistent_parking.sql').read_text(encoding='utf-8'))
+        self.assertFalse(self.task()['is_parked'])
+        later = tomorrow + timedelta(days=1)
+        generation._create_occurrences(self.client, self.task(), later.date(), later)
+        self.assertEqual(self.conn.execute('select is_parked from planning_occurrence where task_id=%s and schedule_date=%s',
+                                          (self.task_id, later.date())).fetchall(), [(False,), (False,)])
+
+    def test_parking_preserves_closed_history_and_failed_write_rolls_back_preference(self):
+        old = self.helper.occurrence(self.task_id, '2026-10-15')[0]
+        self.helper.status(old, 'completed')
+        history = self.row(old)
+        before_task, before_row = self.task(), self.row()
+        payload = self.payload(parked=True)
+        self.conn.execute("create function reject_parking_test() returns trigger language plpgsql as $$ begin raise exception 'parking receipt test'; end $$")
+        self.conn.execute('create trigger reject_parking_test before insert on planning_detail_edit_request for each row execute function reject_parking_test()')
+        try:
+            with self.assertRaisesRegex(chain.psycopg.Error, 'parking receipt test'):
+                self.save(payload)
+            self.assertEqual(self.task(), before_task)
+            self.assertEqual(self.row(), before_row)
+        finally:
+            self.conn.execute('drop trigger reject_parking_test on planning_detail_edit_request')
+            self.conn.execute('drop function reject_parking_test()')
+        self.save(payload)
+        self.assertTrue(self.task()['is_parked'])
+        self.assertEqual(self.row(old), history)
+
+    def test_already_generated_future_round_parks_and_started_future_rejects_atomically(self):
+        future = self.helper.occurrence(self.task_id, '2026-10-17')[0]
+        old = self.helper.occurrence(self.task_id, '2026-10-15')[0]
+        self.save(self.payload(parked=True))
+        self.assertTrue(self.row(future)['is_parked'])
+        self.assertFalse(self.row(old)['is_parked'])
+        self.save(self.payload(parked=False))
+        self.assertFalse(self.row(future)['is_parked'])
+        self.conn.execute("update planning_occurrence set status='in_progress',actual_start=%s where id=%s", (NOW, future))
+        before_task, before_row = self.task(), self.row()
+        with self.assertRaises(edit.common.PlanningError):
+            self.save(self.payload(parked=True))
+        self.assertEqual(self.task(), before_task)
+        self.assertEqual(self.row(), before_row)
+
+    def test_generation_waits_for_parking_commit_and_inherits_live_preference(self):
+        def insert_future():
+            with chain.psycopg.connect(self.server.get_uri(), autocommit=True) as conn:
+                return conn.execute(chain.OCC_SQL.replace('2026-09-24', '2026-10-17'),
+                                    {'task_id': self.task_id}).fetchone()[0]
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with self.conn.transaction():
+                self.save(self.payload(parked=True))
+                future = pool.submit(insert_future)
+                with self.assertRaises(TimeoutError):
+                    future.result(timeout=.2)
+            self.assertTrue(self.row(future.result(timeout=5))['is_parked'])
+
+    def test_first_migration_preserves_open_parking_without_reinterpreting_closed_history(self):
+        future = self.helper.occurrence(self.task_id, '2026-10-17')[0]
+        older = self.helper.occurrence(self.task_id, '2026-10-15')[0]
+        older_snapshot = self.row(older)
+        other = self.helper.task()
+        closed = self.helper.occurrence(other)[0]
+        self.conn.execute('update planning_occurrence set is_parked=true where id=any(%s)', ([self.occ_id, closed],))
+        self.helper.status(closed, 'completed')
+        history = self.row(closed)
+        self.conn.execute('alter table planning_task drop column is_parked')
+        self.conn.execute((chain.MIGRATIONS_DIR/'20261020010000_planning_persistent_parking.sql').read_text(encoding='utf-8'))
+        self.assertTrue(self.task()['is_parked'])
+        self.assertTrue(self.row(future)['is_parked'])
+        self.assertEqual(schedule.compute_schedule([self.row(future)], {self.task_id: self.task()}, NOW + timedelta(days=1)).placed, {})
+        self.assertEqual(self.row(older), older_snapshot)
+        self.assertFalse(self.conn.execute('select is_parked from planning_task where id=%s', (other,)).fetchone()[0])
+        self.assertEqual(self.row(closed), history)
+
+    def test_sql_editor_auto_rls_finishes_without_post_commit_temporary_table_error(self):
+        future = self.helper.occurrence(self.task_id, '2026-10-17')[0]
+        self.conn.execute('update planning_occurrence set is_parked=true where id=%s', (self.occ_id,))
+        self.conn.execute('drop trigger planning_occurrence_parking_initialize on planning_occurrence')
+        self.conn.execute('alter table planning_task drop column is_parked')
+        sql = (chain.MIGRATIONS_DIR/'20261020010000_planning_persistent_parking.sql').read_text(encoding='utf-8')
+        # The actual Dashboard error log shows this auto-RLS suffix appended
+        # after COMMIT for a top-level CREATE TEMPORARY TABLE statement.
+        created = []
+        for statement in chain._split_top_level_statements(sql):
+            match = re.match(r'create\s+(?:temporary\s+|temp\s+)?table\s+(\w+)', statement, re.I)
+            if match:
+                created.append(match[1])
+        suffix = ''.join(f'\nALTER TABLE {name} ENABLE ROW LEVEL SECURITY;' for name in created)
+        self.conn.execute(sql + suffix)
+        self.assertTrue(self.task()['is_parked'])
+        self.assertTrue(self.row(future)['is_parked'])
+        self.assertEqual(self.conn.execute('select count(*) from planning_detail_edit_request').fetchone()[0], 1)
+        self.conn.execute(sql + suffix)
+        self.assertEqual(self.conn.execute('select count(*) from planning_detail_edit_request').fetchone()[0], 1)
+
+    def test_first_migration_parks_existing_hollow_rounds_and_replay_keeps_restore(self):
+        self.task_id = self.helper.task(True)
+        self.occ_id, end = self.helper.occurrence(self.task_id, hollow=True)
+        future = self.helper.occurrence(self.task_id, '2026-10-17', hollow=True)
+        older = self.helper.occurrence(self.task_id, '2026-10-15', hollow=True)
+        closed = self.helper.occurrence(self.task_id, '2026-10-18', hollow=True)
+        for oid in closed:
+            self.helper.status(oid, 'completed')
+        preserved = {oid: self.row(oid) for oid in older + closed}
+        self.conn.execute('update planning_occurrence set is_parked=true where id=any(%s)', ([self.occ_id, end],))
+        self.conn.execute('drop trigger planning_occurrence_parking_initialize on planning_occurrence')
+        self.conn.execute('alter table planning_task drop column is_parked')
+        sql = (chain.MIGRATIONS_DIR/'20261020010000_planning_persistent_parking.sql').read_text(encoding='utf-8')
+        self.conn.execute(sql)
+        self.assertTrue(self.task()['is_parked'])
+        self.assertTrue(all(self.row(oid)['is_parked'] for oid in [self.occ_id, end] + future))
+        self.assertEqual(schedule.compute_schedule([self.row(oid) for oid in future], {self.task_id: self.task()}, NOW).placed, {})
+        self.assertEqual({oid: self.row(oid) for oid in preserved}, preserved)
+        self.save(self.payload(parked=False, oid=future[1]))
+        self.assertFalse(self.task()['is_parked'])
+        self.assertTrue(self.row()['is_parked'] and self.row(end)['is_parked'])
+        before = [self.row(oid) for oid in [self.occ_id, end] + future]
+        receipt_count = self.conn.execute('select count(*) from planning_detail_edit_request').fetchone()[0]
+        self.conn.execute(sql)
+        self.assertFalse(self.task()['is_parked'])
+        self.assertEqual([self.row(oid) for oid in [self.occ_id, end] + future], before)
+        self.assertEqual(self.conn.execute('select count(*) from planning_detail_edit_request').fetchone()[0], receipt_count)
+
+    def test_first_migration_respects_same_day_round_order(self):
+        self.task_id = self.helper.task()
+        self.conn.execute("update planning_task set task_type='interval',refresh_mode='after_completion',after_completion_minutes=30 where id=%s", (self.task_id,))
+        task = self.task()
+        for offset in (0, 30, 60):
+            generation._create_occurrences(self.client, task, NOW.date(), NOW, due_at=NOW + timedelta(minutes=offset))
+        older, self.occ_id, future = [r[0] for r in self.conn.execute('select id from planning_occurrence where task_id=%s order by id', (self.task_id,)).fetchall()]
+        previous = self.row(older)
+        self.conn.execute('update planning_occurrence set is_parked=true where id=%s', (self.occ_id,))
+        self.conn.execute('drop trigger planning_occurrence_parking_initialize on planning_occurrence')
+        self.conn.execute('alter table planning_task drop column is_parked')
+        self.conn.execute((chain.MIGRATIONS_DIR/'20261020010000_planning_persistent_parking.sql').read_text(encoding='utf-8'))
+        self.assertEqual(self.row(older), previous)
+        self.assertTrue(self.row()['is_parked'] and self.row(future)['is_parked'])
+        self.assertNotIn(future, schedule.compute_schedule([self.row(future)], {self.task_id: self.task()}, NOW).placed)
+
+    def test_first_migration_rejects_unsafe_rounds_and_rolls_back_every_task(self):
+        sql = (chain.MIGRATIONS_DIR/'20261020010000_planning_persistent_parking.sql').read_text(encoding='utf-8')
+        for case in ('started_anchor', 'expired_anchor', 'started_future', 'partial_future', 'expired_future', 'hollow_mixed_facts'):
+            with self.subTest(case=case):
+                self.conn.execute('truncate planning_task,planning_detail_edit_request restart identity cascade')
+                safe_task = self.helper.task()
+                safe_anchor = self.helper.occurrence(safe_task)[0]
+                safe_future = self.helper.occurrence(safe_task, '2026-10-17')[0]
+                hollow = case == 'hollow_mixed_facts'
+                self.task_id = self.helper.task(hollow)
+                anchor = self.helper.occurrence(self.task_id, hollow=hollow)
+                future = self.helper.occurrence(self.task_id, '2026-10-17', hollow=hollow)
+                self.occ_id = anchor[0]
+                self.conn.execute('update planning_occurrence set is_parked=true where id=any(%s)', ([safe_anchor] + anchor,))
+                if case.startswith('started'):
+                    oid = anchor[0] if case.endswith('anchor') else future[0]
+                    self.conn.execute("update planning_occurrence set status='in_progress',actual_start=%s where id=%s", (NOW, oid))
+                elif case.startswith('expired'):
+                    oid = anchor[0] if case.endswith('anchor') else future[0]
+                    self.conn.execute('update planning_occurrence set window_end_at=%s where id=%s', (NOW, oid))
+                elif case == 'partial_future':
+                    self.conn.execute("update planning_occurrence set status='partial',partial_at=%s where id=%s", (NOW, future[0]))
+                else:
+                    self.helper.status(future[0], 'completed')
+                ids = [safe_anchor, safe_future] + anchor + future
+                before = {oid: self.row(oid) for oid in ids}
+                mark = self.conn.execute('select to_jsonb(r) from planning_recompute_state r').fetchone()[0]
+                self.conn.execute('drop trigger planning_occurrence_parking_initialize on planning_occurrence')
+                self.conn.execute('alter table planning_task drop column is_parked')
+                try:
+                    with self.assertRaisesRegex(chain.psycopg.Error, 'planning persistent parking upgrade: task') as caught:
+                        self.conn.execute(sql)
+                    self.conn.execute('rollback')
+                    self.assertEqual(caught.exception.sqlstate, 'PC001')
+                    self.assertNotIn('is_parked', self.task())
+                    self.assertEqual({oid: self.row(oid) for oid in ids}, before)
+                    self.assertEqual(self.conn.execute('select count(*) from planning_detail_edit_request').fetchone()[0], 0)
+                    self.assertEqual(self.conn.execute('select to_jsonb(r) from planning_recompute_state r').fetchone()[0], mark)
+                finally:
+                    self.conn.execute('rollback')
+                    self.conn.execute('alter table planning_task add column if not exists is_parked boolean not null default false')
+                    self.conn.execute(sql)
 
     def test_parking_deadline_still_times_out_and_cannot_restore(self):
         self.conn.execute("update planning_occurrence set window_end_at='2026-10-16T08:00+08' where id=%s",(self.occ_id,))
@@ -340,9 +558,13 @@ class OptimizationPostgresTests(unittest.TestCase):
 
     def test_schema_replay_and_permissions(self):
         self.save(self.payload(parked=True))
-        for name in ('20261017010000_planning_detail_edit_and_parking.sql','20261017020000_planning_parked_recompute_guard.sql','20261017030000_planning_detail_once_absence_guard.sql','20261017040000_planning_detail_general_save.sql'):
+        for name in ('20261017010000_planning_detail_edit_and_parking.sql','20261017020000_planning_parked_recompute_guard.sql','20261017030000_planning_detail_once_absence_guard.sql','20261017040000_planning_detail_general_save.sql','20261020010000_planning_persistent_parking.sql'):
             self.conn.execute((chain.MIGRATIONS_DIR/name).read_text(encoding='utf-8'))
         self.assertTrue(self.row()['is_parked'])
+        self.assertTrue(self.task()['is_parked'])
+        self.save(self.payload(parked=False))
+        self.conn.execute((chain.MIGRATIONS_DIR/'20261020010000_planning_persistent_parking.sql').read_text(encoding='utf-8'))
+        self.assertFalse(self.task()['is_parked'])
         for role in ('anon','authenticated'):
             self.assertFalse(self.conn.execute("select has_table_privilege(%s,'planning_detail_edit_request','select')",(role,)).fetchone()[0])
             self.assertFalse(self.conn.execute("select has_function_privilege(%s,'planning_commit_detail_edit(jsonb,jsonb,jsonb,jsonb,uuid,jsonb,timestamptz)','execute')",(role,)).fetchone()[0])

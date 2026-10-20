@@ -1,9 +1,9 @@
 // Goal UI owns its reads, drafts and durable operation identities. Progress is
 // always supplied by the server; task creation reuses the existing task form.
-import { gw } from '../api.js?v=20261018-planning-latency';
-import { modal, confirm, toast, esc, icon, loading, empty, errorBlock } from '../ui.js?v=20261018-planning-latency';
-import { createRetroSelectField } from './retro_select.js?v=20261018-planning-latency';
-import { TASK_TYPE_LABELS } from './planning_display.js?v=20261018-planning-latency';
+import { gw } from '../api.js?v=20261020-memory-initial-intent';
+import { modal, confirm, toast, esc, icon, loading, empty, errorBlock } from '../ui.js?v=20261020-memory-initial-intent';
+import { createRetroSelectField } from './retro_select.js?v=20261020-memory-initial-intent';
+import { TASK_TYPE_LABELS } from './planning_display.js?v=20261020-memory-initial-intent';
 
 export const GOAL_TASK_TYPES = ['daily', 'interval', 'weekly', 'monthly'];
 const BASE = '/admin/api/planning/goals';

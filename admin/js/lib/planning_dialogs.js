@@ -1,8 +1,8 @@
 // Instance dialogs: form-local inputs and timeout retry identity stay in their closures.
-import { gw } from '../api.js?v=20261018-planning-latency';
-import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261018-planning-latency';
-import { createRetroTimeField } from './retro_time.js?v=20261018-planning-latency';
-import { createPlanningActions } from './planning_actions.js?v=20261018-planning-latency';
+import { gw } from '../api.js?v=20261020-memory-initial-intent';
+import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261020-memory-initial-intent';
+import { createRetroTimeField } from './retro_time.js?v=20261020-memory-initial-intent';
+import { createPlanningActions } from './planning_actions.js?v=20261020-memory-initial-intent';
 
 function initDialogTimes(root) {
   root.querySelectorAll('.retro-time[data-retro-for]').forEach(host => {

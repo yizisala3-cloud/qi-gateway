@@ -1,6 +1,6 @@
 // Candidate order belongs to this controller until confirmation or cancellation.
-import { gw } from '../api.js?v=20261018-planning-latency';
-import { toast } from '../ui.js?v=20261018-planning-latency';
+import { gw } from '../api.js?v=20261020-memory-initial-intent';
+import { toast } from '../ui.js?v=20261020-memory-initial-intent';
 
 export function createPlanningSort({
   getRoot, getProgressList, getBoard, getActiveTab, getActiveSection,

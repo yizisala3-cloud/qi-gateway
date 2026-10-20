@@ -1,13 +1,14 @@
 // pages/_memory_browser.js - shared library/requests browser with detail panel
-import { gw, query, update, count, esc } from '../api.js?v=20261018-planning-latency';
+import { gw, query, update, count, esc } from '../api.js?v=20261020-memory-initial-intent';
 import {
   loading, empty, errorBlock, banner, tag, heatTag, impTag, pagerHtml,
   toast, modal, confirm, delegate, icon, fmtDate, createDetailPanel,
-} from '../ui.js?v=20261018-planning-latency';
-import { openMemoryForm } from './_memory_form.js?v=20261018-planning-latency';
-import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20261018-planning-latency';
+} from '../ui.js?v=20261020-memory-initial-intent';
+import { openMemoryForm } from './_memory_form.js?v=20261020-memory-initial-intent';
+import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20261020-memory-initial-intent';
+import { createRecallHistoryView } from './_memory_recall.js?v=20261020-memory-initial-intent';
 
-export const ASSET_VERSION = '20261018-planning-latency';
+export const ASSET_VERSION = '20261020-memory-initial-intent';
 
 const PAGE_SIZE = 20;
 const REQ_FETCH_LIMIT = 100;
@@ -331,6 +332,7 @@ export function createMemoryBrowser({
   lockedType = null,
   showTypeFilter = true,
   showViewTabs = true,
+  showRecallTab = false,
   defaultView = 'library',
   titlePrefix = '',
 }) {
@@ -351,7 +353,7 @@ export function createMemoryBrowser({
   const TYPE_OPTIONS = Object.entries(CONTINUITY_TYPE_LABELS);
 
   const state = {
-    view: defaultView,
+    view: defaultView === 'recall' && !showRecallTab ? 'library' : defaultView,
     libTab: 'all',
     type: lockedType || '',
     sort: 'created_at',
@@ -372,20 +374,55 @@ export function createMemoryBrowser({
         <div class="tabs" role="tablist">
           <button class="tab" data-act="view" data-view="library">${icon('book')}记忆库</button>
           <button class="tab" data-act="view" data-view="requests">${icon('inbox')}审核申请</button>
+          ${showRecallTab ? `<button class="tab" data-act="view" data-view="recall">${icon('clock')}召回记录</button>` : ''}
         </div>
       </div>` : ''}
       <div id="browser-body">${loading()}</div>
     </div>`;
   const body = host.querySelector('#browser-body');
-  const panel = createDetailPanel(host);
+  let disposed = false;
+  let detailSequence = 0;
+  let listSequence = 0;
+  const panel = createDetailPanel(host, { onDismiss: invalidateDetail });
   const pwd = host;
+  let recallView = null;
+
+  // One identity spans view navigation AND detail loading. A later user action
+  // invalidates both awaits, including their failure paths.
+  function invalidateDetail() {
+    ++detailSequence;
+    state.selected = null;
+  }
+
+  function selectDetail(kind, id) {
+    if (disposed) return null;
+    state.selected = { kind, id: Number(id) };
+    return ++detailSequence;
+  }
+
+  function isCurrentDetail(task) {
+    return !disposed && task === detailSequence;
+  }
+
+  function isCurrentList(task, list) {
+    return !disposed && task === listSequence && body.contains(list);
+  }
 
   /* ----- 渲染：工具栏与列表 ----- */
   function renderShell() {
+    if (disposed) return;
+    ++listSequence;
+    recallView?.dispose();
+    recallView = null;
     if (showViewTabs) {
       host.querySelectorAll('.tab[data-view]').forEach((el) => {
         el.classList.toggle('active', el.dataset.view === state.view);
       });
+    }
+    if (state.view === 'recall') {
+      recallView = createRecallHistoryView({ body, panel, onOpenMemory: openMemory,
+        onSelectSnapshot: invalidateDetail, typeLabel: continuityTypeLabel });
+      return recallView.mount();
     }
     body.innerHTML = state.view === 'library' ? libraryShell() : requestsShell();
     wireControls();
@@ -456,9 +493,11 @@ export function createMemoryBrowser({
 
   /* ----- 记忆库 ----- */
   async function loadLibrary() {
+    if (disposed) return;
     const list = body.querySelector('#lib-list');
     const pager = body.querySelector('#lib-pager');
     if (!list) return;
+    const task = ++listSequence;
     list.innerHTML = loading();
     pager.innerHTML = '';
     try {
@@ -476,10 +515,12 @@ export function createMemoryBrowser({
         }),
         count('memories', { eq, search: state.search }),
       ]);
+      if (!isCurrentList(task, list)) return;
       list.innerHTML = data.length ? data.map(renderMemoryCard).join('') : empty('没有符合条件的记忆');
       pager.innerHTML = pagerHtml(state.page, Math.max(1, Math.ceil(total / PAGE_SIZE)), total);
       highlightSelected();
     } catch (error) {
+      if (!isCurrentList(task, list)) return;
       list.innerHTML = errorBlock(`记忆列表读取失败：${esc(error.message)}`);
     }
   }
@@ -508,22 +549,27 @@ export function createMemoryBrowser({
 
   /* ----- 审核申请 ----- */
   async function loadRequests() {
+    if (disposed) return;
     const list = body.querySelector('#req-list');
     if (!list) return;
+    const task = ++listSequence;
     list.innerHTML = loading();
     try {
       const eq = {};
       if (state.reqStatus) eq.status = state.reqStatus;
       if (state.type) eq.continuity_type = state.type;
-      state.reqRows = await query('memory_requests', {
+      const rows = await query('memory_requests', {
         select: REQUEST_FIELDS,
         order: { col: 'created_at', asc: false },
         limit: REQ_FETCH_LIMIT,
         eq,
       });
+      if (!isCurrentList(task, list)) return;
+      state.reqRows = rows;
       state.reqPage = Math.min(state.reqPage, Math.max(0, Math.ceil(state.reqRows.length / PAGE_SIZE) - 1));
       renderRequestList();
     } catch (error) {
+      if (!isCurrentList(task, list)) return;
       list.innerHTML = errorBlock(`申请列表读取失败：${esc(error.message)}`);
     }
   }
@@ -587,7 +633,7 @@ export function createMemoryBrowser({
   }
 
   function highlightSelected() {
-    body.querySelectorAll('.mem-card.selected').forEach((el) => el.classList.remove('selected'));
+    highlightCard(state.selected?.kind, state.selected?.id);
   }
 
   /* ----- 数据获取 ----- */
@@ -748,6 +794,7 @@ export function createMemoryBrowser({
   }
 
   async function saveRequestApprove(id) {
+    const task = detailSequence;
     const root = panel.el;
     const content = root.querySelector('#rv-content').value.trim();
     const importance = Number(root.querySelector('#rv-importance').value);
@@ -773,6 +820,7 @@ export function createMemoryBrowser({
         { title: '缺少召回场景', okText: '仍然通过' },
       );
       if (!confirmed) return;
+      if (!isCurrentDetail(task)) return;
     }
     const button = panel.el.querySelector('[data-act="req-approve-save"]');
     button.disabled = true;
@@ -792,8 +840,7 @@ export function createMemoryBrowser({
         review_note: root.querySelector('#rv-note').value.trim(),
       });
       toast('申请已通过，正式记忆已写入');
-      state.selected = null;
-      await Promise.all([loadCurrentList(), reloadPanel()]);
+      await refreshAfterReview(task);
     } catch (error) {
       toast(`审核失败：${error.message}`, 'err');
       button.disabled = false;
@@ -814,6 +861,7 @@ export function createMemoryBrowser({
   }
 
   async function saveRequestReject(id) {
+    const task = detailSequence;
     const button = panel.el.querySelector('[data-act="req-reject-save"]');
     button.disabled = true;
     try {
@@ -822,8 +870,7 @@ export function createMemoryBrowser({
         review_note: panel.el.querySelector('#rj-note').value.trim(),
       });
       toast('申请已拒绝');
-      state.selected = null;
-      await Promise.all([loadCurrentList(), reloadPanel()]);
+      await refreshAfterReview(task);
     } catch (error) {
       toast(`审核失败：${error.message}`, 'err');
       button.disabled = false;
@@ -836,9 +883,11 @@ export function createMemoryBrowser({
   }
 
   async function openRelation(id, action) {
+    const task = detailSequence;
     let request;
     try {
       request = await fetchRequest(id);
+      if (!isCurrentDetail(task)) return;
     } catch (error) {
       toast(error.message, 'err');
       return;
@@ -945,8 +994,7 @@ export function createMemoryBrowser({
         await submitReview(id, payload);
         toast(action === 'merge' ? '记忆已人工合并' : action === 'duplicate' ? '申请已标记为重复' : '申请已进入冲突待处理队列');
         close();
-        state.selected = null;
-        await Promise.all([loadCurrentList(), reloadPanel()]);
+        await refreshAfterReview(task);
       } catch (error) {
         toast(`审核失败：${error.message}`, 'err');
         button.disabled = false;
@@ -964,24 +1012,29 @@ export function createMemoryBrowser({
   }
 
   /* ----- 打开详情 / 刷新 ----- */
-  async function showMemory(id) {
-    state.selected = { kind: 'mem', id: Number(id) };
+  async function showMemory(id, task = selectDetail('mem', id)) {
+    if (!isCurrentDetail(task)) return;
     highlightCard('mem', id);
     try {
-      renderMemoryDetail(await fetchMemory(id));
+      const memory = await fetchMemory(id);
+      if (!isCurrentDetail(task)) return;
+      renderMemoryDetail(memory);
     } catch (error) {
+      if (!isCurrentDetail(task)) return;
       panel.render({ title: '记忆详情', html: errorBlock(esc(error.message)), actions: '' });
     }
   }
 
-  async function showRequest(id) {
-    state.selected = { kind: 'req', id: Number(id) };
+  async function showRequest(id, render = renderRequestDetail, task = selectDetail('req', id)) {
+    if (!isCurrentDetail(task)) return;
     highlightCard('req', id);
     try {
       const request = await fetchRequest(id);
-      renderRequestDetail(request);
-      hydrateAbsorbTargets(panel.el, request);
+      if (!isCurrentDetail(task)) return;
+      render(request);
+      if (render === renderRequestDetail) hydrateAbsorbTargets(panel.el, request);
     } catch (error) {
+      if (!isCurrentDetail(task)) return;
       panel.render({ title: '申请详情', html: errorBlock(esc(error.message)), actions: '' });
     }
   }
@@ -995,44 +1048,49 @@ export function createMemoryBrowser({
     });
   }
 
-  async function reloadPanel() {
-    if (!state.selected) {
+  async function refreshAfterReview(task) {
+    if (disposed) return;
+    if (isCurrentDetail(task)) {
+      invalidateDetail();
       panel.render({ title: '', html: '', actions: '' });
-      return;
     }
-    if (state.selected.kind === 'mem') await showMemory(state.selected.id);
-    else await showRequest(state.selected.id);
+    await loadCurrentList();
   }
 
   function loadCurrentList() {
+    if (disposed) return;
+    if (state.view === 'recall') return recallView?.reload();
     return state.view === 'library' ? loadLibrary() : loadRequests();
   }
 
   async function setView(view) {
-    if (state.view === view) return;
+    if (disposed || state.view === view) return;
+    invalidateDetail();
     state.view = view;
-    state.selected = null;
     panel.render({ title: '', html: '', actions: '' });
     await renderShell();
   }
 
   /* ----- 生命周期操作（新增 / 编辑 / 类型修改 / 撤销 / 恢复） ----- */
 
-  async function refreshAfterWrite(result) {
+  async function refreshAfterWrite(result, task = detailSequence) {
     // 写操作完成后刷新列表、计数，并按返回结果重新打开对应详情：
     // 新增/编辑/归档返回 memory_id，类型修改返回 memory.id，撤销返回
     // restored_memory_id。
+    if (disposed) return;
     await loadCurrentList();
+    if (!isCurrentDetail(task) || state.view === 'recall') return;
     const targetId = result
       && (result.memory_id || result.restored_memory_id || (result.memory && result.memory.id));
     if (targetId) await showMemory(targetId);
     else {
-      state.selected = null;
+      invalidateDetail();
       panel.render({ title: '', html: '', actions: '' });
     }
   }
 
   async function undoTypeChange(el) {
+    const task = detailSequence;
     const id = el.dataset.id;
     let memory;
     try {
@@ -1063,7 +1121,7 @@ export function createMemoryBrowser({
       toast(result.undo_deleted === false
         ? '当前版本无法物理删除，已转为归档；上一版本已恢复'
         : '已撤销最近一次类型修改');
-      await refreshAfterWrite(result);
+      await refreshAfterWrite(result, task);
     } catch (error) {
       el.disabled = false;
       const raw = String(error.message || '');
@@ -1082,6 +1140,7 @@ export function createMemoryBrowser({
   }
 
   async function restoreArchived(el) {
+    const task = detailSequence;
     const id = el.dataset.id;
     const ok = await confirm(
       '恢复这条自然归档记忆？恢复后热度将重置为 50，其余数据保持不变，并重新允许编辑和参与召回。',
@@ -1096,7 +1155,7 @@ export function createMemoryBrowser({
         body: JSON.stringify({}),
       });
       toast('已恢复');
-      await refreshAfterWrite(result);
+      await refreshAfterWrite(result, task);
     } catch (error) {
       el.disabled = false;
       const raw = String(error.message || '');
@@ -1115,7 +1174,8 @@ export function createMemoryBrowser({
   }
 
   /* ----- 事件绑定 ----- */
-  delegate(host, {
+  const removeDelegation = delegate(host, {
+    'recall-current': (el) => recallView?.openCurrent(el.dataset.id),
     view: (el) => setView(el.dataset.view),
     'lib-tab': (el) => {
       state.libTab = el.dataset.tab;
@@ -1130,22 +1190,30 @@ export function createMemoryBrowser({
     },
     'open-mem': (el) => showMemory(el.dataset.id),
     'open-req': (el) => showRequest(el.dataset.id),
-    'mem-create': () => openMemoryForm({ mode: 'create', onSaved: refreshAfterWrite }),
+    'mem-create': () => {
+      const task = detailSequence;
+      return openMemoryForm({ mode: 'create', onSaved: result => refreshAfterWrite(result, task) });
+    },
     'mem-edit': async (el) => {
+      const task = detailSequence;
       try {
         const memory = await fetchMemory(el.dataset.id);
-        await openMemoryForm({ mode: 'edit', memory, onSaved: refreshAfterWrite });
+        if (!isCurrentDetail(task)) return;
+        await openMemoryForm({ mode: 'edit', memory, onSaved: result => refreshAfterWrite(result, task) });
       } catch (error) { toast(error.message, 'err'); }
     },
     'mem-change-type': async (el) => {
+      const task = detailSequence;
       try {
         const memory = await fetchMemory(el.dataset.id);
-        await openMemoryForm({ mode: 'change', memory, onSaved: refreshAfterWrite });
+        if (!isCurrentDetail(task)) return;
+        await openMemoryForm({ mode: 'change', memory, onSaved: result => refreshAfterWrite(result, task) });
       } catch (error) { toast(error.message, 'err'); }
     },
     'mem-undo': (el) => undoTypeChange(el),
     'mem-restore': (el) => restoreArchived(el),
     'mem-archive': async (el) => {
+      const task = detailSequence;
       if (!(await confirm('归档这条记忆？归档后不再参与召回，但仍保留在数据库中；恢复后热度会重置为 50。', { okText: '归档' }))) return;
       el.disabled = true;
       try {
@@ -1157,7 +1225,7 @@ export function createMemoryBrowser({
           body: JSON.stringify({}),
         });
         toast('已归档');
-        await refreshAfterWrite(result);
+        await refreshAfterWrite(result, task);
       } catch (error) {
         const raw = String(error.message || '');
         const detail = raw.includes(': ') ? raw.split(': ').slice(1).join(': ') : raw;
@@ -1175,22 +1243,24 @@ export function createMemoryBrowser({
       }
     },
     'mem-verify': async (el) => {
+      const task = detailSequence;
       el.disabled = true;
       try {
         await update('memories', el.dataset.id, { verified: 'verified' });
         toast('已标记为已确认');
-        await refreshAfterWrite({ memory_id: el.dataset.id });
+        await refreshAfterWrite({ memory_id: el.dataset.id }, task);
       } catch (error) {
         toast(`操作失败：${error.message}`, 'err');
         el.disabled = false;
       }
     },
     'mem-reject': async (el) => {
+      const task = detailSequence;
       el.disabled = true;
       try {
         await update('memories', el.dataset.id, { verified: 'rejected' });
         toast('已驳回该记忆');
-        await refreshAfterWrite({ memory_id: el.dataset.id });
+        await refreshAfterWrite({ memory_id: el.dataset.id }, task);
       } catch (error) {
         toast(`操作失败：${error.message}`, 'err');
         el.disabled = false;
@@ -1204,15 +1274,9 @@ export function createMemoryBrowser({
     },
     'mem-versions': (el) => showVersionModal(el.dataset.id),
     'mem-trail': (el) => showMemoryTrailModal(el.dataset.id),
-    'req-approve': async (el) => {
-      try { renderRequestApprove(await fetchRequest(el.dataset.id)); }
-      catch (error) { toast(error.message, 'err'); }
-    },
+    'req-approve': (el) => showRequest(el.dataset.id, renderRequestApprove),
     'req-approve-save': (el) => saveRequestApprove(el.dataset.id),
-    'req-reject': async (el) => {
-      try { renderRequestReject(await fetchRequest(el.dataset.id)); }
-      catch (error) { toast(error.message, 'err'); }
-    },
+    'req-reject': (el) => showRequest(el.dataset.id, renderRequestReject),
     'req-reject-save': (el) => saveRequestReject(el.dataset.id),
     'req-detail-back': (el) => showRequest(el.dataset.id),
     'req-merge': (el) => openRelation(el.dataset.id, 'merge'),
@@ -1226,33 +1290,54 @@ export function createMemoryBrowser({
       } catch (error) { toast(error.message, 'err'); }
     },
     'req-open-memory': async (el) => {
+      const task = selectDetail('req', el.dataset.id);
       try {
         const r = await fetchRequest(el.dataset.id);
+        if (!isCurrentDetail(task)) return;
         if (!r.memory_id) { toast('这条申请还没有关联的正式记忆', 'err'); return; }
-        await setView('library');
         state.libTab = 'all';
         state.search = '';
         state.page = 0;
-        await renderShell();
-        await showMemory(r.memory_id);
-      } catch (error) { toast(error.message, 'err'); }
+        await openMemory(r.memory_id);
+      } catch (error) { if (isCurrentDetail(task)) toast(error.message, 'err'); }
     },
   });
 
   /* ----- 启动与外部入口 ----- */
-  async function mount() {
+  async function mount({ memoryId = null, requestId = null } = {}) {
+    // Capture initial URL intent before the first list await. User actions on
+    // this same instance must cancel it, just as they cancel a pending detail.
+    const task = detailSequence;
     await renderShell();
+    if (!isCurrentDetail(task)) return;
+    if (memoryId) await openMemory(memoryId);
+    else if (requestId) await openRequest(requestId);
   }
 
   async function openMemory(id) {
+    if (disposed) return;
+    const task = selectDetail('mem', id);
     if (state.view !== 'library') { state.view = 'library'; await renderShell(); }
-    await showMemory(id);
+    if (!isCurrentDetail(task)) return;
+    await showMemory(id, task);
   }
 
   async function openRequest(id) {
+    if (disposed) return;
+    const task = selectDetail('req', id);
     if (state.view !== 'requests') { state.view = 'requests'; await renderShell(); }
-    await showRequest(id);
+    if (!isCurrentDetail(task)) return;
+    await showRequest(id, renderRequestDetail, task);
   }
 
-  return { mount, reload: loadCurrentList, openMemory, openRequest, state, panel };
+  return { mount, reload: loadCurrentList, openMemory, openRequest, state, panel,
+    destroy() {
+      disposed = true;
+      invalidateDetail();
+      ++listSequence;
+      recallView?.dispose();
+      recallView = null;
+      removeDelegation();
+      panel.dispose();
+    } };
 }

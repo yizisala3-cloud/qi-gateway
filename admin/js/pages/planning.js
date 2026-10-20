@@ -1,30 +1,30 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
 // 数据按需加载：今日看板保留 30 秒提醒轮询，首次/失效切入时刷新可见列表。
-import { gw } from '../api.js?v=20261018-planning-latency';
+import { gw } from '../api.js?v=20261020-memory-initial-intent';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, esc,
   createDetailPanel,
-} from '../ui.js?v=20261018-planning-latency';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261018-planning-latency';
-import { createRetroSelectField } from '../lib/retro_select.js?v=20261018-planning-latency';
+} from '../ui.js?v=20261020-memory-initial-intent';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261020-memory-initial-intent';
+import { createRetroSelectField } from '../lib/retro_select.js?v=20261020-memory-initial-intent';
 import {
   TASK_TYPE_LABELS, TASK_TYPES, STATUS_META, CLOSED_STATUSES,
   fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty, formatIntervalMinutes,
   itemMeta, isClosedOcc, formatLoggedDuration, durationText, durationDetailRows,
   itemBadges, itemHtml,
-} from '../lib/planning_display.js?v=20261018-planning-latency';
-import { openTaskForm } from '../lib/planning_task_form.js?v=20261018-planning-latency';
-import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261018-planning-latency';
-import { createPlanningSort } from '../lib/planning_sort.js?v=20261018-planning-latency';
-import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261018-planning-latency';
-import { createPlanningMemo } from '../lib/planning_memo.js?v=20261018-planning-latency';
-import { createPlanningReads } from '../lib/planning_reads.js?v=20261018-planning-latency';
-import { createPlanningActions } from '../lib/planning_actions.js?v=20261018-planning-latency';
-import { taskNotePreview, openTaskNote, editTaskNoteInline } from '../lib/planning_notes.js?v=20261018-planning-latency';
-import { mergeOrderReceipt, mergeOccurrencesFromBoard } from '../lib/planning_sync.js?v=20261018-planning-latency';
-import { createPlanningGoals } from '../lib/planning_goals.js?v=20261018-planning-latency';
-import { createPlanningDetailEdit } from '../lib/planning_detail_edit.js?v=20261018-planning-latency';
+} from '../lib/planning_display.js?v=20261020-memory-initial-intent';
+import { openTaskForm } from '../lib/planning_task_form.js?v=20261020-memory-initial-intent';
+import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261020-memory-initial-intent';
+import { createPlanningSort } from '../lib/planning_sort.js?v=20261020-memory-initial-intent';
+import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261020-memory-initial-intent';
+import { createPlanningMemo } from '../lib/planning_memo.js?v=20261020-memory-initial-intent';
+import { createPlanningReads } from '../lib/planning_reads.js?v=20261020-memory-initial-intent';
+import { createPlanningActions } from '../lib/planning_actions.js?v=20261020-memory-initial-intent';
+import { taskNotePreview, openTaskNote, editTaskNoteInline } from '../lib/planning_notes.js?v=20261020-memory-initial-intent';
+import { mergeOrderReceipt, mergeOccurrencesFromBoard } from '../lib/planning_sync.js?v=20261020-memory-initial-intent';
+import { createPlanningGoals } from '../lib/planning_goals.js?v=20261020-memory-initial-intent';
+import { createPlanningDetailEdit } from '../lib/planning_detail_edit.js?v=20261020-memory-initial-intent';
 
 const detailHeading = (label, name) => `<h4 class="plan-detail-section-title">${icon(name)}<span>${esc(label)}</span><span class="plan-detail-rule" aria-hidden="true"></span></h4>`;
 const detailRange = (start, end) => start && !end ? `${fmtClock(start)} ～` : fmtRange(start, end);
@@ -851,7 +851,7 @@ export default {
         && r.round_key === occ.round_key && r.phase_group === occ.phase_group).map(r => [r.id, r])).values()] : [occ];
       if ((!occ.phase || round.length === 2) && round.every(r => ['pending', 'deferred'].includes(r.status)
         && !['actual_start', 'actual_end', 'partial_at', 'handled_at', 'closed_at'].some(k => r[k]))) {
-        parking = btn('park', occ.is_parked ? '恢复排程' : '当前轮沉底', 'sort');
+        parking = btn('park', occ.is_parked ? '恢复排程' : '沉底', 'sort');
       }
       splits.push(btn('spawn-remaining', '剩余另建待办', 'plus'));
       splits.push(btn('split', '拆分待办', 'layers'));
