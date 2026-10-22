@@ -81,8 +81,12 @@ class QQModel:
         try:
             result = json.loads(raw)
         except json.JSONDecodeError:
-            if proactive or raw.startswith(("{","[","```")):
+            if proactive or raw.startswith(("{","```")):
                 raise ValueError("qq_model_invalid_json") from None
+            if raw.startswith("["):
+                text, references = split_sticker_summaries(raw)
+                if not references or text.startswith(("{","[","```")):
+                    raise ValueError("qq_model_invalid_json") from None
             result = {"send":True,"text":raw,"sticker_ids":[]}
         if not isinstance(result,dict) or not isinstance(result.get("send",True),bool):
             raise ValueError("qq_model_invalid_result")

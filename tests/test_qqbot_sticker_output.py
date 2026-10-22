@@ -80,6 +80,28 @@ class StickerOutputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.store.history()[1]["content"], previous)
         self.assertEqual(messages[-1], {"role": "user", "content": "小表情真可爱"})
 
+    async def test_marker_only_plain_reply_and_malformed_json_boundaries(self):
+        marker = self.catalog.summary("cat_094")
+        for raw in [marker, marker + "\n" + marker]:
+            with self.subTest(raw=raw):
+                client = Client({"choices": [{"message": {"content": raw}}]})
+                self.runtime.model = QQModel(client, self.config, self.catalog,
+                                             context_builder=lambda *a, **k: "")
+                sent = await self.reply(len(self.transport.sent) + 1, "发一张猫猫")
+                self.assert_images(sent, ["cat_094"])
+                self.assertEqual(len(sent), 1)
+        for raw in ["[invalid", "{invalid", '["' + marker + '",invalid]',
+                    marker + "\n[invalid", "```text\n" + marker + "\n```"]:
+            with self.subTest(raw=raw):
+                client = Client({"choices": [{"message": {"content": raw}}]})
+                model = QQModel(client, self.config, self.catalog, context_builder=lambda *a, **k: "")
+                with self.assertRaises(ValueError):
+                    await model.generate([{"role": "user", "content": "你好"}], "你好")
+        client = Client({"choices": [{"message": {"content": marker}}]})
+        model = QQModel(client, self.config, self.catalog, context_builder=lambda *a, **k: "")
+        with self.assertRaises(ValueError):
+            await model.generate([], "", proactive=True)
+
     async def test_markers_and_explicit_ids_do_not_duplicate_but_requested_repeats_work(self):
         marker = self.catalog.summary("cat_094")
         for query, keys, text, expected in [
