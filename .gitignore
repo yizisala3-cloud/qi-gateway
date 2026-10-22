@@ -7,3 +7,6 @@ venv/
 dist/
 build/
 .DS_Store
+data/qqbot.sqlite3*
+data/qqbot-settings.json*
+qqbot/private/

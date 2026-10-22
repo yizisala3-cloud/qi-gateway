@@ -19,6 +19,8 @@
 - 记忆检索、连续感总结和审核
 - 待办工具（`/v1/todos*` 端点保持不变）
 
+另有默认关闭的 QQ 私聊入口（`/qqbot/onebot`）和主动消息运行模块：仅处理指定主人私聊，QQ 跳过 Eventide，复用人格及长期记忆，支持本地图片／GIF表情目录。配置页提供 QQBot 总开关和主动消息开关，保存后即时生效并在重启后保留；关闭总开关会一起关闭主动消息。设置存于 `QQBOT_SETTINGS_PATH`（默认 `data/qqbot-settings.json`），保存后覆盖两个启用环境变量的初始值。配置与接入顺序见 [QQBot 说明](qqbot/README.md)，配置示例为 `qqbot/config.env.example`。首次部署须先应用 `supabase/migrations/20261021010000_qqbot_chat_export.sql`；本地账本与开关文件目录均须持久化，一个机器人使用一个主动网关实例。
+
 ## 部署
 
 ### 环境变量

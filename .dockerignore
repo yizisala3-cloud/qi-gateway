@@ -36,3 +36,9 @@ conftest.py
 pytest.ini
 requirements-test.txt
 requirements-test-pg.txt
+
+# QQ login/session credentials and mutable local message ledgers
+qqbot/private/
+data/
+*.sqlite3
+*.sqlite3-*

@@ -1,5 +1,5 @@
 // pages/memories.js - 记忆管理：记忆库 + 审核申请 + 召回记录
-import { createMemoryBrowser } from './_memory_browser.js?v=20261020-memory-initial-intent';
+import { createMemoryBrowser } from './_memory_browser.js?v=20261021-qqbot-mount-r10';
 
 export default {
   browser: null,

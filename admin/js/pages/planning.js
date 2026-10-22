@@ -1,30 +1,30 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
 // 数据按需加载：今日看板保留 30 秒提醒轮询，首次/失效切入时刷新可见列表。
-import { gw } from '../api.js?v=20261020-memory-initial-intent';
+import { gw } from '../api.js?v=20261021-qqbot-mount-r10';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, esc,
   createDetailPanel,
-} from '../ui.js?v=20261020-memory-initial-intent';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261020-memory-initial-intent';
-import { createRetroSelectField } from '../lib/retro_select.js?v=20261020-memory-initial-intent';
+} from '../ui.js?v=20261021-qqbot-mount-r10';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261021-qqbot-mount-r10';
+import { createRetroSelectField } from '../lib/retro_select.js?v=20261021-qqbot-mount-r10';
 import {
   TASK_TYPE_LABELS, TASK_TYPES, STATUS_META, CLOSED_STATUSES,
   fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty, formatIntervalMinutes,
   itemMeta, isClosedOcc, formatLoggedDuration, durationText, durationDetailRows,
   itemBadges, itemHtml,
-} from '../lib/planning_display.js?v=20261020-memory-initial-intent';
-import { openTaskForm } from '../lib/planning_task_form.js?v=20261020-memory-initial-intent';
-import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261020-memory-initial-intent';
-import { createPlanningSort } from '../lib/planning_sort.js?v=20261020-memory-initial-intent';
-import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261020-memory-initial-intent';
-import { createPlanningMemo } from '../lib/planning_memo.js?v=20261020-memory-initial-intent';
-import { createPlanningReads } from '../lib/planning_reads.js?v=20261020-memory-initial-intent';
-import { createPlanningActions } from '../lib/planning_actions.js?v=20261020-memory-initial-intent';
-import { taskNotePreview, openTaskNote, editTaskNoteInline } from '../lib/planning_notes.js?v=20261020-memory-initial-intent';
-import { mergeOrderReceipt, mergeOccurrencesFromBoard } from '../lib/planning_sync.js?v=20261020-memory-initial-intent';
-import { createPlanningGoals } from '../lib/planning_goals.js?v=20261020-memory-initial-intent';
-import { createPlanningDetailEdit } from '../lib/planning_detail_edit.js?v=20261020-memory-initial-intent';
+} from '../lib/planning_display.js?v=20261021-qqbot-mount-r10';
+import { openTaskForm } from '../lib/planning_task_form.js?v=20261021-qqbot-mount-r10';
+import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261021-qqbot-mount-r10';
+import { createPlanningSort } from '../lib/planning_sort.js?v=20261021-qqbot-mount-r10';
+import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261021-qqbot-mount-r10';
+import { createPlanningMemo } from '../lib/planning_memo.js?v=20261021-qqbot-mount-r10';
+import { createPlanningReads } from '../lib/planning_reads.js?v=20261021-qqbot-mount-r10';
+import { createPlanningActions } from '../lib/planning_actions.js?v=20261021-qqbot-mount-r10';
+import { taskNotePreview, openTaskNote, editTaskNoteInline } from '../lib/planning_notes.js?v=20261021-qqbot-mount-r10';
+import { mergeOrderReceipt, mergeOccurrencesFromBoard } from '../lib/planning_sync.js?v=20261021-qqbot-mount-r10';
+import { createPlanningGoals } from '../lib/planning_goals.js?v=20261021-qqbot-mount-r10';
+import { createPlanningDetailEdit } from '../lib/planning_detail_edit.js?v=20261021-qqbot-mount-r10';
 
 const detailHeading = (label, name) => `<h4 class="plan-detail-section-title">${icon(name)}<span>${esc(label)}</span><span class="plan-detail-rule" aria-hidden="true"></span></h4>`;
 const detailRange = (start, end) => start && !end ? `${fmtClock(start)} ～` : fmtRange(start, end);

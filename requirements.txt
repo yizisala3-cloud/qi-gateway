@@ -3,6 +3,7 @@ uvicorn[standard]==0.32.1
 httpx[http2]==0.28.1
 supabase==2.15.1
 python-dotenv==1.1.0
+tzdata==2026.5
 jieba==0.42.1
 mcp==2.0.0
 eventide @ git+https://github.com/chuli1122/Eventide.git

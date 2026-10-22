@@ -146,7 +146,8 @@ def build_recent_chat_context(limit: int = 10) -> str:
 
 # ── 主入口：完整上下文构建 ────────────────────────
 
-def build_context(user_message: str = "", history_turns=None) -> str:
+def build_context(user_message: str = "", history_turns=None, *,
+                  include_eventide: bool = True, include_recent_chat: bool = True) -> str:
     """并发拼装完整上下文注入内容。
 
     Args:
@@ -167,7 +168,7 @@ def build_context(user_message: str = "", history_turns=None) -> str:
     # 开关与条数都在运行 build_context 的线程里读一次：落到内层 executor
     # 任务里再读会绕开 fail-open 缓存的预期时序，也让"读几次库"变得
     # 不可推理。近期对话开关关闭时干脆不提交任务：连 db 读取都不会发生。
-    if app_settings.is_recent_chat_injection_enabled():
+    if include_recent_chat and app_settings.is_recent_chat_injection_enabled():
         futures["recent_chat"] = _submit(
             build_recent_chat_context,
             app_settings.get_recent_chat_injection_limit(),
@@ -176,7 +177,7 @@ def build_context(user_message: str = "", history_turns=None) -> str:
         results["recent_chat"] = ""
 
     # 开关关闭时干脆不提交 eventide 任务：连 db 读取都不会发生。
-    if app_settings.is_eventide_injection_enabled():
+    if include_eventide and app_settings.is_eventide_injection_enabled():
         futures["eventide"] = _submit(build_eventide_context)
     else:
         results["eventide"] = ""

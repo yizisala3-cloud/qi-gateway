@@ -1,6 +1,6 @@
 // Read-only snapshots of actual memory injections; no polling or background reads.
-import { query, esc } from '../api.js?v=20261020-memory-initial-intent';
-import { loading, empty, errorBlock, tag, fmtDate, pagerHtml, icon } from '../ui.js?v=20261020-memory-initial-intent';
+import { query, esc } from '../api.js?v=20261021-qqbot-mount-r10';
+import { loading, empty, errorBlock, tag, fmtDate, pagerHtml, icon } from '../ui.js?v=20261021-qqbot-mount-r10';
 
 export function createRecallHistoryView({ body, panel, onOpenMemory, onSelectSnapshot, typeLabel }) {
   const pageSize = 20;

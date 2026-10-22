@@ -1,14 +1,14 @@
 // pages/_memory_browser.js - shared library/requests browser with detail panel
-import { gw, query, update, count, esc } from '../api.js?v=20261020-memory-initial-intent';
+import { gw, query, update, count, esc } from '../api.js?v=20261021-qqbot-mount-r10';
 import {
   loading, empty, errorBlock, banner, tag, heatTag, impTag, pagerHtml,
   toast, modal, confirm, delegate, icon, fmtDate, createDetailPanel,
-} from '../ui.js?v=20261020-memory-initial-intent';
-import { openMemoryForm } from './_memory_form.js?v=20261020-memory-initial-intent';
-import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20261020-memory-initial-intent';
-import { createRecallHistoryView } from './_memory_recall.js?v=20261020-memory-initial-intent';
+} from '../ui.js?v=20261021-qqbot-mount-r10';
+import { openMemoryForm } from './_memory_form.js?v=20261021-qqbot-mount-r10';
+import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20261021-qqbot-mount-r10';
+import { createRecallHistoryView } from './_memory_recall.js?v=20261021-qqbot-mount-r10';
 
-export const ASSET_VERSION = '20261020-memory-initial-intent';
+export const ASSET_VERSION = '20261021-qqbot-mount-r10';
 
 const PAGE_SIZE = 20;
 const REQ_FETCH_LIMIT = 100;

@@ -1,5 +1,5 @@
 // Optional explanations use native disclosures; the original node and IDs stay intact.
-import { icon } from '../ui.js?v=20261020-memory-initial-intent';
+import { icon } from '../ui.js?v=20261021-qqbot-mount-r10';
 
 const initializers = new WeakMap();
 

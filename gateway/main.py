@@ -63,6 +63,8 @@ from .request_context import (
 from . import db
 from . import logging_events
 from . import log_settings
+from .qqbot import qqbot_routes
+from .qqbot_settings import QQSettings, qqbot_settings_routes
 
 logging.basicConfig(
     level=logging.INFO,
@@ -523,6 +525,8 @@ _admin_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
 @asynccontextmanager
 async def lifespan(app):
     global http_client
+    app.state.qqbot = None
+    app.state.qqbot_settings = None
     # 管理页保存的采集开关先恢复；未配置默认关闭，读取失败也关闭。
     await asyncio.to_thread(log_settings.startup)
     log_settings_task = asyncio.create_task(log_settings.watch_settings())
@@ -535,6 +539,8 @@ async def lifespan(app):
     planning_task = track_task(planning_loop())
     memo_task = track_task(memo_maintenance_loop())
     try:
+        app.state.qqbot_settings = QQSettings(app,http_client)
+        await app.state.qqbot_settings.startup()
         async with memory_mcp.session_manager.run():
             yield
     finally:
@@ -544,6 +550,13 @@ async def lifespan(app):
         daily_task.cancel()
         planning_task.cancel()
         memo_task.cancel()
+        if app.state.qqbot_settings is not None:
+            try:
+                await app.state.qqbot_settings.shutdown()
+            except Exception:
+                log.exception('QQ配置服务关闭时清理失败')
+            app.state.qqbot_settings = None
+            app.state.qqbot = None
         await http_client.aclose()
         bg_executor.shutdown(wait=False)
         # §36：先停止接收新事件，再做有时间上限的 flush；绝不因日志队列
@@ -571,6 +584,8 @@ _routes.extend(memory_review_routes)
 _routes.extend(todo_routes)
 _routes.extend(planning_api_routes)
 _routes.extend(memo_api_routes)
+_routes.extend(qqbot_routes)
+_routes.extend(qqbot_settings_routes)
 
 
 class NoCacheStaticFiles(StaticFiles):

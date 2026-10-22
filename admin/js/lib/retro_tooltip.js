@@ -1,5 +1,5 @@
 // Auxiliary paper hints. Required/locked/unavailable explanations belong in visible page text.
-import { registerFloatingSurface } from '../ui.js?v=20261020-memory-initial-intent';
+import { registerFloatingSurface } from '../ui.js?v=20261021-qqbot-mount-r10';
 
 const initializers = new WeakMap();
 let descriptionSequence = 0;

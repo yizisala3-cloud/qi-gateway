@@ -1,8 +1,8 @@
 // pages/config.js - 配置：真实状态展示 + 功能开关
-import { gw, esc } from '../api.js?v=20261020-memory-initial-intent';
-import { loading, errorBlock, tag, toast, delegate, icon } from '../ui.js?v=20261020-memory-initial-intent';
-import { openCycleSettings } from '../lib/cycle_settings.js?v=20261020-memory-initial-intent';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261020-memory-initial-intent';
+import { gw, esc } from '../api.js?v=20261021-qqbot-mount-r10';
+import { loading, errorBlock, tag, toast, delegate, icon } from '../ui.js?v=20261021-qqbot-mount-r10';
+import { openCycleSettings } from '../lib/cycle_settings.js?v=20261021-qqbot-mount-r10';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261021-qqbot-mount-r10';
 
 // 规划数据库不可用时的示例数据（仅本地预览；保存会因库不可用自然报错）
 const DEMO_CYCLE = {
@@ -37,6 +37,9 @@ export default {
   logCollectionWritable: false,
   savingLogCollection: false,
   logMountToken: null,
+  qqSettings: null,
+  qqMountToken: null,
+  savingQQSettings: false,
   toggling: false,
   togglingRecent: false,
   togglingTimestamp: false,
@@ -55,6 +58,11 @@ export default {
   async mount(root) {
     this.root = root;
     this.logMountToken = Symbol('config-log-settings');
+    this.qqMountToken = Symbol('config-qq-settings');
+    const mountToken = this.qqMountToken;
+    const isCurrentMount = () => this.qqMountToken === mountToken && this.root === root;
+    this.qqSettings = null;
+    this.savingQQSettings = false;
     root.innerHTML = loading();
     // 重新进入页面默认全部隐藏（不保留「显示状态」）；旧会话取消。
     for (const credentialId of Object.keys(this.credSessions)) {
@@ -66,6 +74,8 @@ export default {
       'toggle-recent-chat': (el) => this.toggleRecentChat(el),
       'toggle-timestamp': (el) => this.toggleTimestamp(el),
       'toggle-log-collection': (el) => this.toggleLogCollection(el),
+      'toggle-qqbot': () => this.toggleQQSetting('enabled'),
+      'toggle-qqbot-proactive': () => this.toggleQQSetting('proactive_enabled'),
       'save-recent-limit': () => this.saveRecentLimit(),
       'toggle-daily-refresh': (el) => this.toggleCycleSwitch(el, 'daily_refresh_enabled', '每日待办自动刷新'),
       'toggle-auto-recompute': (el) => this.toggleCycleSwitch(el, 'auto_recompute_enabled', '自动重算'),
@@ -76,7 +86,7 @@ export default {
       'cred-hide': (el) => this.hideCredential(el.dataset.cred),
     });
     try {
-      const [health, status, continuity, eventideSettings, contextSettings, cycleSettings, credentials, logSettings] = await Promise.all([
+      const [health, status, continuity, eventideSettings, contextSettings, cycleSettings, credentials, logSettings, qqSettings] = await Promise.all([
         gw('/health'),
         gw('/status'),
         // 连续感状态读取失败不拖垮整页：降级为「状态未知」
@@ -89,7 +99,11 @@ export default {
         // TASK-01：密钥元数据（只含用途/来源/标识，绝无真实值）；失败降级
         gw('/admin/api/config/credentials').catch(() => null),
         gw('/admin/api/logs/settings').catch(() => null),
+        gw('/admin/api/qqbot/settings').catch(() => null),
       ]);
+      // The module is reused across visits; an old load must not change either
+      // the new visit's action state or the root it previously rendered into.
+      if (!isCurrentMount()) return;
       const cycle = cycleSettings || DEMO_CYCLE;
       const cycleIsDemo = !cycleSettings;
       this.cycle = cycle;
@@ -104,6 +118,7 @@ export default {
       this.timestampEnabled = contextSettings ? contextSettings.timestamp_enabled === true : null;
       this.logCollectionEnabled = typeof logSettings?.enabled === 'boolean' ? logSettings.enabled : null;
       this.logCollectionWritable = logSettings?.writable === true;
+      this.qqSettings = this.validQQSettings(qqSettings) ? qqSettings : null;
       const supabase = status.supabase || {};
       const lastDigest = status.last_digest_run;
       const uptimeMin = Math.floor((health.uptime || 0) / 60);
@@ -181,6 +196,10 @@ export default {
             <p class="muted text-sm" style="margin:6px 0 0" data-help-note="日志收集">默认关闭。关闭后停止收集新的报错，已保存的历史日志仍可查看；设置保存后生效，重启后保留。</p>
             <p id="log-collection-note" class="muted text-sm" style="margin:6px 0 0">${this.logCollectionWritable ? '' : '暂不能保存开关，请检查数据库连接或重新进入本页。'}</p>
           </div>
+          <div class="card" id="qqbot-settings-card">
+            <div class="card-head"><div class="card-title">${icon('message')}QQBot</div></div>
+            <div id="qqbot-settings-panel">${this.renderQQSettings()}</div>
+          </div>
           <div class="card">
             <div class="card-head"><div class="card-title">${icon('inbox')}上下文注入</div></div>
             <div class="kv"><span class="k">注入条数</span><span class="v">${limitControl}</span></div>
@@ -213,10 +232,12 @@ export default {
             <p class="muted text-sm" style="margin:6px 0 0" data-help-note="页眉花饰">切换每页标题下的分隔线：紫藤花枝 / 铃兰花枝 / 直线。点一下立即生效，选择保存在本机浏览器。</p>
           </div>
         </div>
-        <p class="muted text-sm mt16" data-help-note="配置信息来源">本页全部信息来自网关真实接口（/health、/status、连续感状态、Eventide 设置、上下文注入设置、日志收集设置、规划周期、密钥元数据）。密钥默认隐藏，点击某一项「显示」后才从服务端按项获取真实值；隐藏或离开本页即清除。</p>`;
+        <p class="muted text-sm mt16" data-help-note="配置信息来源">本页全部信息来自网关真实接口（/health、/status、连续感状态、Eventide 设置、上下文注入设置、日志收集设置、QQBot设置、规划周期、密钥元数据）。密钥默认隐藏，点击某一项「显示」后才从服务端按项获取真实值；隐藏或离开本页即清除。</p>`;
     } catch (error) {
+      if (!isCurrentMount()) return;
       root.innerHTML = errorBlock(`配置状态读取失败：${esc(error.message)}`);
     }
+    if (!isCurrentMount()) return;
     // 规划周期的复古时间字段（卡片表面）
     root.querySelectorAll('.retro-time[data-retro-for]').forEach((host) => {
       createRetroTimeField(host, {
@@ -230,12 +251,88 @@ export default {
 
   unmount() {
     this.logMountToken = null;
+    this.qqMountToken = null;
     // TASK-01（L27）：离开页面清除全部可见密钥与页面状态，取消在途查看
     // 请求；晚到响应不得重新显示。真实值只存在于当前页面的必要状态中。
     for (const credentialId of Object.keys(this.credSessions)) {
       this._closeCredentialSession(credentialId);
     }
     this.credSessions = {};
+  },
+
+  validQQSettings(data) {
+    return data && ['enabled', 'proactive_enabled', 'configured', 'proactive_configured', 'running', 'writable']
+      .every(key => typeof data[key] === 'boolean');
+  },
+
+  renderQQSettings() {
+    const s = this.qqSettings;
+    const known = this.validQQSettings(s);
+    const enabled = known && s.enabled;
+    const proactive = known && s.proactive_enabled;
+    const writable = known && s.writable && !this.savingQQSettings;
+    const mainDisabled = !writable || (!enabled && !s.configured);
+    const proactiveDisabled = !writable || !enabled || !s.running || (!proactive && !s.proactive_configured);
+    const status = !known ? '状态未知' : s.error ? '切换未完成' : !enabled ? '已关闭'
+      : !s.running ? '未启动' : s.connected ? '已连接' : '等待QQ连接';
+    const notes = !known ? ['读取失败，暂不可修改。'] : [s.error,
+      !s.configured ? s.configuration_note : '',
+      enabled && !s.proactive_configured ? s.proactive_note : '',
+      !enabled ? '开启QQBot后可单独开启主动消息。' : '',
+      s.owner_paused ? 'QQ私聊中已暂停主动消息；需要在QQ里恢复。' : '',
+      s.silence_until > Date.now() / 1000 ? 'QQ私聊中已设置今天静默。' : ''].filter(Boolean);
+    return `
+      <div class="kv"><span class="k">QQBot总开关</span><span class="v">
+        <span id="qqbot-enabled-tag" class="tag ${enabled ? 'tag-green' : 'tag-muted'}">${known ? enabled ? '已开启' : '已关闭' : '状态未知'}</span>
+        <button class="toggle-switch" role="switch" aria-label="QQBot总开关" aria-checked="${!!enabled}" data-act="toggle-qqbot" ${mainDisabled ? 'disabled' : ''}><span class="toggle-knob"></span></button>
+      </span></div>
+      <div class="kv"><span class="k">主动消息</span><span class="v">
+        <span id="qqbot-proactive-tag" class="tag ${proactive ? 'tag-green' : 'tag-muted'}">${known ? proactive ? '已开启' : '已关闭' : '状态未知'}</span>
+        <button class="toggle-switch" role="switch" aria-label="QQBot主动消息" aria-checked="${!!proactive}" data-act="toggle-qqbot-proactive" ${proactiveDisabled ? 'disabled' : ''}><span class="toggle-knob"></span></button>
+      </span></div>
+      <div class="kv"><span class="k">连接状态</span><span class="v"><span id="qqbot-runtime-tag" class="tag ${known && s.connected ? 'tag-green' : 'tag-muted'}">${status}</span></span></div>
+      <p class="muted text-sm" id="qqbot-settings-note" style="margin:6px 0 0" role="status">${this.savingQQSettings ? '正在保存…' : notes.map(esc).join(' ')}</p>
+      <p class="muted text-sm" style="margin:6px 0 0" data-help-note="QQBot开关">默认关闭，保存后生效，重启后保留。总开关关闭时停止QQ收发并关闭主动消息；单独关闭主动消息仍可私聊。重新开启不会补发旧问候，也不会解除QQ里设置的暂停。</p>`;
+  },
+
+  refreshQQSettings() {
+    const panel = this.root?.querySelector('#qqbot-settings-panel');
+    if (panel) panel.innerHTML = this.renderQQSettings();
+  },
+
+  async toggleQQSetting(key) {
+    if (!this.validQQSettings(this.qqSettings) || this.savingQQSettings || !this.qqSettings.writable) return;
+    const token = this.qqMountToken;
+    const next = !this.qqSettings[key];
+    this.savingQQSettings = true;
+    this.refreshQQSettings();
+    try {
+      const result = await gw('/admin/api/qqbot/settings', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ [key]: next }),
+      });
+      if (token !== this.qqMountToken) return;
+      if (!this.validQQSettings(result)) throw new Error('未收到有效的QQBot开关状态');
+      this.qqSettings = result;
+      toast(key === 'enabled' ? next ? '已开启QQBot' : '已关闭QQBot和主动消息'
+        : next ? '已开启QQBot主动消息' : '已关闭主动消息，私聊保持开启');
+    } catch (error) {
+      if (token !== this.qqMountToken) return;
+      try {
+        const current = await gw('/admin/api/qqbot/settings');
+        if (token !== this.qqMountToken) return;
+        this.qqSettings = this.validQQSettings(current) ? current : null;
+      } catch (readError) {
+        if (token !== this.qqMountToken) return;
+        this.qqSettings = null;
+      }
+      toast(`QQBot设置未能确认：${error.message}`, 'err');
+    } finally {
+      if (token === this.qqMountToken) {
+        this.savingQQSettings = false;
+        this.refreshQQSettings();
+      }
+    }
   },
 
   /* ---------- 密钥按项查看（TASK-01，§5.3/§9.4） ---------- */

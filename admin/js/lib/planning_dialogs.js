@@ -1,8 +1,8 @@
 // Instance dialogs: form-local inputs and timeout retry identity stay in their closures.
-import { gw } from '../api.js?v=20261020-memory-initial-intent';
-import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261020-memory-initial-intent';
-import { createRetroTimeField } from './retro_time.js?v=20261020-memory-initial-intent';
-import { createPlanningActions } from './planning_actions.js?v=20261020-memory-initial-intent';
+import { gw } from '../api.js?v=20261021-qqbot-mount-r10';
+import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261021-qqbot-mount-r10';
+import { createRetroTimeField } from './retro_time.js?v=20261021-qqbot-mount-r10';
+import { createPlanningActions } from './planning_actions.js?v=20261021-qqbot-mount-r10';
 
 function initDialogTimes(root) {
   root.querySelectorAll('.retro-time[data-retro-for]').forEach(host => {

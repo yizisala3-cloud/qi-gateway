@@ -1,9 +1,9 @@
 // pages/logs.js - 全网关报错日志：真实查询 / 筛选 / 分页 / 详情（§36 批次）
 // 数据全部来自 /admin/api/logs* 只读接口；无 mock fallback。
-import { gw, esc } from '../api.js?v=20261020-memory-initial-intent';
+import { gw, esc } from '../api.js?v=20261021-qqbot-mount-r10';
 import {
   loading, empty, errorBlock, tag, toast, modal, delegate, icon,
-} from '../ui.js?v=20261020-memory-initial-intent';
+} from '../ui.js?v=20261021-qqbot-mount-r10';
 
 const LEVEL_META = {
   WARNING: { label: '警告', tone: 'amber' },
