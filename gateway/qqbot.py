@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+from collections import Counter
 from datetime import datetime, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -16,7 +17,7 @@ from starlette.routing import Route, WebSocketRoute
 from .qqbot_config import QQConfig
 from .qqbot_memory import export_message
 from .qqbot_model import QQModel
-from .qqbot_stickers import StickerCatalog
+from .qqbot_stickers import StickerCatalog, split_sticker_summaries
 from .qqbot_store import QQStore
 from .qqbot_transport import OneBotConnection, NotSubmitted, SendCancelled
 
@@ -148,6 +149,17 @@ class QQRuntime:
         keys = result.get("sticker_ids",[])
         if not isinstance(text,str) or not isinstance(keys,list):
             raise ValueError("qq_invalid_generation")
+        text, references = split_sticker_summaries(text)
+        keys = [key for key in keys if isinstance(key,str) and key in self.catalog.entries]
+        represented = Counter(keys)
+        for reference in references:
+            key = reference["id"]
+            if key not in self.catalog.entries:
+                continue
+            if represented[key]:
+                represented[key] -= 1
+            else:
+                keys.append(key)
         segments = [{"type":"text","data":{"text":text}}] if text else []
         summaries = [text] if text else []
         limit = 10 if multiple_stickers(query) else 1

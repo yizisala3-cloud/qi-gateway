@@ -9,6 +9,20 @@ from pathlib import Path
 
 log = logging.getLogger('gateway.qqbot.stickers')
 
+_SUMMARY = re.compile(r"\[表情包[ \t]+([a-zA-Z0-9_-]{1,64})[：:]([^\]\r\n]*)\]")
+
+
+def split_sticker_summaries(text):
+    """Separate reserved history metadata from ordinary reply text."""
+    references = []
+
+    def collect(match):
+        references.append({"id": match[1], "description": match[2].strip()})
+        return ""
+
+    return _SUMMARY.sub(collect, text).strip(), references
+
+
 class StickerCatalog:
     MAX_BYTES = 8 * 1024 * 1024
 
