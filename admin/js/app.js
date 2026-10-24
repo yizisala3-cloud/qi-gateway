@@ -96,7 +96,8 @@ async function route() {
   try { currentMod?.unmount?.(); } catch {}
   currentMod = null;
   try {
-    const mod = (await import(`./pages/${key}.js?v=${ASSET_VERSION}`)).default;
+    const pageVersion = key === 'config' ? '20261024-sky-settings' : ASSET_VERSION;
+    const mod = (await import(`./pages/${key}.js?v=${pageVersion}`)).default;
     if (seq !== routeSeq) return;
     currentMod = mod;
     root.innerHTML = '';

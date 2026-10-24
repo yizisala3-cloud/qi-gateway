@@ -1,0 +1,19 @@
+{
+  "candidate_index_tree": "473a49062c6fb8d3ca7f57f6d74ff49363af30c6",
+  "full_regression": {
+    "passed": 471,
+    "subtests_passed": 21,
+    "failures": 0
+  },
+  "original_probes": 7,
+  "second_original_probes": 4,
+  "postgres_this_turn": 13,
+  "frontend_js_scenarios_in_regression": 12,
+  "candidate_preview_checks": 5,
+  "compile": "passed",
+  "business_files_match_reviewed": 13,
+  "game_tests": "not_run_user_instruction",
+  "deployment": "not_confirmed",
+  "database_prerequisites": "verified",
+  "conclusion": "READY TO MERGE"
+}

@@ -65,6 +65,8 @@ from . import logging_events
 from . import log_settings
 from .qqbot import qqbot_routes
 from .qqbot_settings import QQSettings, qqbot_settings_routes
+from . import sky_settings
+from .sky_delivery import DeliveryError, validate_delivery, publish_delivery
 
 logging.basicConfig(
     level=logging.INFO,
@@ -323,13 +325,17 @@ async def planning_loop():
             await asyncio.sleep(30)
 
 
-async def chat_completions(request: Request):
+async def chat_completions(request: Request, *, persist=True):
     if not verify_token(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "invalid json"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid chat body"}, status_code=400)
+    if not persist and body.get("stream", False):
+        return JSONResponse({"error": "sky preview requires non-streaming"}, status_code=400)
 
     loop = asyncio.get_event_loop()
     messages = body.get("messages", [])
@@ -405,7 +411,7 @@ async def chat_completions(request: Request):
                 outcome="degraded", upstream_status=resp.status_code,
             )
         assistant_text = extract_assistant_reply_text(resp.status_code, resp.content)
-        if assistant_text:
+        if assistant_text and persist:
             track_task(persist_chat_records(user_text, assistant_text))
         if 200 <= resp.status_code < 300:
             return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
@@ -466,7 +472,7 @@ async def chat_completions(request: Request):
             # BUG-26：中断异常文本出口清洗（先清洗后截断）。
             cleaned = scrub_error_text(str(e), 200)
             yield f"data: {json.dumps({'error': cleaned})}\n\n"
-        if completed and collected:
+        if completed and collected and persist:
             assistant_text = "".join(collected).strip()
             if assistant_text:
                 track_task(persist_chat_records(user_text, assistant_text))
@@ -476,6 +482,44 @@ async def chat_completions(request: Request):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+async def sky_chat_preview(request: Request):
+    if not verify_token(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if request.headers.get('x-sky-access-protocol') != '2':
+        return JSONResponse({'error': 'sky_client_upgrade_required'}, status_code=426)
+    access = await asyncio.to_thread(sky_settings.snapshot, refresh=True)
+    if not access["available"]:
+        return JSONResponse({"error": "sky_settings_unavailable"}, status_code=503)
+    if not access["enabled"]:
+        return JSONResponse({"error": "sky_disabled"}, status_code=403)
+    result = await chat_completions(request, persist=False)
+    latest = await asyncio.to_thread(sky_settings.snapshot, refresh=True)
+    if not latest['available']:
+        return JSONResponse({'error': 'sky_settings_unavailable'}, status_code=503)
+    if not latest['enabled'] or latest['pause_epoch'] != access['pause_epoch']:
+        return JSONResponse({'error': 'sky_generation_cancelled'}, status_code=403)
+    return result
+
+
+async def sky_confirm_delivery(request: Request):
+    if not verify_token(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+    try:
+        payload = validate_delivery(body)
+        receipt = await asyncio.to_thread(publish_delivery, payload)
+    except DeliveryError as exc:
+        return JSONResponse({"error": exc.code}, status_code=exc.status)
+    except Exception as exc:
+        emit_error("chat", "sky_confirm_delivery", "sky_delivery_storage_failed",
+                   "光遇消息已发送，但交付记录保存未确认", exc=exc, outcome="committed_side_effect_failed")
+        return JSONResponse({"error": "delivery_storage_unavailable"}, status_code=503)
+    return JSONResponse(receipt)
 
 
 async def health(request: Request):
@@ -506,6 +550,8 @@ async def status(request: Request):
         "memory_plugin_configured": bool(cfg.MEMORY_PLUGIN_TOKEN),
         "memory_mcp_configured": bool(cfg.MCP_MEMORY_TOKEN),
         "todo_plugin_configured": bool(cfg.TODO_PLUGIN_TOKEN),
+        "sky_delivery_protocol": 1,
+        "sky_access_control": 2,
     })
 
 
@@ -567,6 +613,8 @@ async def lifespan(app):
 
 _routes = [
     Route("/v1/chat/completions", chat_completions, methods=["POST"]),
+    Route("/v1/sky/chat/completions", sky_chat_preview, methods=["POST"]),
+    Route("/v1/sky/deliveries", sky_confirm_delivery, methods=["POST"]),
     Route("/v1/models", list_models, methods=["GET"]),
     Route("/health", health, methods=["GET"]),
     Route("/status", status, methods=["GET"]),
@@ -586,6 +634,7 @@ _routes.extend(planning_api_routes)
 _routes.extend(memo_api_routes)
 _routes.extend(qqbot_routes)
 _routes.extend(qqbot_settings_routes)
+_routes.extend(sky_settings.sky_settings_routes)
 
 
 class NoCacheStaticFiles(StaticFiles):

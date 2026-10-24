@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="3" skipped="0" tests="3" time="0.248" timestamp="2026-10-24T07:12:14.385036-07:00" hostname="PC-20260507QJVR"><testcase classname="tests.sky-final-rereview-20261024.repro_new" name="test_late_old_http_rejection_preserves_messages_already_received_after_resume[sky_generation_cancelled]" time="0.018"><failure message="AssertionError: {'queued_before_old_response': [{'sender': '叶子', 'text': '重新开启以后刚问的新问题'}], 'pending_after_old_response': [], 'events':...6e-3cda-43f1-9740-8735d2bec21e', 'state': 'cancelled_by_switch', 'message': {'sender': '叶子', 'text': '重新开启以后刚问的新问题'}}]}&#10;assert [] == [{'sender': '...新开启以后刚问的新问题'}]&#10;  &#10;  Right contains one more item: {'sender': '叶子', 'text': '重新开启以后刚问的新问题'}&#10;  Use -v to get more diff">tests\sky-final-rereview-20261024\repro_new.py:61: in test_late_old_http_rejection_preserves_messages_already_received_after_resume
+    assert [item['message'] for item in companion.inbox.pending] == [fresh], {
+E   AssertionError: {'queued_before_old_response': [{'sender': '叶子', 'text': '重新开启以后刚问的新问题'}], 'pending_after_old_response': [], 'events':...6e-3cda-43f1-9740-8735d2bec21e', 'state': 'cancelled_by_switch', 'message': {'sender': '叶子', 'text': '重新开启以后刚问的新问题'}}]}
+E   assert [] == [{'sender': '...新开启以后刚问的新问题'}]
+E     
+E     Right contains one more item: {'sender': '叶子', 'text': '重新开启以后刚问的新问题'}
+E     Use -v to get more diff</failure></testcase><testcase classname="tests.sky-final-rereview-20261024.repro_new" name="test_late_old_http_rejection_preserves_messages_already_received_after_resume[sky_disabled]" time="0.011"><failure message="AssertionError: {'queued_before_old_response': [{'sender': '叶子', 'text': '重新开启以后刚问的新问题'}], 'pending_after_old_response': [], 'events':...83-06a4-4162-be54-a4639afc5194', 'state': 'cancelled_by_switch', 'message': {'sender': '叶子', 'text': '重新开启以后刚问的新问题'}}]}&#10;assert [] == [{'sender': '...新开启以后刚问的新问题'}]&#10;  &#10;  Right contains one more item: {'sender': '叶子', 'text': '重新开启以后刚问的新问题'}&#10;  Use -v to get more diff">tests\sky-final-rereview-20261024\repro_new.py:61: in test_late_old_http_rejection_preserves_messages_already_received_after_resume
+    assert [item['message'] for item in companion.inbox.pending] == [fresh], {
+E   AssertionError: {'queued_before_old_response': [{'sender': '叶子', 'text': '重新开启以后刚问的新问题'}], 'pending_after_old_response': [], 'events':...83-06a4-4162-be54-a4639afc5194', 'state': 'cancelled_by_switch', 'message': {'sender': '叶子', 'text': '重新开启以后刚问的新问题'}}]}
+E   assert [] == [{'sender': '...新开启以后刚问的新问题'}]
+E     
+E     Right contains one more item: {'sender': '叶子', 'text': '重新开启以后刚问的新问题'}
+E     Use -v to get more diff</failure></testcase><testcase classname="tests.sky-final-rereview-20261024.repro_new" name="test_pause_between_visual_permission_check_and_commit_cannot_restore_old_scene" time="0.009"><failure message="AssertionError: {'status': 'available', 'summary': '暂停以前的旧画面', 'observed_at': 1792851134.6250732, 'age_seconds': 0.0, ...}&#10;assert '暂停以前的旧画面' == ''&#10;  &#10;  + 暂停以前的旧画面">tests\sky-final-rereview-20261024\repro_new.py:113: in test_pause_between_visual_permission_check_and_commit_cannot_restore_old_scene
+    assert companion.vision.summary == '', companion.vision.context(b.time.time())
+E   AssertionError: {'status': 'available', 'summary': '暂停以前的旧画面', 'observed_at': 1792851134.6250732, 'age_seconds': 0.0, ...}
+E   assert '暂停以前的旧画面' == ''
+E     
+E     + 暂停以前的旧画面</failure></testcase></testsuite></testsuites>

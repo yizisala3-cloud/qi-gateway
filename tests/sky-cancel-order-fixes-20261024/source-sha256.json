@@ -1,0 +1,26 @@
+[
+  {
+    "path": "tools/sky_companion/bridge.py",
+    "sha256": "48EAD00A144DC1204232C971011844D1850F9F5DB186A976D5614BAB702FF3A6"
+  },
+  {
+    "path": "tests/test_sky_settings.py",
+    "sha256": "847ED56B87900C34DB22543E868BD6026DA6399560704C31BD590781749685CA"
+  },
+  {
+    "path": "tests/test_sky_cancellation_order.py",
+    "sha256": "27F602515DBCA3D41FDFFF4243F784D11F3290252EF7125415C52205AFB5980D"
+  },
+  {
+    "path": "tests/sky-final-rereview-20261024/repro_new.py",
+    "sha256": "26AD7A2D866EB661C1415CB5C485D97823EA2F6B90E3EB21BE48E5B43B4421CC"
+  },
+  {
+    "path": "tests/sky-review-20261024/repro_cases.py",
+    "sha256": "9312803666D56456843E9FBA3BC0FAB86B80FD0D1BF2A15E51F3F8199DB77021"
+  },
+  {
+    "path": "tests/sky-rereview-20261024/repro_cases.py",
+    "sha256": "B9A90A15746B827DE349B3F6D3B5993639C8D6E4A2EDC0B760AADD4375192AB4"
+  }
+]

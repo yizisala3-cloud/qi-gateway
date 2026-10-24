@@ -10,3 +10,4 @@ build/
 data/qqbot.sqlite3*
 data/qqbot-settings.json*
 qqbot/private/
+codex/环境变量备份/

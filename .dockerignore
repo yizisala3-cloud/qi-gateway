@@ -15,6 +15,7 @@
 .gitignore
 .gitattributes
 .zcodeignore
+codex/
 .pytest_cache
 __pycache__/
 *.py[cod]

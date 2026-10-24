@@ -1,0 +1,54 @@
+[
+  {
+    "path": "tools/sky_companion/bridge.py",
+    "candidate_text_matches_reviewed": true
+  },
+  {
+    "path": "tools/sky_companion/layout.py",
+    "candidate_text_matches_reviewed": true
+  },
+  {
+    "path": "tools/sky_companion/local_ocr.py",
+    "candidate_text_matches_reviewed": true
+  },
+  {
+    "path": "gateway/main.py",
+    "candidate_text_matches_reviewed": true
+  },
+  {
+    "path": "gateway/sky_settings.py",
+    "candidate_text_matches_reviewed": true
+  },
+  {
+    "path": "gateway/sky_delivery.py",
+    "candidate_text_matches_reviewed": true
+  },
+  {
+    "path": "admin/js/pages/config.js",
+    "candidate_text_matches_reviewed": true
+  },
+  {
+    "path": "admin/js/api.js",
+    "candidate_text_matches_reviewed": true
+  },
+  {
+    "path": "admin/js/app.js",
+    "candidate_text_matches_reviewed": true
+  },
+  {
+    "path": "admin/index.html",
+    "candidate_text_matches_reviewed": true
+  },
+  {
+    "path": "supabase/migrations/20261024010000_sky_retry_original_author.sql",
+    "candidate_text_matches_reviewed": true
+  },
+  {
+    "path": "supabase/migrations/20261024030000_sky_access_pause_epoch.sql",
+    "candidate_text_matches_reviewed": true
+  },
+  {
+    "path": "tools/preview_sky.cjs",
+    "candidate_text_matches_reviewed": true
+  }
+]

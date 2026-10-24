@@ -1,0 +1,46 @@
+[
+  {
+    "path": "tools/sky_companion/bridge.py",
+    "sha256": "3538C6C59837B0B37759379DE9FBBA8B81CB71304DC0A93ABB8CC427603561F6"
+  },
+  {
+    "path": "tools/sky_companion/layout.py",
+    "sha256": "B8D6D365D1E090DAE35DA10E8A6F05CF7AF44EE796242CB0BD6B38716E734B34"
+  },
+  {
+    "path": "tools/sky_companion/local_ocr.py",
+    "sha256": "0FD55EF3ADBF4F826BB4039B20E1AAE58D0DCBD10D020D70B1285FFF88429381"
+  },
+  {
+    "path": "gateway/main.py",
+    "sha256": "170355CF8075762153AB96DE075D5834E2C8A4A5887E98BC30A526B36EB588C1"
+  },
+  {
+    "path": "gateway/sky_settings.py",
+    "sha256": "FBB298475D76F5EEE0100662A85F60D357AA22A94560C57BD4E6E079AF93D092"
+  },
+  {
+    "path": "gateway/sky_delivery.py",
+    "sha256": "F8763C4EF66D304CCC9D95A814B43B94C88B7CA0E23A115F9C92C66E80321268"
+  },
+  {
+    "path": "admin/js/pages/config.js",
+    "sha256": "6208FCD8E05A93993CFEAD480C29875DF63A61E9E4A60605C007E36E0304FD34"
+  },
+  {
+    "path": "admin/js/api.js",
+    "sha256": "9B7744401D3A8AE1EB968B50091B608ACAC634B06B30D3CF35A951E622AC61F7"
+  },
+  {
+    "path": "admin/js/app.js",
+    "sha256": "752DFD8C30F22EE1B2C85DBCE88791FB9ECEFD481DF56460FA9580C87ED686E9"
+  },
+  {
+    "path": "admin/index.html",
+    "sha256": "82D5978C969B00CCFAB222D6FC93D2E13F7514E37A386A4017A3AACA9916FDBC"
+  },
+  {
+    "path": "supabase/migrations/20261024010000_sky_retry_original_author.sql",
+    "sha256": "8FDAB2FBD7113C67DFAB3881CD2886E635CAE2124DCB1F277B5469546AC612C4"
+  }
+]

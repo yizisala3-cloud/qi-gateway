@@ -1,0 +1,19 @@
+{
+  "sky_publish_chat_delivery": {
+    "http_status": 400,
+    "validation_code": "22023",
+    "schema_cache_recognized": true,
+    "mutation": false
+  },
+  "sky_set_access": {
+    "http_status": 400,
+    "validation_code": "22023",
+    "schema_cache_recognized": true,
+    "mutation": false
+  },
+  "gateway_status_http": 200,
+  "gateway_protocols": {
+    "sky_delivery_protocol": 1,
+    "sky_access_control": null
+  }
+}

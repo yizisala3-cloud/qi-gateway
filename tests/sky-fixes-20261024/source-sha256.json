@@ -1,0 +1,66 @@
+[
+  {
+    "path": "tools/sky_companion/bridge.py",
+    "sha256": "3538c6c59837b0b37759379de9fbba8b81cb71304dc0a93abb8cc427603561f6"
+  },
+  {
+    "path": "tools/sky_companion/layout.py",
+    "sha256": "b8d6d365d1e090dae35da10e8a6f05cf7af44ee796242cb0bd6b38716e734b34"
+  },
+  {
+    "path": "gateway/sky_delivery.py",
+    "sha256": "f8763c4ef66d304ccc9d95a814b43b94c88b7ca0e23a115f9c92c66e80321268"
+  },
+  {
+    "path": "gateway/sky_settings.py",
+    "sha256": "fbb298475d76f5eee0100662a85f60d357aa22a94560c57bd4e6e079af93d092"
+  },
+  {
+    "path": "gateway/main.py",
+    "sha256": "170355cf8075762153ab96de075d5834e2c8a4a5887e98bc30a526b36eb588c1"
+  },
+  {
+    "path": "supabase/migrations/20261024010000_sky_retry_original_author.sql",
+    "sha256": "8fdab2fbd7113c67dfab3881cd2886e635cae2124dcb1f277b5469546ac612c4"
+  },
+  {
+    "path": "admin/js/pages/config.js",
+    "sha256": "6208fcd8e05a93993cfead480c29875df63a61e9e4a60605c007e36e0304fd34"
+  },
+  {
+    "path": "admin/js/app.js",
+    "sha256": "752dfd8c30f22ee1b2c85dbce88791fb9ecefd481df56460fa9580c87ed686e9"
+  },
+  {
+    "path": "admin/index.html",
+    "sha256": "82d5978c969b00ccfab222d6fc93d2e13f7514e37a386a4017a3aaca9916fdbc"
+  },
+  {
+    "path": "tools/preview_sky.cjs",
+    "sha256": "5f487b1b57d9ae709efebc9d79322bf6ff47669713103dd49343e936db8b8f05"
+  },
+  {
+    "path": "tests/test_sky_companion_five_fixes.py",
+    "sha256": "75f35b7e54cc1447fb42c39792be3038b3fb7c6894b225232870787feb79936f"
+  },
+  {
+    "path": "tests/test_sky_settings.py",
+    "sha256": "cb19e59be336a9bef218b9d572d6fcee32af7161f74849beeddcf8321fcaccba"
+  },
+  {
+    "path": "tests/test_sky_delivery_pgserver.py",
+    "sha256": "dc08686d889f7f5581ae56c1598f9dcd84ccd73960908d334efaf169dc663ac5"
+  },
+  {
+    "path": "tests/test_sky_config_frontend.py",
+    "sha256": "1354996c4ec988cae64251cadde6f0f82e5f301b7e8c05a5f346b8b15a6afd6b"
+  },
+  {
+    "path": "tests/sky_config.test.mjs",
+    "sha256": "4af52dfb6eb619efe70263849747bd5174a01cb96b18181886c30d26bc7c9c0e"
+  },
+  {
+    "path": "tests/sky-review-20261024/repro_cases.py",
+    "sha256": "9312803666d56456843e9fba3bc0fab86b80fd0d1bf2a15e51f3f8199db77021"
+  }
+]

@@ -1,0 +1,13 @@
+{
+  "url": "http://127.0.0.1:8017/admin/index.html#/config",
+  "environment": "local synthetic preview",
+  "checks": [
+    "initial disabled",
+    "enabled after click",
+    "enabled after reload",
+    "disabled after click",
+    "save-error retains disabled and shows error",
+    "read-error shows unknown and disables switch"
+  ],
+  "production_changed": false
+}

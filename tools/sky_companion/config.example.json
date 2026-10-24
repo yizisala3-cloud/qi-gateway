@@ -1,0 +1,19 @@
+{
+  "gateway_url": "https://yiziwanguan.com",
+  "network_mode": "system",
+  "mumu_cli": "D:\\游戏\\nx_main\\mumu-cli.exe",
+  "adb": "D:\\游戏\\nx_main\\adb.exe",
+  "vm_index": 10,
+  "vm_name": "MuMu安卓设备-10",
+  "package": "com.netease.sky",
+  "peer_names": ["叶子"],
+  "chat_mode": "direct",
+  "primary_user": "叶子",
+  "poll_seconds": 1,
+  "reply_chars": 35,
+  "vision": {"enabled": false, "every_turns": 4, "max_age_seconds": 60},
+  "screen_size": null,
+  "chat_region": null,
+  "open_chat": null,
+  "send_button": null
+}

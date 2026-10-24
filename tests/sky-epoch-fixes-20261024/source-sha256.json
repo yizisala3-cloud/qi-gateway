@@ -1,0 +1,77 @@
+[
+  {
+    "path": "tools/sky_companion/bridge.py",
+    "sha256": "6CFFEE596AD79481C936C1E2354465585639A4B7169ADB5D630345077CB53041",
+    "modified": "2026-10-24T03:11:46.9867450-07:00"
+  },
+  {
+    "path": "tools/sky_companion/layout.py",
+    "sha256": "FD14A17404E3446AAD66BB27181C6201533ED5FFFB9AA65C69B52F56C0082FD3",
+    "modified": "2026-10-24T02:58:27.9579710-07:00"
+  },
+  {
+    "path": "tools/sky_companion/local_ocr.py",
+    "sha256": "94E2B316F275982CB7A28A64C30CCD331AE684535AED8650C3CC5196147A84B8",
+    "modified": "2026-10-24T02:58:27.9599938-07:00"
+  },
+  {
+    "path": "gateway/main.py",
+    "sha256": "DA6C18B4546981C768CF76BC06EE44B81FD6D8E1200C464E01C8B046AE42FF03",
+    "modified": "2026-10-24T03:00:34.3050352-07:00"
+  },
+  {
+    "path": "gateway/sky_settings.py",
+    "sha256": "1F193B165F5564EE21970088BECC7D5EE82BAD0C4BC7D71EB7AB4287AB010B87",
+    "modified": "2026-10-24T03:00:34.3025137-07:00"
+  },
+  {
+    "path": "tools/preview_sky.cjs",
+    "sha256": "385C5F73F01E5AA5A6EBD1CAF7D1C8B8F349EF6699821BA390085A49A8F78ECA",
+    "modified": "2026-10-24T03:00:34.3055416-07:00"
+  },
+  {
+    "path": "supabase/migrations/20261024030000_sky_access_pause_epoch.sql",
+    "sha256": "F6D4A2C9A3D9B236FB5771B37847F9056BDFC98A3C804F4A67A9EEA3BDEF0FCA",
+    "modified": "2026-10-24T03:00:34.3035222-07:00"
+  },
+  {
+    "path": "tests/test_sky_companion.py",
+    "sha256": "319821C7137C7C68791982801B05459C74CAF7D67BEEA9230DA7CD4DA4063C23",
+    "modified": "2026-10-24T03:11:46.9847343-07:00"
+  },
+  {
+    "path": "tests/test_sky_settings.py",
+    "sha256": "1796E401ACF173EC16096C7B22780BFA69A8F60C46B058A7550AB26CF7006A68",
+    "modified": "2026-10-24T03:01:19.5959254-07:00"
+  },
+  {
+    "path": "tests/test_sky_delivery.py",
+    "sha256": "58809294BA73ED94E9F10148E827FEFAF90D5C2F1D0094A0905C6E001E16EA74",
+    "modified": "2026-10-24T03:01:19.5969344-07:00"
+  },
+  {
+    "path": "tests/test_sky_companion_review_regressions.py",
+    "sha256": "9BAA3392808C037CDC28A00585938F55F0D1C7E7B0BB6259CDCE418538014AEF",
+    "modified": "2026-10-24T03:01:19.5979431-07:00"
+  },
+  {
+    "path": "tests/test_sky_pause_epoch.py",
+    "sha256": "4A9DC30602EB8A80D4F09BDF2B412CF511EBB7A049717E1B9274ABCCB63D2F18",
+    "modified": "2026-10-24T03:17:53.6500258-07:00"
+  },
+  {
+    "path": "tests/test_sky_pause_pgserver.py",
+    "sha256": "759B861E54226F7852EE4A563A619BAFD340A9FC2CCDE3A39EDF14EDAD586EBB",
+    "modified": "2026-10-24T03:13:41.8872277-07:00"
+  },
+  {
+    "path": "tests/sky-review-20261024/repro_cases.py",
+    "sha256": "9312803666D56456843E9FBA3BC0FAB86B80FD0D1BF2A15E51F3F8199DB77021",
+    "modified": "2026-10-24T00:11:51.4505050-07:00"
+  },
+  {
+    "path": "tests/sky-rereview-20261024/repro_cases.py",
+    "sha256": "B9A90A15746B827DE349B3F6D3B5993639C8D6E4A2EDC0B760AADD4375192AB4",
+    "modified": "2026-10-24T02:35:36.9559476-07:00"
+  }
+]

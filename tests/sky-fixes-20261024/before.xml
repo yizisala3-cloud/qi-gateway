@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="7" skipped="0" tests="7" time="0.293" timestamp="2026-10-24T00:14:34.052090-07:00" hostname="PC-20260507QJVR"><testcase classname="tests.sky-review-20261024.repro_cases" name="test_player_name_remains_complete[\u53f6\xb7\u5b50]" time="0.005"><failure message="AssertionError: assert [{'sender': '...t': '你好 - 叶'}] == [{'sender': '...'text': '你好'}]&#10;  &#10;  At index 0 diff: {'sender': '子', 'text': '你好 - 叶'} != {'sender': '叶·子', 'text': '你好'}&#10;  Use -v to get more diff">tests\sky-review-20261024\repro_cases.py:16: in test_player_name_remains_complete
+    assert actual == [{"sender": name, "text": "你好"}]
+E   AssertionError: assert [{'sender': '...t': '你好 - 叶'}] == [{'sender': '...'text': '你好'}]
+E     
+E     At index 0 diff: {'sender': '子', 'text': '你好 - 叶'} != {'sender': '叶·子', 'text': '你好'}
+E     Use -v to get more diff</failure></testcase><testcase classname="tests.sky-review-20261024.repro_cases" name="test_player_name_remains_complete[\u963f\u7941\xb7\u53f6\u5b50]" time="0.003"><failure message="AssertionError: assert [{'sender': '...': '你好 - 阿祁'}] == [{'sender': '...'text': '你好'}]&#10;  &#10;  At index 0 diff: {'sender': '叶子', 'text': '你好 - 阿祁'} != {'sender': '阿祁·叶子', 'text': '你好'}&#10;  Use -v to get more diff">tests\sky-review-20261024\repro_cases.py:16: in test_player_name_remains_complete
+    assert actual == [{"sender": name, "text": "你好"}]
+E   AssertionError: assert [{'sender': '...': '你好 - 阿祁'}] == [{'sender': '...'text': '你好'}]
+E     
+E     At index 0 diff: {'sender': '叶子', 'text': '你好 - 阿祁'} != {'sender': '阿祁·叶子', 'text': '你好'}
+E     Use -v to get more diff</failure></testcase><testcase classname="tests.sky-review-20261024.repro_cases" name="test_initial_batch_respects_request_budget" time="0.014"><failure message="assert 24866 &lt;= 20000&#10; +  where 24866 = len('{&quot;scene&quot;: &quot;光遇群聊&quot;, &quot;primary_user&quot;: &quot;叶子&quot;, &quot;message_order&quot;: &quot;oldest_to_newest&quot;, &quot;messages&quot;: [{&quot;sender&quot;: &quot;玩家甲&quot;, &quot;text&quot;: &quot;...99:aaaaaaaaaaaaaaaaaaaaaaaaa&quot;}, {&quot;sender&quot;: &quot;叶子&quot;, &quot;text&quot;: &quot;你还在吗&quot;}], &quot;latest_message&quot;: {&quot;sender&quot;: &quot;叶子&quot;, &quot;text&quot;: &quot;你还在吗&quot;}}')&#10; +    where '{&quot;scene&quot;: &quot;光遇群聊&quot;, &quot;primary_user&quot;: &quot;叶子&quot;, &quot;message_order&quot;: &quot;oldest_to_newest&quot;, &quot;messages&quot;: [{&quot;sender&quot;: &quot;玩家甲&quot;, &quot;text&quot;: &quot;...99:aaaaaaaaaaaaaaaaaaaaaaaaa&quot;}, {&quot;sender&quot;: &quot;叶子&quot;, &quot;text&quot;: &quot;你还在吗&quot;}], &quot;latest_message&quot;: {&quot;sender&quot;: &quot;叶子&quot;, &quot;text&quot;: &quot;你还在吗&quot;}}' = &lt;function conversation_query at 0x0000029B22D939C0&gt;([{'sender': '玩家甲', 'text': '消息0:aaaaaaaaaaaaaaaaaaaaaaaaa'}, {'sender': '玩家甲', 'text': '消息1:aaaaaaaaaaaaaaaaaaaaaaaaa'...der': '玩家甲', 'text': '消息4:aaaaaaaaaaaaaaaaaaaaaaaaa'}, {'sender': '玩家甲', 'text': '消息5:aaaaaaaaaaaaaaaaaaaaaaaaa'}, ...], {'gateway_url': 'https://yiziwanguan.com', 'network_mode': 'system', 'mumu_cli': 'D:\\游戏\\nx_main\\mumu-cli.exe', 'adb': 'D:\\游戏\\nx_main\\adb.exe', ...})&#10; +      where &lt;function conversation_query at 0x0000029B22D939C0&gt; = b.conversation_query">tests\sky-review-20261024\repro_cases.py:26: in test_initial_batch_respects_request_budget
+    assert len(b.conversation_query(received["messages"], config)) &lt;= 20000
+E   assert 24866 &lt;= 20000
+E    +  where 24866 = len('{"scene": "光遇群聊", "primary_user": "叶子", "message_order": "oldest_to_newest", "messages": [{"sender": "玩家甲", "text": "...99:aaaaaaaaaaaaaaaaaaaaaaaaa"}, {"sender": "叶子", "text": "你还在吗"}], "latest_message": {"sender": "叶子", "text": "你还在吗"}}')
+E    +    where '{"scene": "光遇群聊", "primary_user": "叶子", "message_order": "oldest_to_newest", "messages": [{"sender": "玩家甲", "text": "...99:aaaaaaaaaaaaaaaaaaaaaaaaa"}, {"sender": "叶子", "text": "你还在吗"}], "latest_message": {"sender": "叶子", "text": "你还在吗"}}' = &lt;function conversation_query at 0x0000029B22D939C0&gt;([{'sender': '玩家甲', 'text': '消息0:aaaaaaaaaaaaaaaaaaaaaaaaa'}, {'sender': '玩家甲', 'text': '消息1:aaaaaaaaaaaaaaaaaaaaaaaaa'...der': '玩家甲', 'text': '消息4:aaaaaaaaaaaaaaaaaaaaaaaaa'}, {'sender': '玩家甲', 'text': '消息5:aaaaaaaaaaaaaaaaaaaaaaaaa'}, ...], {'gateway_url': 'https://yiziwanguan.com', 'network_mode': 'system', 'mumu_cli': 'D:\\游戏\\nx_main\\mumu-cli.exe', 'adb': 'D:\\游戏\\nx_main\\adb.exe', ...})
+E    +      where &lt;function conversation_query at 0x0000029B22D939C0&gt; = b.conversation_query</failure></testcase><testcase classname="tests.sky-review-20261024.repro_cases" name="test_delivery_retry_preserves_original_assistant" time="0.002"><failure message="gateway.sky_delivery.DeliveryError: delivery_payload_conflict">tests\sky-review-20261024\repro_cases.py:42: in execute
+    raise error
+E   ValueError: payload mismatch
+
+The above exception was the direct cause of the following exception:
+tests\sky-review-20261024\repro_cases.py:53: in test_delivery_retry_preserves_original_assistant
+    assert sd.publish_delivery(payload)["duplicate"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gateway\sky_delivery.py:48: in publish_delivery
+    raise DeliveryError("delivery_payload_conflict", 409) from exc
+E   gateway.sky_delivery.DeliveryError: delivery_payload_conflict</failure></testcase><testcase classname="tests.sky-review-20261024.repro_cases" name="test_partial_ocr_does_not_make_old_message_latest[before_take]" time="0.004"><failure message="AssertionError: assert {'sender': '叶...text': '去雨林吗'} == {'sender': '朋...ext': '改去霞谷吧'}&#10;  &#10;  Differing items:&#10;  {'sender': '叶子'} != {'sender': '朋友甲'}&#10;  {'text': '去雨林吗'} != {'text': '改去霞谷吧'}&#10;  Use -v to get more diff">tests\sky-review-20261024\repro_cases.py:74: in test_partial_ocr_does_not_make_old_message_latest
+    assert json.loads(b.conversation_query(batch["messages"], config))["latest_message"] == latest
+E   AssertionError: assert {'sender': '叶...text': '去雨林吗'} == {'sender': '朋...ext': '改去霞谷吧'}
+E     
+E     Differing items:
+E     {'sender': '叶子'} != {'sender': '朋友甲'}
+E     {'text': '去雨林吗'} != {'text': '改去霞谷吧'}
+E     Use -v to get more diff</failure></testcase><testcase classname="tests.sky-review-20261024.repro_cases" name="test_partial_ocr_does_not_make_old_message_latest[during_merge]" time="0.006"><failure message="AssertionError: assert [{'sender': '...text': '都可以'}] == [{'sender': '...text': '都可以'}]&#10;  &#10;  At index 0 diff: {'sender': '朋友甲', 'text': '改去霞谷吧'} != {'sender': '叶子', 'text': '去雨林吗'}&#10;  Use -v to get more diff">tests\sky-review-20261024\repro_cases.py:70: in test_partial_ocr_does_not_make_old_message_latest
+    assert batch["messages"] == [old, latest, incoming]
+E   AssertionError: assert [{'sender': '...text': '都可以'}] == [{'sender': '...text': '都可以'}]
+E     
+E     At index 0 diff: {'sender': '朋友甲', 'text': '改去霞谷吧'} != {'sender': '叶子', 'text': '去雨林吗'}
+E     Use -v to get more diff</failure></testcase><testcase classname="tests.sky-review-20261024.repro_cases" name="test_confirmed_send_survives_optional_snapshot_failure" time="0.030"><failure message="AssertionError: {'error': 'diagnostic screen.png is held open', 'confirmed': True, 'states': [{'decision_id': 'a0cf1486-cd85-52fe-bb82...er_kind': 'reply', 'event_ids': ['896a662f-e5b7-4027-850c-09ebb6f7bd60'], 'query': '叶子：在吗', ...}], 'delivery_files': 0}&#10;assert '/v1/sky/deliveries' in ['/status', '/v1/sky/chat/completions']">tests\sky-review-20261024\repro_cases.py:114: in test_confirmed_send_survives_optional_snapshot_failure
+    assert "/v1/sky/deliveries" in requests, {
+E   AssertionError: {'error': 'diagnostic screen.png is held open', 'confirmed': True, 'states': [{'decision_id': 'a0cf1486-cd85-52fe-bb82...er_kind': 'reply', 'event_ids': ['896a662f-e5b7-4027-850c-09ebb6f7bd60'], 'query': '叶子：在吗', ...}], 'delivery_files': 0}
+E   assert '/v1/sky/deliveries' in ['/status', '/v1/sky/chat/completions']</failure></testcase></testsuite></testsuites>

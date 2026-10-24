@@ -40,6 +40,9 @@ export default {
   qqSettings: null,
   qqMountToken: null,
   savingQQSettings: false,
+  skySettings: null,
+  skyMountToken: null,
+  savingSkySettings: false,
   toggling: false,
   togglingRecent: false,
   togglingTimestamp: false,
@@ -59,6 +62,9 @@ export default {
     this.root = root;
     this.logMountToken = Symbol('config-log-settings');
     this.qqMountToken = Symbol('config-qq-settings');
+    this.skyMountToken = Symbol('config-sky-settings');
+    this.skySettings = null;
+    this.savingSkySettings = false;
     const mountToken = this.qqMountToken;
     const isCurrentMount = () => this.qqMountToken === mountToken && this.root === root;
     this.qqSettings = null;
@@ -76,6 +82,7 @@ export default {
       'toggle-log-collection': (el) => this.toggleLogCollection(el),
       'toggle-qqbot': () => this.toggleQQSetting('enabled'),
       'toggle-qqbot-proactive': () => this.toggleQQSetting('proactive_enabled'),
+      'toggle-sky': () => this.toggleSkySetting(),
       'save-recent-limit': () => this.saveRecentLimit(),
       'toggle-daily-refresh': (el) => this.toggleCycleSwitch(el, 'daily_refresh_enabled', '每日待办自动刷新'),
       'toggle-auto-recompute': (el) => this.toggleCycleSwitch(el, 'auto_recompute_enabled', '自动重算'),
@@ -86,7 +93,7 @@ export default {
       'cred-hide': (el) => this.hideCredential(el.dataset.cred),
     });
     try {
-      const [health, status, continuity, eventideSettings, contextSettings, cycleSettings, credentials, logSettings, qqSettings] = await Promise.all([
+      const [health, status, continuity, eventideSettings, contextSettings, cycleSettings, credentials, logSettings, qqSettings, skySettings] = await Promise.all([
         gw('/health'),
         gw('/status'),
         // 连续感状态读取失败不拖垮整页：降级为「状态未知」
@@ -100,6 +107,7 @@ export default {
         gw('/admin/api/config/credentials').catch(() => null),
         gw('/admin/api/logs/settings').catch(() => null),
         gw('/admin/api/qqbot/settings').catch(() => null),
+        gw('/admin/api/sky/settings').catch(() => null),
       ]);
       // The module is reused across visits; an old load must not change either
       // the new visit's action state or the root it previously rendered into.
@@ -119,6 +127,7 @@ export default {
       this.logCollectionEnabled = typeof logSettings?.enabled === 'boolean' ? logSettings.enabled : null;
       this.logCollectionWritable = logSettings?.writable === true;
       this.qqSettings = this.validQQSettings(qqSettings) ? qqSettings : null;
+      this.skySettings = this.validSkySettings(skySettings) ? skySettings : null;
       const supabase = status.supabase || {};
       const lastDigest = status.last_digest_run;
       const uptimeMin = Math.floor((health.uptime || 0) / 60);
@@ -200,6 +209,10 @@ export default {
             <div class="card-head"><div class="card-title">${icon('message')}QQBot</div></div>
             <div id="qqbot-settings-panel">${this.renderQQSettings()}</div>
           </div>
+          <div class="card" id="sky-settings-card">
+            <div class="card-head"><div class="card-title">${icon('message')}光遇接入</div></div>
+            <div id="sky-settings-panel">${this.renderSkySettings()}</div>
+          </div>
           <div class="card">
             <div class="card-head"><div class="card-title">${icon('inbox')}上下文注入</div></div>
             <div class="kv"><span class="k">注入条数</span><span class="v">${limitControl}</span></div>
@@ -252,12 +265,75 @@ export default {
   unmount() {
     this.logMountToken = null;
     this.qqMountToken = null;
+    this.skyMountToken = null;
     // TASK-01（L27）：离开页面清除全部可见密钥与页面状态，取消在途查看
     // 请求；晚到响应不得重新显示。真实值只存在于当前页面的必要状态中。
     for (const credentialId of Object.keys(this.credSessions)) {
       this._closeCredentialSession(credentialId);
     }
     this.credSessions = {};
+  },
+
+  validSkySettings(data) {
+    return data && ['enabled', 'available', 'writable'].every(key => typeof data[key] === 'boolean');
+  },
+
+  renderSkySettings() {
+    const s = this.skySettings;
+    const known = this.validSkySettings(s) && s.available;
+    const enabled = known && s.enabled;
+    const disabled = !known || !s.writable || this.savingSkySettings;
+    const note = this.savingSkySettings ? '正在保存…' : !known ? '读取失败，暂不可修改。'
+      : !s.writable ? '当前暂不能保存开关。' : '';
+    return `
+      <div class="kv"><span class="k">启用光遇接入</span><span class="v">
+        <span id="sky-enabled-tag" class="tag ${enabled ? 'tag-green' : 'tag-muted'}">${known ? enabled ? '已开启' : '已关闭' : '状态未知'}</span>
+        <button class="toggle-switch" role="switch" aria-label="光遇接入开关" aria-checked="${!!enabled}" data-act="toggle-sky" ${disabled ? 'disabled' : ''}><span class="toggle-knob"></span></button>
+      </span></div>
+      <p class="muted text-sm" id="sky-settings-note" role="status" style="margin:6px 0 0">${note}</p>
+      <p class="muted text-sm" style="margin:6px 0 0" data-help-note="光遇接入">开启后允许光遇中的聊天与画面理解，需要本机连接程序运行。关闭后暂停新回复，已发送内容仍可保存；重新开启不会补答暂停期间的消息。设置保存后保留，默认关闭。</p>`;
+  },
+
+  refreshSkySettings() {
+    const panel = this.root?.querySelector('#sky-settings-panel');
+    if (panel) panel.innerHTML = this.renderSkySettings();
+  },
+
+  async toggleSkySetting() {
+    if (!this.validSkySettings(this.skySettings) || !this.skySettings.available
+        || !this.skySettings.writable || this.savingSkySettings) return;
+    const token = this.skyMountToken;
+    const next = !this.skySettings.enabled;
+    this.savingSkySettings = true;
+    this.refreshSkySettings();
+    try {
+      const result = await gw('/admin/api/sky/settings', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next }),
+      });
+      if (token !== this.skyMountToken) return;
+      if (!this.validSkySettings(result) || !result.available || result.enabled !== next) {
+        throw new Error('未收到有效的光遇接入开关状态');
+      }
+      this.skySettings = result;
+      toast(next ? '已开启光遇接入' : '已暂停光遇新回复');
+    } catch (error) {
+      if (token !== this.skyMountToken) return;
+      try {
+        const current = await gw('/admin/api/sky/settings');
+        if (token !== this.skyMountToken) return;
+        this.skySettings = this.validSkySettings(current) ? current : null;
+      } catch (readError) {
+        if (token !== this.skyMountToken) return;
+        this.skySettings = null;
+      }
+      toast(`光遇开关未能确认：${error.message}`, 'err');
+    } finally {
+      if (token === this.skyMountToken) {
+        this.savingSkySettings = false;
+        this.refreshSkySettings();
+      }
+    }
   },
 
   validQQSettings(data) {

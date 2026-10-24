@@ -1,0 +1,30 @@
+[
+  {
+    "path": "tools/sky_companion/bridge.py",
+    "sha256": "DBA0DF5C61571158CD2D19E2E68D46E467333920573999F33E1B46E386E63BB1"
+  },
+  {
+    "path": "tools/sky_companion/layout.py",
+    "sha256": "5295A4674E4FEA93A1E29B1FEB461D1EE403F58902298B8A25C7354C5202C9DE"
+  },
+  {
+    "path": "tools/sky_companion/local_ocr.py",
+    "sha256": "0FD55EF3ADBF4F826BB4039B20E1AAE58D0DCBD10D020D70B1285FFF88429381"
+  },
+  {
+    "path": "tools/sky_companion/vision.py",
+    "sha256": "A93E5A1DB6B7BB3867869AC92FF60276FFF4E071F263E8598309EA6FF746F111"
+  },
+  {
+    "path": "gateway/main.py",
+    "sha256": "A238EBDEBE0E899D91436558F44BAA0BF3F1AA24EFB4BB37C97604D29565A60E"
+  },
+  {
+    "path": "gateway/sky_delivery.py",
+    "sha256": "B4E332DEB36DDFBEF7C198433D12F7F32EB888451077996CDC3EC095F323453E"
+  },
+  {
+    "path": "supabase/migrations/20261023010000_sky_confirmed_chat_delivery.sql",
+    "sha256": "65C21A5B71849DB745486297B486350396384F720C39D6E317429301B2E6967A"
+  }
+]
