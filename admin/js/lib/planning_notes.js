@@ -1,5 +1,5 @@
-import { gw } from '../api.js?v=20261021-qqbot-mount-r10';
-import { esc, icon, modal, toast } from '../ui.js?v=20261021-qqbot-mount-r10';
+import { gw } from '../api.js?v=20261025-console-latency-r1';
+import { esc, icon, modal, toast } from '../ui.js?v=20261025-console-latency-r1';
 
 // Count Unicode code points for display without limiting note length.
 export const noteLength = value => Array.from(String(value || '').replace(/\r\n?/g, '\n')).length;

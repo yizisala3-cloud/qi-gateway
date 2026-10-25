@@ -75,6 +75,15 @@ export async function query(
   return result.data || [];
 }
 
+// A page and its exact filtered count share one database snapshot/request.
+export async function queryPage(table, { select = '*', order, limit = 50, offset = 0, eq, search, summary = false } = {}) {
+  const result = await gw(dataPath(table, null, {
+    select, order: order?.col, asc: order?.asc ?? false, limit, offset, eq, search,
+    with_count: true, summary,
+  }));
+  return { data: result.data || [], count: result.count ?? 0 };
+}
+
 export async function insert(table, row) {
   const result = await gw(dataPath(table), {
     method: 'POST',

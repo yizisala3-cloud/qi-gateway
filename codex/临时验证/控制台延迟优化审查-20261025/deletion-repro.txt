@@ -1,0 +1,15 @@
+
+test_delete_of_never_completed_task_removes_business_body_from_command_receipts (__main__.DeletionReceiptReview.test_delete_of_never_completed_task_removes_business_body_from_command_receipts) ... FAIL
+
+======================================================================
+FAIL: test_delete_of_never_completed_task_removes_business_body_from_command_receipts (__main__.DeletionReceiptReview.test_delete_of_never_completed_task_removes_business_body_from_command_receipts)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\codex\临时验证\控制台延迟优化审查-20261025\deletion_repro.py", line 39, in test_delete_of_never_completed_task_removes_business_body_from_command_receipts
+    self.assertFalse(retained and ('private task body to delete' in str(retained) or 'private task note to delete' in str(retained)),
+AssertionError: True is not false : Physical deletion retained the complete task body and note in the new command receipt
+
+----------------------------------------------------------------------
+Ran 1 test in 7.500s
+
+FAILED (failures=1)

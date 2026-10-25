@@ -14,6 +14,7 @@ from . import planning_common as common
 from . import planning_runtime as runtime
 from . import planning_cycles as cycles
 from . import planning_schedule as scheduler
+from . import planning_serialization as presentation
 from .planning_domain import PlanningCycle
 
 log = logging.getLogger("gateway.planning")
@@ -179,7 +180,8 @@ def _recompute_write_payload(
     return len(pending_rows), singles_payload, rounds_payload
 
 
-def _recompute_for_cycle(now: datetime, cycle: PlanningCycle) -> dict[str, Any]:
+def _recompute_for_cycle(now: datetime, cycle: PlanningCycle, *,
+                         receipt_task_ids: set[int] | None = None) -> dict[str, Any]:
     """Recompute the complete cycle using the caller's request-local boundary."""
     today = cycle.key
     client = runtime._require_client()
@@ -198,6 +200,7 @@ def _recompute_for_cycle(now: datetime, cycle: PlanningCycle) -> dict[str, Any]:
     pending_count, singles_payload, rounds_payload = _recompute_write_payload(open_rows, result.placed, now)
     stale_skipped = 0
     updated = 0
+    committed_patches = {}
     if pending_count:
         # 整批事务 + 完整计算输入复核（#6，迁移 20261002040000 RPC）：
         # * expected 快照覆盖**全部参与计算行**（不只待写行）——固定槽、其它
@@ -225,9 +228,22 @@ def _recompute_for_cycle(now: datetime, cycle: PlanningCycle) -> dict[str, Any]:
                 raise
         else:
             updated = len(response.data or [])
+            written_ids = set(response.data or [])
+            committed_patches = {patch['id']: patch for patch in singles_payload if patch['id'] in written_ids}
+            for pair in rounds_payload:
+                for side in ('target', 'sibling'):
+                    row_id = pair.get(side + '_id')
+                    if row_id in written_ids:
+                        committed_patches[row_id] = pair[side + '_patch']
     log.info("planning 重算完成: updated=%s stale_skipped=%s date=%s",
              updated, stale_skipped, today.isoformat())
     result = {"updated": updated, "at": common._iso(now), "conflicts": []}
+    if not stale_skipped:
+        result["occurrences"] = [presentation.serialize_occurrence(
+            {**row, **committed_patches.get(row['id'], {})}, tasks[row['task_id']], now)
+            for row in open_rows if row['task_id'] in tasks
+            and (row['id'] in committed_patches if receipt_task_ids is None
+                 else row['task_id'] in receipt_task_ids)]
     if stale_skipped:
         # 最终 Debug（问题 3）：本次结果不完整，调用方不得据此清掉重算等待
         # 标记；下一次重算按最新输入重新执行。

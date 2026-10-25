@@ -692,10 +692,9 @@ def create_task(
         # 首次创建（未命中）才执行依赖 now 与当前配置的准入。
         # §30.7（2026-10-07）：任务行不存在时核对已删除登记——物理删除的
         # 带键任务按「已删除结果」收敛，同键不同内容 409，绝不复建。
-        existing = _find_task_by_creation_key(client, idempotency_key)
-        tombstone = (
-            _find_creation_request_tombstone(client, idempotency_key)
-            if existing is None else None)
+        identity = client.rpc("planning_creation_identity", {"p_request_key": idempotency_key}).execute().data
+        existing = identity.get("task")
+        tombstone = identity.get("tombstone") if existing is None else None
         replay = _replay_creation_target(
             client, existing, tombstone, request_content, idempotency_key, now)
         if replay is not None:
@@ -741,18 +740,20 @@ def create_task(
         created = (response.data or [{}])[0]
         # 即时生成：新建的待办（含 interval 立即到期）不等后台循环，
         # 立刻出现在列表。
-        _generate_created_task_quietly(created["id"], now, context)
+        receipt = _generate_created_task_quietly(created["id"], now, context)
         serialized = presentation.serialize_task(created, now)
+        serialized["occurrences"] = receipt or []
         serialized["first_round_skipped"] = first_round_skipped
         serialized["schedule_conflict"] = schedule_conflict
         return serialized
     response = client.table("planning_task").insert(row).execute()
     created = (response.data or [{}])[0]
     # 即时生成：新建的待办（含 interval 立即到期）不等后台循环，立刻出现在列表。
-    _generate_created_task_quietly(created["id"], now, context)
+    receipt = _generate_created_task_quietly(created["id"], now, context)
     serialized = presentation.serialize_task(created, now)
     # 创建反馈（§30.6 / §18.1）：区分「本轮已截止、次日起生效」与
     # 「已创建但存在排程冲突」，两者都不改变任务已保存的事实。
+    serialized["occurrences"] = receipt or []
     serialized["first_round_skipped"] = first_round_skipped
     serialized["schedule_conflict"] = schedule_conflict
     return serialized
@@ -886,13 +887,13 @@ def _prepare_refresh_definition(row: dict[str, Any], now: datetime, current: dic
 
 def _generate_created_task_quietly(
     task_id: int, now: datetime, context: cycles.PlanningRequestContext,
-) -> None:
-    _generate_saved_tasks_quietly([task_id], now, context)
+) -> list[dict[str, Any]] | None:
+    return _generate_saved_tasks_quietly([task_id], now, context)
 
 
 def _generate_saved_tasks_quietly(
     task_ids: list[int], now: datetime, context: cycles.PlanningRequestContext,
-) -> None:
+) -> list[dict[str, Any]] | None:
     """Create the new task's due round immediately, then schedule the whole cycle."""
     with runtime._maintenance_lock:
         result = {"created": 0, "errors": []}
@@ -917,7 +918,8 @@ def _generate_saved_tasks_quietly(
         if not common._should_recompute_after_generation(result):
             return
         try:
-            recompute._recompute_for_cycle(now, context.cycle)
+            receipt = recompute._recompute_for_cycle(now, context.cycle, receipt_task_ids=set(task_ids))
+            return receipt.get("occurrences", [])
         except Exception:
             log.exception(
                 "planning 新任务同步重算失败: task=%s", task_id,
@@ -1318,12 +1320,16 @@ def _update_task(task_id: int, payload: Any, now: datetime | None = None, *,
     deactivated = row.get("is_active") is False or task.get("is_active") is False
     if row.get("is_active") is False:
         recompute.request_recompute("task_discarded", now)
-    elif (schedule_changed or resume_refresh) and not deactivated:
+    generated_receipt = None
+    if (schedule_changed or resume_refresh) and not deactivated:
         # 停用命令（is_active=False）不得触发补生成——废弃后新轮次必须
         # 不存在（最终 Debug 问题 1A：single-transaction discard）。
         # 规则变更后只尝试当前应有轮次；唯一键保护既有轮次。
-        _generate_created_task_quietly(task_id, now, cycles.PlanningRequestContext(now))
-    return presentation.serialize_task(updated, now)
+        generated_receipt = _generate_created_task_quietly(task_id, now, cycles.PlanningRequestContext(now))
+    serialized = presentation.serialize_task(updated, now)
+    if generated_receipt:
+        serialized["occurrences"] = generated_receipt
+    return serialized
 
 
 def _ensure_type_requirements(task: dict[str, Any]) -> None:

@@ -63,6 +63,7 @@ def serialize_occurrence(occ: dict[str, Any], task: dict[str, Any], now: datetim
         deadline_at = _deadline_for(task, occ)
     return {
         "id": occ["id"],
+        "updated_at": occ.get("updated_at"),
         "task_id": occ["task_id"],
         "for_date": occ["for_date"],
         # Null means an old instance whose identity cannot be safely inferred.

@@ -10,6 +10,7 @@ import logging
 import re
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
@@ -246,6 +247,9 @@ get_client = runtime.get_client
 
 # ── 当天 / 全部列表 ───────────────────────────────────────────────
 
+_board_read_pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="planning-board")
+
+
 def today_board(now: datetime | None = None) -> dict[str, Any]:
     """当前待办三分区（进度中 / 待处理 / 已完成）+ 重算等待状态。"""
     now = now or runtime._now()
@@ -253,13 +257,16 @@ def today_board(now: datetime | None = None) -> dict[str, Any]:
     cycle = context.cycle
     today = cycle.key
     client = runtime._require_client()
-    today_rows = runtime._rows(
-        client, "planning_occurrence",
-        lambda q: q.eq("display_cycle_date", today.isoformat()),
-    )
-    timeout_rows = [row for row in runtime._rows(
-        client, "planning_occurrence", lambda q: q.eq("status", "timeout"),
-    ) if row.get("round_key")]
+    # Independent reads share the request's already resolved cycle/settings.
+    today_read = _board_read_pool.submit(
+        runtime._rows, client, "planning_occurrence",
+        lambda q: q.eq("display_cycle_date", today.isoformat()))
+    timeout_read = _board_read_pool.submit(
+        runtime._rows, client, "planning_occurrence", lambda q: q.eq("status", "timeout"))
+    state_read = _board_read_pool.submit(recompute.get_recompute_state, now, context=context)
+    today_rows = today_read.result()
+    timeout_rows = [row for row in timeout_read.result() if row.get("round_key")]
+    recompute_state = state_read.result()
     merged: dict[int, dict[str, Any]] = {row["id"]: row for row in today_rows + timeout_rows}
     tasks = runtime._task_map(client, {row["task_id"] for row in merged.values()})
 
@@ -308,7 +315,7 @@ def today_board(now: datetime | None = None) -> dict[str, Any]:
         "cycle_start": cycle.start.isoformat(),
         "cycle_end": cycle.end.isoformat(),
         "now": common._iso(now),
-        "recompute": recompute.get_recompute_state(now, context=context),
+        "recompute": recompute_state,
         "conflicts": conflicts,
         "progress": progress,
         "attention": attention,
@@ -346,6 +353,7 @@ def list_occurrences(
     # 类型和启用状态都先筛任务，再限制实例条数；已删除历史不能占满 limit
     # 而挤掉更早的有效任务记录。默认保留历史读取语义，全部待办显式关闭。
     task_ids: list[int] | None = None
+    filtered_tasks: dict[int, dict[str, Any]] | None = None
     if task_type or not include_inactive:
         def task_query(q):
             if task_type:
@@ -354,7 +362,8 @@ def list_occurrences(
                 q = q.eq("is_active", True)
             return q
 
-        task_ids = [row["id"] for row in runtime._rows(client, "planning_task", task_query)]
+        filtered_tasks = {row["id"]: row for row in runtime._rows(client, "planning_task", task_query)}
+        task_ids = list(filtered_tasks)
         if not task_ids:
             return []
 
@@ -375,7 +384,8 @@ def list_occurrences(
         return q.order("schedule_date", desc=True).order("id", desc=True).limit(limit)
 
     rows = runtime._rows(client, "planning_occurrence", query)
-    tasks = runtime._task_map(client, {row["task_id"] for row in rows})
+    tasks = (filtered_tasks if filtered_tasks is not None
+             else runtime._task_map(client, {row["task_id"] for row in rows}))
     result = []
     for row in rows:
         task = tasks.get(row["task_id"])

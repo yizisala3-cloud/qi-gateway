@@ -48,6 +48,9 @@ class PlanningFrontendModulesTests(unittest.TestCase):
     def test_native_es_import_graph_and_versions(self):
         self._run_group("graph")
 
+    def test_committed_occurrence_receipt_does_not_wait_for_board_refresh(self):
+        self._run_group("console-receipt-background")
+
     def test_latency_feedback_is_immediate_shared_and_restored(self):
         self._run_group("latency-actions")
 

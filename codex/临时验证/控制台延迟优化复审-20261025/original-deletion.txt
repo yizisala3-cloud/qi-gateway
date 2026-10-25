@@ -1,0 +1,7 @@
+
+test_delete_of_never_completed_task_removes_business_body_from_command_receipts (__main__.DeletionReceiptReview.test_delete_of_never_completed_task_removes_business_body_from_command_receipts) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 7.229s
+
+OK

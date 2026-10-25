@@ -1,0 +1,22 @@
+[
+  {
+    "path": "admin/js/pages/planning.js",
+    "sha256": "1BFCF063C6486F1BD77B6F97F50CF41BC884C83AE32E5A38139F150DCBE88EF3"
+  },
+  {
+    "path": "supabase/migrations/20261025010000_planning_occurrence_commands.sql",
+    "sha256": "4F05F9BD8ABD4AC975FF2D162832D86B91C13D6CAC3AA376E9B5439873759752"
+  },
+  {
+    "path": "tests/console_latency.test.mjs",
+    "sha256": "A516F21AEE90C32B1EDD301151AB80ABEF30A0759CBC8C4ABD8FC4568C6ED233"
+  },
+  {
+    "path": "tests/test_console_latency_frontend.py",
+    "sha256": "92BBBC21E00F40C4D400AC56DBEFC5BA529F5465C1FB4E3146589D36229A46E0"
+  },
+  {
+    "path": "tests/test_console_latency_commands_pgserver.py",
+    "sha256": "B9EAFF3A9A9757FF11F0B642AD43750ADD594D78F75536ED0DF67B8D4C8A2E42"
+  }
+]

@@ -1,15 +1,15 @@
 // app.js - shell: login, sidebar, routing, theme, mobile drawers
-import { NAV, ROUTE_INDEX } from './routes.js?v=20261021-qqbot-mount-r10';
-import { loading, errorBlock, icon, esc } from './ui.js?v=20261021-qqbot-mount-r10';
-import { gw, getToken, setToken, clearToken } from './api.js?v=20261021-qqbot-mount-r10';
-import { initHeaderDivider } from './lib/header_divider.js?v=20261021-qqbot-mount-r10';
-import { initRetroSelects } from './lib/retro_select.js?v=20261021-qqbot-mount-r10';
-import { initRetroTooltips } from './lib/retro_tooltip.js?v=20261021-qqbot-mount-r10';
-import { initHelpNotes } from './lib/help_notes.js?v=20261021-qqbot-mount-r10';
-import { initScrollbars } from './lib/scrollbars.js?v=20261021-qqbot-mount-r10';
+import { NAV, ROUTE_INDEX } from './routes.js?v=20261025-console-latency-r1';
+import { loading, errorBlock, icon, esc } from './ui.js?v=20261025-console-latency-r1';
+import { gw, getToken, setToken, clearToken } from './api.js?v=20261025-console-latency-r1';
+import { initHeaderDivider } from './lib/header_divider.js?v=20261025-console-latency-r1';
+import { initRetroSelects } from './lib/retro_select.js?v=20261025-console-latency-r1';
+import { initRetroTooltips } from './lib/retro_tooltip.js?v=20261025-console-latency-r1';
+import { initHelpNotes } from './lib/help_notes.js?v=20261025-console-latency-r1';
+import { initScrollbars } from './lib/scrollbars.js?v=20261025-console-latency-r1';
 
 const DEFAULT_ROUTE = 'planning';
-const ASSET_VERSION = '20261025-qqbot-window-layout';
+const ASSET_VERSION = '20261025-console-latency-r1';
 
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);
@@ -50,7 +50,7 @@ async function tryLogin(token) {
     await gw('/status');
     showApp(); renderSidebar();
     if (!location.hash) location.hash = '#/' + DEFAULT_ROUTE;
-    await route(); refreshStatus();
+    await route(); refreshStatus(true);
   } catch (e) {
     clearToken(); showLogin(`登录失败：${e.message}`);
   }
@@ -96,7 +96,7 @@ async function route() {
   try { currentMod?.unmount?.(); } catch {}
   currentMod = null;
   try {
-    const pageVersion = key === 'logs' ? '20261024-qqbot-recovery-r13-r15' : ASSET_VERSION;
+    const pageVersion = ASSET_VERSION;
     const mod = (await import(`./pages/${key}.js?v=${pageVersion}`)).default;
     if (seq !== routeSeq) return;
     currentMod = mod;
@@ -116,11 +116,11 @@ async function route() {
   }
 }
 
-async function refreshStatus() {
+async function refreshStatus(authorized = false) {
   const dot = document.getElementById('status-dot');
   if (!dot) return;
   try {
-    await gw('/status');
+    if (!authorized) await gw('/status');
     dot.innerHTML = '<span class="dot dot-green"></span>在线';
     dot.className = 'status-chip online';
   } catch (e) {
@@ -164,7 +164,7 @@ async function boot() {
     try {
       await gw('/status'); showApp(); renderSidebar();
       if (!location.hash) location.hash = '#/' + DEFAULT_ROUTE;
-      await route(); refreshStatus();
+      await route(); refreshStatus(true);
     } catch (e) {
       clearToken(); showLogin(`已保存的 Token 被拒绝：${e.message}`);
     }

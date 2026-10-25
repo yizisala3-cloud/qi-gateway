@@ -1,0 +1,27 @@
+{
+  "browser": "headless msedge",
+  "scenarios": [
+    {
+      "tab": "today",
+      "timer": "17",
+      "timerSame": true,
+      "focused": true,
+      "dirtyAlarm": true,
+      "cleanAlarm": true,
+      "taskSame": true,
+      "finishVisible": true
+    },
+    {
+      "tab": "all",
+      "timer": "17",
+      "timerSame": true,
+      "focused": true,
+      "dirtyAlarm": true,
+      "cleanAlarm": true,
+      "taskSame": true,
+      "finishVisible": true
+    }
+  ],
+  "pageErrors": []
+}
+

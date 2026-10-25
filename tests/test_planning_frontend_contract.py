@@ -403,7 +403,7 @@ class PlanningPageContractTests(unittest.TestCase):
             "rows.length >= 10 ? 'none' : ''",  # 达到 10 个隐藏添加按钮
             "').length <= 1) return;",          # 至少保留 1 项，不允许删到 0
             "请至少填写一个待办内容",
-            "button.onclick = () => feedback.run(root,",
+            "const result = await feedback.run(root,",
             "bindSave(root, async () => {",
             "submit.disabled = false;",         # 失败恢复按钮
         ):
@@ -749,7 +749,7 @@ class PlanningNavigationContractTests(unittest.TestCase):
             "createdTask?.schedule_conflict",
             "本轮已过最晚完成，从次日起按重复规则生效",
             "try { close(); } catch (error) {",
-            "try { await onSaved(); } catch (error) {",
+            "try { await onSaved(createdTask); } catch (error) {",
             "待办已创建，列表更新失败，请刷新重试",
         ):
             with self.subTest(post_step=step):

@@ -261,6 +261,7 @@ const checks = {
       await oldPost;
       if (!initialReadCompleted) initialReads[0](response(boardWith(1, 'old-schedule')));
       await remount;
+      await page.committedRefresh;
       assert.equal(page.board.progress[0].content, outcome === 'failure' ? 'old-schedule' : 'new-schedule');
       assert.equal(page.reads.needsRead('today'), false);
       assert.equal(page.reads.hasData('today'), true);
@@ -392,6 +393,7 @@ const checks = {
       const before = readPaths().filter(path => path.endsWith('/today')).length;
       finishPatch();
       await pending;
+      await page.committedRefresh;
       assert.equal(page.board.progress[0].note, '新备注', 'late commit refreshes the currently mounted page');
       assert.equal(readPaths().filter(path => path.endsWith('/today')).length, before + 1,
         'one commit-driven read; no polling or repeated requests');
@@ -1578,6 +1580,7 @@ const checks = {
     await page.mount(new Element());
     requests.length = 0;
     await fillCreate().onclick();
+    await page.committedRefresh;
     assert.deepEqual(readPaths(), ['/admin/api/planning/today']);
     assert.equal(page.reads.needsRead('today'), false);
     assert.equal(page.reads.needsRead('tasks'), true);
@@ -1668,6 +1671,7 @@ const checks = {
       : failure('refresh failed');
     const button = fillCreate();
     await button.onclick();
+    await page.committedRefresh;
     assert.equal(button.disabled, true);
     assert.equal(button.textContent, '已创建');
     assert.equal(page.root.querySelector('#planning-progress').innerHTML, previousHtml);
@@ -1747,11 +1751,38 @@ const checks = {
     created = true;
     finishCreate(response({ id: 55 }));
     await save;
+    await page.committedRefresh;
     assert.equal(page.board.progress[0].id, 55, 'the committed write refreshes the currently mounted page');
     assert.equal(page.reads.needsRead('tasks'), true);
     assert.equal(page.reads.needsRead('occurrences'), true);
     page.openTaskForm(null);
     assert.equal(masks.length, count + 1, 'a committed create may be followed by a new form');
+    page.unmount();
+  },
+  async 'console-receipt-background'() {
+    respond = async () => response(boardWith(1, '快速操作'));
+    await page.mount(new Element());
+    requests.length = 0;
+    const held = [];
+    let receipt = { id: 1, task_id: 10, content: '快速操作', status: 'in_progress', sort_order: 0 };
+    respond = async ({ options }) => options.method
+      ? response(receipt) : await new Promise(resolve => held.push(resolve));
+    await page.occurrenceAction('start', 1);
+    assert.equal(page.board.progress[0].status, 'in_progress', 'server receipt applies before the board read finishes');
+    assert.equal(held.length, 1);
+    receipt = { ...receipt, status: 'completed', closed_at: '2026-10-25T08:00:00Z' };
+    page.occurrenceAction('finish', 1);
+    await lastModal().querySelector('[data-ok]').onclick();
+    assert.equal(page.board.progress.length, 0);
+    assert.equal(page.board.done[0].status, 'completed');
+    assert.equal(held.length, 2);
+    assert.equal(requests.filter(({ options }) => options.method === 'POST').length, 2);
+    held[1](response({ ...emptyBoard(), done: [receipt] }));
+    await page.committedRefresh;
+    held[0](response(boardWith(1, '旧轮询')));
+    await flush();
+    assert.equal(page.board.done[0].status, 'completed', 'a pre-finish read cannot restore the open row');
+    assert.equal(page.board.progress.length, 0);
     page.unmount();
   },
 };

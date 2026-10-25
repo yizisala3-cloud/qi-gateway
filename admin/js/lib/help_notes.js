@@ -1,5 +1,5 @@
 // Optional explanations use native disclosures; the original node and IDs stay intact.
-import { icon } from '../ui.js?v=20261021-qqbot-mount-r10';
+import { icon } from '../ui.js?v=20261025-console-latency-r1';
 
 const initializers = new WeakMap();
 

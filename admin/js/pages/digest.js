@@ -1,6 +1,6 @@
 // pages/digest.js - 记忆总结：连续感总结 + 反刍连续感
-import { gw, esc, query } from '../api.js?v=20261021-qqbot-mount-r10';
-import { loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, fmtDate } from '../ui.js?v=20261021-qqbot-mount-r10';
+import { gw, esc, query } from '../api.js?v=20261025-console-latency-r1';
+import { loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, fmtDate } from '../ui.js?v=20261025-console-latency-r1';
 
 const TIME_PRECISION_LABELS = {
   minute: '精确到分钟', day: '精确到日期', approximate: '大概时间', unknown: '时间未知',
@@ -99,6 +99,7 @@ export default {
   view: 'continuity',
 
   async mount(root) {
+    this.mountToken = Symbol('digest');
     this.root = root;
     root.innerHTML = `
       <div class="page-with-detail">
@@ -190,7 +191,21 @@ export default {
     if (ruminationButton) ruminationButton.disabled = this.ruminationBusy || !ruminationReady;
   },
 
+  unmount() {
+    this.mountToken = null;
+    this.continuityRead = null;
+    this.ruminationRead = null;
+  },
+
   async load() {
+    await Promise.all([this.loadContinuity(), this.loadRumination()]);
+  },
+
+  async loadContinuity() {
+    const token = this.mountToken;
+    if (!token || !this.root) return;
+    const read = this.continuityRead = Symbol('continuity-read');
+    const isCurrent = () => token && this.mountToken === token && this.continuityRead === read;
     const status = this.root.querySelector('#continuity-status');
     const runs = this.root.querySelector('#continuity-runs');
     const overview = this.root.querySelector('#continuity-overview');
@@ -200,6 +215,7 @@ export default {
     overview.innerHTML = loading();
     try {
       const data = await gw('/admin/api/memory-continuity/status');
+      if (!isCurrent()) return;
       this.data = data;
       this.syncControls();
       warning.innerHTML = data.analysis_configured ? '' : `
@@ -211,6 +227,7 @@ export default {
       this.renderRuns(data.recent_runs || []);
       this.renderOverview(data);
     } catch (error) {
+      if (!isCurrent()) return;
       this.data = null;
       this.syncControls();
       warning.innerHTML = '';
@@ -218,10 +235,13 @@ export default {
       runs.innerHTML = empty('无法读取运行记录');
       overview.innerHTML = empty('无法读取状态概览');
     }
-    await this.loadRumination();
   },
 
   async loadRumination() {
+    const token = this.mountToken;
+    if (!token || !this.root) return;
+    const read = this.ruminationRead = Symbol('rumination-read');
+    const isCurrent = () => token && this.mountToken === token && this.ruminationRead === read;
     const status = this.root.querySelector('#rumination-status');
     const runs = this.root.querySelector('#rumination-runs');
     const overview = this.root.querySelector('#rumination-overview');
@@ -233,6 +253,7 @@ export default {
     warning.innerHTML = '';
     try {
       const data = await gw('/admin/api/memory-rumination/status');
+      if (!isCurrent()) return;
       this.rumination = data;
       this.syncControls();
       if (!data.configured) {
@@ -246,6 +267,7 @@ export default {
       this.renderRuminationRuns(data.recent_runs || []);
       this.renderRuminationOverview(data);
     } catch (error) {
+      if (!isCurrent()) return;
       this.rumination = null;
       this.syncControls();
       status.innerHTML = errorBlock(`反刍状态读取失败：${esc(error.message)}`);

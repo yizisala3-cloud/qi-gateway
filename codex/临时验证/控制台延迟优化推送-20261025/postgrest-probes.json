@@ -1,0 +1,17 @@
+[
+  {
+    "name": "occurrence_command",
+    "status": 401,
+    "error_code": "42501"
+  },
+  {
+    "name": "creation_identity",
+    "status": 401,
+    "error_code": "42501"
+  },
+  {
+    "name": "receipt_table",
+    "status": 401,
+    "error_code": "42501"
+  }
+]

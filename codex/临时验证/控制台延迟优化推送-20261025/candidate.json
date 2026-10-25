@@ -1,0 +1,553 @@
+{
+  "baseline": "c885f3b7f6a11cbc99fdf16f990fb4ace77837f5",
+  "code": [
+    "admin/index.html",
+    "admin/js/api.js",
+    "admin/js/app.js",
+    "admin/js/lib/cycle_settings.js",
+    "admin/js/lib/help_notes.js",
+    "admin/js/lib/planning_commands.js",
+    "admin/js/lib/planning_detail_edit.js",
+    "admin/js/lib/planning_dialogs.js",
+    "admin/js/lib/planning_display.js",
+    "admin/js/lib/planning_goals.js",
+    "admin/js/lib/planning_memo.js",
+    "admin/js/lib/planning_notes.js",
+    "admin/js/lib/planning_reminder.js",
+    "admin/js/lib/planning_sort.js",
+    "admin/js/lib/planning_sync.js",
+    "admin/js/lib/planning_task_form.js",
+    "admin/js/lib/retro_select.js",
+    "admin/js/lib/retro_time.js",
+    "admin/js/lib/retro_tooltip.js",
+    "admin/js/pages/_memory_browser.js",
+    "admin/js/pages/_memory_form.js",
+    "admin/js/pages/_memory_recall.js",
+    "admin/js/pages/config.js",
+    "admin/js/pages/digest.js",
+    "admin/js/pages/emotion.js",
+    "admin/js/pages/logs.js",
+    "admin/js/pages/memories.js",
+    "admin/js/pages/persona.js",
+    "admin/js/pages/planning.js",
+    "admin/js/ui.js",
+    "gateway/admin_api.py",
+    "gateway/planning.py",
+    "gateway/planning_api.py",
+    "gateway/planning_commands.py",
+    "gateway/planning_occurrences.py",
+    "gateway/planning_recompute.py",
+    "gateway/planning_serialization.py",
+    "gateway/planning_tasks.py",
+    "supabase/migrations/20261025010000_planning_occurrence_commands.sql",
+    "tests/console_latency.test.mjs",
+    "tests/planning_frontend_modules.test.mjs",
+    "tests/support/planning_db.py",
+    "tests/test_console_latency_api.py",
+    "tests/test_console_latency_commands_pgserver.py",
+    "tests/test_console_latency_frontend.py",
+    "tests/test_memo_frontend_contract.py",
+    "tests/test_planning_api_contract.py",
+    "tests/test_planning_frontend_contract.py",
+    "tests/test_planning_frontend_modules.py",
+    "tests/test_planning_phase1a.py",
+    "tests/test_planning_task_notes.py",
+    "tests/test_planning_task_notes_fullchain_pgserver.py"
+  ],
+  "documents": [
+    "codex/控制台-文档索引/目录说明.md",
+    "codex/网关当前状态/网关当前状态.md",
+    "codex/功能维护规范/规划管理/规划管理.md",
+    "codex/功能维护规范/前端组件/前端组件.md",
+    "codex/功能维护规范/网关日志/网关日志.md",
+    "codex/代码修改日志/规划管理/合并与同步-26.10.25.10.28.md"
+  ],
+  "excluded_index_rows": [
+    "| ai接入光遇教程 | 可转交朋友的 AI 实施教程，仅覆盖光遇接入。 | [教程](../ai接入光遇教程/交给AI执行的光遇接入教程.md)说明独立配置、接口适配、MuMu校准、PASS、主要用户优先、群聊合并、去重、低延迟、视觉、确定交付及开关验收；不附作者密钥或私人运行数据。 |"
+  ],
+  "preserved": {
+    "tools/preview_planning.cjs": "1d31dc599519bb21e3c824619bd12a61cbabb5a654af4e607eef584fc8c225d0"
+  },
+  "log": "codex/代码修改日志/规划管理/合并与同步-26.10.25.10.28.md",
+  "reviewed_hashes": {
+    "admin/js/pages/planning.js": "1bfcf063c6486f1bd77b6f97f50cf41bc884c83ae32e5a38139f150dcbe88ef3",
+    "supabase/migrations/20261025010000_planning_occurrence_commands.sql": "4f05f9bd8abd4ac975ff2d162832d86b91c13d6cac3aa376e9b5439873759752",
+    "gateway/planning_commands.py": "1e61f91616ea3dfef2e138ff4cefb2ced2dd2895cb624786ab5f9b6f539c4321",
+    "admin/js/lib/planning_commands.js": "04f17c677094aa1109612cf9f57938810e261bfcdfa8b9d7bf707d8aa879eb52",
+    "tests/console_latency.test.mjs": "a516f21aee90c32b1edd301151ab80abef30a0759cbc8c4abd8fc4568c6ed233",
+    "tests/test_console_latency_commands_pgserver.py": "b9eaff3a9a9757ff11f0b642ad43750add594d78f75536ed0df67b8d4c8a2e42",
+    "tests/test_console_latency_frontend.py": "92bbbc21e00f40c4d400ac56dbefc5ba529f5465c1fb4e3146589d36229a46e0",
+    "codex/临时验证/控制台延迟优化审查-20261025/receipt_repros.mjs": "585af85bf27431c1516d8ed664d68beb95f927095e4582996cca21bb63d966e4",
+    "codex/临时验证/控制台延迟优化审查-20261025/deletion_repro.py": "41574413f17b4b1754eb6a912fab09c476e1d7b051c47d4add20ab32ecb40fcc"
+  },
+  "files": [
+    {
+      "path": "admin/index.html",
+      "sha256": "4978957c246435c1f7633d587c892bf0ef9c51b7f76073674e67dc2b35628b34",
+      "working_sha256": "4978957c246435c1f7633d587c892bf0ef9c51b7f76073674e67dc2b35628b34"
+    },
+    {
+      "path": "admin/js/api.js",
+      "sha256": "613a4a9b21f2b9067055639f3cf8c90cd34587ca1816d6f29f422efc28b0730d",
+      "working_sha256": "613a4a9b21f2b9067055639f3cf8c90cd34587ca1816d6f29f422efc28b0730d"
+    },
+    {
+      "path": "admin/js/app.js",
+      "sha256": "8f05ac93d936a3eefdbb173f911bc3456272fc3ad2fbfa71bf88e835bb562f4a",
+      "working_sha256": "8f05ac93d936a3eefdbb173f911bc3456272fc3ad2fbfa71bf88e835bb562f4a"
+    },
+    {
+      "path": "admin/js/lib/cycle_settings.js",
+      "sha256": "150f67d49ea6d9d6f2cb1287b508997a89861db34203a267181ee6e104288a89",
+      "working_sha256": "150f67d49ea6d9d6f2cb1287b508997a89861db34203a267181ee6e104288a89"
+    },
+    {
+      "path": "admin/js/lib/help_notes.js",
+      "sha256": "15e779f35b822c00e1fa9e735c651e0dc9eca36c814e5a8a24637b002c0161f1",
+      "working_sha256": "15e779f35b822c00e1fa9e735c651e0dc9eca36c814e5a8a24637b002c0161f1"
+    },
+    {
+      "path": "admin/js/lib/planning_commands.js",
+      "sha256": "04f17c677094aa1109612cf9f57938810e261bfcdfa8b9d7bf707d8aa879eb52",
+      "working_sha256": "04f17c677094aa1109612cf9f57938810e261bfcdfa8b9d7bf707d8aa879eb52"
+    },
+    {
+      "path": "admin/js/lib/planning_detail_edit.js",
+      "sha256": "b1ec586d3937f68b678a348fa32f50cbf1daa50569caf66f514904b524d9ff1d",
+      "working_sha256": "b1ec586d3937f68b678a348fa32f50cbf1daa50569caf66f514904b524d9ff1d"
+    },
+    {
+      "path": "admin/js/lib/planning_dialogs.js",
+      "sha256": "c001d32e7860011cfcb7dbf502aa6e6d863bd6fd8b3d69afdd4cc8feefc47200",
+      "working_sha256": "c001d32e7860011cfcb7dbf502aa6e6d863bd6fd8b3d69afdd4cc8feefc47200"
+    },
+    {
+      "path": "admin/js/lib/planning_display.js",
+      "sha256": "d12f28fcc9fe856f8750df811d10f6509f3fdde3b2defb4a40e4ffcba2c1d554",
+      "working_sha256": "d12f28fcc9fe856f8750df811d10f6509f3fdde3b2defb4a40e4ffcba2c1d554"
+    },
+    {
+      "path": "admin/js/lib/planning_goals.js",
+      "sha256": "0d18a5a123670737253c40199f2a012ae059687026300c05643259a7b7cd9ad8",
+      "working_sha256": "0d18a5a123670737253c40199f2a012ae059687026300c05643259a7b7cd9ad8"
+    },
+    {
+      "path": "admin/js/lib/planning_memo.js",
+      "sha256": "80c7de75054ef3ebb5af30bdc39455e39a6dd374e9cb52dc585e4654085e9bc4",
+      "working_sha256": "80c7de75054ef3ebb5af30bdc39455e39a6dd374e9cb52dc585e4654085e9bc4"
+    },
+    {
+      "path": "admin/js/lib/planning_notes.js",
+      "sha256": "01b966175a0162141434107c0f38f4d6897db73e504dbb1106012f6aaa5f46ac",
+      "working_sha256": "01b966175a0162141434107c0f38f4d6897db73e504dbb1106012f6aaa5f46ac"
+    },
+    {
+      "path": "admin/js/lib/planning_reminder.js",
+      "sha256": "0d0eb9a4d459d26dd664061d68dc4368f15734139d2df4a692341c246dfab9ff",
+      "working_sha256": "0d0eb9a4d459d26dd664061d68dc4368f15734139d2df4a692341c246dfab9ff"
+    },
+    {
+      "path": "admin/js/lib/planning_sort.js",
+      "sha256": "c841348fd2005994c0111d01a3a43f4be3ce7a1bc8228f6ec46904583ba13cee",
+      "working_sha256": "c841348fd2005994c0111d01a3a43f4be3ce7a1bc8228f6ec46904583ba13cee"
+    },
+    {
+      "path": "admin/js/lib/planning_sync.js",
+      "sha256": "39359106571153bea53476b2f0513c14f76108885b9caad1fe29a166c532cd2f",
+      "working_sha256": "39359106571153bea53476b2f0513c14f76108885b9caad1fe29a166c532cd2f"
+    },
+    {
+      "path": "admin/js/lib/planning_task_form.js",
+      "sha256": "c2a3e965eab0d49601409c503b0a40f6b3f05b95f2b9d2aff2f502b83c55f61e",
+      "working_sha256": "c2a3e965eab0d49601409c503b0a40f6b3f05b95f2b9d2aff2f502b83c55f61e"
+    },
+    {
+      "path": "admin/js/lib/retro_select.js",
+      "sha256": "32a989a34576c721d1d55d1bba87d1d653096cc75075f3f1545b37f0b1d6bc05",
+      "working_sha256": "32a989a34576c721d1d55d1bba87d1d653096cc75075f3f1545b37f0b1d6bc05"
+    },
+    {
+      "path": "admin/js/lib/retro_time.js",
+      "sha256": "62db26542a4b7cba4c1b5039c53817f7019c69232279a012dcc47b1e308732fd",
+      "working_sha256": "62db26542a4b7cba4c1b5039c53817f7019c69232279a012dcc47b1e308732fd"
+    },
+    {
+      "path": "admin/js/lib/retro_tooltip.js",
+      "sha256": "34f90d039a4953b824f18d99d0ce8a99789ff5e630efd6f4f585aa825740a9c9",
+      "working_sha256": "34f90d039a4953b824f18d99d0ce8a99789ff5e630efd6f4f585aa825740a9c9"
+    },
+    {
+      "path": "admin/js/pages/_memory_browser.js",
+      "sha256": "a2e6b2cec1045b81a6b476f52f9829bb16b1750124ea95efa63d69330ac7b362",
+      "working_sha256": "a2e6b2cec1045b81a6b476f52f9829bb16b1750124ea95efa63d69330ac7b362"
+    },
+    {
+      "path": "admin/js/pages/_memory_form.js",
+      "sha256": "30d034fcbaea354ac1a2a8fd3c541b9cdd7f4029bceae3fcbb0cbc75aa93f050",
+      "working_sha256": "30d034fcbaea354ac1a2a8fd3c541b9cdd7f4029bceae3fcbb0cbc75aa93f050"
+    },
+    {
+      "path": "admin/js/pages/_memory_recall.js",
+      "sha256": "5756be88befd43ae1ffb987fa3f3104540dc7965ba34e08002079e3870ba3544",
+      "working_sha256": "5756be88befd43ae1ffb987fa3f3104540dc7965ba34e08002079e3870ba3544"
+    },
+    {
+      "path": "admin/js/pages/config.js",
+      "sha256": "6a76794375ad7843bc44d3feb40577e3887d45887e048bab53eeddc6bbe2960a",
+      "working_sha256": "6a76794375ad7843bc44d3feb40577e3887d45887e048bab53eeddc6bbe2960a"
+    },
+    {
+      "path": "admin/js/pages/digest.js",
+      "sha256": "e65713b187822616416abcd14cd9953bc8e54fe1486f6c00008846afd7e51614",
+      "working_sha256": "e65713b187822616416abcd14cd9953bc8e54fe1486f6c00008846afd7e51614"
+    },
+    {
+      "path": "admin/js/pages/emotion.js",
+      "sha256": "9893833e80fe67b2aed7cd3dd1f506d7892c33838c60a4f22e889450299c845c",
+      "working_sha256": "9893833e80fe67b2aed7cd3dd1f506d7892c33838c60a4f22e889450299c845c"
+    },
+    {
+      "path": "admin/js/pages/logs.js",
+      "sha256": "92a06680ab7ed0381994b1178c55e47811aac7df8e86e9e56b34bf3681fd0432",
+      "working_sha256": "92a06680ab7ed0381994b1178c55e47811aac7df8e86e9e56b34bf3681fd0432"
+    },
+    {
+      "path": "admin/js/pages/memories.js",
+      "sha256": "b38e4c387e1cea27597094fb388bbd191349dbc33fba0bd27a70762d1bdc865a",
+      "working_sha256": "b38e4c387e1cea27597094fb388bbd191349dbc33fba0bd27a70762d1bdc865a"
+    },
+    {
+      "path": "admin/js/pages/persona.js",
+      "sha256": "85ba3457ca2b86ecea677076a472d6659582a496f8720f4ca7de027dec86efde",
+      "working_sha256": "85ba3457ca2b86ecea677076a472d6659582a496f8720f4ca7de027dec86efde"
+    },
+    {
+      "path": "admin/js/pages/planning.js",
+      "sha256": "1bfcf063c6486f1bd77b6f97f50cf41bc884c83ae32e5a38139f150dcbe88ef3",
+      "working_sha256": "1bfcf063c6486f1bd77b6f97f50cf41bc884c83ae32e5a38139f150dcbe88ef3"
+    },
+    {
+      "path": "admin/js/ui.js",
+      "sha256": "af3bade8d891640e21c829ed471d8b578fb834eb64be439ee7b18bec062993d3",
+      "working_sha256": "af3bade8d891640e21c829ed471d8b578fb834eb64be439ee7b18bec062993d3"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化-20261025/原有改动保留核对.json",
+      "sha256": "5d027bf2f008fc63eb7d5fc5575fd157b89e1dfaeb6e39e955d8a5c35b2d3ed2",
+      "working_sha256": "5d027bf2f008fc63eb7d5fc5575fd157b89e1dfaeb6e39e955d8a5c35b2d3ed2"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化-20261025/实施与验证.md",
+      "sha256": "9616f3ae89e1ac7e67e6564194ecf0e884cc9ab05eab1718537ff5bdb126c164",
+      "working_sha256": "9616f3ae89e1ac7e67e6564194ecf0e884cc9ab05eab1718537ff5bdb126c164"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化-20261025/调用数量复核.json",
+      "sha256": "2a7df1e2e03796e436c07ae504d4d54e0c60a293271a71c6058de8e930440047",
+      "working_sha256": "2a7df1e2e03796e436c07ae504d4d54e0c60a293271a71c6058de8e930440047"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化-20261025/静态依赖对比.json",
+      "sha256": "6fe0f4ebf6355cc4731a8e6562cc548b056d00485c834cc0866fc4abc2a6fbcb",
+      "working_sha256": "6fe0f4ebf6355cc4731a8e6562cc548b056d00485c834cc0866fc4abc2a6fbcb"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化修复-20261025/deletion-repro.txt",
+      "sha256": "d088183a80390b658fe64933fd35a997483a6593bca73a2223c513d51bb1cad9",
+      "working_sha256": "d088183a80390b658fe64933fd35a997483a6593bca73a2223c513d51bb1cad9"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化修复-20261025/frontend-repros.txt",
+      "sha256": "af95188f819c3c96ff0dc49d722558b0da5b2e8db6c0b5e9119514f13125ad9d",
+      "working_sha256": "af95188f819c3c96ff0dc49d722558b0da5b2e8db6c0b5e9119514f13125ad9d"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化修复-20261025/regression-selection.json",
+      "sha256": "a23924029781b3325aea73ba2fbb2e144e03522373729f9cd057a6b94e50f1bc",
+      "working_sha256": "a23924029781b3325aea73ba2fbb2e144e03522373729f9cd057a6b94e50f1bc"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化修复-20261025/related-regression.txt",
+      "sha256": "2153171573155c6eadc1faa362f784642ed6f2be362071efdf213c50baf32ec1",
+      "working_sha256": "2153171573155c6eadc1faa362f784642ed6f2be362071efdf213c50baf32ec1"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化修复-20261025/source-fix-hashes.json",
+      "sha256": "3afe5b26bd7c3af9ef75ceeb4ae6c28f809c770a1320769bbd234fbd9211535f",
+      "working_sha256": "3afe5b26bd7c3af9ef75ceeb4ae6c28f809c770a1320769bbd234fbd9211535f"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化修复-20261025/targeted-frontend.txt",
+      "sha256": "d5587cb021c6f93537ea62428843d661b708a7aaab633e5f5d1ec90b6ffe9a8d",
+      "working_sha256": "d5587cb021c6f93537ea62428843d661b708a7aaab633e5f5d1ec90b6ffe9a8d"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化修复-20261025/targeted-postgres.txt",
+      "sha256": "c32dc8b74d8d671ac2e4e7573aa5ac3a9affc3422e61c01ed7a486d9fba9cfb4",
+      "working_sha256": "c32dc8b74d8d671ac2e4e7573aa5ac3a9affc3422e61c01ed7a486d9fba9cfb4"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化复审-20261025/boundary_repros.py",
+      "sha256": "0eca57ceb059919bd5e7e1b1a521d517f561a65bc9690707e81ee77cba9336be",
+      "working_sha256": "0eca57ceb059919bd5e7e1b1a521d517f561a65bc9690707e81ee77cba9336be"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化复审-20261025/final-verification.json",
+      "sha256": "bcabe5f01a13d9689f33c04430b3cde61bf5f408ae5bfd6962c764ab25fd55b6",
+      "working_sha256": "bcabe5f01a13d9689f33c04430b3cde61bf5f408ae5bfd6962c764ab25fd55b6"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化复审-20261025/independent-boundaries.txt",
+      "sha256": "72490b92fd0ba026a975c20346200230aef9a15db28535a7cb057b708776afef",
+      "working_sha256": "72490b92fd0ba026a975c20346200230aef9a15db28535a7cb057b708776afef"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化复审-20261025/native-dom-result.json",
+      "sha256": "1b444bb5250990f8e1c8486e21ae4f46de470012c8529eafa37ef26cd66ee5dc",
+      "working_sha256": "1b444bb5250990f8e1c8486e21ae4f46de470012c8529eafa37ef26cd66ee5dc"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化复审-20261025/native-dom.txt",
+      "sha256": "d6b1d0642ec7b38744fcffef12674ef35840ac0203f6402bfc9666992349a718",
+      "working_sha256": "d6b1d0642ec7b38744fcffef12674ef35840ac0203f6402bfc9666992349a718"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化复审-20261025/native_dom_repro.cjs",
+      "sha256": "a6adecd0d71aa351e7289c1a2cad472ab13cae73d87ac3ef42735da0106f630d",
+      "working_sha256": "a6adecd0d71aa351e7289c1a2cad472ab13cae73d87ac3ef42735da0106f630d"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化复审-20261025/original-deletion.txt",
+      "sha256": "27a2cd046c54416aa3466fdb988fb6bcea3f8d542e41c6a0c691371741c9508d",
+      "working_sha256": "27a2cd046c54416aa3466fdb988fb6bcea3f8d542e41c6a0c691371741c9508d"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化复审-20261025/original-frontend.txt",
+      "sha256": "30eeabd33f74d9ae6e5ed3296bc0a7f1ff827bb97b761032aa5354d46be31737",
+      "working_sha256": "30eeabd33f74d9ae6e5ed3296bc0a7f1ff827bb97b761032aa5354d46be31737"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化复审-20261025/regression-selection.json",
+      "sha256": "e2ee4db9d30ed21a2babce8f9714bb7e551bbfda81a0c96831e0cb920db914cb",
+      "working_sha256": "e2ee4db9d30ed21a2babce8f9714bb7e551bbfda81a0c96831e0cb920db914cb"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化复审-20261025/related-regression.txt",
+      "sha256": "348ba17ca578f99aa9bd169c6ef388dc8f7e8c0615a417dab61cbf21e1f2d471",
+      "working_sha256": "348ba17ca578f99aa9bd169c6ef388dc8f7e8c0615a417dab61cbf21e1f2d471"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化复审-20261025/review-source-hashes.json",
+      "sha256": "2c73591ad2e4958990f40de288ebc4763ae6ce77f7904899c5779068d0fd5a36",
+      "working_sha256": "2c73591ad2e4958990f40de288ebc4763ae6ce77f7904899c5779068d0fd5a36"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化复审-20261025/targeted-tests.txt",
+      "sha256": "e67f3f1fc30c5b0f936cf265d098d92a6c20fb9b65b7dfa8c7c4ef4ffbb92ced",
+      "working_sha256": "e67f3f1fc30c5b0f936cf265d098d92a6c20fb9b65b7dfa8c7c4ef4ffbb92ced"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化复审-20261025/复审报告.md",
+      "sha256": "32dd858bcd8e7e81d2253a0d336fb8c581ce58d83907cf4bd7631c76f7bdf9ff",
+      "working_sha256": "32dd858bcd8e7e81d2253a0d336fb8c581ce58d83907cf4bd7631c76f7bdf9ff"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化审查-20261025/deletion-repro.txt",
+      "sha256": "e0cde09d3a1d9677da5913b16bf0c22245d71511982a35e50cc03ff6deafcec2",
+      "working_sha256": "e0cde09d3a1d9677da5913b16bf0c22245d71511982a35e50cc03ff6deafcec2"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化审查-20261025/deletion_repro.py",
+      "sha256": "41574413f17b4b1754eb6a912fab09c476e1d7b051c47d4add20ab32ecb40fcc",
+      "working_sha256": "41574413f17b4b1754eb6a912fab09c476e1d7b051c47d4add20ab32ecb40fcc"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化审查-20261025/frontend-repros.txt",
+      "sha256": "db4c22bff0d6e745b81cfa5f90ad95f689c53c562af2aeef0faa5268b260050a",
+      "working_sha256": "db4c22bff0d6e745b81cfa5f90ad95f689c53c562af2aeef0faa5268b260050a"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化审查-20261025/receipt_repros.mjs",
+      "sha256": "585af85bf27431c1516d8ed664d68beb95f927095e4582996cca21bb63d966e4",
+      "working_sha256": "585af85bf27431c1516d8ed664d68beb95f927095e4582996cca21bb63d966e4"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化审查-20261025/regression-selection.json",
+      "sha256": "b3462f20ab45da94693b92123a77b86fd6465a556a201a9e94f43c42e4ac93a5",
+      "working_sha256": "b3462f20ab45da94693b92123a77b86fd6465a556a201a9e94f43c42e4ac93a5"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化审查-20261025/related-regression.txt",
+      "sha256": "d9fae1843f6b293ae563db22e9f3f6cb94ee8fea9642e46d3ebe9e2d1d0c2bbf",
+      "working_sha256": "d9fae1843f6b293ae563db22e9f3f6cb94ee8fea9642e46d3ebe9e2d1d0c2bbf"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化审查-20261025/review-source-hashes.json",
+      "sha256": "fe4d94e008fc1049ee6ce6ccbec504d18a0c0e46a70f7c4d5f94ce89b62346ee",
+      "working_sha256": "fe4d94e008fc1049ee6ce6ccbec504d18a0c0e46a70f7c4d5f94ce89b62346ee"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化审查-20261025/审查报告.md",
+      "sha256": "846936b22037705ada0951986360be93abbf746171763e0e5a491f68c7c83867",
+      "working_sha256": "846936b22037705ada0951986360be93abbf746171763e0e5a491f68c7c83867"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化推送-20261025/database-verification.json",
+      "sha256": "10d230038c2ba4b5e1f3a602ed0dd75653331819be054ff260432908d597db2a",
+      "working_sha256": "10d230038c2ba4b5e1f3a602ed0dd75653331819be054ff260432908d597db2a"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化推送-20261025/postgrest-probes.json",
+      "sha256": "d04fb47f527058168d171de520e52deb0c55e4c4503a3320a1cb46e03d342f03",
+      "working_sha256": "d04fb47f527058168d171de520e52deb0c55e4c4503a3320a1cb46e03d342f03"
+    },
+    {
+      "path": "codex/临时验证/控制台延迟优化推送-20261025/prepare.json",
+      "sha256": "d62426d0e52810fb0fb6ac8aa3e3e1a422ba6c6a6951d29acff92c02c623b279",
+      "working_sha256": "d62426d0e52810fb0fb6ac8aa3e3e1a422ba6c6a6951d29acff92c02c623b279"
+    },
+    {
+      "path": "codex/代码修改日志/规划管理/合并与同步-26.10.25.10.28.md",
+      "sha256": "d16ed159883046090cee392fe867107c4f84dde492a9d6773528a684b1775e6d",
+      "working_sha256": "d16ed159883046090cee392fe867107c4f84dde492a9d6773528a684b1775e6d"
+    },
+    {
+      "path": "codex/功能维护规范/前端组件/前端组件.md",
+      "sha256": "44ca177a27732b2b171e8ccb8909343479c4be3c69f3bb53c80661b00ab0f025",
+      "working_sha256": "44ca177a27732b2b171e8ccb8909343479c4be3c69f3bb53c80661b00ab0f025"
+    },
+    {
+      "path": "codex/功能维护规范/网关日志/网关日志.md",
+      "sha256": "13bd3ff5a4c3e2777c00561568a432b393cbcd46e39307a7e7b6c7b07a38e00c",
+      "working_sha256": "13bd3ff5a4c3e2777c00561568a432b393cbcd46e39307a7e7b6c7b07a38e00c"
+    },
+    {
+      "path": "codex/功能维护规范/规划管理/规划管理.md",
+      "sha256": "b908e6c66093be1c509a3957ba30e6b6ccc3af244a4dd43a8e025ae9fa780a27",
+      "working_sha256": "b908e6c66093be1c509a3957ba30e6b6ccc3af244a4dd43a8e025ae9fa780a27"
+    },
+    {
+      "path": "codex/控制台-文档索引/目录说明.md",
+      "sha256": "ea29228c5ad90757fbf7f8a722981ccb012c1148043b37a17bf8b95d84b6bb07",
+      "working_sha256": "3d5652378e3d72956411e069c2d6a2a1b89277996c231a472c1baa9b8b0d2950"
+    },
+    {
+      "path": "codex/网关当前状态/网关当前状态.md",
+      "sha256": "c2be3aa8162388a9894e763b8d99403b8331755e91870419b9355e58ccb8c327",
+      "working_sha256": "c2be3aa8162388a9894e763b8d99403b8331755e91870419b9355e58ccb8c327"
+    },
+    {
+      "path": "gateway/admin_api.py",
+      "sha256": "d2d2878c8eb2d28f748663c217bfa31181cfde8cd3f7f8ae80656620dc7275f8",
+      "working_sha256": "d2d2878c8eb2d28f748663c217bfa31181cfde8cd3f7f8ae80656620dc7275f8"
+    },
+    {
+      "path": "gateway/planning.py",
+      "sha256": "d8f48d50e674ec858ad98416d0b9b4c2f90044ff30987f9ff69a9e4c59726992",
+      "working_sha256": "d8f48d50e674ec858ad98416d0b9b4c2f90044ff30987f9ff69a9e4c59726992"
+    },
+    {
+      "path": "gateway/planning_api.py",
+      "sha256": "a459d641fa93406fd3e04a53ebec657b08c02f4a95797b18b20b1c4115bb676c",
+      "working_sha256": "a459d641fa93406fd3e04a53ebec657b08c02f4a95797b18b20b1c4115bb676c"
+    },
+    {
+      "path": "gateway/planning_commands.py",
+      "sha256": "1e61f91616ea3dfef2e138ff4cefb2ced2dd2895cb624786ab5f9b6f539c4321",
+      "working_sha256": "1e61f91616ea3dfef2e138ff4cefb2ced2dd2895cb624786ab5f9b6f539c4321"
+    },
+    {
+      "path": "gateway/planning_occurrences.py",
+      "sha256": "8133c5df088c10373b9be70e6114b9ac35733472115def745792c54d12f16ef0",
+      "working_sha256": "8133c5df088c10373b9be70e6114b9ac35733472115def745792c54d12f16ef0"
+    },
+    {
+      "path": "gateway/planning_recompute.py",
+      "sha256": "8c9c2c0295073bde1c28642ea0e38f89f26d53c1c27ee88708c24249aba33441",
+      "working_sha256": "8c9c2c0295073bde1c28642ea0e38f89f26d53c1c27ee88708c24249aba33441"
+    },
+    {
+      "path": "gateway/planning_serialization.py",
+      "sha256": "a1cd9f2e331393e1c6bcc8d639dae9affb5a5abc5221030f14888419bd3bb466",
+      "working_sha256": "a1cd9f2e331393e1c6bcc8d639dae9affb5a5abc5221030f14888419bd3bb466"
+    },
+    {
+      "path": "gateway/planning_tasks.py",
+      "sha256": "3a6f3941bf34b65eb827f3f51066bdd6ade3ab29a772c5bbc6c5cc3a924c2744",
+      "working_sha256": "3a6f3941bf34b65eb827f3f51066bdd6ade3ab29a772c5bbc6c5cc3a924c2744"
+    },
+    {
+      "path": "supabase/migrations/20261025010000_planning_occurrence_commands.sql",
+      "sha256": "4f05f9bd8abd4ac975ff2d162832d86b91c13d6cac3aa376e9b5439873759752",
+      "working_sha256": "4f05f9bd8abd4ac975ff2d162832d86b91c13d6cac3aa376e9b5439873759752"
+    },
+    {
+      "path": "tests/console_latency.test.mjs",
+      "sha256": "a516f21aee90c32b1edd301151ab80abef30a0759cbc8c4abd8fc4568c6ed233",
+      "working_sha256": "a516f21aee90c32b1edd301151ab80abef30a0759cbc8c4abd8fc4568c6ed233"
+    },
+    {
+      "path": "tests/planning_frontend_modules.test.mjs",
+      "sha256": "2869aac5181515a47b07d086af58c677a0fe2fae946b569ea6e2a53f61af4acd",
+      "working_sha256": "2869aac5181515a47b07d086af58c677a0fe2fae946b569ea6e2a53f61af4acd"
+    },
+    {
+      "path": "tests/support/planning_db.py",
+      "sha256": "0fd715812f96306217931708d69eb5650dad25097c4e0e13355d908877bc3b94",
+      "working_sha256": "0fd715812f96306217931708d69eb5650dad25097c4e0e13355d908877bc3b94"
+    },
+    {
+      "path": "tests/test_console_latency_api.py",
+      "sha256": "7c5a9661fea5a3863b28677b102790994b35f8868c7f7852a24008e58e302bd7",
+      "working_sha256": "7c5a9661fea5a3863b28677b102790994b35f8868c7f7852a24008e58e302bd7"
+    },
+    {
+      "path": "tests/test_console_latency_commands_pgserver.py",
+      "sha256": "b9eaff3a9a9757ff11f0b642ad43750add594d78f75536ed0df67b8d4c8a2e42",
+      "working_sha256": "b9eaff3a9a9757ff11f0b642ad43750add594d78f75536ed0df67b8d4c8a2e42"
+    },
+    {
+      "path": "tests/test_console_latency_frontend.py",
+      "sha256": "92bbbc21e00f40c4d400ac56dbefc5ba529f5465c1fb4e3146589d36229a46e0",
+      "working_sha256": "92bbbc21e00f40c4d400ac56dbefc5ba529f5465c1fb4e3146589d36229a46e0"
+    },
+    {
+      "path": "tests/test_memo_frontend_contract.py",
+      "sha256": "7bb87b1060731ac33c5e78ea8285ed7a235bc5a49566e7ce8d46d9dc83dc8c0f",
+      "working_sha256": "7bb87b1060731ac33c5e78ea8285ed7a235bc5a49566e7ce8d46d9dc83dc8c0f"
+    },
+    {
+      "path": "tests/test_planning_api_contract.py",
+      "sha256": "a2ae71e187413d3009b9a79934476910ff17cd971c2c8b36a4274cb1ff61deb6",
+      "working_sha256": "a2ae71e187413d3009b9a79934476910ff17cd971c2c8b36a4274cb1ff61deb6"
+    },
+    {
+      "path": "tests/test_planning_frontend_contract.py",
+      "sha256": "8000e0de30e146d798cceebb3f2b7e7b79142ce53e13cda705ff3df1797794be",
+      "working_sha256": "8000e0de30e146d798cceebb3f2b7e7b79142ce53e13cda705ff3df1797794be"
+    },
+    {
+      "path": "tests/test_planning_frontend_modules.py",
+      "sha256": "2ab4db033ea4259e4aa908e218d8d4dddaa6623c43057d78333ee7c41d4567f6",
+      "working_sha256": "2ab4db033ea4259e4aa908e218d8d4dddaa6623c43057d78333ee7c41d4567f6"
+    },
+    {
+      "path": "tests/test_planning_phase1a.py",
+      "sha256": "9cfb7bb887dff6165db2a0c033ba9cd3fcb31a5e5a32f7fbed38236bb2c5dfa9",
+      "working_sha256": "9cfb7bb887dff6165db2a0c033ba9cd3fcb31a5e5a32f7fbed38236bb2c5dfa9"
+    },
+    {
+      "path": "tests/test_planning_task_notes.py",
+      "sha256": "ff5a601d43874dabedbe953e617a7fefdc40feac00ee327cacfee5971035d406",
+      "working_sha256": "ff5a601d43874dabedbe953e617a7fefdc40feac00ee327cacfee5971035d406"
+    },
+    {
+      "path": "tests/test_planning_task_notes_fullchain_pgserver.py",
+      "sha256": "05729378b686f493c0dd2384c28b684072470f79b8bf31cc548d57f4510571a5",
+      "working_sha256": "05729378b686f493c0dd2384c28b684072470f79b8bf31cc548d57f4510571a5"
+    }
+  ],
+  "candidate": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\codex\\临时验证\\控制台延迟优化推送-20261025\\candidate",
+  "remote": "https://github.com/yizisala3-cloud/qi-gateway.git",
+  "branch": "main"
+}

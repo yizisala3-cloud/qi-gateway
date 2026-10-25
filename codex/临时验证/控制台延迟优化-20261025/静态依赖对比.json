@@ -1,0 +1,50 @@
+{
+  "scope": "Static JS source graph excluding dynamic imports; not transfer size or browser timing",
+  "before": {
+    "modules": 18,
+    "bytes": 407330,
+    "files": {
+      "admin/js/pages/planning.js": 70352,
+      "admin/js/api.js": 3542,
+      "admin/js/ui.js": 37982,
+      "admin/js/lib/retro_time.js": 22708,
+      "admin/js/lib/retro_select.js": 15420,
+      "admin/js/lib/planning_display.js": 8764,
+      "admin/js/lib/planning_task_form.js": 27998,
+      "admin/js/lib/planning_notes.js": 9809,
+      "admin/js/lib/planning_dialogs.js": 22692,
+      "admin/js/lib/planning_actions.js": 1290,
+      "admin/js/lib/planning_sort.js": 10525,
+      "admin/js/lib/planning_reminder.js": 16036,
+      "admin/js/lib/planning_memo.js": 97296,
+      "admin/js/lib/memo_markdown.js": 1522,
+      "admin/js/lib/planning_reads.js": 2052,
+      "admin/js/lib/planning_sync.js": 6246,
+      "admin/js/lib/planning_goals.js": 27653,
+      "admin/js/lib/planning_detail_edit.js": 25443
+    }
+  },
+  "after": {
+    "modules": 16,
+    "bytes": 294571,
+    "files": {
+      "admin/js/pages/planning.js": 75948,
+      "admin/js/api.js": 3990,
+      "admin/js/ui.js": 38727,
+      "admin/js/lib/retro_time.js": 23167,
+      "admin/js/lib/retro_select.js": 15737,
+      "admin/js/lib/planning_display.js": 8965,
+      "admin/js/lib/planning_task_form.js": 28463,
+      "admin/js/lib/planning_notes.js": 10052,
+      "admin/js/lib/planning_dialogs.js": 24152,
+      "admin/js/lib/planning_actions.js": 1290,
+      "admin/js/lib/planning_commands.js": 1370,
+      "admin/js/lib/planning_sort.js": 10764,
+      "admin/js/lib/planning_reminder.js": 16371,
+      "admin/js/lib/planning_reads.js": 2052,
+      "admin/js/lib/planning_sync.js": 7540,
+      "admin/js/lib/planning_detail_edit.js": 25983
+    }
+  },
+  "removed_static_bytes": 112759
+}

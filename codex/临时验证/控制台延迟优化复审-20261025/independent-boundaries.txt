@@ -1,0 +1,8 @@
+
+test_service_role_can_scrub_receipts_and_reject_deleted_replay (__main__.ReceiptDeletionBoundaries.test_service_role_can_scrub_receipts_and_reject_deleted_replay) ... ok
+test_waiting_delete_erases_a_receipt_that_commits_after_delete_was_dispatched (__main__.ReceiptDeletionBoundaries.test_waiting_delete_erases_a_receipt_that_commits_after_delete_was_dispatched) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 7.325s
+
+OK

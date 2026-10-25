@@ -631,7 +631,8 @@ def set_occurrence_status(occurrence_id: int, payload: Any, now: datetime | None
     # 这里对应关闭态流转（含重新安排与废弃）。
     if closing:
         recompute.request_recompute("status_change", now)
-    refreshed = runtime._fetch_occurrence(client, occurrence_id) or {**occ, **row}
+    refreshed = (result.data[0] if sibling_row is None
+                 else runtime._fetch_occurrence(client, occurrence_id) or {**occ, **row})
     return presentation.serialize_occurrence(refreshed, task, now)
 
 
@@ -782,7 +783,8 @@ def patch_occurrence(occurrence_id: int, payload: Any, now: datetime | None = No
                 "concurrent_modified",
                 "该待办的实际时间已被并发修改，本次补填未执行，请刷新后重试", 409,
             )
-    refreshed = runtime._fetch_occurrence(client, occurrence_id) or {**occ, **main_row}
+    refreshed = (result.data[0] if not est_edited and not window_edited
+                 else runtime._fetch_occurrence(client, occurrence_id) or {**occ, **main_row})
     return presentation.serialize_occurrence(refreshed, task, now)
 
 

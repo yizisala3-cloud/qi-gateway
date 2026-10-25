@@ -1,0 +1,7 @@
+{
+  "admin/js/lib/planning_actions.js": true,
+  "admin/js/lib/absorb_display.js": true,
+  "admin/js/lib/header_divider.js": true,
+  "admin/js/lib/scrollbars.js": true,
+  "admin/js/pages/_memory_patch.js": true
+}

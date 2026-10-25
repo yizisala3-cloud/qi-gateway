@@ -3,6 +3,28 @@ const ESTIMATE_FIELDS = ['est_start', 'est_end', 'nominal_start',
   'estimated_time_source', 'fixed_source', 'schedule_managed', 'is_fixed'];
 const COMMITTED_FIELDS = [...ESTIMATE_FIELDS, 'sort_order'];
 
+export function acceptsOccurrenceReceipt(before, receipt) {
+  const oldTime = timestampMicros(before?.updated_at);
+  const newTime = timestampMicros(receipt?.updated_at);
+  return oldTime === null || newTime === null || oldTime <= newTime;
+}
+
+export function mergeOccurrenceReceipt(board, receipt, { allowInsert = false } = {}) {
+  if (!board || !receipt?.id || !receipt.status) return board;
+  const sections = ['progress', 'attention', 'done'];
+  const before = sections.flatMap(key => board[key] || []).find(row => row.id === receipt.id);
+  if (!before && !(allowInsert && receipt.display_cycle_date === board.date)) return board;
+  if (!acceptsOccurrenceReceipt(before, receipt)) return board;
+  const next = { ...board };
+  sections.forEach(key => { next[key] = (board[key] || []).filter(row => row.id !== receipt.id); });
+  const destination = ['pending', 'in_progress', 'deferred', 'partial'].includes(receipt.status)
+    ? 'progress' : receipt.status === 'timeout' ? 'attention' : 'done';
+  next[destination].push(receipt);
+  next.progress.sort((a, b) => Number(!!a.is_parked) - Number(!!b.is_parked) || a.sort_order - b.sort_order || a.id - b.id);
+  next.done.sort((a, b) => (b.closed_at || '').localeCompare(a.closed_at || '') || b.id - a.id);
+  return next;
+}
+
 function timestampMicros(value) {
   if (typeof value !== 'string') return null;
   const milliseconds = Date.parse(value);

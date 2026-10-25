@@ -1,0 +1,192 @@
+......................... [  1%]
+............................................................................................. [  5%]
+................................................................ [  7%]
+..................................................................... [ 10%]
+............................................. [ 12%]
+............................................................... [ 15%]
+............................................................................................................ [ 20%]
+............................................................................................ [ 24%]
+................................................................... [ 27%]
+................................................................................................................................... [ 32%]
+........................................................................ [ 35%]
+....................................................................................................... [ 40%]
+............................................................ [ 43%]
+............................................................. [ 45%]
+........................................................................ [ 48%]
+........................................................................ [ 51%]
+............................................................... [ 54%]
+............................. [ 55%]
+............................................................ [ 58%]
+........................................................................... [ 61%]
+................................. [ 63%]
+.................................................................. [ 66%]
+...................................s............... [ 68%]
+............................................................................................................................................................................. [ 75%]
+............................................................ [ 78%]
+........................................................................ [ 81%]
+.............................................................. [ 84%]
+...................................................... [ 86%]
+........................................................................ [ 89%]
+........................................................................ [ 92%]
+........................................................................ [ 95%]
+........................................................................ [ 99%]
+.....................                                                    [100%]
+============================== warnings summary ===============================
+..\..\..\..\.venv\Lib\site-packages\starlette\testclient.py:51
+  C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.venv\Lib\site-packages\starlette\testclient.py:51: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+SKIPPED [1] tests\test_planning_phase1a.py:488: PostgreSQL parser is optional locally
+2303 passed, 1 skipped, 1 warning, 1389 subtests passed in 176.30s (0:02:56)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.venv\Lib\site-packages\pgserver\postgres_server.py", line 206, in _cleanup
+    _logger.info(f"exiting {os.getpid()} remaining {pids=}")
+Message: 'exiting 28492 remaining pids=[]'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.venv\Lib\site-packages\pgserver\postgres_server.py", line 206, in _cleanup
+    _logger.info(f"exiting {os.getpid()} remaining {pids=}")
+Message: 'exiting 28492 remaining pids=[]'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.venv\Lib\site-packages\pgserver\postgres_server.py", line 206, in _cleanup
+    _logger.info(f"exiting {os.getpid()} remaining {pids=}")
+Message: 'exiting 28492 remaining pids=[]'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.venv\Lib\site-packages\pgserver\postgres_server.py", line 206, in _cleanup
+    _logger.info(f"exiting {os.getpid()} remaining {pids=}")
+Message: 'exiting 28492 remaining pids=[]'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.venv\Lib\site-packages\pgserver\postgres_server.py", line 206, in _cleanup
+    _logger.info(f"exiting {os.getpid()} remaining {pids=}")
+Message: 'exiting 28492 remaining pids=[]'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.venv\Lib\site-packages\pgserver\postgres_server.py", line 206, in _cleanup
+    _logger.info(f"exiting {os.getpid()} remaining {pids=}")
+Message: 'exiting 28492 remaining pids=[]'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.venv\Lib\site-packages\pgserver\postgres_server.py", line 206, in _cleanup
+    _logger.info(f"exiting {os.getpid()} remaining {pids=}")
+Message: 'exiting 28492 remaining pids=[]'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.venv\Lib\site-packages\pgserver\postgres_server.py", line 206, in _cleanup
+    _logger.info(f"exiting {os.getpid()} remaining {pids=}")
+Message: 'exiting 28492 remaining pids=[]'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.venv\Lib\site-packages\pgserver\postgres_server.py", line 206, in _cleanup
+    _logger.info(f"exiting {os.getpid()} remaining {pids=}")
+Message: 'exiting 28492 remaining pids=[]'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.venv\Lib\site-packages\pgserver\postgres_server.py", line 206, in _cleanup
+    _logger.info(f"exiting {os.getpid()} remaining {pids=}")
+Message: 'exiting 28492 remaining pids=[]'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.venv\Lib\site-packages\pgserver\postgres_server.py", line 206, in _cleanup
+    _logger.info(f"exiting {os.getpid()} remaining {pids=}")
+Message: 'exiting 28492 remaining pids=[]'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.venv\Lib\site-packages\pgserver\postgres_server.py", line 206, in _cleanup
+    _logger.info(f"exiting {os.getpid()} remaining {pids=}")
+Message: 'exiting 28492 remaining pids=[]'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.venv\Lib\site-packages\pgserver\postgres_server.py", line 206, in _cleanup
+    _logger.info(f"exiting {os.getpid()} remaining {pids=}")
+Message: 'exiting 28492 remaining pids=[]'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.venv\Lib\site-packages\pgserver\postgres_server.py", line 206, in _cleanup
+    _logger.info(f"exiting {os.getpid()} remaining {pids=}")
+Message: 'exiting 28492 remaining pids=[]'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.venv\Lib\site-packages\pgserver\postgres_server.py", line 206, in _cleanup
+    _logger.info(f"exiting {os.getpid()} remaining {pids=}")
+Message: 'exiting 28492 remaining pids=[]'
+Arguments: ()

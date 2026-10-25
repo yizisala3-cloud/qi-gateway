@@ -1,7 +1,7 @@
 // Field editors keep the existing detail layout, selection and atomic receipt.
-import { gw } from '../api.js?v=20261021-qqbot-mount-r10';
-import { esc, toast, icon } from '../ui.js?v=20261021-qqbot-mount-r10';
-import { bindNoteInput, focusEditorEnd } from './planning_notes.js?v=20261021-qqbot-mount-r10';
+import { gw } from '../api.js?v=20261025-console-latency-r1';
+import { esc, toast, icon } from '../ui.js?v=20261025-console-latency-r1';
+import { bindNoteInput, focusEditorEnd } from './planning_notes.js?v=20261025-console-latency-r1';
 
 export const resultUnknown = error => error?.resultUnknown || !error?.status || error.status >= 500;
 const scopeText = value => value === 'current_and_future' ? '当前及未来' : '仅未来';
@@ -12,8 +12,8 @@ export function createPlanningDetailEdit({ getDetail, captureOwner, isCurrent, i
   const drafts = new Map(), pending = new Map(), parking = new Map(), uncertain = new Map();
   let session = null;
   const owns = s => session === s && isCurrent(s.owner) && s.host?.isConnected;
-  const notifySaved = async taskId => {
-    try { await onSaved(); }
+  const notifySaved = async (taskId, result, owner) => {
+    try { await onSaved(result, owner); }
     catch (error) {
       globalThis.console?.error({ location: 'planning_detail_edit.refreshAfterSave', stack: error.stack, taskId });
       toast('待办已保存，列表更新失败，请刷新重试', 'warn');
@@ -391,9 +391,10 @@ export function createPlanningDetailEdit({ getDetail, captureOwner, isCurrent, i
       if (Object.keys(changes).some(k => k.includes('minutes') && k !== 'timer_minutes' || k.startsWith('window_'))) ranges.push(`时间${scopeText(saved.scope.time)}`);
       if (['alarm_start', 'alarm_end', 'timer_minutes'].some(k => k in changes)) ranges.push('提醒已更新');
       toast(automatic ? '已自动保存' : `待办已保存（${ranges.join('，')}）`);
-      await notifySaved(s.taskId);
+      await notifySaved(s.taskId, saved, s.owner);
     },
     async park(occurrence) {
+      const owner = captureOwner();
       const taskId = occurrence.task_id;
       const prior = parking.get(occurrence.id);
       if (prior?.busy || pending.has(taskId)) return;
@@ -405,11 +406,11 @@ export function createPlanningDetailEdit({ getDetail, captureOwner, isCurrent, i
           const ctx = await gw(`/admin/api/planning/tasks/${taskId}/detail-edit?occurrence_id=${occurrence.id}`);
           op.body = { occurrence_id: occurrence.id, token: ctx.token, parked: !occurrence.is_parked };
         }
-        await gw(`/admin/api/planning/tasks/${taskId}/detail-edit`, { method: 'POST',
+        const saved = await gw(`/admin/api/planning/tasks/${taskId}/detail-edit`, { method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Idempotency-Key': op.key }, body: JSON.stringify(op.body) });
         parking.delete(occurrence.id);
         toast(op.body.parked ? '当前及后续所有轮次已沉底；截止和提醒仍按原设置' : '当前及后续所有轮次已恢复排程，将按当前约束重新计算');
-        await notifySaved(taskId);
+        await notifySaved(taskId, saved, owner);
       } catch (error) {
         if (!resultUnknown(error)) parking.delete(occurrence.id);
         toast(resultUnknown(error) ? '操作结果未知，请再次点击以核实同一次操作' : `操作未执行：${error.message}`, 'warn');

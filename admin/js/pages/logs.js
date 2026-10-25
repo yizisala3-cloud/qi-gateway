@@ -1,9 +1,9 @@
 // pages/logs.js - 全网关报错日志：真实查询 / 筛选 / 分页 / 详情（§36 批次）
 // 数据全部来自 /admin/api/logs* 只读接口；无 mock fallback。
-import { gw, esc } from '../api.js?v=20261021-qqbot-mount-r10';
+import { gw, esc } from '../api.js?v=20261025-console-latency-r1';
 import {
   loading, empty, errorBlock, tag, toast, modal, delegate, icon,
-} from '../ui.js?v=20261021-qqbot-mount-r10';
+} from '../ui.js?v=20261025-console-latency-r1';
 
 const LEVEL_META = {
   WARNING: { label: '警告', tone: 'amber' },
@@ -172,8 +172,7 @@ export default {
     search.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') this.onFilterChange();
     });
-    await this.loadMeta();
-    await this.fetchList();
+    await Promise.all([this.loadMeta(), this.fetchList()]);
   },
 
   unmount() {
@@ -368,7 +367,7 @@ export default {
     if (this.metaAbort) this.metaAbort.abort();
     const controller = new AbortController();
     this.metaAbort = controller;
-    const range = this.timeRange();
+    const range = this._activeRange();
     const params = new URLSearchParams();
     if (this.filters.module) params.set('module', this.filters.module);
     if (this.filters.level) params.set('level', this.filters.level);

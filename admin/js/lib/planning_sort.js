@@ -1,6 +1,6 @@
 // Candidate order belongs to this controller until confirmation or cancellation.
-import { gw } from '../api.js?v=20261021-qqbot-mount-r10';
-import { toast } from '../ui.js?v=20261021-qqbot-mount-r10';
+import { gw } from '../api.js?v=20261025-console-latency-r1';
+import { toast } from '../ui.js?v=20261025-console-latency-r1';
 
 export function createPlanningSort({
   getRoot, getProgressList, getBoard, getActiveTab, getActiveSection,

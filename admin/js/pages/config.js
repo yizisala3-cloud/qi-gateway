@@ -1,8 +1,8 @@
 // pages/config.js - 配置：真实状态展示 + 功能开关
-import { gw, esc } from '../api.js?v=20261021-qqbot-mount-r10';
-import { loading, errorBlock, tag, toast, delegate, icon } from '../ui.js?v=20261021-qqbot-mount-r10';
-import { openCycleSettings } from '../lib/cycle_settings.js?v=20261021-qqbot-mount-r10';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261021-qqbot-mount-r10';
+import { gw, esc } from '../api.js?v=20261025-console-latency-r1';
+import { loading, errorBlock, tag, toast, delegate, icon } from '../ui.js?v=20261025-console-latency-r1';
+import { openCycleSettings } from '../lib/cycle_settings.js?v=20261025-console-latency-r1';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261025-console-latency-r1';
 
 // 规划数据库不可用时的示例数据（仅本地预览；保存会因库不可用自然报错）
 const DEMO_CYCLE = {
@@ -95,43 +95,93 @@ export default {
       'cred-reveal': (el) => this.revealCredential(el.dataset.cred),
       'cred-hide': (el) => this.hideCredential(el.dataset.cred),
     });
-    try {
-      const [health, status, continuity, eventideSettings, contextSettings, cycleSettings, credentials, logSettings, qqSettings, skySettings] = await Promise.all([
-        gw('/health'),
-        gw('/status'),
-        // 连续感状态读取失败不拖垮整页：降级为「状态未知」
-        gw('/admin/api/memory-continuity/status').catch(() => null),
-        // 开关读取失败不拖垮整页：降级为「状态未知」
-        gw('/admin/api/eventide/settings').catch(() => null),
-        gw('/admin/api/context/settings').catch(() => null),
-        // 规划周期读取失败降级为示例数据（数据库未连接时的本地预览）
-        gw('/admin/api/planning/cycle').catch(() => null),
-        // TASK-01：密钥元数据（只含用途/来源/标识，绝无真实值）；失败降级
-        gw('/admin/api/config/credentials').catch(() => null),
-        gw('/admin/api/logs/settings').catch(() => null),
-        gw('/admin/api/qqbot/settings').catch(() => null),
-        gw('/admin/api/sky/settings').catch(() => null),
-      ]);
-      // The module is reused across visits; an old load must not change either
-      // the new visit's action state or the root it previously rendered into.
+    this.cycle = DEMO_CYCLE;
+    this.cycleIsDemo = true;
+    this.credentials = [];
+    this.keyRefReady = null;
+    this.injectEnabled = this.recentChatEnabled = this.recentChatLimit = this.timestampEnabled = null;
+    this.logCollectionEnabled = null;
+    this.logCollectionWritable = false;
+    const groups = [
+      ['health', 'status'], ['status', 'continuity'], ['status'], ['credentials'],
+      ['status', 'continuity'], ['eventideSettings', 'logSettings'], ['qqSettings'],
+      ['skySettings'], ['contextSettings'], ['cycleSettings'], [],
+    ];
+    const titles = ['网关运行状态', '模型与上游', 'Supabase 连接状态', '模型与插件密钥',
+      '最近一次总结', '功能开关', 'QQBot', '光遇接入', '上下文注入', '规划周期', '页眉花饰'];
+    root.innerHTML = `<div class="grid grid-2">${titles.map((title, i) =>
+      `<div class="card" id="config-section-${i}"><div class="card-head"><div class="card-title">${title}</div></div>${loading()}</div>`).join('')}</div>`;
+    const data = {};
+    const settled = new Set();
+    const rendered = new Set();
+    const failures = new Map();
+    const renderReady = () => {
       if (!isCurrentMount()) return;
-      const cycle = cycleSettings || DEMO_CYCLE;
-      const cycleIsDemo = !cycleSettings;
-      this.cycle = cycle;
-      this.cycleIsDemo = cycleIsDemo;
-      this.credentials = (credentials && credentials.credentials) || [];
-      this.keyRefReady = credentials ? credentials.key_ref_ready === true : null;
-      this.injectEnabled = eventideSettings ? eventideSettings.inject_enabled === true : null;
-      this.recentChatEnabled = contextSettings ? contextSettings.recent_chat_enabled === true : null;
-      this.recentChatLimit = contextSettings && Number.isInteger(contextSettings.recent_chat_limit)
-        ? contextSettings.recent_chat_limit
-        : null;
-      this.timestampEnabled = contextSettings ? contextSettings.timestamp_enabled === true : null;
-      this.logCollectionEnabled = typeof logSettings?.enabled === 'boolean' ? logSettings.enabled : null;
-      this.logCollectionWritable = logSettings?.writable === true;
-      this.qqSettings = this.validQQSettings(qqSettings) ? qqSettings : null;
-      this.skySettings = this.validSkySettings(skySettings) ? skySettings : null;
-      const supabase = status.supabase || {};
+      const cards = this.renderConfigCards(data);
+      groups.forEach((keys, index) => {
+        if (rendered.has(index) || !keys.every(key => settled.has(key))) return;
+        const host = root.querySelector(`#config-section-${index}`);
+        const failure = keys.find(key => failures.has(key) && ['health', 'status'].includes(key));
+        host.className = failure ? 'card' : '';
+        host.style.display = failure ? '' : 'contents';
+        host.innerHTML = failure ? errorBlock(`配置状态读取失败：${esc(failures.get(failure).message)}`) : cards[index];
+        // A section mounts exactly once. Later responses cannot erase edits,
+        // switch state or an explicitly revealed credential in another section.
+        host.querySelectorAll('.retro-time[data-retro-for]').forEach((field) => {
+          createRetroTimeField(field, { id: field.dataset.retroFor,
+            value: field.dataset.retroValue || '', mode: field.dataset.retroMode || 'datetime',
+            align: field.dataset.retroAlign || 'left' });
+        });
+        rendered.add(index);
+      });
+    };
+    const applyValue = (key, value) => {
+      if (key === 'cycleSettings') {
+        this.cycle = value || DEMO_CYCLE;
+        this.cycleIsDemo = !value;
+      } else if (key === 'credentials') {
+        this.credentials = value?.credentials || [];
+        this.keyRefReady = value ? value.key_ref_ready === true : null;
+      } else if (key === 'eventideSettings') {
+        this.injectEnabled = value ? value.inject_enabled === true : null;
+      } else if (key === 'contextSettings') {
+        this.recentChatEnabled = value ? value.recent_chat_enabled === true : null;
+        this.recentChatLimit = Number.isInteger(value?.recent_chat_limit) ? value.recent_chat_limit : null;
+        this.timestampEnabled = value ? value.timestamp_enabled === true : null;
+      } else if (key === 'logSettings') {
+        this.logCollectionEnabled = typeof value?.enabled === 'boolean' ? value.enabled : null;
+        this.logCollectionWritable = value?.writable === true;
+      } else if (key === 'qqSettings') {
+        this.qqSettings = this.validQQSettings(value) ? value : null;
+      } else if (key === 'skySettings') {
+        this.skySettings = this.validSkySettings(value) ? value : null;
+      }
+    };
+    renderReady();
+    await Promise.all(Object.entries({
+      health: '/health', status: '/status', continuity: '/admin/api/memory-continuity/status',
+      eventideSettings: '/admin/api/eventide/settings', contextSettings: '/admin/api/context/settings',
+      cycleSettings: '/admin/api/planning/cycle', credentials: '/admin/api/config/credentials',
+      logSettings: '/admin/api/logs/settings', qqSettings: '/admin/api/qqbot/settings',
+      skySettings: '/admin/api/sky/settings',
+    }).map(async ([key, path]) => {
+      let value = null;
+      try { value = await gw(path); }
+      catch (error) { failures.set(key, error); }
+      if (!isCurrentMount()) return;
+      data[key] = value;
+      applyValue(key, value);
+      settled.add(key);
+      renderReady();
+    }));
+  },
+
+  renderConfigCards({ health: rawHealth, status: rawStatus, continuity = null, eventideSettings = null, contextSettings = null }) {
+      const health = rawHealth || {};
+      const status = rawStatus || {};
+      const cycle = this.cycle || DEMO_CYCLE;
+      const cycleIsDemo = this.cycleIsDemo;
+      const supabase = status?.supabase || {};
       const lastDigest = status.last_digest_run;
       const uptimeMin = Math.floor((health.uptime || 0) / 60);
       const uptimeText = uptimeMin >= 60 ? `${Math.floor(uptimeMin / 60)} 小时 ${uptimeMin % 60} 分` : `${uptimeMin} 分钟`;
@@ -156,32 +206,31 @@ export default {
         ? localStorage.getItem('qi-divider')
         : 'wisteria';
       const dividerName = { wisteria: '紫藤花枝', lily3: '铃兰花枝', straight: '直线' }[dividerVariant];
-      root.innerHTML = `
-        <div class="grid grid-2">
-          <div class="card">
+      return [
+`<div class="card">
             <div class="card-head"><div class="card-title">${icon('gear')}网关运行状态</div></div>
             <div class="kv"><span class="k">健康状态</span><span class="v">${okTag(health.status === 'ok')}</span></div>
             <div class="kv"><span class="k">阶段</span><span class="v">${esc(health.phase || '-')}</span></div>
             <div class="kv"><span class="k">运行时长</span><span class="v">${esc(uptimeText)}</span></div>
             <div class="kv"><span class="k">后台任务</span><span class="v">${esc(status.bg_tasks ?? '-')} 个</span></div>
             <div class="kv"><span class="k">记忆调度器</span><span class="v">${status.daily_running ? tag('运行中', 'green') : tag('已停止', 'red')}</span></div>
-          </div>
-          <div class="card">
+          </div>`,
+`<div class="card">
             <div class="card-head"><div class="card-title">${icon('message')}模型与上游</div></div>
             <div class="kv"><span class="k">聊天上游 API</span><span class="v mono text-sm">${esc(status.upstream_base_url || '-')}</span></div>
             <div class="kv"><span class="k">聊天模型</span><span class="v mono text-sm">${esc(status.upstream_model || '-')}</span></div>
             <div class="kv"><span class="k">连续感模型</span><span class="v mono text-sm">${esc(continuity?.analysis_model || continuity?.continuity_model || '-')}</span></div>
             <div class="kv"><span class="k">连续感模型状态</span><span class="v">${continuity ? boolTag(continuity.analysis_configured) : tag('状态未知', 'muted')}</span></div>
             <div class="kv"><span class="k">Embedding</span><span class="v">${tag('暂未接入', 'muted')}</span></div>
-          </div>
-          <div class="card">
+          </div>`,
+`<div class="card">
             <div class="card-head"><div class="card-title">${icon('layers')}Supabase 连接状态</div></div>
             <div class="kv"><span class="k">数据库访问</span><span class="v">${okTag(supabase.access_ok)}</span></div>
             <div class="kv"><span class="k">密钥模式</span><span class="v mono text-sm">${esc(supabase.key_mode || 'unknown')}</span></div>
             <div class="kv"><span class="k">提权密钥</span><span class="v">${supabase.elevated_active ? tag('启用', 'green') : tag('未启用', 'red')}</span></div>
             <div class="kv"><span class="k">安全后端访问</span><span class="v">${status.rls_ready ? tag('就绪', 'green') : tag('未就绪', 'red')}</span></div>
-          </div>
-          <div class="card">
+          </div>`,
+`<div class="card">
             <div class="card-head"><div class="card-title">${icon('key')}模型与插件密钥（默认隐藏，点击后按项显示）</div></div>
             <div id="cred-list">${this.renderCredentialRows()}</div>
             ${this.keyRefReady === false ? '<p class="muted text-sm" style="margin:6px 0 0;color:var(--amber)">密钥标识未就绪（GATEWAY_KEY_REF_SECRET 缺失或短于 32 字节）：日志暂不能按密钥区分故障，密钥值查看不受影响。</p>' : ''}
@@ -190,14 +239,14 @@ export default {
               <button class="btn btn-secondary btn-sm is-disabled" disabled aria-describedby="config-change-note">更换配置</button>
               <span class="control-note" id="config-change-note">暂未接入</span>
             </span></div>
-          </div>
-          <div class="card">
+          </div>`,
+`<div class="card">
             <div class="card-head"><div class="card-title">${icon('clock')}最近一次总结</div></div>
             <div class="kv"><span class="k">上次总结运行</span><span class="v">${lastDigest ? `#${esc(lastDigest.id ?? '-')} ${esc(lastDigest.status || '')}` : '本进程启动以来尚未运行'}</span></div>
             <div class="kv"><span class="k">上次热度衰减</span><span class="v">${esc(status.last_heat_decay_date || '从未执行')}</span></div>
             <div class="kv"><span class="k">连续感运行状态</span><span class="v">${esc(continuity?.status || '-')}</span></div>
-          </div>
-          <div class="card">
+          </div>`,
+`<div class="card">
             <div class="card-head"><div class="card-title">${icon('flame')}功能开关</div></div>
             <div class="kv"><span class="k">身体状态注入</span><span class="v">${eventideControl}</span></div>
             <p class="muted text-sm" style="margin:6px 0 0" data-help-note="身体状态开关">关闭后聊天提示词不再注入 Eventide 身体状态卡，状态模拟暂停并冻结；重新开启后按时间分段追赶。</p>
@@ -207,23 +256,23 @@ export default {
             </span></div>
             <p class="muted text-sm" style="margin:6px 0 0" data-help-note="日志收集">默认关闭。关闭后停止收集新的报错，已保存的历史日志仍可查看；设置保存后生效，重启后保留。</p>
             <p id="log-collection-note" class="muted text-sm" style="margin:6px 0 0">${this.logCollectionWritable ? '' : '暂不能保存开关，请检查数据库连接或重新进入本页。'}</p>
-          </div>
-          <div class="card" id="qqbot-settings-card">
+          </div>`,
+`<div class="card" id="qqbot-settings-card">
             <div class="card-head"><div class="card-title">${icon('message')}QQBot</div></div>
             <div id="qqbot-settings-panel">${this.renderQQSettings()}</div>
-          </div>
-          <div class="card" id="sky-settings-card">
+          </div>`,
+`<div class="card" id="sky-settings-card">
             <div class="card-head"><div class="card-title">${icon('message')}光遇接入</div></div>
             <div id="sky-settings-panel">${this.renderSkySettings()}</div>
-          </div>
-          <div class="card">
+          </div>`,
+`<div class="card">
             <div class="card-head"><div class="card-title">${icon('inbox')}上下文注入</div></div>
             <div class="kv"><span class="k">注入条数</span><span class="v">${limitControl}</span></div>
             <div class="kv"><span class="k">近期对话注入</span><span class="v">${recentChatControl}</span></div>
             <div class="kv"><span class="k">时间戳注入</span><span class="v">${timestampControl}</span></div>
             <p class="muted text-sm" style="margin:6px 0 0" data-help-note="上下文注入">近期对话每轮从数据库取最近 N 条聊天记录（user/assistant 各算一条）注入补充上下文，与客户端本次发送的历史无关；时间戳为每轮请求附上当前北京时间。改动保存后立即对下一次聊天生效。</p>
-          </div>
-          <div class="card">
+          </div>`,
+`<div class="card">
             <div class="card-head"><div class="card-title">${icon('calendar')}规划周期</div></div>
             <div class="kv"><span class="k">每日刷新时间</span><span class="v">
               <span class="retro-time retro-time-inline" aria-label="每日刷新时间（北京时间）" data-retro-for="cfg-cycle-boundary" data-retro-mode="time" data-retro-align="right" data-retro-value="${esc(cycle.refresh_boundary_time || '')}"></span>
@@ -238,31 +287,15 @@ export default {
             <div class="kv"><span class="k">待生效修改</span><span class="v">${cycle.pending_boundary ? tag(`将改为 ${esc(cycle.refresh_boundary_time || '')}`, 'amber') : tag('无', 'muted')}</span></div>
             ${cycleIsDemo ? '<p class="muted text-sm" style="margin:6px 0 0">规划数据库未连接，以上为示例数据，不可修改；连接后自动显示真实值。</p>' : ''}
             <p class="muted text-sm" style="margin:6px 0 0" data-help-note="规划周期">新的刷新时间从下一规划周期开始生效，当前周期保持不变；若有待办跨越新刷新时间，保存时会列出供逐个调整。</p>
-          </div>
-          <div class="card">
+          </div>`,
+`<div class="card">
             <div class="card-head"><div class="card-title">${icon('feather')}页眉花饰</div></div>
             <div class="kv"><span class="k">分隔线样式</span><span class="v">
               <span class="tag tag-green" id="divider-tag">${dividerName}</span>
               <button class="btn btn-secondary btn-sm" data-act="toggle-divider" style="margin-left:8px">切换样式</button>
             </span></div>
             <p class="muted text-sm" style="margin:6px 0 0" data-help-note="页眉花饰">切换每页标题下的分隔线：紫藤花枝 / 铃兰花枝 / 直线。点一下立即生效，选择保存在本机浏览器。</p>
-          </div>
-        </div>
-        <p class="muted text-sm mt16" data-help-note="配置信息来源">本页全部信息来自网关真实接口（/health、/status、连续感状态、Eventide 设置、上下文注入设置、日志收集设置、QQBot设置、规划周期、密钥元数据）。密钥默认隐藏，点击某一项「显示」后才从服务端按项获取真实值；隐藏或离开本页即清除。</p>`;
-    } catch (error) {
-      if (!isCurrentMount()) return;
-      root.innerHTML = errorBlock(`配置状态读取失败：${esc(error.message)}`);
-    }
-    if (!isCurrentMount()) return;
-    // 规划周期的复古时间字段（卡片表面）
-    root.querySelectorAll('.retro-time[data-retro-for]').forEach((host) => {
-      createRetroTimeField(host, {
-        id: host.dataset.retroFor,
-        value: host.dataset.retroValue || '',
-        mode: host.dataset.retroMode || 'datetime',
-        align: host.dataset.retroAlign || 'left',
-      });
-    });
+          </div>`];
   },
 
   unmount() {

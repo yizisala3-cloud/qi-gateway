@@ -633,7 +633,7 @@ class PlanningIdentityPathTests(unittest.TestCase):
         task = self.db.rows["planning_task"][0]
         occ = self.db.rows["planning_occurrence"][0]
         self.assertEqual(occ["est_start"], datetime(2026, 9, 24, 8, tzinfo=BEIJING).isoformat())
-        with mock.patch.object(planning_tasks, "_generate_created_task_quietly") as generate:
+        with mock.patch.object(planning_tasks, "_generate_created_task_quietly", return_value=None) as generate:
             planning.update_task(task["id"], {"estimated_minutes": 90}, self.now)
         generate.assert_called_once()
         self.assertEqual(generate.call_args.args[0], task["id"])

@@ -1,14 +1,14 @@
 // pages/_memory_browser.js - shared library/requests browser with detail panel
-import { gw, query, update, count, esc } from '../api.js?v=20261021-qqbot-mount-r10';
+import { gw, query, queryPage, update, count, esc } from '../api.js?v=20261025-console-latency-r1';
 import {
   loading, empty, errorBlock, banner, tag, heatTag, impTag, pagerHtml,
   toast, modal, confirm, delegate, icon, fmtDate, createDetailPanel,
-} from '../ui.js?v=20261021-qqbot-mount-r10';
-import { openMemoryForm } from './_memory_form.js?v=20261021-qqbot-mount-r10';
-import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20261021-qqbot-mount-r10';
-import { createRecallHistoryView } from './_memory_recall.js?v=20261021-qqbot-mount-r10';
+} from '../ui.js?v=20261025-console-latency-r1';
+import { openMemoryForm } from './_memory_form.js?v=20261025-console-latency-r1';
+import { absorbImpactViews, absorbImpactSummary } from '../lib/absorb_display.js?v=20261025-console-latency-r1';
+import { createRecallHistoryView } from './_memory_recall.js?v=20261025-console-latency-r1';
 
-export const ASSET_VERSION = '20261021-qqbot-mount-r10';
+export const ASSET_VERSION = '20261025-console-latency-r1';
 
 const PAGE_SIZE = 20;
 const REQ_FETCH_LIMIT = 100;
@@ -21,6 +21,7 @@ const TIME_PRECISION_LABELS = {
   minute: '精确到分钟', hour: '精确到小时', day: '精确到日期', approximate: '大概时间', unknown: '时间未知',
 };
 const MEMORY_FIELDS = 'id,title,content,content_hash,tags,heat,importance,source,verified,is_active,last_recalled_at,recall_count,created_at,memory_key,supersedes_memory_id,superseded_by_memory_id,superseded_at,continuity_id,continuity_type,continuity_schema_version,continuity_data,source_type,thread_state,evidence_start_time,evidence_end_time,evidence_message_ids,source_time,memory_time,time_precision,evidence_time_precision,recall_scene,recall_tags';
+const MEMORY_CARD_FIELDS = 'id,title,content,tags,heat,importance,verified,is_active,created_at,memory_key,continuity_type,superseded_by_memory_id';
 const REQUEST_FIELDS = 'id,assistant_id,conversation_id,source_message_id,content,title,tags,importance,reason,status,source,memory_id,memory_key,update_mode,related_memory_id,related_request_id,continuity_id,continuity_type,continuity_schema_version,continuity_data,thread_state,confidence,evidence_message_ids,source_time,memory_time,time_precision,digest_run_id,dedupe_state,dedupe_reason,evidence_time_precision,recall_scene,recall_tags,producer_path,absorbed_fast_path_memory_ids,absorbed_fast_path_memory_snapshots,created_at,reviewed_at,reviewed_by,review_note';
 
 export function continuityTypeLabel(value) {
@@ -504,17 +505,11 @@ export function createMemoryBrowser({
       const eq = { is_active: state.libTab !== 'archived' };
       if (state.libTab === 'verified') eq.verified = 'verified';
       if (state.type) eq.continuity_type = state.type;
-      const [data, total] = await Promise.all([
-        query('memories', {
-          select: MEMORY_FIELDS,
-          order: { col: state.sort, asc: false },
-          limit: PAGE_SIZE,
-          offset: state.page * PAGE_SIZE,
-          eq,
-          search: state.search,
-        }),
-        count('memories', { eq, search: state.search }),
-      ]);
+      const { data, count: total } = await queryPage('memories', {
+        select: MEMORY_CARD_FIELDS, summary: true,
+        order: { col: state.sort, asc: false },
+        limit: PAGE_SIZE, offset: state.page * PAGE_SIZE, eq, search: state.search,
+      });
       if (!isCurrentList(task, list)) return;
       list.innerHTML = data.length ? data.map(renderMemoryCard).join('') : empty('没有符合条件的记忆');
       pager.innerHTML = pagerHtml(state.page, Math.max(1, Math.ceil(total / PAGE_SIZE)), total);
@@ -1078,14 +1073,18 @@ export function createMemoryBrowser({
     // 新增/编辑/归档返回 memory_id，类型修改返回 memory.id，撤销返回
     // restored_memory_id。
     if (disposed) return;
-    await loadCurrentList();
-    if (!isCurrentDetail(task) || state.view === 'recall') return;
+    const listRefresh = loadCurrentList();
+    if (!isCurrentDetail(task) || state.view === 'recall') {
+      await listRefresh;
+      return;
+    }
     const targetId = result
       && (result.memory_id || result.restored_memory_id || (result.memory && result.memory.id));
-    if (targetId) await showMemory(targetId);
+    if (targetId) await Promise.all([listRefresh, showMemory(targetId)]);
     else {
       invalidateDetail();
       panel.render({ title: '', html: '', actions: '' });
+      await listRefresh;
     }
   }
 

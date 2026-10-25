@@ -1,0 +1,43 @@
+{
+  "method": "Synthetic repository adapters; exact invocation counts, not production time",
+  "operations": [
+    {
+      "operation": "today",
+      "task_count_before_operation": 50,
+      "database_http_requests": 5,
+      "by_target": {
+        "app_settings:select": 1,
+        "planning_occurrence:select": 2,
+        "planning_recompute_state:select": 1,
+        "planning_task:select": 1
+      }
+    },
+    {
+      "operation": "occurrences",
+      "task_count_before_operation": 50,
+      "database_http_requests": 2,
+      "by_target": {
+        "planning_task:select": 1,
+        "planning_occurrence:select": 1
+      }
+    },
+    {
+      "operation": "create-idempotent",
+      "task_count_before_operation": 50,
+      "database_http_requests": 10,
+      "by_target": {
+        "planning_creation_identity": 1,
+        "planning_task:insert": 1,
+        "app_settings:select": 1,
+        "planning_task:select": 2,
+        "planning_occurrence:select": 3,
+        "planning_insert_round_occurrence": 1,
+        "planning_apply_recompute_batch": 1
+      }
+    }
+  ],
+  "occurrence_command": {
+    "database_http_requests": 1,
+    "source": "test_console_latency_commands_pgserver.py::test_finish_one_rpc_with_durable_replay_and_intent_conflict"
+  }
+}

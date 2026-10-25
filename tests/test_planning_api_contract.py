@@ -161,7 +161,7 @@ class PlanningApiContractTests(unittest.TestCase):
         headers = {**self.auth, "Idempotency-Key": "create-key-rec"}
         payload = {"content": "背单词", "task_type": "daily", "estimated_minutes": 30}
         with mock.patch.object(planning_runtime, "_now", lambda: NOW):
-            with mock.patch.object(planning_tasks, "_generate_created_task_quietly"):
+            with mock.patch.object(planning_tasks, "_generate_created_task_quietly", return_value=None):
                 first = self.http.post("/admin/api/planning/tasks", json=payload, headers=headers)
             self.assertEqual(first.status_code, 201)
             self.assertEqual(len(self.client.rows["planning_task"]), 1)

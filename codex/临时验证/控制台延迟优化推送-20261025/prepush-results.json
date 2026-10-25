@@ -1,0 +1,13 @@
+{
+  "baseline": "c885f3b7f6a11cbc99fdf16f990fb4ace77837f5",
+  "tested_candidate": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\codex\\临时验证\\控制台延迟优化推送-20261025\\candidate",
+  "passed": 2303,
+  "skipped": 1,
+  "subtests_passed": 1389,
+  "database_version": "20261025172414",
+  "reviewed_source_hashes_match": true,
+  "existing_work_preserved": true,
+  "conclusion": "READY TO MERGE",
+  "service_deployed": false,
+  "live_latency_verified": false
+}

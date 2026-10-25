@@ -87,6 +87,9 @@ class SqlClient:
         return SqlQuery(self, table)
 
     def rpc(self, name, params):
+        if name == 'planning_creation_identity':
+            from tests.support.planning_goal_sql import GoalSqlClient
+            return GoalSqlClient(self.conn).rpc(name, params)
         assert name == 'planning_update_once_task_guarded', name
         self.calls.append((name, params))
 
@@ -115,7 +118,7 @@ class TaskNoteFullChainPostgresTests(unittest.TestCase):
                       mock.patch.object(cfg, 'GATEWAY_TOKEN', 'notes-isolated-test'),
                       mock.patch('gateway.db.load_app_setting', return_value=None),
                       mock.patch.object(tasks, '_generate_due_quietly'),
-                      mock.patch.object(tasks, '_generate_created_task_quietly')):
+                      mock.patch.object(tasks, '_generate_created_task_quietly', return_value=None)):
             patch.start()
             self.addCleanup(patch.stop)
         self.http = TestClient(Starlette(routes=list(planning_api_routes)), raise_server_exceptions=False)

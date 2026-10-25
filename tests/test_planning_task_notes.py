@@ -119,7 +119,7 @@ class TaskNoteHttpTests(unittest.TestCase):
     def test_create_with_note_persists_and_returns_it(self):
         note = '创建时的长备注🙂' * 1000
         with mock.patch('gateway.db.load_app_setting', return_value=None), \
-                mock.patch.object(tasks, '_generate_created_task_quietly'):
+                mock.patch.object(tasks, '_generate_created_task_quietly', return_value=None):
             response = self.http.post('/admin/api/planning/tasks', headers=self.auth,
                                       json={'content': '新建待办', 'task_type': 'daily',
                                             'estimated_minutes': 20, 'note': note})

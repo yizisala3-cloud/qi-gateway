@@ -181,6 +181,8 @@ def _execute_list(
     limit: int,
     search: str,
     count_only: bool,
+    with_count: bool = False,
+    summary: bool = False,
 ) -> dict[str, Any]:
     client = db.get_client()
     if not client:
@@ -189,7 +191,8 @@ def _execute_list(
     if count_only:
         query = client.table(table).select("id", count="exact")
     else:
-        query = client.table(table).select(select)
+        query = (client.table(table).select(select, count="exact") if with_count
+                 else client.table(table).select(select))
 
     for key, value in eq.items():
         query = query.eq(key, value)
@@ -217,7 +220,10 @@ def _execute_list(
         .range(offset, offset + limit - 1)
         .execute()
     )
-    return {"data": response.data or [], "count": response.count}
+    rows = response.data or []
+    if summary and table == "memories":
+        rows = [{**row, "content": (row.get("content") or "")[:160]} for row in rows]
+    return {"data": rows, "count": response.count}
 
 
 def _execute_insert(table: str, row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -270,6 +276,8 @@ async def admin_collection(request: Request):
                 limit=limit,
                 search=search,
                 count_only=count_only,
+                with_count=params.get("with_count", "false").lower() == "true",
+                summary=params.get("summary", "false").lower() == "true",
             )
             return JSONResponse(result)
 

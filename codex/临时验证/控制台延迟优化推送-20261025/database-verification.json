@@ -1,0 +1,108 @@
+{
+  "project": "dlgunkklpjqletgahdtp",
+  "source_sha256": "4f05f9bd8abd4ac975ff2d162832d86b91c13d6cac3aa376e9b5439873759752",
+  "apply_result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"success\":true}"
+      }
+    ]
+  },
+  "verification": {
+    "table": {
+      "rls": true,
+      "columns": [
+        {
+          "name": "request_key",
+          "type": "uuid",
+          "not_null": true
+        },
+        {
+          "name": "intent",
+          "type": "jsonb",
+          "not_null": true
+        },
+        {
+          "name": "result",
+          "type": "jsonb",
+          "not_null": true
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true
+        }
+      ],
+      "indexes": [
+        "CREATE UNIQUE INDEX planning_occurrence_command_request_pkey ON public.planning_occurrence_command_request USING btree (request_key)",
+        "CREATE INDEX planning_occurrence_command_request_task_idx ON public.planning_occurrence_command_request USING btree (((result #>> '{task,id}'::text[])))"
+      ],
+      "row_count": 0,
+      "anon_select": false,
+      "service_all": true,
+      "authenticated_select": false
+    },
+    "functions": [
+      {
+        "args": [
+          "p_request_key"
+        ],
+        "body_md5": "75a61a06a17c0c9c56d86e4c73bb8cb1",
+        "settings": [
+          "search_path=pg_catalog, public"
+        ],
+        "signature": "planning_creation_identity(text)",
+        "anon_execute": false,
+        "service_execute": true,
+        "security_definer": false,
+        "authenticated_execute": false
+      },
+      {
+        "args": null,
+        "body_md5": "9a9ae39fa71792c36b6ba5d3d1308d8d",
+        "settings": [
+          "search_path=pg_catalog, public"
+        ],
+        "signature": "planning_erase_task_command_receipts()",
+        "anon_execute": false,
+        "service_execute": true,
+        "security_definer": false,
+        "authenticated_execute": false
+      },
+      {
+        "args": [
+          "p_occurrence_id",
+          "p_status",
+          "p_request_key",
+          "p_partial_note",
+          "p_logged_seconds",
+          "p_now"
+        ],
+        "body_md5": "7708a3f304dc4fbed7b1bb59e1b3c671",
+        "settings": [
+          "search_path=pg_catalog, public"
+        ],
+        "signature": "planning_occurrence_command(bigint,text,uuid,text,bigint,timestamp with time zone)",
+        "anon_execute": false,
+        "service_execute": true,
+        "security_definer": false,
+        "authenticated_execute": false
+      }
+    ],
+    "migration": {
+      "name": "planning_occurrence_commands",
+      "version": "20261025172414"
+    },
+    "checked_at": "2026-10-25T17:25:08.022881+00:00",
+    "deletion_trigger": {
+      "enabled": "O",
+      "definition": "CREATE TRIGGER planning_erase_task_command_receipts AFTER DELETE ON public.planning_task FOR EACH ROW EXECUTE FUNCTION planning_erase_task_command_receipts()"
+    }
+  },
+  "expected_body_md5": {
+    "planning_erase_task_command_receipts": "9a9ae39fa71792c36b6ba5d3d1308d8d",
+    "planning_occurrence_command": "7708a3f304dc4fbed7b1bb59e1b3c671",
+    "planning_creation_identity": "75a61a06a17c0c9c56d86e4c73bb8cb1"
+  }
+}

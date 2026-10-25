@@ -1,30 +1,30 @@
 // pages/planning.js - 规划管理：四类型待办 + 时间排程 + 排列模式 + 浏览器闹钟/计时器
 // 四区域以页签切换（复用记忆管理 .tabs/.tab），「当前待办」内再以 .subtabs 三分区切换；
 // 数据按需加载：今日看板保留 30 秒提醒轮询，首次/失效切入时刷新可见列表。
-import { gw } from '../api.js?v=20261021-qqbot-mount-r10';
+import { gw } from '../api.js?v=20261025-console-latency-r1';
 import {
   loading, empty, errorBlock, tag, toast, modal, confirm, delegate, icon, esc,
   createDetailPanel,
-} from '../ui.js?v=20261021-qqbot-mount-r10';
-import { createRetroTimeField } from '../lib/retro_time.js?v=20261021-qqbot-mount-r10';
-import { createRetroSelectField } from '../lib/retro_select.js?v=20261021-qqbot-mount-r10';
+} from '../ui.js?v=20261025-console-latency-r1';
+import { createRetroTimeField } from '../lib/retro_time.js?v=20261025-console-latency-r1';
+import { createRetroSelectField } from '../lib/retro_select.js?v=20261025-console-latency-r1';
 import {
   TASK_TYPE_LABELS, TASK_TYPES, STATUS_META, CLOSED_STATUSES,
   fmtClock, fmtRange, fmtDue, taskTypeSummary, miniEmpty, formatIntervalMinutes,
   itemMeta, isClosedOcc, formatLoggedDuration, durationText, durationDetailRows,
   itemBadges, itemHtml,
-} from '../lib/planning_display.js?v=20261021-qqbot-mount-r10';
-import { openTaskForm } from '../lib/planning_task_form.js?v=20261021-qqbot-mount-r10';
-import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261021-qqbot-mount-r10';
-import { createPlanningSort } from '../lib/planning_sort.js?v=20261021-qqbot-mount-r10';
-import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261021-qqbot-mount-r10';
-import { createPlanningMemo } from '../lib/planning_memo.js?v=20261021-qqbot-mount-r10';
-import { createPlanningReads } from '../lib/planning_reads.js?v=20261021-qqbot-mount-r10';
-import { createPlanningActions } from '../lib/planning_actions.js?v=20261021-qqbot-mount-r10';
-import { taskNotePreview, openTaskNote, editTaskNoteInline } from '../lib/planning_notes.js?v=20261021-qqbot-mount-r10';
-import { mergeOrderReceipt, mergeOccurrencesFromBoard } from '../lib/planning_sync.js?v=20261021-qqbot-mount-r10';
-import { createPlanningGoals } from '../lib/planning_goals.js?v=20261021-qqbot-mount-r10';
-import { createPlanningDetailEdit } from '../lib/planning_detail_edit.js?v=20261021-qqbot-mount-r10';
+} from '../lib/planning_display.js?v=20261025-console-latency-r1';
+import { openTaskForm } from '../lib/planning_task_form.js?v=20261025-console-latency-r1';
+import { createPlanningDialogs } from '../lib/planning_dialogs.js?v=20261025-console-latency-r1';
+import { createPlanningSort } from '../lib/planning_sort.js?v=20261025-console-latency-r1';
+import { createPlanningReminder } from '../lib/planning_reminder.js?v=20261025-console-latency-r1';
+import { createPlanningReads } from '../lib/planning_reads.js?v=20261025-console-latency-r1';
+import { createPlanningActions } from '../lib/planning_actions.js?v=20261025-console-latency-r1';
+import { taskNotePreview, openTaskNote, editTaskNoteInline } from '../lib/planning_notes.js?v=20261025-console-latency-r1';
+import { mergeOrderReceipt, mergeOccurrencesFromBoard, mergeOccurrenceReceipt, acceptsOccurrenceReceipt } from '../lib/planning_sync.js?v=20261025-console-latency-r1';
+import { createPlanningDetailEdit } from '../lib/planning_detail_edit.js?v=20261025-console-latency-r1';
+
+import { sendOccurrenceCommand } from '../lib/planning_commands.js?v=20261025-console-latency-r1';
 
 const detailHeading = (label, name) => `<h4 class="plan-detail-section-title">${icon(name)}<span>${esc(label)}</span><span class="plan-detail-rule" aria-hidden="true"></span></h4>`;
 const detailRange = (start, end) => start && !end ? `${fmtClock(start)} ～` : fmtRange(start, end);
@@ -82,8 +82,9 @@ export default {
     this.readErrors = new Map();
     this.savedRefresh = null;
     this.loadedTabs = new Set();
+    this.tabLoads = new Map();
     const mountedReads = this.reads;
-    this.dialogs ||= createPlanningDialogs({
+    this.dialogs = createPlanningDialogs({
       findOccurrence: (id) => this.findOccurrence(id),
       getOccurrences: () => this.occurrences,
       getTasks: () => this.tasks,
@@ -92,7 +93,8 @@ export default {
       loadToday: () => this.loadToday({ fresh: true }),
       loadTasks: () => this.loadTasks({ fresh: true }),
       loadOccurrences: () => this.loadOccurrences({ fresh: true }),
-      refreshVisible: () => this.refreshVisible(),
+      refreshVisible: () => this.reconcileCommitted(),
+      onReceipt: (result) => { if (this.reads === mountedReads) this.applyCommittedReceipt(result); },
     });
     this.sort = createPlanningSort({
       getRoot: () => this.reads === mountedReads ? this.root : null,
@@ -110,22 +112,6 @@ export default {
         board: structuredClone(this.board) }),
       onSaved: (ids, result, receipt) => this.orderSaved(ids, result, receipt),
     });
-    this.memo = createPlanningMemo({
-      beginReader: (id) => {
-        this.clearSelection();
-        this.selected = { kind: 'memo', id };
-        return { selected: this.selected, reads: this.reads, tab: this.activeTab };
-      },
-      isReaderCurrent: (owner) => this.selectionIsCurrent(owner) && this.activeTab === 'memo',
-      showReader: (owner, content) => {
-        if (!this.selectionIsCurrent(owner)) return null;
-        this.detail.render(content);
-        return { root: this.detail.el, close: () => {
-          if (this.selectionIsCurrent(owner)) this.clearSelection();
-        } };
-      },
-    });
-    this.memo.prefetchTags();
     this.activeTab = 'today';
     this.activeSection = 'progress';
     root.innerHTML = `
@@ -255,10 +241,10 @@ export default {
     });
     this.detailEdit ||= createPlanningDetailEdit({
       getDetail: () => this.detail,
-      captureOwner: () => ({ selected: this.selected, reads: this.reads, tab: this.activeTab }),
+      captureOwner: () => ({ selected: this.selected, reads: this.reads, tab: this.activeTab, revision: this.orderRevision }),
       isCurrent: owner => this.selectionIsCurrent(owner),
       initRetroFields: scope => this.initRetroFields(scope),
-      onSaved: () => this.taskSaved(true),
+      onSaved: (result, owner) => this.taskSaved(true, result, owner),
       onCancel: () => {
         const row = this.selected?.kind === 'occ'
           ? this.findOccurrence(this.selected.id) || this.occurrences.find(r => r.id === this.selected.id)
@@ -266,11 +252,6 @@ export default {
         if (row) this.selected.kind === 'occ' ? this.showOccurrenceDetail(row) : this.showTaskDetail(row);
       },
     });
-    this.goals ||= createPlanningGoals({ getDetail: () => this.detail,
-      clearSelection: () => this.clearSelection(),
-      openTaskForm: (task, options) => this.openTaskForm(task, options),
-      onTaskChanged: () => this.taskSaved(false) });
-    this.goals.mount(root.querySelector('[data-goals-root]'), actionRoot);
     this.progressList = root.querySelector('#planning-progress');
     actionRoot.addEventListener('click', (e) => {
       if (this.reads === mountedReads) this.handleItemClick(e);
@@ -290,7 +271,7 @@ export default {
       'cancel-reorder': () => this.cancelReorder(),
       'clear-filters': () => this.clearFilters(),
       'retry-lists': () => this.retryLists(),
-      'memo-new': () => this.memo?.openEditor(null),
+      'retry-tab': el => this.ensureTabModule(el.dataset.tab),
       stop: () => this.reminder.stopRinging(),
       'plan-tab': (el) => this.switchTab(el.dataset.tab),
       'plan-subtab': (el) => this.switchSection(el.dataset.section),
@@ -347,18 +328,74 @@ export default {
     this.renderReadFeedback();
     this.refreshVisible({ onlyInvalid: true });
     this.syncToolbarForTab(tab);
-    if (tab === 'memo') {
-      if (!this.loadedTabs.has('memo')) {
-        // 备忘录数据按需加载；编辑器中的未保存内容由模块自身生命周期承接
-        this.loadedTabs.add('memo');
-        this.memo.mount(this.root.querySelector('[data-memo-root]'));
-      } else {
-        // 已挂载过的备忘录重返（BUG-08）：首次读取失败不能被当成已加载，
-        // 重返必须重读（含读取其他设备的更新），否则失败态一直挂着
-        this.memo?.show();
-      }
+    if (tab === 'memo' || tab === 'goals') void this.ensureTabModule(tab);
+  },
+
+  async ensureTabModule(tab) {
+    const reads = this.reads;
+    const root = this.root;
+    if (!reads || !root) return null;
+    this.tabLoads ||= new Map();
+    const key = `${tab}`;
+    let pending = this.tabLoads.get(key);
+    if (!pending) {
+      pending = (async () => {
+        const module = tab === 'memo'
+          ? await import('../lib/planning_memo.js?v=20261025-console-latency-r1')
+          : await import('../lib/planning_goals.js?v=20261025-console-latency-r1');
+        if (this.reads !== reads || this.root !== root) return null;
+        if (tab === 'memo') {
+          this.memo = module.createPlanningMemo({
+            beginReader: (id) => {
+              this.clearSelection();
+              this.selected = { kind: 'memo', id };
+              return { selected: this.selected, reads: this.reads, tab: this.activeTab };
+            },
+            isReaderCurrent: owner => this.selectionIsCurrent(owner) && this.activeTab === 'memo',
+            showReader: (owner, content) => {
+              if (!this.selectionIsCurrent(owner)) return null;
+              this.detail.render(content);
+              return { root: this.detail.el, close: () => {
+                if (this.selectionIsCurrent(owner)) this.clearSelection();
+              } };
+            },
+          });
+          this.memo.prefetchTags();
+        } else {
+          this.goals = module.createPlanningGoals({
+            getDetail: () => this.detail,
+            clearSelection: () => this.clearSelection(),
+            openTaskForm: (task, options) => this.openTaskForm(task, options),
+            onTaskChanged: () => this.taskSaved(false),
+          });
+          this.goals.mount(root.querySelector('[data-goals-root]'), root.querySelector('#planning-layout'));
+        }
+        return this[tab];
+      })();
+      this.tabLoads.set(key, pending);
     }
-    if (tab === 'goals') this.goals?.show();
+    const host = root.querySelector(tab === 'memo' ? '[data-memo-root]' : '[data-goals-root]');
+    if (!this.loadedTabs.has(tab)) host.innerHTML = loading();
+    root.querySelectorAll(`[data-toolbar-tab="${tab}"]`).forEach(button => { button.disabled = true; });
+    try {
+      const instance = await pending;
+      if (!instance || this.reads !== reads || this.activeTab !== tab) return null;
+      if (!this.loadedTabs.has(tab)) {
+        this.loadedTabs.add(tab);
+        if (tab === 'memo') instance.mount(host);
+      } else if (tab === 'memo') instance.show();
+      if (tab === 'goals') instance.show();
+      root.querySelectorAll(`[data-toolbar-tab="${tab}"]`).forEach(button => { button.disabled = false; });
+      return instance;
+    } catch (error) {
+      if (this.reads !== reads) return null;
+      this.tabLoads.delete(key);
+      this[tab]?.dispose();
+      this[tab] = null;
+      this.loadedTabs.delete(tab);
+      host.innerHTML = errorBlock(`模块读取失败：${esc(error.message)} <button class="btn btn-secondary btn-sm" data-act="retry-tab" data-tab="${tab}">重试</button>`);
+      return null;
+    }
   },
 
   /** 工具栏按钮按页签显隐（2026-10-03 确认）：「新建待办」只在当前待办；
@@ -420,6 +457,8 @@ export default {
     this.memo?.dispose();
     this.goals?.dispose();
     this.memo = null;
+    this.goals = null;
+    this.tabLoads = null;
     this.loadedTabs = null;
     this.reminder.dispose();
     this.detail = null;
@@ -517,19 +556,55 @@ export default {
     this.reads?.invalidate(names);
   },
 
-  async taskSaved(editing) {
-    this.planningChanged();
-    // 保存前发出的慢轮询自此失效；隐藏列表仅标记，下一次切入再读取。
-    // 表单关闭/路由重挂载不会撤销业务写入；成功时刷新当前挂载的页面。
-    const mountedReads = this.reads;
-    if (!mountedReads || !this.root) return;
-    mountedReads.invalidate();
+  applyCommittedReceipt(result) {
+    if (!result || !this.root) return;
+    try {
+      // Occurrences also carry task_type; their id belongs to a different table.
+      const task = result.task || (result.task_type && typeof result.is_active === 'boolean'
+        && !Object.hasOwn(result, 'task_id') ? result : null);
+      if (task?.id) this.tasks = this.tasks.map(row => row.id === task.id
+        && (!row.updated_at || !task.updated_at || Date.parse(row.updated_at) <= Date.parse(task.updated_at)) ? task : row);
+      const rows = result.occurrences || (result.status && result.task_id ? [result] : []);
+      for (const row of rows) {
+        this.board = mergeOccurrenceReceipt(this.board, row, { allowInsert: !!task?.is_active });
+        this.occurrences = this.occurrences.map(before => before.id === row.id
+          && acceptsOccurrenceReceipt(before, row) ? row : before);
+      }
+      if (this.activeTab === 'today' && this.board) this.renderBoard();
+      if (this.activeTab === 'all') { this.renderTasks(); this.renderOccurrences(); }
+      if (this.selected?.kind === 'occ' && !this.detailEdit?.isActive('occ', this.selected.id)) {
+        const row = this.findOccurrence(this.selected.id) || this.occurrences.find(item => item.id === this.selected.id);
+        if (row) this.showOccurrenceDetail(row, { preserveInputs: true });
+      }
+    } catch (error) {
+      console.error({ location: 'planning.applyCommittedReceipt', stack: error.stack,
+        taskId: result.task?.id || result.task_id || result.id });
+      toast('操作已保存，界面更新失败，正在重新读取列表', 'warn');
+    }
+  },
+
+  reconcileCommitted(message = '操作已保存，列表更新失败', { onlyInvalid = false } = {}) {
+    const reads = this.reads;
+    if (!reads || !this.root) return;
     const names = this.visibleLists();
-    const ok = await this.refreshVisible();
-    if (this.reads !== mountedReads || !this.root || ok) return;
-    this.savedRefresh = { names, message: editing ? '待办已保存，列表更新失败' : '待办已创建，列表更新失败' };
-    this.renderReadFeedback();
-    toast(`${this.savedRefresh.message}，请刷新重试`, 'warn');
+    this.committedRefresh = this.refreshVisible({ onlyInvalid }).then(ok => {
+      if (ok || this.reads !== reads || !this.root) return;
+      this.savedRefresh = { names, message };
+      this.renderReadFeedback();
+      toast(`${message}，请刷新重试`, 'warn');
+    }).catch(error => {
+      if (this.reads !== reads || !this.root) return;
+      console.error({ location: 'planning.reconcileCommitted', stack: error.stack, names });
+      this.savedRefresh = { names, message };
+      this.renderReadFeedback();
+    });
+  },
+
+  async taskSaved(editing, result, owner = null) {
+    const canApply = !owner || owner.reads === this.reads && owner.revision === this.orderRevision;
+    this.planningChanged();
+    if (canApply) this.applyCommittedReceipt(result);
+    this.reconcileCommitted(editing ? '待办已保存，列表更新失败' : '待办已创建，列表更新失败');
   },
 
   renderReadFeedback() {
@@ -780,13 +855,13 @@ export default {
     const factsHost = this.detail.body.querySelector(`[data-occ-readonly="${occ.id}"]`);
     if (preserveInputs && factsHost) {
       // Update facts in place. Input identity, focus, selection and drawer state survive.
-      const update = (el, html) => { if (el.innerHTML !== html) el.innerHTML = html; };
+      const update = (el, html) => { if (el && el.innerHTML !== html) el.innerHTML = html; };
       update(factsHost, facts);
       if (!this.detail.body.querySelector('[data-note-editor]')) {
         update(this.detail.body.querySelector('[data-occ-state]'), state);
       }
-      update(this.detail.el.querySelector('.detail-title'), title);
-      update(this.detail.el.querySelector('.detail-badges'), badges);
+      update(this.detail.el?.querySelector('.detail-title'), title);
+      update(this.detail.el?.querySelector('.detail-badges'), badges);
       update(this.detail.foot, actions);
       for (const [selector, value] of [
         ['[data-alarm-start]', !!occ.alarm_start], ['[data-alarm-end]', !!occ.alarm_end],
@@ -1037,7 +1112,8 @@ export default {
         toast(`已重新计算，更新了 ${result.updated} 项待办时间`);
       }
       if (!this.root) return;
-      await this.refreshVisible({ onlyInvalid: true });
+      if (this.reads === mountedReads) this.applyCommittedReceipt(result);
+      this.reconcileCommitted('时间已重新计算，列表更新失败', { onlyInvalid: true });
     } catch (error) {
       toast(`重算失败：${error.message}`, 'err');
     }
@@ -1085,12 +1161,13 @@ export default {
     }
     const reads = this.reads;
     const post = async (path, body) => {
-      const result = await gw(`/admin/api/planning/occurrences/${id}${path}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body || {}),
-      });
+      const result = path === '/start' || path === '/finish'
+        ? await sendOccurrenceCommand(id, path === '/start' ? 'in_progress' : 'completed', body || {})
+        : await gw(`/admin/api/planning/occurrences/${id}${path}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
+        });
       this.planningChanged();
+      if (this.reads === reads && this.root) this.applyCommittedReceipt(result);
       return result;
     };
     try {
@@ -1116,9 +1193,9 @@ export default {
       else if (act === 'split') return this.askSplit(id);
       else if (act === 'spawn-remaining') return this.askRemaining(id);
       toast('已更新');
-      if (!this.root || this.reads !== reads) return;
-      reads.invalidate();
-      await this.refreshVisible();
+      if (!this.root) return;
+      this.reads?.invalidate();
+      this.reconcileCommitted();
     } catch (error) {
       toast(`操作失败：${error.message}`, 'err');
     }
@@ -1134,6 +1211,7 @@ export default {
     }
     if (act === 'note') return this.openNoteForSelection(id);
     const owner = { selected: this.selected, reads: this.reads, tab: this.activeTab };
+    let receipt;
     try {
       if (act === 'early') {
         const task = this.tasks.find((t) => t.id === id);
@@ -1171,7 +1249,7 @@ export default {
           ? '待办已删除：从未有过完成记录，相关业务记录已清除'
           : '待办已删除：完成历史已保留，可继续在历史中查看');
       } else if (act === 'enable') {
-        await gw(`/admin/api/planning/tasks/${id}`, {
+        receipt = await gw(`/admin/api/planning/tasks/${id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ is_active: true }),
@@ -1187,7 +1265,7 @@ export default {
         ))) return;
         if (el) el.disabled = true;  // in-flight guard：请求期间防连续点击重复 PATCH
         try {
-          await gw(`/admin/api/planning/tasks/${id}`, {
+          receipt = await gw(`/admin/api/planning/tasks/${id}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ refresh_enabled: resuming }),
@@ -1198,9 +1276,11 @@ export default {
         }
       }
       this.planningChanged();
-      if (this.reads !== owner.reads || !this.root) return;
+      if (!this.root) return;
+      if (this.reads !== owner.reads) { this.reconcileCommitted(); return; }
       this.reads?.invalidate();
-      await this.refreshVisible();
+      this.applyCommittedReceipt(receipt);
+      this.reconcileCommitted();
       if (act === 'pause-refresh' || act === 'resume-refresh') {
         // 按钮状态只来自服务端持久化数据，刷新页面后同样正确（需求 24H）
         const fresh = this.tasks.find((t) => t.id === id);
@@ -1283,10 +1363,11 @@ export default {
       toast(this.taskForm.editing ? '待办正在保存，请等待完成' : '待办正在创建，请等待完成', 'warn');
       return;
     }
+    const owner = { reads: this.reads, revision: this.orderRevision };
     this.taskForm = openTaskForm(task, {
       occurrences: this.occurrences,
       initRetroFields: (scope, options) => this.initRetroFields(scope, options),
-      onSaved: () => this.taskSaved(!!task?.id),
+      onSaved: (result) => this.taskSaved(!!task?.id, result, owner),
       ...options,
     });
     return this.taskForm;
@@ -1318,7 +1399,7 @@ export default {
         }
         return act.startsWith('occ-') ? this.occurrenceAction(act.slice(4), id) : this.taskAction(act.slice(5), id, el);
       };
-      const labels = { 'occ-start': '正在开始…', 'occ-park': '正在更新排程…',
+      const labels = { 'occ-finish': '正在准备…', 'occ-complete': '正在准备…', 'occ-start': '正在开始…', 'occ-park': '正在更新排程…',
         'task-early': '正在记录完成…', 'task-pause-refresh': '正在暂停…',
         'task-resume-refresh': '正在恢复…', 'task-enable': '正在启用…' };
       try {

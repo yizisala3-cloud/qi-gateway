@@ -16,7 +16,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from . import planning, planning_goals, planning_detail_edit
+from . import planning, planning_goals, planning_detail_edit, planning_commands
 from .config import cfg
 
 log = logging.getLogger("gateway.planning_api")
@@ -197,6 +197,11 @@ async def occurrence_item(request: Request) -> JSONResponse:
     return await _dispatch_json(request, planning.patch_occurrence, occurrence_id)
 
 
+async def occurrence_command(request: Request):
+    return await _dispatch_json(request, planning_commands.occurrence_command,
+                                request.path_params["occurrence_id"])
+
+
 async def occurrence_status(request: Request) -> JSONResponse:
     return await _dispatch_json(
         request, planning.set_occurrence_status, request.path_params["occurrence_id"],
@@ -288,6 +293,7 @@ planning_api_routes = [
     Route("/admin/api/planning/tasks/{task_id:int}/complete-early", task_complete_early, methods=["POST"]),
     Route("/admin/api/planning/occurrences", occurrences_collection, methods=["GET"]),
     Route("/admin/api/planning/occurrences/{occurrence_id:int}", occurrence_item, methods=["GET", "PATCH"]),
+    Route("/admin/api/planning/occurrences/{occurrence_id:int}/command", occurrence_command, methods=["POST"]),
     Route("/admin/api/planning/occurrences/{occurrence_id:int}/status", occurrence_status, methods=["POST"]),
     Route("/admin/api/planning/occurrences/{occurrence_id:int}/reschedule-timeout", occurrence_reschedule_timeout, methods=["POST"]),
     Route("/admin/api/planning/occurrences/{occurrence_id:int}/start", occurrence_start, methods=["POST"]),

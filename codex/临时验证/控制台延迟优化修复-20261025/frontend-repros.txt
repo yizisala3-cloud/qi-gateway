@@ -1,0 +1,10 @@
+✔ an occurrence receipt must not replace an unrelated task with the same numeric id (0.9076ms)
+✔ a command receipt must preserve a timer draft being edited while the request is pending (3.6522ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 2
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 374.0385

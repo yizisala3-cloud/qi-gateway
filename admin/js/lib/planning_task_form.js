@@ -1,8 +1,8 @@
 // Task creation/edit form. Local submitting/committed state belongs to one opened form.
-import { gw } from '../api.js?v=20261021-qqbot-mount-r10';
-import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261021-qqbot-mount-r10';
-import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261021-qqbot-mount-r10';
-import { noteInputHtml, bindNoteInput } from './planning_notes.js?v=20261021-qqbot-mount-r10';
+import { gw } from '../api.js?v=20261025-console-latency-r1';
+import { modal, toast, errorBlock, esc, icon, confirm } from '../ui.js?v=20261025-console-latency-r1';
+import { TASK_TYPES, TASK_TYPE_LABELS, WEEKDAY_NAMES, formatIntervalMinutes } from './planning_display.js?v=20261025-console-latency-r1';
+import { noteInputHtml, bindNoteInput } from './planning_notes.js?v=20261025-console-latency-r1';
 
 export function openTaskForm(task, { occurrences, initRetroFields, onSaved,
   allowedTypes = TASK_TYPES, createTask = null, onCreated = null }) {
@@ -431,7 +431,7 @@ export function openTaskForm(task, { occurrences, initRetroFields, onSaved,
         toast('待办已创建，关联未完成，请在目标页面重试关联', 'warn');
       }
     }
-    try { await onSaved(); } catch (error) {
+    try { await onSaved(createdTask); } catch (error) {
       globalThis.console?.error({ location: 'planning_task_form.refreshAfterSave',
         stack: error.stack, error, editing, taskId: task?.id || createdTask?.id });
       toast(editing ? '待办已保存，列表更新失败，请刷新重试' : '待办已创建，列表更新失败，请刷新重试', 'warn');

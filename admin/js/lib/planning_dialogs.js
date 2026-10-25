@@ -1,8 +1,10 @@
 // Instance dialogs: form-local inputs and timeout retry identity stay in their closures.
-import { gw } from '../api.js?v=20261021-qqbot-mount-r10';
-import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261021-qqbot-mount-r10';
-import { createRetroTimeField } from './retro_time.js?v=20261021-qqbot-mount-r10';
-import { createPlanningActions } from './planning_actions.js?v=20261021-qqbot-mount-r10';
+import { gw } from '../api.js?v=20261025-console-latency-r1';
+import { modal, toast, errorBlock, esc, icon } from '../ui.js?v=20261025-console-latency-r1';
+import { createRetroTimeField } from './retro_time.js?v=20261025-console-latency-r1';
+import { createPlanningActions } from './planning_actions.js?v=20261025-console-latency-r1';
+
+import { sendOccurrenceCommand, pendingOccurrenceCommand } from './planning_commands.js?v=20261025-console-latency-r1';
 
 function initDialogTimes(root) {
   root.querySelectorAll('.retro-time[data-retro-for]').forEach(host => {
@@ -40,12 +42,16 @@ function bindTimeEnter(root) {
 
 export function createPlanningDialogs({
   findOccurrence, getOccurrences, getTasks, openTaskForm,
-  loadToday, loadTasks, loadOccurrences, onChanged = () => {}, refreshVisible = null,
+  loadToday, loadTasks, loadOccurrences, onChanged = () => {}, refreshVisible = null, onReceipt = () => {},
 }) {
   const feedback = createPlanningActions();
   const bindSave = (root, operation) => {
     const button = root.querySelector('[data-ok]');
-    button.onclick = () => feedback.run(root, { button, label: '正在保存…' }, operation);
+    button.onclick = async () => {
+      const result = await feedback.run(root, { button, label: '正在保存…' }, operation);
+      if (button.dataset.confirmation && button.isConnected) button.textContent = button.dataset.confirmation;
+      return result;
+    };
   };
   const refreshAfterWrite = async (includeTasks = false) => {
     try {
@@ -59,12 +65,13 @@ export function createPlanningDialogs({
   };
   return {
     askCompleteDuration(id, post) {
+      const pending = pendingOccurrenceCommand(id, 'completed');
       const { root, close } = modal({
         title: '完成待办',
         body: `
           <div class="field">
             <label>实际耗时（可留空）</label>
-            <input type="text" data-actual-duration placeholder="如 45、1h30m、1h1m1s">
+            <input type="text" data-actual-duration ${pending ? 'disabled' : ''} value="${esc(pending?.actual_logged_duration || '')}" placeholder="如 45、1h30m、1h1m1s">
             <p class="muted text-sm" style="margin:4px 0 0" data-help-note="耗时填写">无后缀按分钟计，可组合时/分/秒；留空则不记录手填耗时。</p>
           </div>`,
         footer: `<button class="btn btn-secondary" data-cancel>取消</button>
@@ -83,6 +90,12 @@ export function createPlanningDialogs({
           toast('已完成');
           await refreshAfterWrite();
         } catch (error) {
+          if (error.resultUnknown) {
+            const input = root.querySelector('[data-actual-duration]');
+            input.value = text;
+            input.disabled = true;
+            submit.dataset.confirmation = '核实完成结果';
+          }
           submit.disabled = false;
           toast(`操作失败：${error.message}`, 'err');
         }
@@ -90,10 +103,11 @@ export function createPlanningDialogs({
     },
 
     askPartial(id) {
+      const pending = pendingOccurrenceCommand(id, 'partial');
       const { root, close } = modal({
         title: '部分完成',
         body: `<div class="field"><label>完成了哪些部分（会保存为说明）</label>
-               <textarea id="planning-partial-note" rows="3" placeholder="例如：背完了前 20 页"></textarea></div>
+               <textarea id="planning-partial-note" rows="3" ${pending ? 'disabled' : ''} placeholder="例如：背完了前 20 页">${esc(pending?.partial_note || '')}</textarea></div>
                <div class="field muted text-sm" data-help-note="部分完成">记录后待办保持开放，之后可点「已全部完成」收口。</div>`,
         footer: `<button class="btn btn-secondary" data-cancel>取消</button>
                  <button class="btn btn-primary" data-ok>保存</button>`,
@@ -103,16 +117,19 @@ export function createPlanningDialogs({
         const note = root.querySelector('#planning-partial-note').value.trim();
         if (!note) { toast('请填写完成说明', 'err'); return; }
         try {
-          await gw(`/admin/api/planning/occurrences/${id}/status`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ status: 'partial', partial_note: note }),
-          });
+          const result = await sendOccurrenceCommand(id, 'partial', { partial_note: note });
           onChanged();
+          onReceipt(result);
           close();
           toast('已记录部分完成；待办保持开放，可继续处理');
           await refreshAfterWrite();
         } catch (error) {
+          if (error.resultUnknown) {
+            const input = root.querySelector('#planning-partial-note');
+            input.value = note;
+            input.disabled = true;
+            root.querySelector('[data-ok]').dataset.confirmation = '核实保存结果';
+          }
           toast(`操作失败：${error.message}`, 'err');
         }
       });

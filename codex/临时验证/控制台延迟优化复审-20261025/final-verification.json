@@ -1,0 +1,14 @@
+{
+  "source_and_original_probes_unchanged": true,
+  "regression_exit_code": 0,
+  "regression_summary": [
+    "2303 passed, 1 skipped, 1 warning, 1389 subtests passed in 175.98s (0:02:55)"
+  ],
+  "diff_check_exit_code": 0,
+  "new_findings": 0,
+  "original_findings_verified_fixed": [
+    "CL-01",
+    "CL-02",
+    "CL-03"
+  ]
+}

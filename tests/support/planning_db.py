@@ -241,6 +241,12 @@ class CoreClient:
         return self._counters[table]
 
     def rpc(self, fn, params=None):
+        if fn == 'planning_creation_identity':
+            data = {
+                'task': next((dict(row) for row in self.rows['planning_task'] if row.get('creation_request_key') == params['p_request_key']), None),
+                'tombstone': next((dict(row) for row in self.rows['planning_creation_request'] if row.get('request_key') == params['p_request_key']), None),
+            }
+            return SimpleNamespace(execute=lambda: SimpleNamespace(data=data))
         if fn == 'planning_save_order':
             data = emulate_planning_save_order(self, dict(params or {}))
             return SimpleNamespace(execute=lambda: SimpleNamespace(data=data))
@@ -551,4 +557,10 @@ class IdentityDatabase:
         return IdentityQuery(self, name)
 
     def rpc(self, fn, params=None):
+        if fn == 'planning_creation_identity':
+            data = {
+                'task': next((dict(row) for row in self.rows['planning_task'] if row.get('creation_request_key') == params['p_request_key']), None),
+                'tombstone': next((dict(row) for row in self.rows['planning_creation_request'] if row.get('request_key') == params['p_request_key']), None),
+            }
+            return SimpleNamespace(execute=lambda: SimpleNamespace(data=data))
         return IdentityRpcCall(self, fn, params)
