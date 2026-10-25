@@ -12,8 +12,16 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from pathlib import Path
+from uuid import uuid4
+
+from .qqbot_proactive import initial_state, validate_state, complete
 
 log = logging.getLogger('gateway.qqbot.store')
+
+
+class EvaluationLeaseLost(RuntimeError):
+    """An evaluation result cannot be committed until runtime authority returns."""
+
 
 class QQStore:
     def __init__(self, path, scope):
@@ -53,6 +61,15 @@ class QQStore:
             old = self.conn.execute("SELECT value FROM meta WHERE key='scope'").fetchone()
             mismatch = bool(old and old[0] != scope)
             if not mismatch:
+                namespace = self.conn.execute("SELECT value FROM meta WHERE key='export_namespace'").fetchone()
+                if namespace is None:
+                    # A pre-existing scope belongs to a legacy ledger: its remote
+                    # receipts must retain their original keys, even when empty.
+                    value = '' if old else uuid4().hex
+                    self.conn.execute("INSERT INTO meta VALUES('export_namespace',?)", (value,))
+                else:
+                    value = namespace[0]
+                self.export_namespace = value
                 self.conn.execute("INSERT OR IGNORE INTO meta VALUES('scope',?)", (scope,))
                 columns = {r['name'] for r in self.conn.execute('PRAGMA table_info(inbox)')}
                 if 'claim_owner' not in columns:
@@ -74,6 +91,10 @@ class QQStore:
         if mismatch:
             self.conn.close()
             raise ValueError("QQ账本已绑定其他账号或角色，请使用独立存储文件")
+        if self.export_namespace and (len(self.export_namespace) != 32 or
+                any(c not in '0123456789abcdef' for c in self.export_namespace)):
+            self.conn.close()
+            raise ValueError("QQ账本导出命名空间损坏，请恢复账本备份")
 
     @contextmanager
     def transaction(self):
@@ -138,6 +159,76 @@ class QQStore:
     def _save_state(self, state):
         self.conn.execute("INSERT OR REPLACE INTO meta VALUES('schedule',?)", (json.dumps(state),))
 
+    def evaluation_state(self):
+        with self.lock:
+            row = self.conn.execute("SELECT value FROM meta WHERE key='proactive_evaluation'").fetchone()
+            return validate_state(json.loads(row[0])) if row else initial_state()
+
+    def _save_evaluation(self, state):
+        self.conn.execute("INSERT OR REPLACE INTO meta VALUES('proactive_evaluation',?)",(json.dumps(state),))
+
+    def begin_evaluation(self, now, delay, owner):
+        with self.transaction():
+            state, evaluation = self.state(), self.evaluation_state()
+            if (not self.owns(owner,now) or evaluation['fault_stopped'] or evaluation['in_flight']
+                    or evaluation['next_check_at'] > now or state['next_check'] > now
+                    or state['paused'] or state['silence_until'] > now or self.pending() or self.open_proactive()):
+                return None
+            evaluation.update(in_flight=True,attempt_id=uuid4().hex,attempt_revision=state['revision'],
+                next_check_at=now+delay)
+            self._save_evaluation(evaluation)
+            return dict(evaluation)
+
+    def finish_evaluation(self, attempt, outcome, now, delay, owner, *, completed_at=None, **failure):
+        with self.transaction():
+            if not self.owns(owner,now):
+                raise EvaluationLeaseLost('qq_evaluation_lease_lost')
+            evaluation = self.evaluation_state()
+            if (not evaluation['in_flight']
+                    or evaluation['attempt_id'] != attempt['attempt_id']
+                    or evaluation['generation'] != attempt['generation']):
+                return None
+            if self.state()['revision'] != attempt['attempt_revision']:
+                outcome, failure = 'cancelled', {}
+            # Authority is checked at submission time; pacing belongs to the
+            # original provider completion, even if a lease renewal was late.
+            evaluation = complete(evaluation,outcome,now if completed_at is None else completed_at,delay,**failure)
+            self._save_evaluation(evaluation)
+            if evaluation['fault_stopped']:
+                self._invalidate_proactive('evaluation_fault_stopped')
+            return {'outcome':outcome, **evaluation}
+
+    def recover_evaluation(self, now, delay, owner):
+        with self.transaction():
+            evaluation = self.evaluation_state()
+            if not self.owns(owner,now) or not evaluation['in_flight']:
+                return None
+            cancelled = self.state()['revision'] != evaluation['attempt_revision']
+            outcome = 'cancelled' if cancelled else 'error'
+            evaluation = complete(evaluation,outcome,now,delay,**({} if cancelled else {'code':'interrupted'}))
+            evaluation['generation'] += 1
+            self._save_evaluation(evaluation)
+            if evaluation['fault_stopped']:
+                self._invalidate_proactive('evaluation_fault_stopped')
+            return {'outcome':outcome, **evaluation}
+
+    def resume_evaluation(self, now, delay, owner, version, force=False):
+        with self.transaction():
+            evaluation = self.evaluation_state()
+            if not self.owns(owner,now):
+                raise ValueError('当前QQBot实例尚未取得运行权，请稍后重试。')
+            if evaluation['generation'] != version:
+                raise ValueError('主动评估状态已变化，请刷新后重试。')
+            if not evaluation['fault_stopped'] and not force:
+                return evaluation
+            if evaluation['in_flight'] and not force:
+                raise ValueError('主动评估仍在结束，请稍后重试。')
+            self._invalidate_proactive('evaluation_manually_resumed')
+            evaluation.update(fault_stopped=False,failure_streak=0,silent_streak=0,
+                next_check_at=now+delay,generation=evaluation['generation']+1,in_flight=False,attempt_id='')
+            self._save_evaluation(evaluation)
+            return evaluation
+
     def accept(self, message_id, text, now, *, action=None, silence_until=0, reply=None):
         if action is not None and (action not in {'pause','resume','today','status'} or not reply):
             raise ValueError('非法主人控制指令')
@@ -151,6 +242,16 @@ class QQStore:
             state = self.state()
             state.update(last_incoming=now,unanswered=0,revision=state["revision"]+1)
             self._save_state(state)
+            try:
+                evaluation = self.evaluation_state()
+            except (ValueError,TypeError,OverflowError) as exc:
+                # A damaged proactive record must not reject ordinary incoming chat.
+                log.error('QQ主动评估状态损坏，保留原记录并继续私聊',exc_info=exc)
+            else:
+                evaluation['silent_streak'] = 0
+                if not evaluation['fault_stopped'] and not evaluation['failure_streak']:
+                    evaluation['next_check_at'] = 0
+                self._save_evaluation(evaluation)
             self.conn.execute("UPDATE outbox SET status='failed',error='new_owner_message',payload='[]' WHERE kind='proactive' AND status='queued'")
             if action is not None:
                 self._control(action,now,silence_until)
@@ -258,10 +359,13 @@ class QQStore:
 
     def invalidate_proactive(self, reason):
         with self.transaction():
-            state = self.state()
-            state['revision'] += 1
-            self._save_state(state)
-            self.conn.execute("UPDATE outbox SET status='failed',error=?,payload='[]' WHERE kind='proactive' AND status='queued'",(reason,))
+            self._invalidate_proactive(reason)
+
+    def _invalidate_proactive(self, reason):
+        state = self.state()
+        state['revision'] += 1
+        self._save_state(state)
+        self.conn.execute("UPDATE outbox SET status='failed',error=?,payload='[]' WHERE kind='proactive' AND status='queued'",(reason,))
 
     def claim_send(self, now, owner=None):
         with self.transaction():
@@ -283,6 +387,19 @@ class QQStore:
         if row['expires']<=now:
             return 'expired'
         if row['kind']=='proactive':
+            try:
+                evaluation = self.evaluation_state()
+            except (ValueError,TypeError,OverflowError) as exc:
+                # A malformed proactive record cancels this unsent task. It
+                # must not poison receipt settlement or unrelated private chat.
+                log.error('QQ主动任务因评估状态损坏已取消',exc_info=exc,extra={'evt':{
+                    'module':'qqbot','operation':'proactive_submission',
+                    'error_code':'proactive_state_unavailable',
+                    'message_zh':'主动评估状态损坏，已取消未提交问候，私聊投递继续',
+                    'outcome':'failed'}})
+                return 'evaluation_state_unavailable'
+            if evaluation['fault_stopped']:
+                return 'evaluation_fault_stopped'
             state = self.state()
             if row['eligibility_revision'] is None or row['eligibility_revision']!=state['revision']:
                 return 'stale_proactive_revision'
@@ -372,4 +489,6 @@ class QQStore:
     def export_key(self, message_key):
         with self.lock:
             scope = self.conn.execute("SELECT value FROM meta WHERE key='scope'").fetchone()[0]
+        if self.export_namespace:
+            scope += ':' + self.export_namespace
         return "qqbot:"+hashlib.sha256((scope+":"+message_key).encode()).hexdigest()

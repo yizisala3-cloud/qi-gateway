@@ -11,6 +11,7 @@ const LEVEL_META = {
   CRITICAL: { label: '严重', tone: 'red' },
 };
 const MODULE_LABELS = {
+  qqbot: 'QQBot',
   planning: '规划管理', memo: '备忘录', memory: '记忆', context: '上下文',
   chat: '聊天转发', database: '数据库', system: '系统', todo: '待办插件',
   eventide: '身体状态', persona: '人设', other: '其他组件',

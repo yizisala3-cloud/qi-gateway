@@ -18,8 +18,10 @@ from .qqbot_config import QQConfig
 from .qqbot_memory import export_message
 from .qqbot_model import QQModel
 from .qqbot_stickers import StickerCatalog, split_sticker_summaries
-from .qqbot_store import QQStore
+from .qqbot_store import QQStore, EvaluationLeaseLost
 from .qqbot_transport import OneBotConnection, NotSubmitted, SendCancelled
+from .qqbot_proactive import initial_state, public_status, classify_failure, ERROR_MESSAGES
+from .logging_events import emit_error
 
 log = logging.getLogger("gateway.qqbot")
 
@@ -57,6 +59,10 @@ class QQRuntime:
         self.export_pending = None
         self.proactive_generation = None
         self.sending_task = None
+        self.proactive_state_error = False
+        self.last_evaluation_state = initial_state()
+        self.evaluation_recovery_pending = False
+        self.pending_evaluation_result = None
 
     def activate(self):
         self.leader = self.store.acquire(self.owner,self.now())
@@ -66,8 +72,48 @@ class QQRuntime:
 
     def _recover_activation(self):
         self._recover()
+        self._recover_evaluation()
         if self.discard_proactive_on_activation:
             self.store.invalidate_proactive('settings_activation')
+
+    def _recover_evaluation(self):
+        # A lease gap may outlive a provider call, or end while it is still
+        # active. Only the former is an orphan that can be settled here.
+        if self.proactive_generation is not None:
+            self.evaluation_recovery_pending = True
+            return
+        try:
+            pending = self.pending_evaluation_result
+            if pending is not None:
+                if not self.store.owns(self.owner,self.now()):
+                    return
+                recovered = self.store.finish_evaluation(pending['attempt'],pending['outcome'],
+                    self.now(),pending['delay'],self.owner,completed_at=pending['completed_at'],
+                    **pending['failure'])
+                self.pending_evaluation_result = None
+                # Dropping this result does not discharge the new owner's
+                # separate duty to reconcile the current ledger on renewal.
+                self.evaluation_recovery_pending = recovered is None
+                if recovered:
+                    self.last_evaluation_state = recovered
+                    if recovered['outcome']=='error':
+                        self._log_evaluation_failure(pending['exc'],pending['failure']['code'],
+                            recovered,pending['status'])
+                # A newer attempt must never receive this old outcome. Leave
+                # its independent reconciliation to the next authority check.
+                return
+            recovered = self.store.recover_evaluation(self.now(),self.config.check_seconds,self.owner)
+            if recovered:
+                self.last_evaluation_state = recovered
+                if recovered['outcome']=='error':
+                    self._log_evaluation_failure(None,'interrupted',recovered)
+            self.evaluation_recovery_pending = False
+        except EvaluationLeaseLost:
+            # The lease may expire or change after the preliminary check.
+            # Retain the same known result for a later authorized settlement.
+            self.evaluation_recovery_pending = True
+        except Exception as exc:
+            self._evaluation_storage_failed(exc)
 
     def _recover(self):
         self.store.recover(self.now(),datetime.fromtimestamp(self.now(),ZoneInfo(self.config.timezone)).date().isoformat())
@@ -85,10 +131,13 @@ class QQRuntime:
         for task in self.tasks:
             task.cancel()
         await asyncio.gather(*self.tasks,return_exceptions=True)
-        if self.leader:
+        if self.store.owns(self.owner,self.now()):
             self._recover()
+            if self.pending_evaluation_result is not None:
+                self._recover_evaluation()
             self.store.release(self.owner)
         self.store.close()
+        self.pending_evaluation_result = None
         self.closed = True
 
     def status(self):
@@ -96,7 +145,72 @@ class QQRuntime:
         return {"enabled":True,"leader":self.leader,"connected":self.transport.ready,
                 "proactive_enabled":self.config.proactive_enabled,"paused":state["paused"],
                 "silence_until":state["silence_until"],"timezone":self.config.timezone,
-                "outbox":self.store.counts(),"stickers":len(self.catalog.entries)}
+                "outbox":self.store.counts(),"stickers":len(self.catalog.entries),
+                "proactive_evaluation":self.evaluation_status()}
+
+    def evaluation_status(self):
+        if not self.proactive_state_error:
+            try:
+                self.last_evaluation_state = self.store.evaluation_state()
+            except Exception as exc:
+                self._evaluation_storage_failed(exc)
+        result = public_status(self.last_evaluation_state)
+        result['recovery_pending'] = (self.evaluation_recovery_pending and result['in_flight']
+            and self.proactive_generation is None)
+        if self.proactive_state_error:
+            result.update(fault_stopped=True,last_error_code='state_unavailable',
+                last_error_message=ERROR_MESSAGES['state_unavailable'],next_check_at=0)
+        return result
+
+    def resume_evaluation(self, version):
+        if self.proactive_generation is not None:
+            raise ValueError('主动评估仍在结束，请稍后重试。')
+        self.last_evaluation_state = self.store.resume_evaluation(self.now(),self.config.check_seconds,
+            self.owner,version,force=self.proactive_state_error)
+        self.proactive_state_error = False
+        if not self.last_evaluation_state['in_flight']:
+            self.evaluation_recovery_pending = False
+            self.pending_evaluation_result = None
+
+    def _evaluation_storage_failed(self, exc):
+        first = not self.proactive_state_error
+        self.proactive_state_error = True
+        if first:
+            emit_error('qqbot','proactive_state','proactive_state_unavailable',
+                'QQ主动评估状态不可用，已停止调用，请检查存储后到配置页恢复',
+                exc=exc,outcome='failed',safe_context={'reason_code':'state_unavailable'})
+
+    def _log_evaluation_failure(self, exc, code, evaluation, status=None):
+        stopped = evaluation['fault_stopped']
+        message = ERROR_MESSAGES[code] + ('；已停止调用，请到配置页恢复' if stopped else '；稍后按退避规则重试')
+        emit_error('qqbot','proactive_evaluation','proactive_calls_stopped' if stopped else 'proactive_'+code,
+            message,level='ERROR' if stopped else 'WARNING',exc=exc,
+            outcome='failed' if stopped else 'degraded',upstream_status=status,
+            safe_context={'attempts':evaluation['failure_streak'],'reason_code':code,
+                'retry':not stopped,'timeout_seconds':max(0,evaluation['next_check_at']-self.now())})
+
+    def _finish_evaluation(self, attempt, outcome, *, exc=None, status=None, **failure):
+        completed_at, delay = self.now(), self.config.check_seconds
+        try:
+            result = self.store.finish_evaluation(attempt,outcome,completed_at,delay,
+                self.owner,completed_at=completed_at,**failure)
+            if result:
+                self.last_evaluation_state = result
+            self.evaluation_recovery_pending = result is None
+            self.pending_evaluation_result = None
+            return result
+        except EvaluationLeaseLost:
+            # Keep one known result, not a generated message. A restarted
+            # process has no such result and still recovers as interrupted.
+            self.pending_evaluation_result = dict(
+                attempt={key:attempt[key] for key in ('attempt_id','generation','attempt_revision')},
+                outcome=outcome,completed_at=completed_at,delay=delay,
+                failure=dict(failure),exc=exc,status=status)
+            self.evaluation_recovery_pending = True
+            return None
+        except Exception as exc:
+            self._evaluation_storage_failed(exc)
+            return None
 
     async def ingest(self, event):
         c = self.config
@@ -127,7 +241,9 @@ class QQRuntime:
             local = datetime.fromtimestamp(now,ZoneInfo(c.timezone))
             tomorrow = (local+timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0).timestamp()
             state = self.store.state()
-            if not c.proactive_enabled:
+            if action in {'resume','status'} and self.evaluation_status()['fault_stopped']:
+                reply = '主动评估因故障已停止，请到配置页点击恢复调用；你仍可正常私聊。'
+            elif not c.proactive_enabled:
                 reply = "服务器尚未启用主动消息；你的控制选择已保存。"
             elif action=="pause":
                 reply = "好，主动消息已暂停。你仍然可以正常和我聊天。"
@@ -224,6 +340,8 @@ class QQRuntime:
 
     def _proactive_timing_error(self, state, now):
         c = self.config
+        if self.proactive_state_error or self.store.evaluation_state()['fault_stopped']:
+            return 'evaluation_fault_stopped'
         active,local = self._active(now)
         if not c.proactive_enabled or not active:
             return 'outside_active_window'
@@ -237,6 +355,11 @@ class QQRuntime:
 
     async def proactive_once(self):
         c, now = self.config,self.now()
+        if not c.proactive_enabled or self.proactive_state_error:
+            return
+        evaluation = self.evaluation_status()
+        if evaluation['fault_stopped'] or evaluation['in_flight'] or evaluation['next_check_at'] > now:
+            return
         state = self.store.state()
         if (not c.proactive_enabled or not self.transport.ready or self.generate_lock.locked()
                 or self.store.pending() or state["paused"] or state["silence_until"]>now
@@ -244,31 +367,57 @@ class QQRuntime:
                 or state["next_check"]>now or self._proactive_timing_error(state,now)):
             return
         async with self.generate_lock:
-            state = self.store.reserve_check(now,c.check_seconds)
-            history = self.store.conversation_history(c.history_limit)
+            try:
+                attempt = self.store.begin_evaluation(now,c.check_seconds,self.owner)
+                if attempt is None:
+                    return
+                self.last_evaluation_state = attempt
+                history = self.store.conversation_history(c.history_limit)
+            except Exception as exc:
+                self._evaluation_storage_failed(exc)
+                return
             if not history:
+                self._finish_evaluation(attempt,'cancelled')
                 return
             query = "\n".join(r["content"] for r in history if r["role"]=="user")[-1600:]
             try:
                 self.proactive_generation = asyncio.create_task(self.model.generate(history,query,proactive=True))
                 result = await self.proactive_generation
+                if not isinstance(result,dict) or type(result.get('send')) is not bool:
+                    raise ValueError('qq_invalid_proactive_result')
                 if not result.get("send",False):
-                    return
-                segments, summary = self._segments(result,"")
+                    outcome = 'silent'
+                else:
+                    segments, summary = self._segments(result,"")
+                    outcome = 'ready'
             except asyncio.CancelledError:
+                self._finish_evaluation(attempt,'cancelled')
                 if asyncio.current_task().cancelling():
                     raise
                 return
             except Exception as exc:
-                log.warning("QQ主动检查降级 type=%s",type(exc).__name__,exc_info=exc)
+                code,fatal,retry_after,status = classify_failure(exc)
+                finished = self._finish_evaluation(attempt,'error',exc=exc,status=status,
+                    code=code,fatal=fatal,retry_after=retry_after)
+                if finished and finished['outcome']=='error':
+                    self._log_evaluation_failure(exc,code,finished,status)
+                elif self.proactive_state_error:
+                    failed = {**attempt,'fault_stopped':True,'failure_streak':min(5,attempt['failure_streak']+1),'next_check_at':0}
+                    self._log_evaluation_failure(exc,code,failed,status)
                 return
             finally:
                 self.proactive_generation = None
+            finished = self._finish_evaluation(attempt,outcome)
+            if not finished or finished['outcome'] != 'ready':
+                return
             current = self.now()
             active_now, _ = self._active(current)
             if active_now and self.transport.ready and not self.stopped:
-                self.store.queue("proactive:"+uuid4().hex,"proactive",segments,summary,current,
-                                 self._proactive_expiry(current),revision=state["revision"],owner=self.owner)
+                try:
+                    self.store.queue("proactive:"+uuid4().hex,"proactive",segments,summary,current,
+                        self._proactive_expiry(current),revision=attempt['attempt_revision'],owner=self.owner)
+                except Exception as exc:
+                    self._evaluation_storage_failed(exc)
 
     def _before_submit(self):
         try:
@@ -379,9 +528,14 @@ class QQRuntime:
         while not self.stopped:
             try:
                 previous = self.leader
-                self.leader = self.store.acquire(self.owner,self.now())
+                now = self.now()
+                self.leader = self.store.acquire(self.owner,now)
                 if self.leader and not previous:
                     self._recover_activation()
+                elif self.leader:
+                    # Reconciliation is an obligation of every current owner,
+                    # independent of whether an older result was discarded.
+                    self._recover_evaluation()
                 elif previous and not self.leader:
                     await self.transport.close()
             except asyncio.CancelledError:

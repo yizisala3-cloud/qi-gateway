@@ -1,0 +1,20 @@
+{
+  "passed": true,
+  "isolated_only": true,
+  "real_settings_and_logs_api": true,
+  "fake_provider_and_transport": true,
+  "fault_stopped_after_five": true,
+  "manual_recovery": true,
+  "persisted_on_reload": true,
+  "proactive_stays_off": true,
+  "daily_limit_stays_30": true,
+  "log_module_filter": true,
+  "error_detail": true,
+  "themes_and_viewports": [
+    "fault-1280-day.png",
+    "fault-1280-night.png",
+    "fault-390-day.png",
+    "fault-390-night.png"
+  ],
+  "page_errors": []
+}

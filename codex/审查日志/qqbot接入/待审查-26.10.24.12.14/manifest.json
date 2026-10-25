@@ -1,0 +1,222 @@
+{
+  "batch": "26.10.24.12.14",
+  "baseline": "local-before, not HEAD",
+  "disposition": "local only; no commit, push, deployment, or production settings writes",
+  "production_reference_image": "localhost:5000/qi-gateway:qq-daily-limit-20261024-1105",
+  "patch_sha256": "22b9081d330da41d7c200e06ee3ea6bc719de3506ffc4daabb4db3ed8eb0f8b4",
+  "file_count": 24,
+  "files": [
+    {
+      "path": "gateway/qqbot.py",
+      "status": "modified",
+      "before_sha256": "0208501a0f501e22c298a0335369a2280d586f434c6bb6eb977363eb047266f5",
+      "after_sha256": "dfe6d2d290539f08da7f174d20736b92fb3493d37be92906c0ae7a6563cc10ec"
+    },
+    {
+      "path": "gateway/qqbot_store.py",
+      "status": "modified",
+      "before_sha256": "305fda254e04e2edd271ef3016ab5ed90a6990b73b5ac11396666f0a7c0d004c",
+      "after_sha256": "1b08f8bda82cb6973e9259de82c739782c4e3be4d9525beb11dc81a8073606e6"
+    },
+    {
+      "path": "gateway/qqbot_model.py",
+      "status": "modified",
+      "before_sha256": "8a3436228d5d890f4be2e9d1841f3718d73a84b72215aad6ed9057c49da2c3f4",
+      "after_sha256": "4a11308637b52baa4aa6be5bbe23b958fced64c5db6c06d7a3d6464ac9213d99"
+    },
+    {
+      "path": "gateway/qqbot_settings.py",
+      "status": "modified",
+      "before_sha256": "18a9adfd5ae0e7576703234e318094a119f29787da5aad41a541f0b180e9ec47",
+      "after_sha256": "dc3117c1cdff66900a53b113376590bf3e09b7305d5191a9f62dc09b5e9de0e8"
+    },
+    {
+      "path": "gateway/logging_events.py",
+      "status": "modified",
+      "before_sha256": "94560231b62f5c1201c33f85a1f25c0d1c359f1d1834f10647e070a337f4602c",
+      "after_sha256": "c94fb360037ec41e9a00a542a06b77b0a852bbea5ad4658cfae27be8c123025a"
+    },
+    {
+      "path": "admin/js/pages/config.js",
+      "status": "modified",
+      "before_sha256": "fbb4627ad6cc57e82380f285c4e5248e3134dc0f01db3ac2e73fd35c28f89105",
+      "after_sha256": "5a6c0cce32afcc4e5076d9576f2b41543cd39a95b185d57f66bada350683eaa6"
+    },
+    {
+      "path": "admin/js/pages/logs.js",
+      "status": "modified",
+      "before_sha256": "942301e2df5d47b8f693a6e72926ffa2c325737857d27e0e30824660ea5bcf5f",
+      "after_sha256": "93cb3163e3ed903d593b8894f7b1a6954f3d4c576ddece97ec33f7ce431836d9"
+    },
+    {
+      "path": "admin/js/app.js",
+      "status": "modified",
+      "before_sha256": "eb0189c0ad05d651df7f2b979c57503813792285732f30a23f1a250956247fe2",
+      "after_sha256": "e7386ddb8170dab1e0ab0c99edf348d20239d51b96a957de565f392827b5ce3d"
+    },
+    {
+      "path": "admin/index.html",
+      "status": "modified",
+      "before_sha256": "27be601397b6fcb52d23788574aa06d21d3ec54f9db24c82ceda0fdffa1aa454",
+      "after_sha256": "042c29d55dc674a97a0e3fbcd813679d9131999c1720423cc4372df5d8e4fdc9"
+    },
+    {
+      "path": "tests/qqbot_config_mount.test.mjs",
+      "status": "modified",
+      "before_sha256": "23df21d6c59f36a8969997d0c9b982b0d3b011bd908e98d15de7089c238ca8c8",
+      "after_sha256": "ab40a15ddeeef83bf9f29b053072d1d154e769c759e9818ba77c5c60a717e5a7"
+    },
+    {
+      "path": "tests/test_qqbot_config_frontend.py",
+      "status": "modified",
+      "before_sha256": "eb580d08a143392ad130e310830cfd4c04caa09200a752c6deccffae8da87243",
+      "after_sha256": "4c01128e04ded27a03d2122f937a422da5cf92de142f2ef8ebedcb7c4a7661d7"
+    },
+    {
+      "path": "tests/test_qqbot_context.py",
+      "status": "modified",
+      "before_sha256": "f372228cde9caea5f51386626056a38d0b502919530919ca7e4164ef12b12acc",
+      "after_sha256": "253c4beda52b887c520c93fcecf1dfe360c66cf2cf55a6bbf8432580aa6be334"
+    },
+    {
+      "path": "README.md",
+      "status": "modified",
+      "before_sha256": "315d0a22129e55c957586fce591bfd72b88ef01681818d67a41056eb12364e87",
+      "after_sha256": "58e82079c69f8c018b01238b2fba3a863e1feb6190574fe619fa4fc01059a21c"
+    },
+    {
+      "path": "qqbot/README.md",
+      "status": "modified",
+      "before_sha256": "8050b005a17f3baf15b340388985b1dc79efc859f6235ab7d36880c87e0c6f7a",
+      "after_sha256": "532b1ee0fc3f06e0054517d90ed81bb76e888c246180d5d6544965cd920f5188"
+    },
+    {
+      "path": "codex/需求/qqbot接入/需求规范.md",
+      "status": "modified",
+      "before_sha256": "226ab3289efcedf63ff6bb625f3133295eb72564cbeb4f058050b1e516753513",
+      "after_sha256": "25afd3dbff8b85f0aec9d7eead9101f7e3e811728a3b15221584ad501dc13731"
+    },
+    {
+      "path": "codex/功能维护规范/qqbot接入/qqbot接入.md",
+      "status": "modified",
+      "before_sha256": "34f9c38dadb5d9934b02813060934d837b6a6c59a7dd4c2012498ad39fb8b15e",
+      "after_sha256": "6ab5b5554c3fb5ccf3f8eb4d27ff11409e27394be4809c16bb5bc4b8ff3b3216"
+    },
+    {
+      "path": "codex/功能维护规范/网关日志/网关日志.md",
+      "status": "modified",
+      "before_sha256": "f6addbd5543ddfc7d27268b1ec51dc388063ff7ad728f101c59f3d7ad3523a1d",
+      "after_sha256": "ffdffd77c8ba0d24c41a956818fc976cfbc4c9723d1fa7bf000cba33afeff264"
+    },
+    {
+      "path": "codex/网关当前状态/网关当前状态.md",
+      "status": "modified",
+      "before_sha256": "449dbcea2f943a9057ea5b12e6c69aa79dc230a16f754c0fc68adeeeb33ed6a9",
+      "after_sha256": "218a76e2cb4e02b58c1beb7fd61843a6433a7aa79d6bc7474aae5f4ecebe7434"
+    },
+    {
+      "path": "codex/控制台-文档索引/目录说明.md",
+      "status": "modified",
+      "before_sha256": "27c811fc7b7d836d43b8347f519c35b534ea7db39f24c8b908bf014b6d682504",
+      "after_sha256": "80d054f900a6728d9f49779349f79ccd8daf29b5db7cef1709d702aa80298f1c"
+    },
+    {
+      "path": "gateway/qqbot_proactive.py",
+      "status": "added",
+      "before_sha256": null,
+      "after_sha256": "5fb97f06b937aa9c18cb8ed3bf0c7c161cae7a135284ffb29dd93473223a3ab8"
+    },
+    {
+      "path": "tests/test_qqbot_proactive_recovery.py",
+      "status": "added",
+      "before_sha256": null,
+      "after_sha256": "c8440407fe62f66018762db96d7d82689dadd4de666ff62f3f6e0bb322fad4a5"
+    },
+    {
+      "path": "codex/代码修改日志/qqbot接入/主动评估退避与故障恢复-26.10.24.12.14.md",
+      "status": "added",
+      "before_sha256": null,
+      "after_sha256": "33fa77ad125d9c7010810413bdf74af6bd7dd2e74ab653732bdd9d54d4e743a1"
+    },
+    {
+      "path": "tests/qqbot-proactive-recovery-20261024/preview.py",
+      "status": "added",
+      "before_sha256": null,
+      "after_sha256": "7f92744cee22dc599f4c1c2581425cbba9caa765cb2ec76f409c08959ff4b67d"
+    },
+    {
+      "path": "tests/qqbot-proactive-recovery-20261024/browser.cjs",
+      "status": "added",
+      "before_sha256": null,
+      "after_sha256": "a0a176817238a223639cb4c9d2024f16420c17b61889197917d328c198d04f77"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "tests/qqbot-proactive-recovery-20261024/browser-result.json",
+      "sha256": "7a60f97244c3cc679b6bbb75f3618d3cff6e27d1da70bf34469747b94a699b58"
+    },
+    {
+      "path": "tests/qqbot-proactive-recovery-20261024/browser.cjs",
+      "sha256": "a0a176817238a223639cb4c9d2024f16420c17b61889197917d328c198d04f77"
+    },
+    {
+      "path": "tests/qqbot-proactive-recovery-20261024/fault-1280-day.png",
+      "sha256": "44d05cd300dd092ec8dec6a1fc3bd057422e68ed2de856f18cd8b133d442dfcf"
+    },
+    {
+      "path": "tests/qqbot-proactive-recovery-20261024/fault-1280-night.png",
+      "sha256": "708012befc4c247baf54e9a5aa4e18dd9c54214bc12b6fc253fedbedf6b1e3d4"
+    },
+    {
+      "path": "tests/qqbot-proactive-recovery-20261024/fault-390-day.png",
+      "sha256": "6f5bf4f25f23c1ae67fe254cd501b70b4143b381371032f2c4f092721314f623"
+    },
+    {
+      "path": "tests/qqbot-proactive-recovery-20261024/fault-390-night.png",
+      "sha256": "6f7515a83aa9b37be68bd27e529a43b952f1fcbbb5882132665645181ce9ac34"
+    },
+    {
+      "path": "tests/qqbot-proactive-recovery-20261024/package_review.py",
+      "sha256": "7290028d65fe65986261a9eeda7efa989ee2d31054a85ff6a1f3de276bf9777e"
+    },
+    {
+      "path": "tests/qqbot-proactive-recovery-20261024/preview.py",
+      "sha256": "7f92744cee22dc599f4c1c2581425cbba9caa765cb2ec76f409c08959ff4b67d"
+    },
+    {
+      "path": "tests/qqbot-proactive-recovery-20261024/qqbot-log-detail.png",
+      "sha256": "94c003002120a0c59601c19db51784a96970dfa7a96147a2cac8edff81214244"
+    },
+    {
+      "path": "tests/qqbot-proactive-recovery-20261024/qqbot-log-dropdown.png",
+      "sha256": "91d8d2e3c9d56807aaac53b2372aaed12fbc19c748657f5c51dc4d76f3b77b08"
+    },
+    {
+      "path": "tests/qqbot-proactive-recovery-20261024/qqbot-log-list.png",
+      "sha256": "328d218638aae04693bae0fe0b002731142cc41058f0163944de0099d8f7c553"
+    },
+    {
+      "path": "tests/qqbot-proactive-recovery-20261024/recovered.png",
+      "sha256": "a42caf5a41fd4c34ebed9eaf3ec14f88103bc31e61a33c3a49067dc6df5be46e"
+    },
+    {
+      "path": "tests/qqbot-proactive-recovery-20261024/recovery-help-open.png",
+      "sha256": "aa90349b7b0cf77690bd74e55ac922fc43cec3124bd900006d0ef03a5849788c"
+    },
+    {
+      "path": "tests/qqbot-proactive-recovery-20261024/regressions.txt",
+      "sha256": "b7783eaa024c5d89db1bc05be3901925471d67e02dd60b434b748608b453ae06"
+    },
+    {
+      "path": "tests/qqbot-proactive-recovery-20261024/regressions.xml",
+      "sha256": "4ade6df476b5da653668cb196de5fe8833d3f4ff1730cbc94d47b6f989fde6a0"
+    }
+  ],
+  "review_entry_sha256": "1767ace9f4510deb8df52f08b46778f1a2389d27047c1c5175d10a59112b348a",
+  "tests": {
+    "passed": 407,
+    "subtests_passed": 117,
+    "skipped": 27
+  }
+}

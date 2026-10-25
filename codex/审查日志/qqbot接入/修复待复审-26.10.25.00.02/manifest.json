@@ -1,0 +1,108 @@
+{
+  "batch": "26.10.25.00.02",
+  "baseline": "local before this fix, not HEAD",
+  "status": "local only; awaiting independent review; no commit, push, deployment or production writes",
+  "file_count": 9,
+  "files": [
+    {
+      "path": "gateway/qqbot.py",
+      "before_sha256": "9c3575c34f6c1e323c267f711d11197d6eeb0ce906f71e04c09641009f3ad935",
+      "after_sha256": "9fbf00dcc5d7cc2217a7785f7adc7a5c18d129407ed7b587598c08770a4fca89"
+    },
+    {
+      "path": "gateway/qqbot_store.py",
+      "before_sha256": "c4e37ee4a087dff1e89465e0fc607dd3f4cdc5d87933444241d1c636385a8e0c",
+      "after_sha256": "7d06ec3f93ed2b2901c77a92cb04669a4a898dd2971fb8e3bb41cc65ad1c05be"
+    },
+    {
+      "path": "tests/test_qqbot_recovery_boundaries.py",
+      "before_sha256": "9d32e9bde057d484e8a39f0ae8338ec8b8300432a025708b8664932d6a8b733d",
+      "after_sha256": "64a8849031d579ed065a3593ed56b331da76c0d3f9edefca600a5f02bca067ce"
+    },
+    {
+      "path": "tests/test_qqbot_lease_outcomes.py",
+      "before_sha256": null,
+      "after_sha256": "1c38ba0340866d974ed5dbc440cf26a72f05e889290617f0faba1fa96e2d6a26"
+    },
+    {
+      "path": "codex/需求/qqbot接入/后续待修复.md",
+      "before_sha256": "f1fee3ed5a2ef82218fd7838cda73e94ce39d0dfcf279174f3802ae8c29d24e3",
+      "after_sha256": "d9309698b228a2f94c17c6039f390820f03d038824339891f348971ccf7d712c"
+    },
+    {
+      "path": "codex/功能维护规范/qqbot接入/qqbot接入.md",
+      "before_sha256": "d4786a441f22c400d83f96c80868484608370cc4a6925ef902e31f830364739d",
+      "after_sha256": "c708b6a31227d75bf4b706c3cb43c9a1b1e3b4b07668edaf920e154441486ba9"
+    },
+    {
+      "path": "codex/网关当前状态/网关当前状态.md",
+      "before_sha256": "2df842a052c6739b17efed7920d252f3245c976964d8e49410483669ddf3320e",
+      "after_sha256": "5bcec2a318f350f7e193003ba574984948886cb9f1c98512043fb5ae44c4e770"
+    },
+    {
+      "path": "codex/控制台-文档索引/目录说明.md",
+      "before_sha256": "e146071c6ff92facc5381bb96761768c2a5fa19e6e526dd03f3ca7d712213724",
+      "after_sha256": "25ff25509f3ac31fdef3d9d741a57689ac1a6c463439f2af0c1584922bff12f5"
+    },
+    {
+      "path": "codex/代码修改日志/qqbot接入/租约恢复保留已知评估结果-26.10.25.00.02.md",
+      "before_sha256": null,
+      "after_sha256": "3f97ed0924fed2cafe48a1cabb3e88826da528d5537f8fc7b9f285e1855af1b4"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "tests/qqbot-lease-outcomes-20261025/expanded-current.txt",
+      "sha256": "2d8ccd1f71f578b4860f38f9c1eccbe47898bcce7f8cd0e7449c0d45b392bc6d"
+    },
+    {
+      "path": "tests/qqbot-lease-outcomes-20261025/independent-before.txt",
+      "sha256": "4b89d7201da2abed91ef1e0b5183a975d15311a3b435ba418422b26e1ddfa542"
+    },
+    {
+      "path": "tests/qqbot-lease-outcomes-20261025/regressions.txt",
+      "sha256": "ee9b27f346f10e484ca2c0f2d1a05afd22b8d01281aae3d200ad5a68c62f71e4"
+    },
+    {
+      "path": "tests/qqbot-lease-outcomes-20261025/targeted-initial.txt",
+      "sha256": "925fb096e713d37d4623a9839847bf2c219afcccd1a498f1cc30d5ad8d2b189d"
+    },
+    {
+      "path": "tests/qqbot-lease-outcomes-20261025/expanded-current.xml",
+      "sha256": "3ede64919dacb94496ed0f941bc146a3b1b66b7387d24a33021e3b81d4e93e61"
+    },
+    {
+      "path": "tests/qqbot-lease-outcomes-20261025/independent-before.xml",
+      "sha256": "6b3624e7c4cfe6339d75e45331a82e277f0e03657e7020caca819abfab9907f5"
+    },
+    {
+      "path": "tests/qqbot-lease-outcomes-20261025/regressions.xml",
+      "sha256": "119b54158072d48bfee6de3bf081eb8f2186ac628f47f770c41f96cc007b1efa"
+    },
+    {
+      "path": "tests/qqbot-lease-outcomes-20261025/targeted-initial.xml",
+      "sha256": "1952583f776e65d21fd0210ece5b2fdd2f43d8f0eb528dfb5ddeaecdab58efc8"
+    },
+    {
+      "path": "tests/qqbot-lease-outcomes-20261025/package_review.py",
+      "sha256": "44ce4e618532c0960f064818ffd9b779344e53403dc881d92331fcce2f069862"
+    },
+    {
+      "path": "codex/审查日志/qqbot接入/审查摘要-26.10.24.23.03/test_independent_recovery.py",
+      "sha256": "d9b22dc2e94ce9c2cc603d1fcc04bc589f371b835568c4862cfb559135fe675d"
+    },
+    {
+      "path": "codex/审查日志/qqbot接入/审查摘要-26.10.24.23.54/test_independent_lease_outcomes.py",
+      "sha256": "091ceb94ef7153f6e4e8635257b3ebfa1d96d6529de290adaedfa45643bf6fbb"
+    }
+  ],
+  "patch_sha256": "b8ecbee0c6759c3fd1392dfe31763fadf4931deb750ac82d4147b19b87146e76",
+  "review_entry_sha256": "e2f40e65ba8b5cdba967ebdcb82cb7dc347097c500f04d307c56d3d27cd2b8f7",
+  "tests": {
+    "passed": 437,
+    "subtests_passed": 134,
+    "skipped": 27,
+    "new_tests_passed": 15,
+    "new_subtests_passed": 6
+  }
+}

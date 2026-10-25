@@ -1,0 +1,39 @@
+.F...F..                                                       [100%]
+================================== FAILURES ===================================
+_ RecoveryBoundaryTests.test_cancelled_crash_recovery_preserves_prior_failures_and_silent_state _
+..\..\..\..\..\AppData\Local\Python\pythoncore-3.12-64\Lib\shutil.py:633: in _rmtree_unsafe
+    os.unlink(fullname)
+E   PermissionError: [WinError 32] 另一个程序正在使用此文件，进程无法访问。: 'C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\tmpw882m_5v\\cancel-1.sqlite3'
+
+During handling of the above exception, another exception occurred:
+..\..\..\..\..\AppData\Local\Python\pythoncore-3.12-64\Lib\tempfile.py:954: in cleanup
+    self._rmtree(self.name, ignore_errors=self._ignore_cleanup_errors)
+..\..\..\..\..\AppData\Local\Python\pythoncore-3.12-64\Lib\tempfile.py:934: in _rmtree
+    _shutil.rmtree(name, onexc=onexc)
+..\..\..\..\..\AppData\Local\Python\pythoncore-3.12-64\Lib\shutil.py:781: in rmtree
+    return _rmtree_unsafe(path, onexc)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\..\..\AppData\Local\Python\pythoncore-3.12-64\Lib\shutil.py:635: in _rmtree_unsafe
+    onexc(os.unlink, fullname, err)
+..\..\..\..\..\AppData\Local\Python\pythoncore-3.12-64\Lib\tempfile.py:909: in onexc
+    _os.unlink(path)
+E   PermissionError: [WinError 32] 另一个程序正在使用此文件，进程无法访问。: 'C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\tmpw882m_5v\\cancel-1.sqlite3'
+_ RecoveryBoundaryTests.test_queued_receipt_with_bad_evaluation_is_settled_on_restart _
+..\..\..\..\..\AppData\Local\Python\pythoncore-3.12-64\Lib\shutil.py:633: in _rmtree_unsafe
+    os.unlink(fullname)
+E   PermissionError: [WinError 32] 另一个程序正在使用此文件，进程无法访问。: 'C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\tmpct9b7cnr\\queued-crash.sqlite3'
+
+During handling of the above exception, another exception occurred:
+..\..\..\..\..\AppData\Local\Python\pythoncore-3.12-64\Lib\tempfile.py:954: in cleanup
+    self._rmtree(self.name, ignore_errors=self._ignore_cleanup_errors)
+..\..\..\..\..\AppData\Local\Python\pythoncore-3.12-64\Lib\tempfile.py:934: in _rmtree
+    _shutil.rmtree(name, onexc=onexc)
+..\..\..\..\..\AppData\Local\Python\pythoncore-3.12-64\Lib\shutil.py:781: in rmtree
+    return _rmtree_unsafe(path, onexc)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\..\..\AppData\Local\Python\pythoncore-3.12-64\Lib\shutil.py:635: in _rmtree_unsafe
+    onexc(os.unlink, fullname, err)
+..\..\..\..\..\AppData\Local\Python\pythoncore-3.12-64\Lib\tempfile.py:909: in onexc
+    _os.unlink(path)
+E   PermissionError: [WinError 32] 另一个程序正在使用此文件，进程无法访问。: 'C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\tmpct9b7cnr\\queued-crash.sqlite3'
+2 failed, 6 passed, 10 subtests passed in 4.33s

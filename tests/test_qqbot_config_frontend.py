@@ -38,3 +38,9 @@ class QQConfigFrontendTests(unittest.TestCase):
 
     def test_current_load_errors_and_normal_clicks(self):
         self.run_group('normal')
+
+    def test_daily_limit_validation_save_and_late_responses(self):
+        self.run_group('daily-limit')
+
+    def test_proactive_recovery_and_late_responses(self):
+        self.run_group('evaluation-recovery')

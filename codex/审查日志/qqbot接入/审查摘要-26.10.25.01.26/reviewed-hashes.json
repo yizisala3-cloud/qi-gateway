@@ -1,0 +1,56 @@
+[
+  {
+    "path": "gateway/qqbot.py",
+    "expected": "9fbf00dcc5d7cc2217a7785f7adc7a5c18d129407ed7b587598c08770a4fca89",
+    "actual": "9fbf00dcc5d7cc2217a7785f7adc7a5c18d129407ed7b587598c08770a4fca89",
+    "matches": true
+  },
+  {
+    "path": "gateway/qqbot_store.py",
+    "expected": "7d06ec3f93ed2b2901c77a92cb04669a4a898dd2971fb8e3bb41cc65ad1c05be",
+    "actual": "7d06ec3f93ed2b2901c77a92cb04669a4a898dd2971fb8e3bb41cc65ad1c05be",
+    "matches": true
+  },
+  {
+    "path": "tests/test_qqbot_recovery_boundaries.py",
+    "expected": "64a8849031d579ed065a3593ed56b331da76c0d3f9edefca600a5f02bca067ce",
+    "actual": "64a8849031d579ed065a3593ed56b331da76c0d3f9edefca600a5f02bca067ce",
+    "matches": true
+  },
+  {
+    "path": "tests/test_qqbot_lease_outcomes.py",
+    "expected": "1c38ba0340866d974ed5dbc440cf26a72f05e889290617f0faba1fa96e2d6a26",
+    "actual": "1c38ba0340866d974ed5dbc440cf26a72f05e889290617f0faba1fa96e2d6a26",
+    "matches": true
+  },
+  {
+    "path": "codex/需求/qqbot接入/后续待修复.md",
+    "expected": "d9309698b228a2f94c17c6039f390820f03d038824339891f348971ccf7d712c",
+    "actual": "d9309698b228a2f94c17c6039f390820f03d038824339891f348971ccf7d712c",
+    "matches": true
+  },
+  {
+    "path": "codex/功能维护规范/qqbot接入/qqbot接入.md",
+    "expected": "c708b6a31227d75bf4b706c3cb43c9a1b1e3b4b07668edaf920e154441486ba9",
+    "actual": "c708b6a31227d75bf4b706c3cb43c9a1b1e3b4b07668edaf920e154441486ba9",
+    "matches": true
+  },
+  {
+    "path": "codex/网关当前状态/网关当前状态.md",
+    "expected": "5bcec2a318f350f7e193003ba574984948886cb9f1c98512043fb5ae44c4e770",
+    "actual": "5bcec2a318f350f7e193003ba574984948886cb9f1c98512043fb5ae44c4e770",
+    "matches": true
+  },
+  {
+    "path": "codex/控制台-文档索引/目录说明.md",
+    "expected": "25ff25509f3ac31fdef3d9d741a57689ac1a6c463439f2af0c1584922bff12f5",
+    "actual": "25ff25509f3ac31fdef3d9d741a57689ac1a6c463439f2af0c1584922bff12f5",
+    "matches": true
+  },
+  {
+    "path": "codex/代码修改日志/qqbot接入/租约恢复保留已知评估结果-26.10.25.00.02.md",
+    "expected": "3f97ed0924fed2cafe48a1cabb3e88826da528d5537f8fc7b9f285e1855af1b4",
+    "actual": "3f97ed0924fed2cafe48a1cabb3e88826da528d5537f8fc7b9f285e1855af1b4",
+    "matches": true
+  }
+]

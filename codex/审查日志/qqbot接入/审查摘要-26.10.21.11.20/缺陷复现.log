@@ -1,0 +1,217 @@
+Second request history: [('user', 'question A'), ('user', 'question B'), ('assistant', '测试回复')]
+FCanonical insert order after transient export failure: ['assistant', 'user']
+FGenerated replies while export is blocked: 1
+FInbox after database recovery: [(1, 'working')] outbox: {}
+FAction completed after configured one-second timeout: False
+FConnection verified: True received owner callbacks: 0
+FF
+================================== FAILURES ===================================
+_ RuntimeReviewProbes.test_current_question_must_remain_after_previous_answer _
+
+self = <review_probes.RuntimeReviewProbes testMethod=test_current_question_must_remain_after_previous_answer>
+
+    async def test_current_question_must_remain_after_previous_answer(self):
+        await self.runtime.ingest(event(1, "question A"))
+        self.model.wait = asyncio.Event()
+        first = asyncio.create_task(self.runtime.reply_once())
+        await asyncio.sleep(0)
+        await self.runtime.ingest(event(2, "question B"))
+        self.model.wait.set()
+        await first
+        await self.runtime.send_once()
+        await self.runtime.reply_once()
+        history = [(r["role"], r["content"]) for r in self.model.calls[-1][0]]
+        print("Second request history:", history)
+>       self.assertEqual(history[-1], ("user", "question B"))
+E       AssertionError: Tuples differ: ('assistant', '测试回复') != ('user', 'question B')
+E       
+E       First differing element 0:
+E       'assistant'
+E       'user'
+E       
+E       - ('assistant', '测试回复')
+E       + ('user', 'question B')
+
+tests\qqbot-review-20261021\review_probes.py:53: AssertionError
+_ RuntimeReviewProbes.test_memory_export_must_preserve_conversation_order_on_retry _
+
+self = <review_probes.RuntimeReviewProbes testMethod=test_memory_export_must_preserve_conversation_order_on_retry>
+
+    async def test_memory_export_must_preserve_conversation_order_on_retry(self):
+        await self.prepare_reply()
+        delivered = []
+        failed_once = False
+        def export(config, key, row):
+            nonlocal failed_once
+            if row["role"] == "user" and not failed_once:
+                failed_once = True
+                raise ConnectionError("one transient failure")
+            delivered.append(row["role"])
+        self.runtime.exporter = export
+        await self.runtime.export_once()
+        self.clock.advance(61)
+        await self.runtime.export_once()
+        print("Canonical insert order after transient export failure:", delivered)
+>       self.assertEqual(delivered, ["user", "assistant"])
+E       AssertionError: Lists differ: ['assistant', 'user'] != ['user', 'assistant']
+E       
+E       First differing element 0:
+E       'assistant'
+E       'user'
+E       
+E       - ['assistant', 'user']
+E       + ['user', 'assistant']
+
+tests\qqbot-review-20261021\review_probes.py:102: AssertionError
+------------------------------ Captured log call ------------------------------
+WARNING  gateway.qqbot:qqbot.py:263 QQ记忆同步等待重试 type=ConnectionError
+Traceback (most recent call last):
+  File "C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\gateway\qqbot.py", line 260, in export_once
+    await asyncio.to_thread(self.exporter,self.config,self.store.export_key(row["message_key"]),row)
+  File "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\asyncio\threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\concurrent\futures\thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\tests\qqbot-review-20261021\review_probes.py", line 95, in export
+    raise ConnectionError("one transient failure")
+ConnectionError: one transient failure
+_ RuntimeReviewProbes.test_slow_memory_export_must_not_block_new_private_reply _
+
+self = <review_probes.RuntimeReviewProbes testMethod=test_slow_memory_export_must_not_block_new_private_reply>
+
+    async def test_slow_memory_export_must_not_block_new_private_reply(self):
+        await self.prepare_reply()
+        started, release = asyncio.Event(), threading.Event()
+        loop = asyncio.get_running_loop()
+        def export(*args):
+            loop.call_soon_threadsafe(started.set)
+            release.wait(3)
+        self.runtime.exporter = export
+        task = asyncio.create_task(self.runtime._loop())
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            await self.runtime.ingest(event(2, "question B"))
+            await asyncio.sleep(.3)
+            observed = len(self.model.calls)
+            print("Generated replies while export is blocked:", observed)
+        finally:
+            release.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+>       self.assertEqual(observed, 2)
+E       AssertionError: 1 != 2
+
+tests\qqbot-review-20261021\review_probes.py:85: AssertionError
+____ RuntimeReviewProbes.test_transient_outbox_error_must_not_strand_inbox ____
+
+self = <review_probes.RuntimeReviewProbes testMethod=test_transient_outbox_error_must_not_strand_inbox>
+
+    async def test_transient_outbox_error_must_not_strand_inbox(self):
+        await self.runtime.ingest(event(1, "question A"))
+        self.runtime.store.conn.execute("CREATE TRIGGER fail_queue BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT,'temporary write failure'); END")
+        with self.assertRaises(sqlite3.IntegrityError):
+            await self.runtime.reply_once()
+        self.runtime.store.conn.execute("DROP TRIGGER fail_queue")
+        await self.runtime.reply_once()
+        rows = [tuple(r) for r in self.runtime.store.conn.execute("SELECT id,status FROM inbox")]
+        print("Inbox after database recovery:", rows, "outbox:", self.runtime.store.counts())
+>       self.assertEqual(self.runtime.store.counts(), {"queued": 1})
+E       AssertionError: {} != {'queued': 1}
+E       - {}
+E       + {'queued': 1}
+
+tests\qqbot-review-20261021\review_probes.py:64: AssertionError
+______ TransportReviewProbes.test_action_timeout_must_bound_socket_write ______
+
+self = <review_probes.TransportReviewProbes testMethod=test_action_timeout_must_bound_socket_write>
+
+    async def test_action_timeout_must_bound_socket_write(self):
+        config = QQConfig(token="x" * 32, account_id="12345", owner_id="67890", action_timeout=1)
+        connection = OneBotConnection(config, AsyncMock())
+        socket = Socket()
+        block = asyncio.Event()
+        async def blocked_write(value):
+            await block.wait()
+        socket.send_json = blocked_write
+        connection.socket, connection.verified, connection.online = socket, True, True
+        connection.last_seen = connection.now()
+        task = asyncio.create_task(connection.send([]))
+        try:
+            await asyncio.sleep(1.2)
+            bounded = task.done()
+            print("Action completed after configured one-second timeout:", bounded)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+>       self.assertTrue(bounded)
+E       AssertionError: False is not true
+
+tests\qqbot-review-20261021\review_probes.py:145: AssertionError
+_ TransportReviewProbes.test_owner_event_during_identification_must_not_be_lost _
+
+self = <review_probes.TransportReviewProbes testMethod=test_owner_event_during_identification_must_not_be_lost>
+
+    async def test_owner_event_during_identification_must_not_be_lost(self):
+        config = QQConfig(enabled=True, token="x" * 32, account_id="12345",
+                          owner_id="67890", action_timeout=1)
+        events = AsyncMock()
+        connection = OneBotConnection(config, events)
+        socket = Socket()
+        task = asyncio.create_task(connection.serve(socket))
+        try:
+            login = await asyncio.wait_for(socket.output.get(), 1)
+            await socket.input.put(event(1, "message during handshake"))
+            await socket.ack(login, {"user_id": 12345})
+            status = await asyncio.wait_for(socket.output.get(), 1)
+            await socket.ack(status, {"online": True})
+            await asyncio.sleep(.05)
+            print("Connection verified:", connection.verified, "received owner callbacks:", events.await_count)
+            observed = events.await_count
+        finally:
+            await socket.close(1000)
+            await asyncio.wait_for(task, 1)
+>       self.assertEqual(observed, 1)
+E       AssertionError: 0 != 1
+
+tests\qqbot-review-20261021\review_probes.py:125: AssertionError
+__ CatalogReviewProbes.test_missing_optional_sticker_must_allow_text_runtime __
+
+self = <review_probes.CatalogReviewProbes testMethod=test_missing_optional_sticker_must_allow_text_runtime>
+
+    def test_missing_optional_sticker_must_allow_text_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "stickers.json"
+            manifest.write_text(json.dumps({"version": 1, "stickers": [
+                {"id": "cat", "description": "cat reaction", "file": "missing.gif"}
+            ]}), encoding="utf-8")
+            config = QQConfig(enabled=True, account_id="12345", owner_id="67890", assistant_id="role",
+                              sticker_manifest=str(manifest), store_path=str(root / "ledger.sqlite3"))
+>           runtime = QQRuntime(config, model=Model(), transport=Transport(), exporter=lambda *args: None)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\qqbot-review-20261021\review_probes.py:158: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+gateway\qqbot.py:42: in __init__
+    self.catalog = catalog if catalog is not None else StickerCatalog(config.sticker_manifest)
+                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gateway\qqbot_stickers.py:42: in __init__
+    self._read(key)
+gateway\qqbot_stickers.py:45: in _read
+    path = (self.root / self.entries[key]["file"]).resolve(strict=True)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\..\..\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\pathlib.py:1240: in resolve
+    s = self._flavour.realpath(self, strict=strict)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+path = 'C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\tests\\qqbot-review-20261021\\tmp\\tmpmg7007ff\\missing.gif'
+strict = True
+
+>   ???
+E   FileNotFoundError: [WinError 2] 系统找不到指定的文件。: 'C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\tests\\qqbot-review-20261021\\tmp\\tmpmg7007ff\\missing.gif'
+
+<frozen ntpath>:695: FileNotFoundError
+7 failed in 2.11s

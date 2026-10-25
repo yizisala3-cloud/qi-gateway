@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "real_settings_api": true,
+  "production_candidate_frontend": true,
+  "persistence_after_reload": true,
+  "invalid_values_rejected": 4,
+  "keyboard_step": true,
+  "viewports_and_themes": [
+    "card-1280-day.png",
+    "card-1280-night.png",
+    "card-390-day.png",
+    "card-390-night.png"
+  ],
+  "proactive_remains_off": true,
+  "page_errors": []
+}

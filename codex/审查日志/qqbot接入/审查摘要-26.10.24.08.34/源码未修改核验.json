@@ -1,0 +1,62 @@
+[
+  {
+    "path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\gateway\\qqbot_config.py",
+    "unchanged": true
+  },
+  {
+    "path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\gateway\\qqbot_memory.py",
+    "unchanged": true
+  },
+  {
+    "path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\gateway\\qqbot_model.py",
+    "unchanged": true
+  },
+  {
+    "path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\gateway\\qqbot_settings.py",
+    "unchanged": true
+  },
+  {
+    "path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\gateway\\qqbot_stickers.py",
+    "unchanged": true
+  },
+  {
+    "path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\gateway\\qqbot_store.py",
+    "unchanged": true
+  },
+  {
+    "path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\gateway\\qqbot_transport.py",
+    "unchanged": true
+  },
+  {
+    "path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\gateway\\qqbot.py",
+    "unchanged": true
+  },
+  {
+    "path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\gateway\\main.py",
+    "unchanged": true
+  },
+  {
+    "path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\Dockerfile",
+    "unchanged": true
+  },
+  {
+    "path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\requirements.txt",
+    "unchanged": true
+  },
+  {
+    "path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\qqbot\\README.md",
+    "unchanged": true
+  },
+  {
+    "path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\qqbot\\config.env.example",
+    "unchanged": true
+  },
+  {
+    "path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\qqbot\\stickers.example.json",
+    "unchanged": true
+  },
+  {
+    "path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\tools\\run_qqbot_tests.py",
+    "unchanged": true
+  }
+]

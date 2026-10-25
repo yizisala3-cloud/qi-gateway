@@ -13,6 +13,8 @@ from .context import build_context
 from .model_routing import select_upstream_model
 from .request_context import extract_recent_turns, append_gateway_context
 from .qqbot_stickers import split_sticker_summaries
+from .qqbot_proactive import QQModelHTTPError, parse_retry_after
+from .logging_events import credential_scope, provider_label
 
 log = logging.getLogger("gateway.qqbot.model")
 
@@ -62,11 +64,12 @@ class QQModel:
             messages.append({"role":"user","content":"后台检查：请依据已有上下文决定是否主动发一条消息。"})
         body = {"model":select_upstream_model(cfg.UPSTREAM_MODEL,""),"messages":messages,
                 "stream":False,"max_tokens":1800,"tools":[],"tool_choice":"none"}
-        response = await self.client.post(cfg.UPSTREAM_BASE_URL.rstrip("/")+"/chat/completions",
-            headers={"Authorization":"Bearer "+cfg.UPSTREAM_API_KEY,"Content-Type":"application/json"},
-            json=body, timeout=httpx.Timeout(cfg.UPSTREAM_READ_TIMEOUT,connect=10))
-        if not 200 <= response.status_code < 300:
-            raise RuntimeError("qq_model_http_error")
+        with credential_scope('chat',provider_label(cfg.UPSTREAM_BASE_URL),cfg.UPSTREAM_API_KEY):
+            response = await self.client.post(cfg.UPSTREAM_BASE_URL.rstrip("/")+"/chat/completions",
+                headers={"Authorization":"Bearer "+cfg.UPSTREAM_API_KEY,"Content-Type":"application/json"},
+                json=body, timeout=httpx.Timeout(cfg.UPSTREAM_READ_TIMEOUT,connect=10))
+            if not 200 <= response.status_code < 300:
+                raise QQModelHTTPError(response.status_code,parse_retry_after(response.headers.get('Retry-After')))
         data = response.json()
         choices = data.get("choices") if isinstance(data,dict) else None
         message = choices[0].get("message") if isinstance(choices,list) and choices and isinstance(choices[0],dict) else None

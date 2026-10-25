@@ -1,0 +1,11 @@
+{
+  "daily_limit_loaded_in_new_process": 30,
+  "source": "file",
+  "proactive_enabled": false,
+  "files": {
+    "gateway/qqbot_settings.py": "18a9adfd5ae0e7576703234e318094a119f29787da5aad41a541f0b180e9ec47",
+    "admin/js/pages/config.js": "d25f5350866b899fbff9f2eb1f19a927a795a110088ee6ad0918fcdd3e673c66",
+    "admin/js/app.js": "9a1f798c3ffea7dd1359640aa42124d0ee974264b274956a241f0230e95bd2f0",
+    "admin/index.html": "27be601397b6fcb52d23788574aa06d21d3ec54f9db24c82ceda0fdffa1aa454"
+  }
+}

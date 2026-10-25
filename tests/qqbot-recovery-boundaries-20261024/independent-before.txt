@@ -1,0 +1,25 @@
+FFF                                                                      [100%]
+================================== FAILURES ===================================
+_ IndependentRecoveryTests.test_cancelled_attempt_is_not_a_fifth_failure_after_crash _
+codex\审查日志\qqbot接入\审查摘要-26.10.24.23.03\test_independent_recovery.py:126: in test_cancelled_attempt_is_not_a_fifth_failure_after_crash
+    self.assertFalse(after['fault_stopped'], f'recovered state={after}')
+E   AssertionError: True is not false : recovered state={'silent_streak': 0, 'failure_streak': 5, 'fault_stopped': True, 'next_check_at': 0, 'last_finished_at': 1792567237.0, 'last_error_at': 1792567237.0, 'last_error_code': 'interrupted', 'in_flight': False, 'available': True, 'fault_version': 2, 'last_error_message': '上次主动评估意外中断'}
+_ IndependentRecoveryTests.test_corrupt_evaluation_does_not_poison_receipts_and_block_private_chat _
+codex\审查日志\qqbot接入\审查摘要-26.10.24.23.03\test_independent_recovery.py:96: in test_corrupt_evaluation_does_not_poison_receipts_and_block_private_chat
+    self.assertIsNone(error, f'{error}; initial send error={initial_error}; durable receipts={receipt_count}, queued replies={queued_replies}, sent={self.transport.sent}')
+E   AssertionError: 'JSONDecodeError' is not None : JSONDecodeError; initial send error=JSONDecodeError; durable receipts=1, queued replies=1, sent=[]
+_ IndependentRecoveryTests.test_expired_lease_does_not_leave_finished_evaluation_in_flight_forever _
+codex\审查日志\qqbot接入\审查摘要-26.10.24.23.03\test_independent_recovery.py:148: in test_expired_lease_does_not_leave_finished_evaluation_in_flight_forever
+    self.assertFalse(state['in_flight'], f'no model task exists after lease renewal: {state}')
+E   AssertionError: True is not false : no model task exists after lease renewal: {'silent_streak': 0, 'failure_streak': 0, 'fault_stopped': False, 'next_check_at': 1792555506.0, 'last_finished_at': 0, 'last_error_at': 0, 'last_error_code': '', 'in_flight': True, 'available': True, 'fault_version': 0, 'last_error_message': ''}
+============================== warnings summary ===============================
+..\..\..\..\..\AppData\Local\Python\pythoncore-3.12-64\Lib\site-packages\_pytest\cacheprovider.py:469
+  C:\Users\Administrator\AppData\Local\Python\pythoncore-3.12-64\Lib\site-packages\_pytest\cacheprovider.py:469: PytestCacheWarning: could not create cache path C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.pytest_cache\v\cache\nodeids: [WinError 5] 拒绝访问。: 'C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\.pytest_cache\\v\\cache'
+    config.cache.set("cache/nodeids", sorted(self.cached_nodeids))
+
+..\..\..\..\..\AppData\Local\Python\pythoncore-3.12-64\Lib\site-packages\_pytest\cacheprovider.py:423
+  C:\Users\Administrator\AppData\Local\Python\pythoncore-3.12-64\Lib\site-packages\_pytest\cacheprovider.py:423: PytestCacheWarning: could not create cache path C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.pytest_cache\v\cache\lastfailed: [WinError 5] 拒绝访问。: 'C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\.pytest_cache\\v\\cache'
+    config.cache.set("cache/lastfailed", self.lastfailed)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+3 failed, 2 warnings in 1.01s

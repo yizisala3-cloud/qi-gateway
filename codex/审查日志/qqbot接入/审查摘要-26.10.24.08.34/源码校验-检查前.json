@@ -1,0 +1,62 @@
+[
+  {
+    "Path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\gateway\\qqbot_config.py",
+    "Hash": "35108BD2320C374B94575026E8385567DF7CF9F97D8AA4D12AE12A0D935E4DFC"
+  },
+  {
+    "Path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\gateway\\qqbot_memory.py",
+    "Hash": "0AB222637CB54E3932D9238D8A231B84F174432A1F3E3400847412DD0CB0184C"
+  },
+  {
+    "Path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\gateway\\qqbot_model.py",
+    "Hash": "8A3436228D5D890F4BE2E9D1841F3718D73A84B72215AAD6ED9057C49DA2C3F4"
+  },
+  {
+    "Path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\gateway\\qqbot_settings.py",
+    "Hash": "023B9127C70B7A81C36C9440EDC89928D735804D9E0BBFAB5F8712CC6A99D44B"
+  },
+  {
+    "Path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\gateway\\qqbot_stickers.py",
+    "Hash": "A76853CA4491BA0DEBA15C7FD0FF47B0DE0E7009A66539081212C8243CE3378C"
+  },
+  {
+    "Path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\gateway\\qqbot_store.py",
+    "Hash": "305FDA254E04E2EDD271EF3016AB5ED90A6990B73B5AC11396666F0A7C0D004C"
+  },
+  {
+    "Path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\gateway\\qqbot_transport.py",
+    "Hash": "94C546E3D087D85383A17ADAF0775A7AE749BAEA2C235BF474A1CFB4E1FBE86A"
+  },
+  {
+    "Path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\gateway\\qqbot.py",
+    "Hash": "0208501A0F501E22C298A0335369A2280D586F434C6BB6EB977363EB047266F5"
+  },
+  {
+    "Path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\gateway\\main.py",
+    "Hash": "DA6C18B4546981C768CF76BC06EE44B81FD6D8E1200C464E01C8B046AE42FF03"
+  },
+  {
+    "Path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\Dockerfile",
+    "Hash": "72391138920012F3BF2A4B517240210C47A8A27C861AC0EC9AAC9220C5642E3D"
+  },
+  {
+    "Path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\requirements.txt",
+    "Hash": "1CB88D85D33E6C1D14572D7F293EE2EE9882B690024DA989945445CA62DC2BB4"
+  },
+  {
+    "Path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\qqbot\\README.md",
+    "Hash": "C1E43F01AE141C1D4B9A0B601F336C2AA42B4F769DB647A0A2259D7C65FDC8EA"
+  },
+  {
+    "Path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\qqbot\\config.env.example",
+    "Hash": "3A512FB9920B19AE1587E5975AC94354DF0B210C8C13D56648565BB004FBE3DC"
+  },
+  {
+    "Path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\qqbot\\stickers.example.json",
+    "Hash": "740EBA6A9F180BD9F4FA817BE238D93D086369B33B2AE3D750FC142547863F40"
+  },
+  {
+    "Path": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\tools\\run_qqbot_tests.py",
+    "Hash": "912F1BD37B1D30B4DC6E178C9A29D2B01F2B2635777896DF21190C9413E5FFF4"
+  }
+]

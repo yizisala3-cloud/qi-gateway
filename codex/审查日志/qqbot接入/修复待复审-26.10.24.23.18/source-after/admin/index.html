@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="day">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>qi-dashboard</title>
+<link rel="icon" href="/admin/assets/lily-medallion.png">
+<link rel="stylesheet" href="/admin/css/style.css?v=20261021-qqbot-mount-r10&amp;sidebar=20261010-candle-motion2&amp;planning=20261017-time-label-align">
+</head>
+<body>
+<div class="app" id="app">
+
+  <!-- 登录页 -->
+  <div class="login-page" id="login-page" style="display:none">
+    <div class="login-card">
+      <img class="login-medallion" src="/admin/assets/lily-medallion.png" alt="">
+      <h2>qi-dashboard</h2>
+      <p class="login-sub">记忆与陪伴管理后台</p>
+      <div class="orn-divider" aria-hidden="true"></div>
+      <input type="password" id="login-input" placeholder="请输入网关 Token" autocomplete="off">
+      <button class="btn btn-primary btn-block" id="login-btn">进入管理台</button>
+      <p class="login-error" id="login-error" role="alert"></p>
+    </div>
+  </div>
+
+  <!-- 主布局 -->
+  <div class="layout" id="layout" style="display:none">
+
+    <aside class="sidebar" id="sidebar">
+      <img class="sidebar-ornament" src="/admin/assets/ornaments/top-border-ornament.png" alt="" aria-hidden="true">
+      <div class="sidebar-identity">
+        <img class="medallion" src="/admin/assets/lily-medallion.png" alt="铃兰挂画">
+        <h1>qi-dashboard</h1>
+        <p class="sub">记忆与陪伴管理</p>
+      </div>
+      <img class="sidebar-orn-fancy" src="/admin/assets/ornaments/sidebar-divider-four-petal-transparent.png" alt="" aria-hidden="true">
+      <nav class="sidebar-nav" id="sidebar-nav" aria-label="主导航"></nav>
+      <div class="sidebar-art-viewport" aria-hidden="true">
+        <img src="/admin/assets/sidebar-stilllife-desk-user-version.png" alt="">
+        <div class="candle-scene">
+          <img class="candle-repair" src="/admin/assets/sidebar-candle-repair.png" alt="">
+          <svg class="candle-flame" viewBox="406 350 120 312" aria-hidden="true" focusable="false">
+            <image href="/admin/assets/sidebar-candle-flame.png" width="1536" height="1024" />
+          </svg>
+          <div class="candle-glow"></div>
+        </div>
+      </div>
+      <img class="ornament-bottom" src="/admin/assets/ornaments/top-border-ornament.png" alt="" aria-hidden="true">
+      <div class="sidebar-foot">
+        <span id="status-dot" class="status-chip"><span class="dot dot-muted"></span>检测中</span>
+        <button class="icon-btn" id="theme-btn" data-tooltip="切换日间 / 夜读" aria-label="切换主题"></button>
+      </div>
+    </aside>
+    <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+
+    <div class="main">
+      <main class="content" id="content">
+        <div class="page-head" id="page-head">
+          <button class="icon-btn menu-btn" id="menu-btn" aria-label="打开导航">
+            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M3 12h18"/><path d="M3 18h18"/></svg>
+          </button>
+          <div class="page-head-text">
+            <div class="crumb" id="page-crumb"></div>
+            <h1 class="page-title" id="page-title"></h1>
+            <p class="page-desc" id="page-desc"></p>
+          </div>
+          <div class="page-head-actions" id="page-head-actions"></div>
+        </div>
+        <div class="orn-divider page-head-rule" aria-hidden="true"></div>
+        <div id="page-root"></div>
+      </main>
+    </div>
+  </div>
+</div>
+<!-- 备忘录 Markdown 依赖（固定版本随项目交付；window.marked / window.DOMPurify） -->
+<script src="/admin/assets/vendor/marked-12.0.2.min.js"></script>
+<script src="/admin/assets/vendor/purify-3.1.6.min.js"></script>
+<script type="module" src="/admin/js/app.js?v=20261024-qqbot-recovery-r13-r15"></script>
+</body>
+</html>

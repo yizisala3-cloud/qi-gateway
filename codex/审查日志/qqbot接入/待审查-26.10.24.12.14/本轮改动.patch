@@ -1,0 +1,1444 @@
+diff --git a/gateway/qqbot.py b/gateway/qqbot.py
+--- a/gateway/qqbot.py
++++ b/gateway/qqbot.py
+@@ -20,6 +20,8 @@
+ from .qqbot_stickers import StickerCatalog, split_sticker_summaries
+ from .qqbot_store import QQStore
+ from .qqbot_transport import OneBotConnection, NotSubmitted, SendCancelled
++from .qqbot_proactive import initial_state, public_status, classify_failure, ERROR_MESSAGES
++from .logging_events import emit_error
+ 
+ log = logging.getLogger("gateway.qqbot")
+ 
+@@ -57,6 +59,8 @@
+         self.export_pending = None
+         self.proactive_generation = None
+         self.sending_task = None
++        self.proactive_state_error = False
++        self.last_evaluation_state = initial_state()
+ 
+     def activate(self):
+         self.leader = self.store.acquire(self.owner,self.now())
+@@ -66,6 +70,13 @@
+ 
+     def _recover_activation(self):
+         self._recover()
++        try:
++            recovered = self.store.recover_evaluation(self.now(),self.config.check_seconds,self.owner)
++            if recovered:
++                self.last_evaluation_state = recovered
++                self._log_evaluation_failure(None,'interrupted',recovered)
++        except Exception as exc:
++            self._evaluation_storage_failed(exc)
+         if self.discard_proactive_on_activation:
+             self.store.invalidate_proactive('settings_activation')
+ 
+@@ -96,7 +107,55 @@
+         return {"enabled":True,"leader":self.leader,"connected":self.transport.ready,
+                 "proactive_enabled":self.config.proactive_enabled,"paused":state["paused"],
+                 "silence_until":state["silence_until"],"timezone":self.config.timezone,
+-                "outbox":self.store.counts(),"stickers":len(self.catalog.entries)}
++                "outbox":self.store.counts(),"stickers":len(self.catalog.entries),
++                "proactive_evaluation":self.evaluation_status()}
++
++    def evaluation_status(self):
++        if not self.proactive_state_error:
++            try:
++                self.last_evaluation_state = self.store.evaluation_state()
++            except Exception as exc:
++                self._evaluation_storage_failed(exc)
++        result = public_status(self.last_evaluation_state)
++        if self.proactive_state_error:
++            result.update(fault_stopped=True,last_error_code='state_unavailable',
++                last_error_message=ERROR_MESSAGES['state_unavailable'],next_check_at=0)
++        return result
++
++    def resume_evaluation(self, version):
++        if self.proactive_generation is not None:
++            raise ValueError('主动评估仍在结束，请稍后重试。')
++        self.last_evaluation_state = self.store.resume_evaluation(self.now(),self.config.check_seconds,
++            self.owner,version,force=self.proactive_state_error)
++        self.proactive_state_error = False
++
++    def _evaluation_storage_failed(self, exc):
++        first = not self.proactive_state_error
++        self.proactive_state_error = True
++        if first:
++            emit_error('qqbot','proactive_state','proactive_state_unavailable',
++                'QQ主动评估状态不可用，已停止调用，请检查存储后到配置页恢复',
++                exc=exc,outcome='failed',safe_context={'reason_code':'state_unavailable'})
++
++    def _log_evaluation_failure(self, exc, code, evaluation, status=None):
++        stopped = evaluation['fault_stopped']
++        message = ERROR_MESSAGES[code] + ('；已停止调用，请到配置页恢复' if stopped else '；稍后按退避规则重试')
++        emit_error('qqbot','proactive_evaluation','proactive_calls_stopped' if stopped else 'proactive_'+code,
++            message,level='ERROR' if stopped else 'WARNING',exc=exc,
++            outcome='failed' if stopped else 'degraded',upstream_status=status,
++            safe_context={'attempts':evaluation['failure_streak'],'reason_code':code,
++                'retry':not stopped,'timeout_seconds':max(0,evaluation['next_check_at']-self.now())})
++
++    def _finish_evaluation(self, attempt, outcome, **failure):
++        try:
++            result = self.store.finish_evaluation(attempt,outcome,self.now(),self.config.check_seconds,
++                self.owner,**failure)
++            if result:
++                self.last_evaluation_state = result
++            return result
++        except Exception as exc:
++            self._evaluation_storage_failed(exc)
++            return None
+ 
+     async def ingest(self, event):
+         c = self.config
+@@ -127,7 +186,9 @@
+             local = datetime.fromtimestamp(now,ZoneInfo(c.timezone))
+             tomorrow = (local+timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0).timestamp()
+             state = self.store.state()
+-            if not c.proactive_enabled:
++            if action in {'resume','status'} and self.evaluation_status()['fault_stopped']:
++                reply = '主动评估因故障已停止，请到配置页点击恢复调用；你仍可正常私聊。'
++            elif not c.proactive_enabled:
+                 reply = "服务器尚未启用主动消息；你的控制选择已保存。"
+             elif action=="pause":
+                 reply = "好，主动消息已暂停。你仍然可以正常和我聊天。"
+@@ -224,6 +285,8 @@
+ 
+     def _proactive_timing_error(self, state, now):
+         c = self.config
++        if self.proactive_state_error or self.store.evaluation_state()['fault_stopped']:
++            return 'evaluation_fault_stopped'
+         active,local = self._active(now)
+         if not c.proactive_enabled or not active:
+             return 'outside_active_window'
+@@ -237,6 +300,11 @@
+ 
+     async def proactive_once(self):
+         c, now = self.config,self.now()
++        if not c.proactive_enabled or self.proactive_state_error:
++            return
++        evaluation = self.evaluation_status()
++        if evaluation['fault_stopped'] or evaluation['in_flight'] or evaluation['next_check_at'] > now:
++            return
+         state = self.store.state()
+         if (not c.proactive_enabled or not self.transport.ready or self.generate_lock.locked()
+                 or self.store.pending() or state["paused"] or state["silence_until"]>now
+@@ -244,31 +312,56 @@
+                 or state["next_check"]>now or self._proactive_timing_error(state,now)):
+             return
+         async with self.generate_lock:
+-            state = self.store.reserve_check(now,c.check_seconds)
+-            history = self.store.conversation_history(c.history_limit)
++            try:
++                attempt = self.store.begin_evaluation(now,c.check_seconds,self.owner)
++                if attempt is None:
++                    return
++                self.last_evaluation_state = attempt
++                history = self.store.conversation_history(c.history_limit)
++            except Exception as exc:
++                self._evaluation_storage_failed(exc)
++                return
+             if not history:
++                self._finish_evaluation(attempt,'cancelled')
+                 return
+             query = "\n".join(r["content"] for r in history if r["role"]=="user")[-1600:]
+             try:
+                 self.proactive_generation = asyncio.create_task(self.model.generate(history,query,proactive=True))
+                 result = await self.proactive_generation
++                if not isinstance(result,dict) or type(result.get('send')) is not bool:
++                    raise ValueError('qq_invalid_proactive_result')
+                 if not result.get("send",False):
+-                    return
+-                segments, summary = self._segments(result,"")
++                    outcome = 'silent'
++                else:
++                    segments, summary = self._segments(result,"")
++                    outcome = 'ready'
+             except asyncio.CancelledError:
++                self._finish_evaluation(attempt,'cancelled')
+                 if asyncio.current_task().cancelling():
+                     raise
+                 return
+             except Exception as exc:
+-                log.warning("QQ主动检查降级 type=%s",type(exc).__name__,exc_info=exc)
++                code,fatal,retry_after,status = classify_failure(exc)
++                finished = self._finish_evaluation(attempt,'error',code=code,fatal=fatal,retry_after=retry_after)
++                if finished and finished['outcome']=='error':
++                    self._log_evaluation_failure(exc,code,finished,status)
++                elif self.proactive_state_error:
++                    failed = {**attempt,'fault_stopped':True,'failure_streak':min(5,attempt['failure_streak']+1),'next_check_at':0}
++                    self._log_evaluation_failure(exc,code,failed,status)
+                 return
+             finally:
+                 self.proactive_generation = None
++            finished = self._finish_evaluation(attempt,outcome)
++            if not finished or finished['outcome'] != 'ready':
++                return
+             current = self.now()
+             active_now, _ = self._active(current)
+             if active_now and self.transport.ready and not self.stopped:
+-                self.store.queue("proactive:"+uuid4().hex,"proactive",segments,summary,current,
+-                                 self._proactive_expiry(current),revision=state["revision"],owner=self.owner)
++                try:
++                    self.store.queue("proactive:"+uuid4().hex,"proactive",segments,summary,current,
++                        self._proactive_expiry(current),revision=attempt['attempt_revision'],owner=self.owner)
++                except Exception as exc:
++                    self._evaluation_storage_failed(exc)
+ 
+     def _before_submit(self):
+         try:
+diff --git a/gateway/qqbot_store.py b/gateway/qqbot_store.py
+--- a/gateway/qqbot_store.py
++++ b/gateway/qqbot_store.py
+@@ -13,6 +13,8 @@
+ from contextlib import contextmanager
+ from pathlib import Path
+ from uuid import uuid4
++
++from .qqbot_proactive import initial_state, validate_state, complete
+ 
+ log = logging.getLogger('gateway.qqbot.store')
+ 
+@@ -152,6 +154,70 @@
+     def _save_state(self, state):
+         self.conn.execute("INSERT OR REPLACE INTO meta VALUES('schedule',?)", (json.dumps(state),))
+ 
++    def evaluation_state(self):
++        with self.lock:
++            row = self.conn.execute("SELECT value FROM meta WHERE key='proactive_evaluation'").fetchone()
++            return validate_state(json.loads(row[0])) if row else initial_state()
++
++    def _save_evaluation(self, state):
++        self.conn.execute("INSERT OR REPLACE INTO meta VALUES('proactive_evaluation',?)",(json.dumps(state),))
++
++    def begin_evaluation(self, now, delay, owner):
++        with self.transaction():
++            state, evaluation = self.state(), self.evaluation_state()
++            if (not self.owns(owner,now) or evaluation['fault_stopped'] or evaluation['in_flight']
++                    or evaluation['next_check_at'] > now or state['next_check'] > now
++                    or state['paused'] or state['silence_until'] > now or self.pending() or self.open_proactive()):
++                return None
++            evaluation.update(in_flight=True,attempt_id=uuid4().hex,attempt_revision=state['revision'],
++                next_check_at=now+delay)
++            self._save_evaluation(evaluation)
++            return dict(evaluation)
++
++    def finish_evaluation(self, attempt, outcome, now, delay, owner, **failure):
++        with self.transaction():
++            evaluation = self.evaluation_state()
++            if (not self.owns(owner,now) or not evaluation['in_flight']
++                    or evaluation['attempt_id'] != attempt['attempt_id']
++                    or evaluation['generation'] != attempt['generation']):
++                return None
++            if self.state()['revision'] != attempt['attempt_revision']:
++                outcome, failure = 'cancelled', {}
++            evaluation = complete(evaluation,outcome,now,delay,**failure)
++            self._save_evaluation(evaluation)
++            if evaluation['fault_stopped']:
++                self._invalidate_proactive('evaluation_fault_stopped')
++            return {'outcome':outcome, **evaluation}
++
++    def recover_evaluation(self, now, delay, owner):
++        with self.transaction():
++            evaluation = self.evaluation_state()
++            if not self.owns(owner,now) or not evaluation['in_flight']:
++                return None
++            evaluation = complete(evaluation,'error',now,delay,code='interrupted')
++            evaluation['generation'] += 1
++            self._save_evaluation(evaluation)
++            if evaluation['fault_stopped']:
++                self._invalidate_proactive('evaluation_fault_stopped')
++            return evaluation
++
++    def resume_evaluation(self, now, delay, owner, version, force=False):
++        with self.transaction():
++            evaluation = self.evaluation_state()
++            if not self.owns(owner,now):
++                raise ValueError('当前QQBot实例尚未取得运行权，请稍后重试。')
++            if evaluation['generation'] != version:
++                raise ValueError('主动评估状态已变化，请刷新后重试。')
++            if not evaluation['fault_stopped'] and not force:
++                return evaluation
++            if evaluation['in_flight'] and not force:
++                raise ValueError('主动评估仍在结束，请稍后重试。')
++            self._invalidate_proactive('evaluation_manually_resumed')
++            evaluation.update(fault_stopped=False,failure_streak=0,silent_streak=0,
++                next_check_at=now+delay,generation=evaluation['generation']+1,in_flight=False,attempt_id='')
++            self._save_evaluation(evaluation)
++            return evaluation
++
+     def accept(self, message_id, text, now, *, action=None, silence_until=0, reply=None):
+         if action is not None and (action not in {'pause','resume','today','status'} or not reply):
+             raise ValueError('非法主人控制指令')
+@@ -165,6 +231,16 @@
+             state = self.state()
+             state.update(last_incoming=now,unanswered=0,revision=state["revision"]+1)
+             self._save_state(state)
++            try:
++                evaluation = self.evaluation_state()
++            except (ValueError,TypeError) as exc:
++                # A damaged proactive record must not reject ordinary incoming chat.
++                log.error('QQ主动评估状态损坏，保留原记录并继续私聊',exc_info=exc)
++            else:
++                evaluation['silent_streak'] = 0
++                if not evaluation['fault_stopped'] and not evaluation['failure_streak']:
++                    evaluation['next_check_at'] = 0
++                self._save_evaluation(evaluation)
+             self.conn.execute("UPDATE outbox SET status='failed',error='new_owner_message',payload='[]' WHERE kind='proactive' AND status='queued'")
+             if action is not None:
+                 self._control(action,now,silence_until)
+@@ -272,10 +348,13 @@
+ 
+     def invalidate_proactive(self, reason):
+         with self.transaction():
+-            state = self.state()
+-            state['revision'] += 1
+-            self._save_state(state)
+-            self.conn.execute("UPDATE outbox SET status='failed',error=?,payload='[]' WHERE kind='proactive' AND status='queued'",(reason,))
++            self._invalidate_proactive(reason)
++
++    def _invalidate_proactive(self, reason):
++        state = self.state()
++        state['revision'] += 1
++        self._save_state(state)
++        self.conn.execute("UPDATE outbox SET status='failed',error=?,payload='[]' WHERE kind='proactive' AND status='queued'",(reason,))
+ 
+     def claim_send(self, now, owner=None):
+         with self.transaction():
+@@ -297,6 +376,8 @@
+         if row['expires']<=now:
+             return 'expired'
+         if row['kind']=='proactive':
++            if self.evaluation_state()['fault_stopped']:
++                return 'evaluation_fault_stopped'
+             state = self.state()
+             if row['eligibility_revision'] is None or row['eligibility_revision']!=state['revision']:
+                 return 'stale_proactive_revision'
+diff --git a/gateway/qqbot_model.py b/gateway/qqbot_model.py
+--- a/gateway/qqbot_model.py
++++ b/gateway/qqbot_model.py
+@@ -13,6 +13,8 @@
+ from .model_routing import select_upstream_model
+ from .request_context import extract_recent_turns, append_gateway_context
+ from .qqbot_stickers import split_sticker_summaries
++from .qqbot_proactive import QQModelHTTPError, parse_retry_after
++from .logging_events import credential_scope, provider_label
+ 
+ log = logging.getLogger("gateway.qqbot.model")
+ 
+@@ -62,11 +64,12 @@
+             messages.append({"role":"user","content":"后台检查：请依据已有上下文决定是否主动发一条消息。"})
+         body = {"model":select_upstream_model(cfg.UPSTREAM_MODEL,""),"messages":messages,
+                 "stream":False,"max_tokens":1800,"tools":[],"tool_choice":"none"}
+-        response = await self.client.post(cfg.UPSTREAM_BASE_URL.rstrip("/")+"/chat/completions",
+-            headers={"Authorization":"Bearer "+cfg.UPSTREAM_API_KEY,"Content-Type":"application/json"},
+-            json=body, timeout=httpx.Timeout(cfg.UPSTREAM_READ_TIMEOUT,connect=10))
+-        if not 200 <= response.status_code < 300:
+-            raise RuntimeError("qq_model_http_error")
++        with credential_scope('chat',provider_label(cfg.UPSTREAM_BASE_URL),cfg.UPSTREAM_API_KEY):
++            response = await self.client.post(cfg.UPSTREAM_BASE_URL.rstrip("/")+"/chat/completions",
++                headers={"Authorization":"Bearer "+cfg.UPSTREAM_API_KEY,"Content-Type":"application/json"},
++                json=body, timeout=httpx.Timeout(cfg.UPSTREAM_READ_TIMEOUT,connect=10))
++            if not 200 <= response.status_code < 300:
++                raise QQModelHTTPError(response.status_code,parse_retry_after(response.headers.get('Retry-After')))
+         data = response.json()
+         choices = data.get("choices") if isinstance(data,dict) else None
+         message = choices[0].get("message") if isinstance(choices,list) and choices and isinstance(choices[0],dict) else None
+diff --git a/gateway/qqbot_settings.py b/gateway/qqbot_settings.py
+--- a/gateway/qqbot_settings.py
++++ b/gateway/qqbot_settings.py
+@@ -100,7 +100,25 @@
+             'proactive_configured':proactive_configured,'proactive_note':proactive_note,
+             'running':running,'connected':bool(runtime_state.get('connected')),
+             'owner_paused':bool(runtime_state.get('paused')),'silence_until':runtime_state.get('silence_until',0),
++            'proactive_evaluation':self.runtime.evaluation_status() if running else None,
+             'error':self.read_error or self.apply_error or status_error}
++
++    async def resume_evaluation(self, version):
++        async with self.lock:
++            if self.closing or self.read_error:
++                raise SettingsError(self.read_error or '网关正在关闭，请稍后重试。')
++            if not self.runtime or self.runtime.stopped or not self.flags['enabled']:
++                raise SettingsError('请先开启QQBot总开关后再恢复调用。',409)
++            try:
++                self.runtime.resume_evaluation(version)
++            except ValueError as exc:
++                raise SettingsError(str(exc),409) from exc
++            except Exception as exc:
++                log.error('QQ主动评估恢复失败',exc_info=exc,extra={'evt':{
++                    'module':'qqbot','operation':'proactive_resume','error_code':'proactive_resume_failed',
++                    'message_zh':'QQ主动评估未能恢复，请检查本地存储后重试','outcome':'failed'}})
++                raise SettingsError('主动评估未能恢复，请检查本地存储后重试。') from exc
++            return self.snapshot()
+ 
+     def _write(self, flags):
+         self.path.parent.mkdir(parents=True,exist_ok=True)
+@@ -232,4 +250,26 @@
+     return JSONResponse(data,headers={'Cache-Control':'no-store'})
+ 
+ 
+-qqbot_settings_routes = [Route('/admin/api/qqbot/settings',settings_endpoint,methods=['GET','PUT'])]
++async def resume_evaluation_endpoint(request):
++    from .main import verify_token
++    headers = {'Cache-Control':'no-store'}
++    if not verify_token(request):
++        return JSONResponse({'error':'unauthorized'},status_code=401,headers=headers)
++    manager = getattr(request.app.state,'qqbot_settings',None)
++    if manager is None:
++        return JSONResponse({'error':'QQBot配置服务未就绪'},status_code=503,headers=headers)
++    try:
++        try:
++            payload = await request.json()
++        except (ValueError,UnicodeDecodeError):
++            raise SettingsError('请求正文必须为合法JSON。',400) from None
++        if (not isinstance(payload,dict) or set(payload) != {'fault_version'}
++                or type(payload['fault_version']) is not int or payload['fault_version'] < 0):
++            raise SettingsError('请提交当前故障版本后恢复调用。',400)
++        return JSONResponse(await manager.resume_evaluation(payload['fault_version']),headers=headers)
++    except SettingsError as exc:
++        return JSONResponse({'error':str(exc)},status_code=exc.status,headers=headers)
++
++
++qqbot_settings_routes = [Route('/admin/api/qqbot/settings',settings_endpoint,methods=['GET','PUT']),
++    Route('/admin/api/qqbot/proactive/resume',resume_evaluation_endpoint,methods=['POST'])]
+diff --git a/gateway/logging_events.py b/gateway/logging_events.py
+--- a/gateway/logging_events.py
++++ b/gateway/logging_events.py
+@@ -42,6 +42,7 @@
+ _LEVEL_NAMES = ("WARNING", "ERROR", "CRITICAL")
+ 
+ _MODULE_ZH = {
++    "qqbot": "QQBot",
+     "planning": "规划管理",
+     "memo": "备忘录",
+     "memory": "记忆",
+@@ -61,6 +62,7 @@
+ _LOGGER_MODULE_RULES: tuple[tuple[str, str], ...] = tuple(
+     sorted(
+         (
++            ("gateway.qqbot", "qqbot"),
+             ("gateway.planning", "planning"),
+             ("gateway.memo", "memo"),
+             ("gateway.memory", "memory"),
+@@ -96,6 +98,7 @@
+ 
+ # 模块 → emit_error 使用的 logger 名（结构化入口与既有 logger 命名一致）。
+ _MODULE_LOGGER = {
++    "qqbot": "gateway.qqbot",
+     "planning": "gateway.planning",
+     "memo": "gateway.memo",
+     "memory": "gateway.memory",
+@@ -110,6 +113,7 @@
+ 
+ # 路由模板 → 模块（HTTP 边界兜底事件用）。
+ _ROUTE_MODULE_RULES: tuple[tuple[str, str], ...] = (
++    ("/admin/api/qqbot", "qqbot"),
+     ("/admin/api/planning", "planning"),
+     ("/admin/api/memo", "memo"),
+     ("/admin/api/memory", "memory"),
+diff --git a/admin/js/pages/config.js b/admin/js/pages/config.js
+--- a/admin/js/pages/config.js
++++ b/admin/js/pages/config.js
+@@ -83,6 +83,7 @@
+       'toggle-qqbot': () => this.toggleQQSetting('enabled'),
+       'toggle-qqbot-proactive': () => this.toggleQQSetting('proactive_enabled'),
+       'save-qqbot-daily-limit': () => this.saveQQDailyLimit(),
++      'resume-qqbot-evaluation': () => this.resumeQQEvaluation(),
+       'toggle-sky': () => this.toggleSkySetting(),
+       'save-recent-limit': () => this.saveRecentLimit(),
+       'toggle-daily-refresh': (el) => this.toggleCycleSwitch(el, 'daily_refresh_enabled', '每日待办自动刷新'),
+@@ -342,6 +343,34 @@
+       .every(key => typeof data[key] === 'boolean');
+   },
+ 
++  validQQEvaluation(data) {
++    return data?.available === true && typeof data.fault_stopped === 'boolean'
++      && typeof data.in_flight === 'boolean'
++      && ['failure_streak','silent_streak','fault_version'].every(key => Number.isInteger(data[key]) && data[key] >= 0)
++      && Number.isFinite(data.next_check_at) && data.next_check_at >= 0;
++  },
++
++  renderQQEvaluation() {
++    const s = this.qqSettings, e = s?.proactive_evaluation;
++    const known = this.validQQEvaluation(e);
++    const stopped = known && e.fault_stopped;
++    const status = !known ? '未读取' : stopped ? '故障停用' : !s.proactive_enabled ? '未启用'
++      : e.in_flight ? 'AI评估中' : s.owner_paused || s.silence_until > Date.now()/1000 ? '主人已暂停'
++      : e.failure_streak ? '故障退避中' : e.silent_streak ? '静默降频中' : '等待条件满足';
++    const next = !known ? '—' : stopped ? '等待手动恢复' : !s.proactive_enabled ? '未启用'
++      : e.in_flight ? '本轮结束后计算' : e.next_check_at > Date.now()/1000
++        ? new Date(e.next_check_at*1000).toLocaleString('zh-CN',{hour12:false}) : '条件满足后';
++    const disabled = !stopped || !s?.writable || !s.running || this.savingQQSettings;
++    return `<div class="kv"><span class="k">主动评估状态</span><span class="v">
++      <span id="qqbot-evaluation-tag" class="tag ${stopped ? 'tag-red' : 'tag-muted'}">${status}</span>
++      <button type="button" class="btn btn-secondary btn-sm" data-act="resume-qqbot-evaluation" ${disabled ? 'disabled' : ''}>恢复调用</button>
++      </span></div>
++      <div class="kv"><span class="k">连续故障</span><span class="v" id="qqbot-failure-streak">${known ? `${e.failure_streak} 次` : '—'}</span></div>
++      <div class="kv"><span class="k">下次评估（本地时间）</span><span class="v" id="qqbot-next-evaluation">${esc(next)}</span></div>
++      ${known && e.last_error_message ? `<p class="muted text-sm" id="qqbot-last-evaluation-error" style="margin:6px 0 0" role="status">最近故障：${esc(e.last_error_message)}</p>` : ''}
++      <p class="muted text-sm" data-help-note="主动评估与故障恢复" style="margin:6px 0 0">正常静默后等待10、20、40、60分钟；连续故障后等待5分钟、15分钟、1小时、2小时，第5次或鉴权失败停止调用。间隔不会短于配置的基础间隔；时间为最早再次评估时刻，仍需满足发送时段、安静期和冷却。恢复调用只解除故障暂停，不重置当天已用次数，也不会立即强制发消息。报错可在日志页按QQBot筛选，需开启日志收集。</p>`;
++  },
++
+   renderQQSettings() {
+     const s = this.qqSettings;
+     const known = this.validQQSettings(s);
+@@ -375,6 +404,7 @@
+         <button type="button" class="btn btn-secondary btn-sm" data-act="save-qqbot-daily-limit" ${limitDisabled ? 'disabled' : ''}>保存</button>
+       </span></div>
+       <div class="kv"><span class="k">连接状态</span><span class="v"><span id="qqbot-runtime-tag" class="tag ${known && s.connected ? 'tag-green' : 'tag-muted'}">${status}</span></span></div>
++      ${this.renderQQEvaluation()}
+       <p class="muted text-sm" id="qqbot-settings-note" style="margin:6px 0 0" role="status">${this.savingQQSettings ? '正在保存…' : notes.map(esc).join(' ')}</p>
+       <p class="muted text-sm" style="margin:6px 0 0" data-help-note="QQBot开关">默认关闭，保存后生效，重启后保留。总开关关闭时停止QQ收发并关闭主动消息；单独关闭主动消息仍可私聊。重新开启不会补发旧问候，也不会解除QQ里设置的暂停。</p>`;
+   },
+@@ -405,14 +435,21 @@
+     return this.saveQQSettings({ daily_limit: value }, `每日主动消息上限已保存为${value}条`);
+   },
+ 
+-  async saveQQSettings(payload, message) {
++  async resumeQQEvaluation() {
++    const e = this.qqSettings?.proactive_evaluation;
++    if (!this.validQQEvaluation(e) || !e.fault_stopped) return;
++    return this.saveQQSettings({fault_version:e.fault_version},'已恢复主动评估，将按原设置等待合适时机',
++      '/admin/api/qqbot/proactive/resume','POST');
++  },
++
++  async saveQQSettings(payload, message, path = '/admin/api/qqbot/settings', method = 'PUT') {
+     if (!this.validQQSettings(this.qqSettings) || this.savingQQSettings || !this.qqSettings.writable) return;
+     const token = this.qqMountToken;
+     this.savingQQSettings = true;
+     this.refreshQQSettings();
+     try {
+-      const result = await gw('/admin/api/qqbot/settings', {
+-        method: 'PUT', headers: { 'Content-Type': 'application/json' },
++      const result = await gw(path, {
++        method, headers: { 'Content-Type': 'application/json' },
+         body: JSON.stringify(payload),
+       });
+       if (token !== this.qqMountToken) return;
+diff --git a/admin/js/pages/logs.js b/admin/js/pages/logs.js
+--- a/admin/js/pages/logs.js
++++ b/admin/js/pages/logs.js
+@@ -11,6 +11,7 @@
+   CRITICAL: { label: '严重', tone: 'red' },
+ };
+ const MODULE_LABELS = {
++  qqbot: 'QQBot',
+   planning: '规划管理', memo: '备忘录', memory: '记忆', context: '上下文',
+   chat: '聊天转发', database: '数据库', system: '系统', todo: '待办插件',
+   eventide: '身体状态', persona: '人设', other: '其他组件',
+diff --git a/admin/js/app.js b/admin/js/app.js
+--- a/admin/js/app.js
++++ b/admin/js/app.js
+@@ -96,7 +96,7 @@
+   try { currentMod?.unmount?.(); } catch {}
+   currentMod = null;
+   try {
+-    const pageVersion = key === 'config' ? '20261024-qqbot-daily-limit' : ASSET_VERSION;
++    const pageVersion = ['config','logs'].includes(key) ? '20261024-qqbot-recovery' : ASSET_VERSION;
+     const mod = (await import(`./pages/${key}.js?v=${pageVersion}`)).default;
+     if (seq !== routeSeq) return;
+     currentMod = mod;
+diff --git a/admin/index.html b/admin/index.html
+--- a/admin/index.html
++++ b/admin/index.html
+@@ -75,6 +75,6 @@
+ <!-- 备忘录 Markdown 依赖（固定版本随项目交付；window.marked / window.DOMPurify） -->
+ <script src="/admin/assets/vendor/marked-12.0.2.min.js"></script>
+ <script src="/admin/assets/vendor/purify-3.1.6.min.js"></script>
+-<script type="module" src="/admin/js/app.js?v=20261024-qqbot-daily-limit"></script>
++<script type="module" src="/admin/js/app.js?v=20261024-qqbot-recovery"></script>
+ </body>
+ </html>
+diff --git a/tests/qqbot_config_mount.test.mjs b/tests/qqbot_config_mount.test.mjs
+--- a/tests/qqbot_config_mount.test.mjs
++++ b/tests/qqbot_config_mount.test.mjs
+@@ -29,6 +29,13 @@
+   globalThis.fetch = async (url, options={}) => {
+     const path=new URL(url).pathname;
+     if (path==='/health') visit++;
++    if (path==='/admin/api/qqbot/proactive/resume') {
++      const payload=JSON.parse(options.body);writes.push(payload);
++      if (holdPut) await put.promise;
++      server={...server,proactive_evaluation:{...server.proactive_evaluation,fault_stopped:false,failure_streak:0,
++        fault_version:server.proactive_evaluation.fault_version+1}};
++      return response(snapshot(server));
++    }
+     if (path==='/admin/api/qqbot/settings') {
+       if (options.method==='PUT') {
+         const payload=JSON.parse(options.body);writes.push(payload);
+@@ -194,3 +201,32 @@
+     assert.equal(page.savingQQSettings,false);page.unmount();
+   });
+ }
++
++if (group==='evaluation-recovery') {
++  const stopped=()=>({available:true,fault_stopped:true,failure_streak:5,silent_streak:0,fault_version:3,
++    next_check_at:0,in_flight:false,last_error_message:'主动评估请求超时'});
++  test('manual recovery posts only the displayed fault version and keeps proactive off',async()=>{
++    const f=setup({enabled:true,proactive_enabled:false,proactive_evaluation:stopped()},{delayed:'none'});
++    await page.mount(f.oldRoot);
++    assert.equal(f.oldRoot.querySelector('#qqbot-evaluation-tag').textContent,'故障停用');
++    f.oldRoot.querySelector('[data-act="resume-qqbot-evaluation"]').click();await flush();
++    assert.deepEqual(f.writes,[{fault_version:3}]);assert.equal(f.state().proactive_enabled,false);
++    assert.equal(page.qqSettings.proactive_evaluation.fault_stopped,false);
++    assert.equal(f.oldRoot.querySelector('[data-act="resume-qqbot-evaluation"]').disabled,true);page.unmount();
++  });
++  for(const failure of [false,true])test(`late recovery response is isolated, failure=${failure}`,async()=>{
++    const f=setup({enabled:true,proactive_enabled:false,proactive_evaluation:stopped()},{delayed:'none'});
++    await page.mount(f.oldRoot);f.hold();const pending=page.resumeQQEvaluation();
++    assert.equal(f.oldRoot.querySelector('[data-act="resume-qqbot-evaluation"]').disabled,true);
++    await page.resumeQQEvaluation();assert.equal(f.writes.length,1);
++    page.unmount();await page.mount(f.currentRoot);const html=f.currentRoot.innerHTML;
++    if(failure)f.failPut();else f.release();await pending;
++    assert.equal(f.currentRoot.innerHTML,html);assert.equal(page.qqSettings.proactive_evaluation.fault_stopped,true);
++    page.unmount();
++  });
++  test('unknown evaluation state does not offer recovery',async()=>{
++    const f=setup({enabled:true,proactive_enabled:false},{delayed:'none'});await page.mount(f.oldRoot);
++    assert.equal(f.oldRoot.querySelector('[data-act="resume-qqbot-evaluation"]').disabled,true);
++    await page.resumeQQEvaluation();assert.equal(f.writes.length,0);page.unmount();
++  });
++}
+diff --git a/tests/test_qqbot_config_frontend.py b/tests/test_qqbot_config_frontend.py
+--- a/tests/test_qqbot_config_frontend.py
++++ b/tests/test_qqbot_config_frontend.py
+@@ -41,3 +41,6 @@
+ 
+     def test_daily_limit_validation_save_and_late_responses(self):
+         self.run_group('daily-limit')
++
++    def test_proactive_recovery_and_late_responses(self):
++        self.run_group('evaluation-recovery')
+diff --git a/tests/test_qqbot_context.py b/tests/test_qqbot_context.py
+--- a/tests/test_qqbot_context.py
++++ b/tests/test_qqbot_context.py
+@@ -5,11 +5,13 @@
+ import unittest
+ from pathlib import Path
+ from unittest.mock import Mock, patch
++import httpx
+ 
+ from gateway import context
+ from gateway.qqbot_config import QQConfig
+ from gateway.qqbot_model import QQModel
+ from gateway.qqbot_stickers import StickerCatalog
++from gateway.qqbot_proactive import QQModelHTTPError
+ 
+ 
+ class CatalogTests(unittest.TestCase):
+@@ -70,6 +72,16 @@
+ 
+ 
+ class ModelTests(unittest.IsolatedAsyncioTestCase):
++    async def test_upstream_status_and_retry_header_are_preserved_without_response_body(self):
++        class ErrorClient:
++            async def post(self,*args,**kwargs):
++                return httpx.Response(429,headers={'Retry-After':'7200'},text='private upstream body')
++        model=QQModel(ErrorClient(),QQConfig(),StickerCatalog(),context_builder=Mock(return_value=''))
++        with self.assertRaises(QQModelHTTPError) as raised:
++            await model.generate([{'role':'user','content':'test'}],'test',True)
++        self.assertEqual(raised.exception.status_code,429)
++        self.assertEqual(raised.exception.retry_after,7200)
++        self.assertNotIn('private upstream body',str(raised.exception))
+     async def generate(self,content,proactive=False,tool_calls=None):
+         message={"content":content}
+         if tool_calls: message["tool_calls"]=tool_calls
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -7,6 +7,8 @@
+ 记忆系统、连续感总结、Eventide、待办读写闭环和 MCP 记忆工具已实现。旧积温、网关标签定时器、旧主动消息库存投递链和 OrangeChat 客户端兼容插件层已经退役；`/v1/memory-requests*`、`/v1/todos*` 端点与对应 Token 继续保留。
+ 
+ 普通聊天的网关上下文使用独立的补充 system 消息追加，原 system prompt 内容始终保持不变。
++
++QQBot主动评估退避、故障停止／手动恢复及日志接入已本地实现，按用户要求待独立审查，未提交、推送或部署；日志收集总开关保持关闭。[审查入口](codex/审查日志/qqbot接入/待审查-26.10.24.12.14/审查入口.md)包含独立补丁和验证证据，现用生产版本仍见下方部署记录。
+ 
+ ## 架构
+ 
+diff --git a/qqbot/README.md b/qqbot/README.md
+--- a/qqbot/README.md
++++ b/qqbot/README.md
+@@ -16,6 +16,8 @@
+ 不能直接用 main 替代运行镜像；完整部署入口见根目录 [README](../README.md#部署)。
+ 
+ ## 部署
++
++本地待审查：主动评估已增加静默降频、连续故障停止和配置页“恢复调用”，QQ错误也已接入日志模块；**本批未提交、未推送、未部署**，线上仍是每日上限入口版本。静默后等10／20／40／60分钟，故障后等5／15／60／120分钟、第5次停止，401／403立即停止；不设置每日AI评估上限。持久故障停止仅由配置页恢复，恢复不打开主动开关或清零每日额度；日志总开关按用户选择保持关闭。实现与验证见[本轮修改记录](../codex/代码修改日志/qqbot接入/主动评估退避与故障恢复-26.10.24.12.14.md)，供独立审查的入口见[审查材料](../codex/审查日志/qqbot接入/待审查-26.10.24.12.14/审查入口.md)。
+ 
+ 1. 核对目标 Supabase 的 `chat_messages` 结构及既有桥接 RPC。现用原项目已核验，
+    本次搬家没有新生产 SQL；不因换服务器重复执行历史迁移。新环境缺对象时，才在
+diff --git a/codex/需求/qqbot接入/需求规范.md b/codex/需求/qqbot接入/需求规范.md
+--- a/codex/需求/qqbot接入/需求规范.md
++++ b/codex/需求/qqbot接入/需求规范.md
+@@ -40,6 +40,19 @@
+ ### 每日主动消息上限（2026-10-24补充）
+ 
+ 用户先要求每日最多次数改为30条，随后将实施方式明确为在配置页面增加修改数值入口。QQBot区域新增“每日主动消息上限”整数输入及保存，范围1～100条；现用值设为30，保存即时生效、刷新及重启后保留，不重置当天已用次数，不自动启用主动消息。时段、安静期、冷却和模型自主静默仍分别生效；本轮只新增每日上限入口，其它主动参数尚未由用户要求在页面编辑。
++
++## 主动评估退避、故障停用与日志（2026-10-24确认）
++
++用户要求本轮写代码，并明确先不要推送，待他人审查。范围如下，当前仅本地实现，未提交、未推送、未部署：
++
++- 不增加AI评估的每日次数上限；每日30条为已发送主动消息额度，继续由配置页修改。
++- 模型正常选择静默后依次等待10、20、40、60分钟，此后每小时；主人新输入重置静默降频，不解除故障停用。
++- 连续失败后依次等待5分钟、15分钟、1小时、2小时，第5次停止后续主动评估；401／403鉴权或权限失败立即停止。429同时遵守更长的Retry-After。
++- 上述等待从本轮调用结束时计算，且不短于配置的基础评估间隔；发送时段、安静期、主人暂停、冷却、在线和额度限制继续生效。正常静默或可发送结果清零连续失败。
++- 故障停止保存在QQ本地账本，不能被收消息、跨天、开关切换、重启或QQ“恢复主动消息”解除；只有配置页“恢复调用”清除。恢复不重置当天额度，不改两个开关、不解除主人暂停，也不立即强制调用／发送。
++- 新消息或设置变化取消本轮时不算模型失败；迟到结果不能重写当前状态。意外进程中断的在途调用按一次中断故障恢复，延迟后再试，达到第5次则停用。
++- QQ报错接入现有日志页，按QQBot模块查看；不得在业务线程同步写远端日志，不记录凭据或聊天正文。用户明确选择“保持关闭，只接好代码”，因此日志收集总开关继续关闭，开启后才采集新事件，不补录关闭期间事件。
++- 普通私聊继续可用；本轮不改模型调用次数结构，一次主动调用同时决定发送与内容。
+ 
+ ## 私聊
+ 
+diff --git a/codex/功能维护规范/qqbot接入/qqbot接入.md b/codex/功能维护规范/qqbot接入/qqbot接入.md
+--- a/codex/功能维护规范/qqbot接入/qqbot接入.md
++++ b/codex/功能维护规范/qqbot接入/qqbot接入.md
+@@ -20,6 +20,7 @@
+ | gateway/qqbot_settings.py | 双开关与每日上限原子持久化、准备状态和动态应用；账号／密钥仍在环境变量 |
+ | gateway/qqbot_transport.py | OneBot v11 反向WS、鉴权、登录核验、心跳与echo回执 |
+ | gateway/qqbot.py | 私聊入口、合并生成、主人控制、主动判断、投递与同步循环 |
++| gateway/qqbot_proactive.py | 主动评估静默／故障退避、HTTP错误分类、持久状态校验与安全展示字段 |
+ | gateway/qqbot_store.py | 持久化输入／发送任务、回执日志、短历史、调度、导出进度及运行租约 |
+ | gateway/qqbot_model.py | 复用网关模型、人格与长期召回，禁用QQ情感状态注入 |
+ | gateway/qqbot_stickers.py | 本地表情目录与受限文件读取、发送内容快照 |
+@@ -65,6 +66,22 @@
+ 
+ ## 主动消息与表情
+ 
++### 本地主动评估策略（26.10.24.12.14，待审查未发布）
++
++主动评估使用原SQLite `meta.proactive_evaluation`独立记录，不覆盖`schedule`内的实际发送次数、未回复次数和冷却；无需Supabase迁移或新增环境变量。不设置每日AI评估上限。
++
++正常静默依次等待600／1200／2400／3600秒，封顶1小时；正常可发送结果清零静默与连续失败。连续模型故障后等待300／900／3600／7200秒，第5次停止；401／403立即停止，429取Retry-After与既有等待的较大值。所有等待从完成时开始，且不短于`check_seconds`。这只是最早再次评估时刻，原资格检查和实际投递额度继续生效。
++
++持久状态含静默／故障连续次数、故障停止、最早评估／完成／错误时间、固定错误分类、在途attempt及主人修订号、故障代次。开始模型前先原子登记在途；结束验证租约、attempt、代次和主人修订号。主人新消息重置静默且取消旧问候，不能清空故障计数／等待或解除停止；旧结果被改判为取消。正常取消不计故障，意外重启的在途记录计一次`interrupted`并退避，第5次中断也停止；已持久停止跨开关／重启保留。
++
++`POST /admin/api/qqbot/proactive/resume`沿用网关Token鉴权和no-store，只接受`{"fault_version":非负整数}`，拒绝布尔及额外字段。必须QQ总开关已运行；显示代次过旧或模型仍结束中返回409，存储故障返回503。与设置保存共用锁；成功只清除故障停止、连续次数和旧未提交问候，保留最近故障的历史描述、两个开关、主人暂停／当日静默和已用额度，等待基础间隔后按原条件评估。QQ控制命令只恢复主人暂停，不能调用此故障恢复操作。
++
++`GET /admin/api/qqbot/settings`及status增加安全的`proactive_evaluation`字段；QQ关闭时为null，不为读取状态创建账本。前端展示故障次数／原因／下次最早评估和“恢复调用”，复用原保存锁、失败回读和挂载隔离；刷新或保存后读取最新状态，不额外轮询。
++
++读写主动状态异常时当前运行器保守停止新调用并记录一次结构化存储故障，不能以空记录覆盖损坏状态。普通输入不因评估JSON损坏被拒绝；修复存储后再手动恢复，强制清除遗留在途前必须确认没有实际模型任务。若磁盘完全不可写，进程内停止不能保证落盘；强制终止后的处理以最后成功保存的在途／故障记录为准。
++
++QQ日志通过现有handler／有界队列接入，模块`qqbot`；重试故障为WARNING，停用为ERROR，附固定原因、次数、退避时长及脱敏堆栈。普通QQ模块warning／error也按logger前缀归类。真实上游调用携带现有密钥作用域，只存安全标识，HTTP错误不嵌入上游正文。全局日志收集关闭时不采集，不改变评估故障行为；本轮按用户选择保持生产总开关关闭。不开新日志表、后台循环或同步远端写入。
++
+ 主动检查须同时满足在线、允许时段、安静期、次数限制、暂停／静默状态、无待处理私聊等条件；模型仍可选择静默。未回复逐步降频，主人新输入重置未回应计数，并取消尚在生成或排队的主动问候。修订号阻止暂停／恢复前的迟到结果重新排队；发送前复核时段并按TTL过期，不集中补发旧问候。已提交到协议端的动作不能撤回。
+ 
+ 主动任务在outbox.eligibility_revision中持久保存生成时的主人状态修订号。暂停、当日静默、普通新输入及恢复命令改变修订后，旧的未提交问候永久失效；即便后来恢复、静默结束或新输入已经处理完成，也不能复活旧任务。不能只查当前pending或只取消当时处于queued的行。
+diff --git a/codex/功能维护规范/网关日志/网关日志.md b/codex/功能维护规范/网关日志/网关日志.md
+--- a/codex/功能维护规范/网关日志/网关日志.md
++++ b/codex/功能维护规范/网关日志/网关日志.md
+@@ -19,6 +19,8 @@
+ - 用户暂缓现有 11 项缺陷、镜像及 TASK-01/02 剩余验收；关闭采集不等于统一敏感输出、密钥生命周期等已有缺陷已修。活动清单保留原编号和证据。
+ 
+ ## 稳定约束（勿改）
++
++26.10.24本地新增QQBot日志归类，尚未发布：`gateway.qqbot`及子logger、QQ管理路由归到`qqbot`模块，日志页显示QQBot。主动评估重试／停止及状态不可用通过`emit_error`附安全字段，实际模型错误保留脱敏堆栈和已有密钥标识；不得记录原始HTTP响应体或QQ正文。仍使用原handler、有界队列和writer，不增加SQL或同步远端请求。用户明确要求日志收集总开关保持关闭，仅接好代码；开关关闭时不采集或补录QQ错误。详细边界见[QQ维护规范](../qqbot接入/qqbot接入.md)。此接入不改变已有缺陷及延期验收结论。
+ 
+ 1. **主记录者仲裁**：logging handler 是唯一主记录者。中间件只在
+    「响应 ≥500 且本请求 `error_events == 0` 且未被显式抑制」时补边界
+diff --git a/codex/网关当前状态/网关当前状态.md b/codex/网关当前状态/网关当前状态.md
+--- a/codex/网关当前状态/网关当前状态.md
++++ b/codex/网关当前状态/网关当前状态.md
+@@ -1,4 +1,12 @@
+ # 网关当前状态
++
++## 10.24 QQ主动评估退避与恢复已本地完成，待独立审查
++
++26.10.24.12.14批次本地实现正常静默10／20／40／60分钟降频、连续故障5／15／60／120分钟退避、第5次停止及401／403立即停止，故障状态持久化，配置页显示状态／原因及“恢复调用”。不设AI每日评估次数上限，保留每日实际主动消息额度、原发送资格和私聊路径；新消息、开关或重启不能解除已保存的故障停止。
++
++QQ报错已接入原日志收集队列并可在日志页筛选QQBot；用户要求“保持关闭，只接好代码”，因此本轮没有开启生产日志收集。407项及117子测试通过；27项可选数据库集成测试跳过。本地真实设置／日志API配合假模型与QQ传输完成Edge电脑／手机、日夜主题、恢复与刷新及日志详情验证，没有工具发QQ消息。
++
++用户明确要求先让他人审查：**未提交、未推送、未部署，不改服务器或生产开关**。现用镜像仍以下方发布记录`qq-daily-limit-20261024-1105`为准，不能把本地截图当作线上功能已生效。无新SQL或环境变量。入口：[独立审查材料](../审查日志/qqbot接入/待审查-26.10.24.12.14/审查入口.md)、[修改记录](../代码修改日志/qqbot接入/主动评估退避与故障恢复-26.10.24.12.14.md)。下方保留已有发布历史。
+ 
+ ## 10.24 QQ每日主动消息上限入口已发布，现用30条
+ 
+diff --git a/codex/控制台-文档索引/目录说明.md b/codex/控制台-文档索引/目录说明.md
+--- a/codex/控制台-文档索引/目录说明.md
++++ b/codex/控制台-文档索引/目录说明.md
+@@ -33,7 +33,8 @@
+ | 代码修改日志 | 只记录实际代码、数据库迁移、测试代码及与功能实现直接相关的配置或资源修改。 | 按实际功能分目录，每次代码修改单独建立一份带分钟时间戳的日志。纯文档整理不得写入。 |
+ | 代码修改日志/光遇接入 | 光遇实现、验证及发布历史。 | 最新[合并与同步](../代码修改日志/光遇接入/合并与同步-26.10.24.07.52.md)记录本次候选与核验；新迁移20261024144537／20261024144539已执行，旧35份回执保持，配置开关关闭。代码已普通推送main `8c5bce1`、远端SHA一致；候选471项／21子测试及旧11项通过，配套部署／实机未验；07:13补修及桌面入口历史保留。 |
+ | 需求/光遇接入/配置页开关与本地预览.md | 本轮用户明确确认的范围及验收边界。 | [需求](../需求/光遇接入/配置页开关与本地预览.md)：修复五类、配置页开关、内置浏览器测试前端；先不做实机验证。 |
+-| 代码修改日志/qqbot接入 | QQ私聊、主动消息、表情与记忆桥的实现和发布记录。 | 最新[每日上限入口](../代码修改日志/qqbot接入/主动消息每日上限配置入口-26.10.24.11.05.md)已发布，范围1～100、现用30，真实保存刷新通过，QQ连接／主动关闭；未提交推送。[NapCat服务器迁移](../代码修改日志/qqbot接入/NapCat迁至服务器-26.10.24.08.46.md)的重启／私聊／两条原文同步及168项保留事实保持，原R12／R11记录继续作为历史。 |
++| 代码修改日志/qqbot接入 | QQ私聊、主动消息、表情与记忆桥的实现和发布记录。 | 最新[主动评估退避与故障恢复](../代码修改日志/qqbot接入/主动评估退避与故障恢复-26.10.24.12.14.md)本地完成待审查，未提交／推送／部署；用户要求日志总开关保持关闭。现用[每日上限入口](../代码修改日志/qqbot接入/主动消息每日上限配置入口-26.10.24.11.05.md)已发布、现用30、QQ连接／主动关闭；[NapCat迁移](../代码修改日志/qqbot接入/NapCat迁至服务器-26.10.24.08.46.md)真实私聊及原文同步历史保持。 |
++| 审查日志/qqbot接入/待审查-26.10.24.12.14 | 本轮主动评估退避／故障恢复／日志接入的独立审查材料。 | [审查入口](../审查日志/qqbot接入/待审查-26.10.24.12.14/审查入口.md)提供本轮开始前基线、独立补丁、快照哈希及407项／117子测试和Edge本地证据；27项可选数据库测试跳过。按用户要求先审查，不进行提交、推送或部署。 |
+ | 代码修改日志/记忆召回 | 保存召回冷却、召回记录及相关缺陷修复记录。 | [合并与同步](../代码修改日志/记忆召回/合并与同步-26.10.20.07.11.md)：两批50文件已普通推送main 635df7c，实际远端一致；召回新迁移已执行、规划沉底既有迁移已核验，无待补SQL。全量2941项/1617子测试、1可选跳过，浏览器62+7+16组通过；服务运行/线上未验收，原审查历史保留。 |
+ | 代码修改日志/备忘录 | 保存备忘录实际代码与迁移修复记录。 | 标签管理实现及修复记录保留；已修复条目已按用户要求移出活动清单，当前备忘录主清单4项，10.12批次另有BUG-18。 |
+ | 代码修改日志/长期目标 | 保存长期目标一期实际代码、迁移、前端及验证记录。 | 最新[合并与同步](../代码修改日志/长期目标/合并与同步-26.10.16.07.09.md)：41文件e396d06已正常推送main，远端完整SHA一致，生产目标SQL用户执行后五表/六函数/权限/缓存与历史基线已核验，无待补SQL；服务运行/线上业务未验收。[三项修复](../代码修改日志/长期目标/异步弹窗与结果确认修复-26.10.16.06.07.md)2840测试、1576子测试和Edge20+7组证据及[一期历史](../代码修改日志/长期目标/一期实现-26.10.16.04.50.md)保留。 |
+diff --git a/gateway/qqbot_proactive.py b/gateway/qqbot_proactive.py
+new file mode 100644
+--- /dev/null
++++ b/gateway/qqbot_proactive.py
+@@ -0,0 +1,128 @@
++"""Proactive evaluation pacing and safe, persistent fault descriptions."""
++from __future__ import annotations
++
++from datetime import timezone
++from email.utils import parsedate_to_datetime
++import math
++import time
++
++import httpx
++
++SILENT_DELAYS = (600, 1200, 2400, 3600)
++FAILURE_DELAYS = (300, 900, 3600, 7200)
++ERROR_MESSAGES = {
++    'timeout': '主动评估请求超时',
++    'network': '主动评估上游连接失败',
++    'rate_limited': '主动评估被上游限流',
++    'auth_failed': '主动评估鉴权或权限失败，请检查模型配置',
++    'upstream_http': '主动评估上游返回错误状态',
++    'invalid_response': '主动评估返回内容无效',
++    'interrupted': '上次主动评估意外中断',
++    'internal_error': '主动评估处理失败',
++    'state_unavailable': '主动评估状态无法保存或读取，请检查本地存储',
++}
++
++
++class QQModelHTTPError(RuntimeError):
++    def __init__(self, status_code, retry_after=None):
++        super().__init__('qq_model_http_error')
++        self.status_code = status_code
++        self.retry_after = retry_after
++
++
++def parse_retry_after(value, now=None):
++    if not isinstance(value, str) or not value.strip():
++        return None
++    try:
++        seconds = float(value)
++    except ValueError:
++        try:
++            at = parsedate_to_datetime(value)
++            at = at.replace(tzinfo=timezone.utc) if at.tzinfo is None else at
++            seconds = at.timestamp() - (time.time() if now is None else now)
++        except (TypeError, ValueError, OverflowError):
++            return None
++    return max(0, seconds) if math.isfinite(seconds) else None
++
++
++def classify_failure(exc):
++    status = getattr(exc, 'status_code', None)
++    if isinstance(exc, httpx.HTTPStatusError):
++        status = exc.response.status_code
++    retry_after = getattr(exc, 'retry_after', None)
++    if isinstance(exc, httpx.HTTPStatusError):
++        retry_after = parse_retry_after(exc.response.headers.get('Retry-After'))
++    if status in (401, 403):
++        code = 'auth_failed'
++    elif status == 429:
++        code = 'rate_limited'
++    elif isinstance(exc, httpx.TimeoutException):
++        code = 'timeout'
++    elif isinstance(exc, httpx.RequestError):
++        code = 'network'
++    elif isinstance(status, int):
++        code = 'upstream_http'
++    elif isinstance(exc, (ValueError, TypeError)):
++        code = 'invalid_response'
++    else:
++        code = 'internal_error'
++    return code, code == 'auth_failed', retry_after, status
++
++
++def initial_state():
++    return dict(silent_streak=0, failure_streak=0, fault_stopped=False,
++        next_check_at=0, last_finished_at=0, last_error_at=0, last_error_code='',
++        in_flight=False, attempt_id='', attempt_revision=0, generation=0)
++
++
++def validate_state(raw):
++    if not isinstance(raw, dict):
++        raise ValueError('qq_evaluation_state_invalid')
++    state = {**initial_state(), **raw}
++    valid = (all(type(state[key]) is int and state[key] >= 0 for key in
++        ('silent_streak','failure_streak','attempt_revision','generation'))
++        and state['silent_streak'] <= len(SILENT_DELAYS) and state['failure_streak'] <= 5
++        and (state['failure_streak'] < 5 or state['fault_stopped'])
++        and all(type(state[key]) is bool for key in ('fault_stopped','in_flight'))
++        and all(type(state[key]) in (int,float) and math.isfinite(state[key]) and state[key] >= 0
++            for key in ('next_check_at','last_finished_at','last_error_at'))
++        and state['last_error_code'] in {'', *ERROR_MESSAGES}
++        and isinstance(state['attempt_id'],str) and len(state['attempt_id']) <= 64
++        and (not state['in_flight'] or bool(state['attempt_id']))
++        and not (state['in_flight'] and state['fault_stopped']))
++    if not valid:
++        raise ValueError('qq_evaluation_state_invalid')
++    return state
++
++
++def complete(state, outcome, now, base_delay, *, code='', fatal=False, retry_after=None):
++    state = dict(state)
++    state.update(in_flight=False, attempt_id='', last_finished_at=now)
++    if outcome == 'error':
++        state['failure_streak'] = min(5, state['failure_streak'] + 1)
++        state.update(last_error_code=code, last_error_at=now)
++        if fatal or state['failure_streak'] >= 5:
++            state.update(fault_stopped=True, next_check_at=0, generation=state['generation']+1)
++        else:
++            delay = max(base_delay,FAILURE_DELAYS[state['failure_streak']-1])
++            if isinstance(retry_after,(int,float)) and math.isfinite(retry_after):
++                delay = max(delay, retry_after)
++            state['next_check_at'] = now + delay
++    elif outcome == 'silent':
++        state['failure_streak'] = 0
++        state['silent_streak'] = min(len(SILENT_DELAYS),state['silent_streak']+1)
++        state['next_check_at'] = now + max(base_delay,SILENT_DELAYS[state['silent_streak']-1])
++    elif outcome == 'ready':
++        state.update(failure_streak=0,silent_streak=0,next_check_at=now+base_delay)
++    elif outcome == 'cancelled':
++        state['next_check_at'] = max(state['next_check_at'],now+base_delay)
++    else:
++        raise ValueError('qq_evaluation_outcome_invalid')
++    return state
++
++
++def public_status(state):
++    return {key:state[key] for key in ('silent_streak','failure_streak','fault_stopped',
++        'next_check_at','last_finished_at','last_error_at','last_error_code','in_flight')} | {
++        'available':True, 'fault_version':state['generation'],
++        'last_error_message':ERROR_MESSAGES.get(state['last_error_code'],'')}
+diff --git a/tests/test_qqbot_proactive_recovery.py b/tests/test_qqbot_proactive_recovery.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_qqbot_proactive_recovery.py
+@@ -0,0 +1,313 @@
++"""Durable proactive pacing, fault stops, manual recovery and captured errors."""
++import asyncio
++from contextlib import asynccontextmanager
++from dataclasses import replace
++from datetime import datetime, timezone
++from email.utils import format_datetime
++import json
++import logging
++from pathlib import Path
++import tempfile
++import unittest
++from unittest.mock import patch
++
++import httpx
++from starlette.applications import Starlette
++from starlette.testclient import TestClient
++
++from gateway import logging_events
++from gateway.config import cfg
++from gateway.qqbot import QQRuntime
++from gateway.qqbot_config import QQConfig
++from gateway.qqbot_proactive import QQModelHTTPError, parse_retry_after
++from gateway.qqbot_settings import QQSettings, qqbot_settings_routes
++from tests.test_qqbot import Clock, Model, Transport, event
++
++
++class RecoveryTests(unittest.IsolatedAsyncioTestCase):
++    def setUp(self):
++        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
++        self.clock=Clock();self.model=Model();self.transport=Transport()
++        self.failure_calls=0
++        self.config=QQConfig(enabled=True,proactive_enabled=True,account_id='12345',owner_id='67890',
++            assistant_id='role',token='x'*32,store_path=str(Path(self.tmp.name)/'state.sqlite3'),
++            active_start='00:00',active_end='00:00',quiet_seconds=1,cooldown_seconds=60,check_seconds=300)
++        self.runtime=self.make_runtime();self.addAsyncCleanup(self.close_runtime)
++        self.clock.on_advance=lambda:self.runtime.store.acquire(self.runtime.owner,self.clock())
++
++    def make_runtime(self):
++        runtime=QQRuntime(self.config,model=self.model,transport=self.transport,now=self.clock,exporter=lambda *a:None)
++        runtime.activate();return runtime
++
++    async def close_runtime(self):
++        await self.runtime.stop()
++
++    async def prepare(self):
++        await self.runtime.ingest(event(1,'hello'));self.clock.advance(4)
++        await self.runtime.reply_once();await self.runtime.send_once();self.clock.advance(2)
++
++    async def fail_evaluation(self, error=None):
++        async def generate(*args,**kwargs):
++            self.failure_calls+=1
++            raise error or httpx.ReadTimeout('test timeout')
++        self.runtime.model.generate=generate
++        await self.runtime.proactive_once()
++
++    def advance_to_due(self):
++        due=self.runtime.store.evaluation_state()['next_check_at']
++        self.clock.advance(max(0,due-self.clock()))
++
++    async def stop_by_five_errors(self):
++        await self.prepare()
++        for i,delay in enumerate([300,900,3600,7200,None],1):
++            await self.fail_evaluation()
++            state=self.runtime.store.evaluation_state()
++            self.assertEqual(state['failure_streak'],i)
++            if delay is not None:
++                self.assertEqual(state['next_check_at']-self.clock(),delay)
++                self.advance_to_due()
++        self.assertTrue(self.runtime.evaluation_status()['fault_stopped'])
++
++    async def test_silent_backoff_ends_at_one_hour_and_new_input_resets_only_silence(self):
++        await self.prepare();self.model.result={'send':False,'text':'','sticker_ids':[]}
++        for delay in [600,1200,2400,3600,3600]:
++            await self.runtime.proactive_once();state=self.runtime.store.evaluation_state()
++            self.assertEqual(state['next_check_at']-self.clock(),delay)
++            calls=len(self.model.calls);self.clock.advance(delay-1);await self.runtime.proactive_once()
++            self.assertEqual(len(self.model.calls),calls);self.clock.advance(1)
++        await self.runtime.ingest(event(2,'new topic'))
++        self.assertEqual(self.runtime.store.evaluation_state()['silent_streak'],0)
++        self.assertEqual(self.runtime.store.evaluation_state()['next_check_at'],0)
++        self.assertFalse(self.runtime.store.evaluation_state()['fault_stopped'])
++
++    async def test_five_errors_stop_and_messages_or_qq_resume_do_not_reenable(self):
++        await self.stop_by_five_errors()
++        original=self.runtime.store.evaluation_state()
++        self.clock.advance(86400);await self.runtime.proactive_once()
++        await self.runtime.ingest(event(2,'恢复主动消息'))
++        await self.runtime.send_once()
++        current=self.runtime.store.evaluation_state()
++        self.assertTrue(current['fault_stopped']);self.assertEqual(current['failure_streak'],5)
++        self.assertEqual(current['generation'],original['generation'])
++        self.assertEqual(self.failure_calls,5)
++        self.assertIn('配置页',self.runtime.store.history()[-1]['content'])
++
++    async def test_fault_survives_restart_and_manual_recovery_keeps_switches_and_count(self):
++        await self.stop_by_five_errors();before=self.runtime.evaluation_status()
++        schedule=self.runtime.store.state();schedule['count']=7;self.runtime.store._save_state(schedule)
++        await self.runtime.stop();self.transport=Transport();self.runtime=self.make_runtime()
++        self.assertTrue(self.runtime.evaluation_status()['fault_stopped'])
++        self.runtime.config=replace(self.config,proactive_enabled=False)
++        self.runtime.resume_evaluation(before['fault_version'])
++        state=self.runtime.evaluation_status()
++        self.assertFalse(state['fault_stopped']);self.assertEqual(state['failure_streak'],0)
++        self.assertFalse(self.runtime.config.proactive_enabled)
++        self.assertEqual(self.runtime.store.state()['count'],7)
++        self.assertEqual(state['next_check_at']-self.clock(),300)
++        with self.assertRaises(ValueError):self.runtime.resume_evaluation(before['fault_version'])
++
++    async def test_normal_silence_clears_error_streak_and_new_message_keeps_retry_deadline(self):
++        await self.prepare();await self.fail_evaluation()
++        state=self.runtime.store.evaluation_state();due=state['next_check_at']
++        await self.runtime.ingest(event(2,'new topic'))
++        self.assertEqual(self.runtime.store.evaluation_state()['next_check_at'],due)
++        self.assertEqual(self.runtime.store.evaluation_state()['failure_streak'],1)
++        self.runtime.store.conn.execute("update inbox set status='done'")
++        self.runtime.model=Model();self.runtime.model.result={'send':False,'text':'','sticker_ids':[]}
++        self.advance_to_due();await self.runtime.proactive_once()
++        self.assertEqual(self.runtime.evaluation_status()['failure_streak'],0)
++        self.assertEqual(self.runtime.evaluation_status()['silent_streak'],1)
++
++    async def test_auth_failure_stops_immediately_and_rate_limit_obeys_retry_after(self):
++        await self.prepare();await self.fail_evaluation(QQModelHTTPError(429,7200))
++        state=self.runtime.evaluation_status();self.assertEqual(state['next_check_at']-self.clock(),7200)
++        self.assertFalse(state['fault_stopped']);self.advance_to_due()
++        await self.fail_evaluation(QQModelHTTPError(401))
++        self.assertTrue(self.runtime.evaluation_status()['fault_stopped'])
++        self.assertEqual(self.runtime.evaluation_status()['last_error_code'],'auth_failed')
++
++    async def test_slow_failure_delay_starts_after_completion(self):
++        await self.prepare()
++        async def slow(*args,**kwargs):
++            self.clock.advance(700);raise httpx.ReadTimeout('late timeout')
++        self.runtime.model.generate=slow;await self.runtime.proactive_once()
++        self.assertEqual(self.runtime.evaluation_status()['next_check_at']-self.clock(),300)
++
++    async def test_custom_base_interval_is_measured_after_slow_request_finishes(self):
++        await self.prepare();self.runtime.config=replace(self.config,check_seconds=1200)
++        async def slow(*args,**kwargs):
++            self.clock.advance(1300);raise httpx.ReadTimeout('late timeout')
++        self.runtime.model.generate=slow;await self.runtime.proactive_once()
++        self.assertEqual(self.runtime.evaluation_status()['next_check_at']-self.clock(),1200)
++
++    async def test_cancel_for_new_input_does_not_count_or_restore_old_silent_streak(self):
++        await self.prepare();self.model.wait=asyncio.Event()
++        pending=asyncio.create_task(self.runtime.proactive_once());await asyncio.sleep(0);await asyncio.sleep(0)
++        self.assertIsNotNone(self.runtime.proactive_generation)
++        await self.runtime.ingest(event(2,'new message'));await pending
++        state=self.runtime.evaluation_status()
++        self.assertEqual(state['failure_streak'],0);self.assertEqual(state['silent_streak'],0)
++        self.assertFalse(state['in_flight']);self.assertFalse(state['fault_stopped'])
++
++    async def test_restart_inflight_counts_interruption_without_retrying_immediately(self):
++        await self.prepare()
++        self.runtime.store.begin_evaluation(self.clock(),300,self.runtime.owner)
++        await self.runtime.stop();self.transport=Transport();self.runtime=self.make_runtime()
++        state=self.runtime.evaluation_status()
++        self.assertFalse(state['in_flight']);self.assertEqual(state['failure_streak'],1)
++        self.assertEqual(state['last_error_code'],'interrupted')
++        self.assertEqual(state['next_check_at']-self.clock(),300)
++
++    async def test_storage_failure_stops_extra_calls_and_private_ingest_survives_corrupt_evaluation(self):
++        await self.prepare()
++        self.runtime.store.conn.execute("insert or replace into meta values('proactive_evaluation','{broken')")
++        before=len(self.model.calls)
++        await self.runtime.proactive_once();await self.runtime.proactive_once()
++        self.assertTrue(self.runtime.evaluation_status()['fault_stopped'])
++        self.assertEqual(len(self.model.calls),before)
++        self.assertTrue(await self.runtime.ingest(event(2,'ordinary chat')))
++
++    async def test_sendable_result_resets_silence_without_counting_until_real_send(self):
++        await self.prepare();self.model.result={'send':False,'text':'','sticker_ids':[]}
++        await self.runtime.proactive_once();self.advance_to_due()
++        self.model.result={'send':True,'text':'hello again','sticker_ids':[]}
++        await self.runtime.proactive_once()
++        self.assertEqual(self.runtime.evaluation_status()['silent_streak'],0)
++        self.assertEqual(self.runtime.store.state()['count'],0)
++        await self.runtime.send_once();self.assertEqual(self.runtime.store.state()['count'],1)
++
++    async def test_logged_failure_is_qqbot_event_with_trace_and_safe_retry_context(self):
++        await self.prepare();records=[]
++        class Capture(logging.Handler):
++            def emit(self,record):records.append(record)
++        handler=Capture();logger=logging.getLogger('gateway.qqbot');logger.addHandler(handler)
++        try:await self.fail_evaluation(httpx.ReadTimeout('Bearer private-token-12345678901234567890'))
++        finally:logger.removeHandler(handler)
++        normalized=[logging_events._build_event_from_record(record) for record in records]
++        row=next(row for row in normalized if row and row['operation']=='proactive_evaluation')
++        self.assertEqual(row['module'],'qqbot');self.assertEqual(row['safe_context']['attempts'],1)
++        self.assertTrue(row['stack_trace']);self.assertEqual(row['safe_context']['timeout_seconds'],300)
++        self.assertNotIn('private-token-12345678901234567890',json.dumps(row))
++
++    async def test_collection_switch_controls_qqbot_capture_without_affecting_failure_state(self):
++        await self.prepare();queue=logging_events._EventQueue(10)
++        handler=logging_events.GatewayLogHandler();logger=logging.getLogger('gateway.qqbot')
++        logger.addHandler(handler)
++        try:
++            with patch.object(logging_events,'_queue',queue),patch.object(logging_events,'_capture_active',False):
++                await self.fail_evaluation()
++            self.assertEqual(queue.depth(),0)
++            self.advance_to_due()
++            with patch.object(logging_events,'_queue',queue),patch.object(logging_events,'_capture_active',True):
++                await self.fail_evaluation()
++            captured=queue.drain(10)
++            self.assertEqual(len(captured),1);self.assertEqual(captured[0]['module'],'qqbot')
++            self.assertEqual(captured[0]['safe_context']['attempts'],2)
++        finally:logger.removeHandler(handler)
++
++    async def test_crash_during_fifth_attempt_stops_instead_of_resetting_failures(self):
++        await self.prepare()
++        for _ in range(4):await self.fail_evaluation();self.advance_to_due()
++        attempt=self.runtime.store.begin_evaluation(self.clock(),300,self.runtime.owner)
++        self.assertIsNotNone(attempt)
++        await self.runtime.stop();self.transport=Transport();self.runtime=self.make_runtime()
++        state=self.runtime.evaluation_status()
++        self.assertTrue(state['fault_stopped']);self.assertEqual(state['failure_streak'],5)
++
++    async def test_late_result_after_new_message_cannot_change_fault_or_silence_state(self):
++        await self.prepare()
++        for mid,late in [(2,{'send':False,'text':'','sticker_ids':[]}),(3,QQModelHTTPError(401))]:
++            self.runtime.store.conn.execute("update inbox set status='done'")
++            self.clock.advance(400)
++            async def ignore_cancel(*args,**kwargs):
++                try:await asyncio.Event().wait()
++                except asyncio.CancelledError:
++                    if isinstance(late,Exception):raise late
++                    return late
++            self.runtime.model.generate=ignore_cancel
++            pending=asyncio.create_task(self.runtime.proactive_once());await asyncio.sleep(0);await asyncio.sleep(0)
++            self.assertIsNotNone(self.runtime.proactive_generation)
++            await self.runtime.ingest(event(mid,'changed topic'));await pending
++            state=self.runtime.evaluation_status()
++            self.assertEqual(state['failure_streak'],0);self.assertEqual(state['silent_streak'],0)
++            self.assertFalse(state['fault_stopped']);self.assertFalse(self.runtime.store.open_proactive())
++
++    async def test_state_write_failure_blocks_further_model_calls_until_manual_recovery(self):
++        await self.prepare();calls=0
++        async def silent(*args,**kwargs):
++            nonlocal calls
++            calls+=1
++            return {'send':False,'text':'','sticker_ids':[]}
++        self.runtime.model.generate=silent
++        with patch.object(self.runtime.store,'finish_evaluation',side_effect=OSError('disk full')):
++            await self.runtime.proactive_once()
++        self.assertTrue(self.runtime.evaluation_status()['fault_stopped'])
++        self.clock.advance(10000);await self.runtime.proactive_once();self.assertEqual(calls,1)
++        # A finished provider request with an uncommitted result remains durable
++        # in-flight; recovery must not guess whether it completed successfully.
++        self.assertTrue(self.runtime.store.evaluation_state()['in_flight'])
++        self.runtime.resume_evaluation(self.runtime.evaluation_status()['fault_version'])
++        self.assertFalse(self.runtime.evaluation_status()['fault_stopped'])
++        self.assertFalse(self.runtime.evaluation_status()['in_flight'])
++        self.assertEqual(self.runtime.evaluation_status()['next_check_at']-self.clock(),300)
++
++
++class RetryAfterTests(unittest.TestCase):
++    def test_seconds_date_and_invalid_headers(self):
++        self.assertEqual(parse_retry_after('900'),900)
++        self.assertEqual(parse_retry_after('-5'),0)
++        now=1770000000
++        self.assertEqual(parse_retry_after(format_datetime(datetime.fromtimestamp(now+600,timezone.utc)),now),600)
++        for value in ['nan','inf','not-a-date','',None]:self.assertIsNone(parse_retry_after(value,now))
++
++
++class ResumeApiTests(unittest.TestCase):
++    def test_auth_strict_version_and_offline_master(self):
++        with tempfile.TemporaryDirectory() as tmp,patch.object(cfg,'GATEWAY_TOKEN','resume-test-token'):
++            app=Starlette(routes=qqbot_settings_routes);app.state.qqbot=None
++            app.state.qqbot_settings=QQSettings(app,None,env={},path=Path(tmp)/'settings.json')
++            headers={'Authorization':'Bearer resume-test-token'};url='/admin/api/qqbot/proactive/resume'
++            with TestClient(app) as client:
++                self.assertEqual(client.post(url,json={'fault_version':0}).status_code,401)
++                for payload in [{},{'fault_version':True},{'fault_version':-1},{'fault_version':0,'enabled':True}]:
++                    self.assertEqual(client.post(url,headers=headers,json=payload).status_code,400)
++                response=client.post(url,headers=headers,json={'fault_version':0})
++                self.assertEqual(response.status_code,409)
++                self.assertEqual(response.headers['cache-control'],'no-store')
++
++    def test_manual_resume_preserves_flags_and_restart_and_rejects_stale_fault(self):
++        with tempfile.TemporaryDirectory() as tmp,patch.object(cfg,'GATEWAY_TOKEN','resume-test-token'):
++            root=Path(tmp);clock=Clock()
++            env={'QQBOT_ENABLED':'true','QQBOT_TOKEN':'x'*32,'QQBOT_ACCOUNT_ID':'12345','QQBOT_OWNER_ID':'67890',
++                'QQBOT_ASSISTANT_ID':'role','QQBOT_DAILY_LIMIT':'30','QQBOT_STORE_PATH':str(root/'ledger.sqlite3')}
++            @asynccontextmanager
++            async def lifespan(app):
++                manager=QQSettings(app,None,env=env,path=root/'settings.json',runtime_factory=lambda config,client:
++                    QQRuntime(config,model=Model(),transport=Transport(),now=clock,exporter=lambda *a:None))
++                app.state.qqbot_settings=manager;await manager.startup()
++                try:yield
++                finally:await manager.shutdown()
++            app=Starlette(routes=qqbot_settings_routes,lifespan=lifespan)
++            headers={'Authorization':'Bearer resume-test-token'};url='/admin/api/qqbot/proactive/resume'
++            with TestClient(app) as client:
++                runtime=app.state.qqbot
++                with runtime.store.transaction():
++                    state=runtime.store.evaluation_state();state.update(fault_stopped=True,failure_streak=5,generation=8)
++                    runtime.store._save_evaluation(state)
++                    used=runtime.store.state();used['count']=7;runtime.store._save_state(used)
++                self.assertEqual(client.post(url,headers=headers,json={'fault_version':7}).status_code,409)
++                result=client.post(url,headers=headers,json={'fault_version':8})
++                self.assertEqual(result.status_code,200);data=result.json()
++                self.assertFalse(data['proactive_evaluation']['fault_stopped'])
++                self.assertFalse(data['proactive_enabled']);self.assertTrue(data['enabled']);self.assertEqual(data['daily_limit'],30)
++                self.assertEqual(runtime.store.state()['count'],7)
++                self.assertEqual(client.post(url,headers=headers,json={'fault_version':8}).status_code,409)
++                # Toggling and reloading must keep a later fault stopped.
++                with runtime.store.transaction():
++                    state=runtime.store.evaluation_state();state.update(fault_stopped=True,failure_streak=5,generation=10)
++                    runtime.store._save_evaluation(state)
++                self.assertEqual(client.put('/admin/api/qqbot/settings',headers=headers,json={'enabled':False}).status_code,200)
++                self.assertEqual(client.put('/admin/api/qqbot/settings',headers=headers,json={'enabled':True}).status_code,200)
++                self.assertTrue(client.get('/admin/api/qqbot/settings',headers=headers).json()['proactive_evaluation']['fault_stopped'])
++            with TestClient(app) as client:
++                self.assertTrue(client.get('/admin/api/qqbot/settings',headers=headers).json()['proactive_evaluation']['fault_stopped'])
+diff --git a/codex/代码修改日志/qqbot接入/主动评估退避与故障恢复-26.10.24.12.14.md b/codex/代码修改日志/qqbot接入/主动评估退避与故障恢复-26.10.24.12.14.md
+new file mode 100644
+--- /dev/null
++++ b/codex/代码修改日志/qqbot接入/主动评估退避与故障恢复-26.10.24.12.14.md
+@@ -0,0 +1,32 @@
++# QQBot主动评估退避、故障恢复与日志接入
++
++批次：26.10.24.12.14，America/Los_Angeles。用户确认先实现故障停用／配置页手动恢复，并要求QQ报错同步接入日志页。随后明确日志总开关“保持关闭，只接好代码”，代码完成后先不推送，留给他人审查。
++
++## 实现
++
++- 新增纯策略模块`gateway/qqbot_proactive.py`：静默10／20／40／60分钟降频；故障5／15／60／120分钟退避，第5次停止；401／403立即停止；429尊重更长Retry-After。所有等待从调用完成开始，不短于配置基础间隔。不增加每日AI评估上限。
++- SQLite原`meta`增加独立评估记录，开始前登记attempt／修订号，完成时核对租约和代次。故障停止持久保存，收消息、QQ恢复命令、开关和重启都不解除；正常取消及过期结果不计故障。异常在途重启计一次中断，保留连续次数，不能立即重试。
++- 配置卡展示故障状态、连续次数、最早下次评估和最近原因，新增“恢复调用”。严格鉴权POST及故障代次防止旧页面解除新故障；复用设置锁、失败回读和挂载隔离。恢复只解除故障，等待基础间隔，不改开关／主人暂停、已用额度或强制发消息。
++- 实际发送仍经过原资格、回执和次数链。正常私聊路径保留；损坏评估JSON不拒绝主人新输入。读写状态失败时当前运行器停止继续调用，修复存储且确认没有实际模型任务后才能手动恢复。
++- 日志系统增加QQBot模块及logger／路由归类。模型错误通过既有非阻塞队列记录安全摘要、故障次数／重试信息、状态码和脱敏堆栈；沿用模型密钥作用域。HTTP异常不带上游正文。没有新表、writer或同步日志请求。
++- 配置／日志模块本地缓存版本改为`20261024-qqbot-recovery`。保留此前工作树其它前端修改，不把它们包含在本轮独立差异中。
++
++## 验证
++
++最终QQ专项及网关日志回归：**407 passed、117 subtests passed、27 skipped**，RuntimeWarning按错误处理。跳过的是5项QQ导出和22项网关日志的可选一次性PostgreSQL集成测试；本轮无SQL变更，未运行它们，也未使用生产数据库。
++
++新增测试重点覆盖完成后计时、静默封顶、正常结果清连续失败、五次及鉴权停用、Retry-After、取消与迟到结果、异常在途恢复、读写故障、旧恢复版本拒绝、私聊／额度／开关不变，以及采集开关关闭不入队。Node执行真实配置模块，覆盖恢复API、保存锁及卸载／重入后的旧成功／失败响应。
++
++Edge隔离预览使用真实设置与日志API、当前页面、临时SQLite、假模型／假QQ传输和内存日志查询；仅预览进程开启采集。验证电脑1280／手机390、日夜主题、故障停止、恢复／刷新后保持、主动仍关闭／每日30、说明展开、实际自定义下拉、QQBot过滤和载入完成后的错误详情。页面脚本错误0，无横向溢出；截图已视觉核查。未工具发送真实QQ消息。
++
++证据：[测试与浏览器目录](../../../tests/qqbot-proactive-recovery-20261024/)、[最终测试输出](../../../tests/qqbot-proactive-recovery-20261024/regressions.txt)、[JUnit](../../../tests/qqbot-proactive-recovery-20261024/regressions.xml)、[浏览器结果](../../../tests/qqbot-proactive-recovery-20261024/browser-result.json)。
++
++测试编写过程中修正了unittest助手误命名为`fail`、未满足debounce的测试前置条件，以及日志详情等待命中背景卡片的问题；最终结果来自修正后的实际调用、真实模块执行和弹窗内字段等待，未放宽实现断言。
++
++## 交付与边界
++
++**LOCAL ONLY / PENDING INDEPENDENT REVIEW：未提交、未推送、未部署。**本轮没有生产写入、服务器重启、QQ测试发送或日志总开关修改。现用镜像仍为每日上限版本`localhost:5000/qi-gateway:qq-daily-limit-20261024-1105`；NapCat独立容器及现有数据保持原状态。没有新增SQL、环境变量或配置文件键。
++
++持久停止的保证以成功保存的账本为准；整个存储不可写时，当前进程可停止调用，但强制终止前无法落盘的变化不能宣称已持久化。损坏记录保留并需先修复存储。恢复保留最近错误描述供追溯；页面状态在进入／刷新或操作后更新，不增加轮询。
++
++审查请从[审查入口](../../审查日志/qqbot接入/待审查-26.10.24.12.14/审查入口.md)读取本轮独立差异。工作树此前已有每日上限、账本命名空间及其它改动，不能直接把`git diff HEAD`视为本轮范围。后续部署仍需等待用户安排；本地预览不能作为线上已生效或实际主动消息验收。
+diff --git a/tests/qqbot-proactive-recovery-20261024/preview.py b/tests/qqbot-proactive-recovery-20261024/preview.py
+new file mode 100644
+--- /dev/null
++++ b/tests/qqbot-proactive-recovery-20261024/preview.py
+@@ -0,0 +1,120 @@
++"""Local review preview: real QQ/log APIs, fake provider/QQ and memory log storage."""
++import asyncio
++from collections import Counter
++from contextlib import asynccontextmanager
++from dataclasses import replace
++import json
++import logging
++from pathlib import Path
++import socket
++import sys
++import tempfile
++
++ROOT=Path(__file__).resolve().parents[2]
++sys.path.insert(0,str(ROOT))
++import httpx
++import uvicorn
++from starlette.applications import Starlette
++from starlette.responses import JSONResponse
++from starlette.routing import Mount,Route
++from starlette.staticfiles import StaticFiles
++from gateway import log_api,log_store,logging_events
++from gateway.config import cfg
++from gateway.qqbot import QQRuntime
++from gateway.qqbot_settings import QQSettings,qqbot_settings_routes
++from tests.test_qqbot import Clock,Model,Transport,event
++
++BASE=Path(__file__).resolve().parent
++cfg.GATEWAY_TOKEN='qqbot-recovery-preview-only'
++cfg.GATEWAY_LOG_ENABLED=True
++logging_events._queue=logging_events._EventQueue(100)
++logging_events._capture_active=True
++capture=logging_events.GatewayLogHandler();logging.getLogger('gateway.qqbot').addHandler(capture)
++events=[];clock=Clock();seed_number=0
++temporary=tempfile.TemporaryDirectory(prefix='qqbot-recovery-preview-');folder=Path(temporary.name)
++
++class PreviewRuntime(QQRuntime):
++    def start(self):self.activate()
++
++def refresh_events():
++    events.extend(logging_events._queue.drain(100))
++    return events
++
++def groups():
++    result={}
++    for row in refresh_events():
++        key=row['fingerprint']
++        if key not in result:
++            result[key]={**row,'event_count':0,'first_seen_at':row['occurred_at']}
++        result[key].update(last_seen_at=row['occurred_at'],sample_event_id=row['event_id'],message_zh=row['message_zh'])
++        result[key]['event_count']+=1
++    return list(result.values())
++
++def query_groups(**filters):
++    data=groups()
++    for field in ['module','level']:
++        if filters.get(field):data=[row for row in data if row[field]==filters[field]]
++    return {'groups':data,'has_more':False,'visible_snapshot':'100:110:'}
++
++def facets(**kwargs):
++    data=refresh_events()
++    return {'modules':[{'module':key,'count':value} for key,value in Counter(row['module'] for row in data).items()],
++        'levels':[{'level':key,'count':value} for key,value in Counter(row['level'] for row in data).items()],
++        'total_events':len(data),'keys':[]}
++
++log_store.query_groups=query_groups
++log_store.facets=facets
++log_store.get_event=lambda event_id:next((row for row in refresh_events() if row['event_id']==event_id),None)
++log_store.get_group=lambda fingerprint,**kwargs:{
++    'group':next((row for row in groups() if row['fingerprint']==fingerprint),None),
++    'samples':[row for row in refresh_events() if row['fingerprint']==fingerprint]}
++
++async def seed_fault(app):
++    global seed_number
++    runtime=app.state.qqbot;seed_number+=1
++    if runtime.evaluation_status()['fault_stopped']:
++        runtime.resume_evaluation(runtime.evaluation_status()['fault_version'])
++    original=runtime.config
++    runtime.config=replace(original,proactive_enabled=True,quiet_seconds=1,cooldown_seconds=60,
++        active_start='00:00',active_end='00:00')
++    runtime.model=Model();runtime.transport.ready=True
++    await runtime.ingest(event(seed_number,'isolated preview message'));clock.advance(4)
++    await runtime.reply_once();await runtime.send_once()
++    clock.advance(400)
++    async def failed(*args,**kwargs):raise httpx.ReadTimeout('isolated provider timeout')
++    runtime.model.generate=failed
++    for i in range(5):
++        await runtime.proactive_once()
++        if i<4:clock.advance(runtime.store.evaluation_state()['next_check_at']-clock())
++    runtime.config=original;runtime.model=Model();refresh_events()
++
++@asynccontextmanager
++async def lifespan(app):
++    env={'QQBOT_ENABLED':'true','QQBOT_TOKEN':'x'*32,'QQBOT_ACCOUNT_ID':'12345','QQBOT_OWNER_ID':'67890',
++        'QQBOT_ASSISTANT_ID':'role','QQBOT_STORE_PATH':str(folder/'ledger.sqlite3'),'QQBOT_DAILY_LIMIT':'30',
++        'QQBOT_TIMEZONE':'Asia/Shanghai','QQBOT_ACTIVE_START':'00:00','QQBOT_ACTIVE_END':'00:00'}
++    manager=QQSettings(app,None,env=env,path=folder/'settings.json',runtime_factory=lambda config,client:
++        PreviewRuntime(config,model=Model(),transport=Transport(),now=clock,exporter=lambda *args:None))
++    app.state.qqbot_settings=manager;await manager.startup()
++    clock.on_advance=lambda:app.state.qqbot.store.acquire(app.state.qqbot.owner,clock())
++    await seed_fault(app)
++    try:yield
++    finally:
++        await manager.shutdown();logging.getLogger('gateway.qqbot').removeHandler(capture);temporary.cleanup()
++
++async def health(request):return JSONResponse({'status':'ok','uptime':1})
++async def status(request):return JSONResponse({'upstream_model':'isolated-preview','supabase':{}})
++async def optional(request):return JSONResponse({})
++async def log_settings(request):return JSONResponse({'enabled':True,'writable':True})
++async def inject(request):
++    await seed_fault(request.app)
++    return JSONResponse(request.app.state.qqbot_settings.snapshot())
++
++app=Starlette(lifespan=lifespan,routes=[*qqbot_settings_routes,*log_api.log_api_routes,
++    Route('/health',health),Route('/status',status),Route('/__test/fault',inject,methods=['POST']),
++    Route('/admin/api/logs/settings',log_settings),Route('/admin/api/{path:path}',optional),
++    Mount('/admin',StaticFiles(directory=ROOT/'admin',html=True))])
++if __name__=='__main__':
++    listener=socket.socket();listener.bind(('127.0.0.1',0));port=listener.getsockname()[1]
++    (BASE/'preview-server.json').write_text(json.dumps({'port':port}),encoding='utf8')
++    uvicorn.Server(uvicorn.Config(app,log_level='warning',access_log=False)).run(sockets=[listener])
+diff --git a/tests/qqbot-proactive-recovery-20261024/browser.cjs b/tests/qqbot-proactive-recovery-20261024/browser.cjs
+new file mode 100644
+--- /dev/null
++++ b/tests/qqbot-proactive-recovery-20261024/browser.cjs
+@@ -0,0 +1,60 @@
++const {chromium}=require('C:/Users/Administrator/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
++const {readFileSync,writeFileSync}=require('node:fs');
++const {join}=require('node:path');
++const assert=require('node:assert/strict');
++(async()=>{
++ const port=JSON.parse(readFileSync(join(__dirname,'preview-server.json'),'utf8')).port;
++ const origin=`http://127.0.0.1:${port}`;
++ const browser=await chromium.launch({channel:'msedge',headless:true});
++ const context=await browser.newContext({viewport:{width:1280,height:1000}});
++ await context.addInitScript(()=>localStorage.setItem('qi-token','qqbot-recovery-preview-only'));
++ const page=await context.newPage(),errors=[];
++ page.on('pageerror',error=>errors.push(error.message));
++ try{
++  const seeded=await context.request.post(origin+'/__test/fault');assert.equal(seeded.ok(),true);
++  await page.goto(origin+'/admin/#/config');
++  const card=page.locator('#qqbot-settings-card'),resume=page.locator('[data-act="resume-qqbot-evaluation"]');
++  await resume.waitFor();assert.equal(await resume.isEnabled(),true);
++  assert.equal(await page.locator('#qqbot-evaluation-tag').textContent(),'故障停用');
++  assert.equal(await page.locator('#qqbot-failure-streak').textContent(),'5 次');
++  const images=[];
++  for(const width of [1280,390])for(const theme of ['day','night']){
++   await page.setViewportSize({width,height:1000});
++   await page.evaluate(theme=>document.documentElement.setAttribute('data-theme',theme),theme);
++   await card.scrollIntoViewIfNeeded();
++   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
++   const file=`fault-${width}-${theme}.png`;await card.screenshot({path:join(__dirname,file),animations:'disabled'});images.push(file);
++  }
++  await page.setViewportSize({width:1280,height:1000});await resume.click();
++  await page.waitForFunction(()=>document.querySelector('#qqbot-evaluation-tag')?.textContent==='未启用');
++  assert.equal(await resume.isDisabled(),true);
++  assert.equal(await page.locator('#qqbot-proactive-tag').textContent(),'已关闭');
++  assert.equal(await page.locator('#qqbot-daily-limit-input').inputValue(),'30');
++  await page.reload();await resume.waitFor();assert.equal(await resume.isDisabled(),true);
++  assert.equal(await page.locator('#qqbot-failure-streak').textContent(),'0 次');
++  await card.screenshot({path:join(__dirname,'recovered.png'),animations:'disabled'});
++  const help=card.locator('summary[aria-label="主动评估与故障恢复说明"]');await help.click();
++  assert.equal(await help.evaluate(el=>el.parentElement.open),true);
++  await card.screenshot({path:join(__dirname,'recovery-help-open.png'),animations:'disabled'});
++  await page.goto(origin+'/admin/#/logs');
++  await page.locator('.mem-card[data-act="detail"]').first().waitFor();
++  const module=page.locator('#log-module');
++  assert.ok((await module.locator('option').allTextContents()).some(text=>text.includes('QQBot')));
++  await module.locator('..').locator('.retro-select-field').click();
++  await page.locator('.retro-select-pop [data-value="qqbot"]').waitFor();
++  await page.screenshot({path:join(__dirname,'qqbot-log-dropdown.png'),animations:'disabled'});
++  await page.locator('.retro-select-pop [data-value="qqbot"]').click();
++  await page.locator('.mem-card[data-act="detail"]').first().waitFor();
++  await page.screenshot({path:join(__dirname,'qqbot-log-list.png'),fullPage:true,animations:'disabled'});
++  await page.locator('.mem-card[data-act="detail"]').filter({hasText:'已停止调用'}).first().click();
++  const detail=page.locator('.modal-body');
++  await detail.getByText('proactive_calls_stopped',{exact:true}).waitFor();
++  await detail.getByText('QQBot · proactive_evaluation',{exact:true}).waitFor();
++  await page.screenshot({path:join(__dirname,'qqbot-log-detail.png'),animations:'disabled'});
++  assert.deepEqual(errors,[]);
++  const result={passed:true,isolated_only:true,real_settings_and_logs_api:true,fake_provider_and_transport:true,
++    fault_stopped_after_five:true,manual_recovery:true,persisted_on_reload:true,proactive_stays_off:true,
++    daily_limit_stays_30:true,log_module_filter:true,error_detail:true,themes_and_viewports:images,page_errors:errors};
++  writeFileSync(join(__dirname,'browser-result.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result));
++ }finally{await context.close();await browser.close();}
++})().catch(error=>{console.error(error.stack);process.exitCode=1;});

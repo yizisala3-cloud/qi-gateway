@@ -1,0 +1,7 @@
+..F                                                                      [100%]
+================================== FAILURES ===================================
+_ ReTakeoverTests.test_returning_owner_reconciles_newer_orphan_after_discarding_old_result _
+codex\审查日志\qqbot接入\审查摘要-26.10.25.01.26\test_independent_retakeover.py:92: in test_returning_owner_reconciles_newer_orphan_after_discarding_old_result
+    self.assertFalse(state['in_flight'],
+E   AssertionError: True is not false : authoritative owner has no model task but leaves newer orphan unresolved: {'silent_streak': 0, 'failure_streak': 1, 'fault_stopped': False, 'next_check_at': 1792555837.0, 'last_finished_at': 1792555237.0, 'last_error_at': 1792555237.0, 'last_error_code': 'interrupted', 'in_flight': True, 'available': True, 'fault_version': 1, 'last_error_message': '上次主动评估意外中断', 'recovery_pending': False}; pending result=None, pending recovery=False
+1 failed, 2 passed in 0.75s

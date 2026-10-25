@@ -42,6 +42,7 @@ _LEVEL_RANK = {"WARNING": 0, "ERROR": 1, "CRITICAL": 2}
 _LEVEL_NAMES = ("WARNING", "ERROR", "CRITICAL")
 
 _MODULE_ZH = {
+    "qqbot": "QQBot",
     "planning": "规划管理",
     "memo": "备忘录",
     "memory": "记忆",
@@ -61,6 +62,7 @@ _LEVEL_ZH = {"WARNING": "警告", "ERROR": "错误", "CRITICAL": "严重错误"}
 _LOGGER_MODULE_RULES: tuple[tuple[str, str], ...] = tuple(
     sorted(
         (
+            ("gateway.qqbot", "qqbot"),
             ("gateway.planning", "planning"),
             ("gateway.memo", "memo"),
             ("gateway.memory", "memory"),
@@ -96,6 +98,7 @@ _EXCLUDED_LOGGER_PREFIXES = (
 
 # 模块 → emit_error 使用的 logger 名（结构化入口与既有 logger 命名一致）。
 _MODULE_LOGGER = {
+    "qqbot": "gateway.qqbot",
     "planning": "gateway.planning",
     "memo": "gateway.memo",
     "memory": "gateway.memory",
@@ -110,6 +113,7 @@ _MODULE_LOGGER = {
 
 # 路由模板 → 模块（HTTP 边界兜底事件用）。
 _ROUTE_MODULE_RULES: tuple[tuple[str, str], ...] = (
+    ("/admin/api/qqbot", "qqbot"),
     ("/admin/api/planning", "planning"),
     ("/admin/api/memo", "memo"),
     ("/admin/api/memory", "memory"),

@@ -1,0 +1,98 @@
+{
+  "source": {
+    "gateway/qqbot.py": {
+      "normalized_sha256": "0208501a0f501e22c298a0335369a2280d586f434c6bb6eb977363eb047266f5",
+      "ast_sha256": "2ff7984a771e57aaa8145989e74ce78d78e95755da46e1ecdf99f22cc40be98d",
+      "crlf": 424,
+      "lf": 424,
+      "bom": false,
+      "normalized_matches_local": true,
+      "ast_matches_local": true,
+      "local_crlf": 0,
+      "local_lf": 424
+    },
+    "gateway/qqbot_transport.py": {
+      "normalized_sha256": "94c546e3d087d85383a17adaf0775a7ae749baea2c235bf474a1cfb4e1fbe86a",
+      "ast_sha256": "186b97980655ec1ef61704ce2517de021849c992555d72189025e30b13fc3d14",
+      "crlf": 199,
+      "lf": 199,
+      "bom": false,
+      "normalized_matches_local": true,
+      "ast_matches_local": true,
+      "local_crlf": 0,
+      "local_lf": 199
+    },
+    "gateway/qqbot_config.py": {
+      "normalized_sha256": "35108bd2320c374b94575026e8385567df7cf9f97d8aa4d12ae12a0d935e4dfc",
+      "ast_sha256": "48c850e6c8a8ca2c231319b01141f40e9ed768d92e03be7db29b8092c305206a",
+      "crlf": 106,
+      "lf": 106,
+      "bom": false,
+      "normalized_matches_local": true,
+      "ast_matches_local": true,
+      "local_crlf": 0,
+      "local_lf": 106
+    },
+    "gateway/qqbot_store.py": {
+      "normalized_sha256": "305fda254e04e2edd271ef3016ab5ed90a6990b73b5ac11396666f0a7c0d004c",
+      "ast_sha256": "b048ebafa0fbcc78cd58c0cb3aa8cb96b5653e84f8b7d483e319bb4be5d75154",
+      "crlf": 0,
+      "lf": 391,
+      "bom": false,
+      "normalized_matches_local": true,
+      "ast_matches_local": true,
+      "local_crlf": 0,
+      "local_lf": 391
+    },
+    "gateway/qqbot_settings.py": {
+      "normalized_sha256": "023b9127c70b7a81c36c9440edc89928d735804d9e0bbfab5f8712cc6a99d44b",
+      "ast_sha256": "78c09f3fed1489834977d9c80fbf112af2a5f1bf203d096d1921821278019bb8",
+      "crlf": 220,
+      "lf": 220,
+      "bom": false,
+      "normalized_matches_local": true,
+      "ast_matches_local": true,
+      "local_crlf": 0,
+      "local_lf": 220
+    },
+    "gateway/qqbot_stickers.py": {
+      "normalized_sha256": "a76853ca4491ba0deba15c7fd0ff47b0de0e7009a66539081212c8243ce3378c",
+      "ast_sha256": "644c348b4ac7494e7df2fb73db8a43a7b160921e17ebd7c087bdefde6e97b8bf",
+      "crlf": 93,
+      "lf": 93,
+      "bom": false,
+      "normalized_matches_local": true,
+      "ast_matches_local": true,
+      "local_crlf": 0,
+      "local_lf": 93
+    },
+    "gateway/qqbot_model.py": {
+      "normalized_sha256": "8a3436228d5d890f4be2e9d1841f3718d73a84b72215aad6ed9057c49da2c3f4",
+      "ast_sha256": "5a4215fd1f6c2d5d18b2fa5b8028fc169e33955ae62c7b0742b5835430493223",
+      "crlf": 98,
+      "lf": 98,
+      "bom": false,
+      "normalized_matches_local": true,
+      "ast_matches_local": true,
+      "local_crlf": 0,
+      "local_lf": 98
+    },
+    "gateway/qqbot_memory.py": {
+      "normalized_sha256": "0ab222637cb54e3932d9238d8a231b84f174432a1f3e3400847412dd0cb0184c",
+      "ast_sha256": "6366d7e63093072dec0ffe116ed5c8f2fc386c849bf5bdc91306961dd0a7fb55",
+      "crlf": 18,
+      "lf": 18,
+      "bom": false,
+      "normalized_matches_local": true,
+      "ast_matches_local": true,
+      "local_crlf": 0,
+      "local_lf": 18
+    }
+  },
+  "configuration_matches": {
+    "QQBOT_TOKEN": true,
+    "QQBOT_ACCOUNT_ID": true,
+    "QQBOT_OWNER_ID": true,
+    "QQBOT_ASSISTANT_ID": true
+  }
+}

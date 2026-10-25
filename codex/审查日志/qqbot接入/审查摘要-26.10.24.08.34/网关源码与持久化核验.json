@@ -1,0 +1,62 @@
+{
+  "source_hashes": {
+    "gateway/qqbot.py": "32f1be93f9489adba350e9afd31d219dabad1a4994017e2a6a06970e8e412a87",
+    "gateway/qqbot_transport.py": "4fb6c9aa1e65489d1490dba89a9937c6628b16802e9c5b799b9df598a4d148cf",
+    "gateway/qqbot_config.py": "f3efcd2d4e28b573b9c1ab52abecebd0132416b797bf8927b7199af56e681145",
+    "gateway/qqbot_store.py": "305fda254e04e2edd271ef3016ab5ed90a6990b73b5ac11396666f0a7c0d004c",
+    "gateway/qqbot_settings.py": "0d51db4e4708f95680ea4f95a2b7b3315f31bd3fdca826d6421214f0ae76699a",
+    "gateway/qqbot_stickers.py": "4645f8f023902ac41d31fe8d17594b55b38e2295b02ff06789cde396a71d7188",
+    "gateway/qqbot_model.py": "0ff9355e380456ede909b13ad2e0336408681c6ee0cd84bad1ec45db8f337d83",
+    "gateway/qqbot_memory.py": "352be2275b1ae4adf0a939785c7b25a853c75a357513dcaa2716f34eb7aaf298"
+  },
+  "files": {
+    "QQBOT_STORE_PATH": {
+      "path": "/data/qqbot/messages.sqlite3",
+      "exists": true,
+      "bytes": 73728
+    },
+    "QQBOT_SETTINGS_PATH": {
+      "path": "/data/qqbot/settings.json",
+      "exists": true,
+      "bytes": 46
+    },
+    "QQBOT_STICKER_MANIFEST": {
+      "path": "/data/qqbot/stickers/cloud-cat-v1/manifest.json",
+      "exists": true,
+      "bytes": 37400
+    }
+  },
+  "flags": {
+    "enabled": false,
+    "proactive_enabled": false
+  },
+  "sticker_count": 168,
+  "mounts": [
+    {
+      "Type": "bind",
+      "Source": "/data/qi-gateway/qqbot",
+      "Destination": "/data/qqbot",
+      "RW": true
+    }
+  ],
+  "local_comparison_raw": {
+    "gateway/qqbot.py": false,
+    "gateway/qqbot_transport.py": false,
+    "gateway/qqbot_config.py": false,
+    "gateway/qqbot_store.py": true,
+    "gateway/qqbot_settings.py": false,
+    "gateway/qqbot_stickers.py": false,
+    "gateway/qqbot_model.py": false,
+    "gateway/qqbot_memory.py": false
+  },
+  "local_comparison_lf": {
+    "gateway/qqbot.py": false,
+    "gateway/qqbot_transport.py": false,
+    "gateway/qqbot_config.py": false,
+    "gateway/qqbot_store.py": true,
+    "gateway/qqbot_settings.py": false,
+    "gateway/qqbot_stickers.py": false,
+    "gateway/qqbot_model.py": false,
+    "gateway/qqbot_memory.py": false
+  }
+}

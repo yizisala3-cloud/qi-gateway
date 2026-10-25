@@ -1,0 +1,43 @@
+.....F........F...F...F.......................          [100%]
+================================== FAILURES ===================================
+_ RecoveryTests.test_fault_survives_restart_and_manual_recovery_keeps_switches_and_count _
+tests\test_qqbot_proactive_recovery.py:101: in test_fault_survives_restart_and_manual_recovery_keeps_switches_and_count
+    self.runtime.resume_evaluation(before['fault_version'])
+gateway\qqbot.py:172: in resume_evaluation
+    self.evaluation_recovery_pending = result is None
+                                       ^^^^^^
+E   NameError: name 'result' is not defined
+_ RecoveryTests.test_state_write_failure_blocks_further_model_calls_until_manual_recovery _
+tests\test_qqbot_proactive_recovery.py:249: in test_state_write_failure_blocks_further_model_calls_until_manual_recovery
+    self.runtime.resume_evaluation(self.runtime.evaluation_status()['fault_version'])
+gateway\qqbot.py:172: in resume_evaluation
+    self.evaluation_recovery_pending = result is None
+                                       ^^^^^^
+E   NameError: name 'result' is not defined
+_ ResumeApiTests.test_manual_resume_preserves_flags_and_restart_and_rejects_stale_fault _
+tests\test_qqbot_proactive_recovery.py:300: in test_manual_resume_preserves_flags_and_restart_and_rejects_stale_fault
+    self.assertEqual(result.status_code,200);data=result.json()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: 503 != 200
+_ RecoveryBoundaryTests.test_lease_gap_on_fifth_attempt_stops_and_allows_manual_resume _
+tests\test_qqbot_recovery_boundaries.py:229: in test_lease_gap_on_fifth_attempt_stops_and_allows_manual_resume
+    self.bot.resume_evaluation(state['fault_version'])
+gateway\qqbot.py:172: in resume_evaluation
+    self.evaluation_recovery_pending = result is None
+                                       ^^^^^^
+E   NameError: name 'result' is not defined
+_ LeaseOutcomeTests.test_authentication_and_permission_failures_still_stop (status=401) _
+tests\test_qqbot_lease_outcomes.py:112: in test_authentication_and_permission_failures_still_stop
+    self.bot.resume_evaluation(state['fault_version'])
+gateway\qqbot.py:172: in resume_evaluation
+    self.evaluation_recovery_pending = result is None
+                                       ^^^^^^
+E   NameError: name 'result' is not defined
+_ LeaseOutcomeTests.test_authentication_and_permission_failures_still_stop (status=403) _
+tests\test_qqbot_lease_outcomes.py:112: in test_authentication_and_permission_failures_still_stop
+    self.bot.resume_evaluation(state['fault_version'])
+gateway\qqbot.py:172: in resume_evaluation
+    self.evaluation_recovery_pending = result is None
+                                       ^^^^^^
+E   NameError: name 'result' is not defined
+6 failed, 42 passed, 15 subtests passed in 9.65s

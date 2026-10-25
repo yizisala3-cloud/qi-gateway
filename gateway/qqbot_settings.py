@@ -1,4 +1,4 @@
-"""Local persisted dashboard switches; identities/secrets stay in the environment."""
+"""Persist dashboard switches and daily limits; identities stay in the environment."""
 from __future__ import annotations
 
 import asyncio
@@ -13,7 +13,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .qqbot import QQRuntime
-from .qqbot_config import QQConfig, _flag
+from .qqbot_config import QQConfig, _flag, _number
 
 log = logging.getLogger('gateway.qqbot.settings')
 
@@ -22,6 +22,12 @@ class SettingsError(Exception):
     def __init__(self,message,status=503):
         super().__init__(message)
         self.status = status
+
+
+def _daily_limit(value):
+    if type(value) is not int or not 1 <= value <= 100:
+        raise ValueError('每日主动消息上限必须是1到100之间的整数。')
+    return value
 
 
 class QQSettings:
@@ -36,27 +42,31 @@ class QQSettings:
         self.read_error = ''
         self.apply_error = ''
         self.source = 'environment'
-        self.flags = {'enabled':False,'proactive_enabled':False}
+        self.flags = {'enabled':False,'proactive_enabled':False,'daily_limit':3}
         try:
             if self.path.exists():
                 if self.path.stat().st_size>4096:
                     raise ValueError('settings_file_too_large')
                 flags = json.loads(self.path.read_text(encoding='utf-8'))
-                if (not isinstance(flags,dict) or set(flags)!=set(self.flags)
-                        or any(not isinstance(v,bool) for v in flags.values())
+                if (not isinstance(flags,dict) or not {'enabled','proactive_enabled'} <= set(flags) <= set(self.flags)
+                        or any(not isinstance(flags[key],bool) for key in ('enabled','proactive_enabled'))
                         or (flags['proactive_enabled'] and not flags['enabled'])):
                     raise ValueError('invalid_settings_file')
+                flags['daily_limit'] = (_daily_limit(flags['daily_limit']) if 'daily_limit' in flags
+                    else _number(self.env,'QQBOT_DAILY_LIMIT',3,1,100))
                 self.flags = flags
                 self.source = 'file'
             else:
                 enabled = _flag(self.env,'QQBOT_ENABLED')
-                self.flags = dict(enabled=enabled,proactive_enabled=enabled and _flag(self.env,'QQBOT_PROACTIVE_ENABLED'))
+                self.flags = dict(enabled=enabled,proactive_enabled=enabled and _flag(self.env,'QQBOT_PROACTIVE_ENABLED'),
+                    daily_limit=_number(self.env,'QQBOT_DAILY_LIMIT',3,1,100))
         except (OSError,ValueError) as exc:
             self.read_error = 'QQBot开关读取失败，请检查本地配置文件后重启网关。'
             log.error('QQ开关读取失败 type=%s',type(exc).__name__,exc_info=exc)
 
     def config(self, flags):
         return QQConfig.from_env({**self.env,'QQBOT_ENABLED':'true',
+            'QQBOT_DAILY_LIMIT':str(flags.get('daily_limit',self.flags['daily_limit'])),
             'QQBOT_PROACTIVE_ENABLED':'true' if flags['proactive_enabled'] else 'false'})
 
     def readiness(self, proactive=False):
@@ -90,7 +100,25 @@ class QQSettings:
             'proactive_configured':proactive_configured,'proactive_note':proactive_note,
             'running':running,'connected':bool(runtime_state.get('connected')),
             'owner_paused':bool(runtime_state.get('paused')),'silence_until':runtime_state.get('silence_until',0),
+            'proactive_evaluation':self.runtime.evaluation_status() if running else None,
             'error':self.read_error or self.apply_error or status_error}
+
+    async def resume_evaluation(self, version):
+        async with self.lock:
+            if self.closing or self.read_error:
+                raise SettingsError(self.read_error or '网关正在关闭，请稍后重试。')
+            if not self.runtime or self.runtime.stopped or not self.flags['enabled']:
+                raise SettingsError('请先开启QQBot总开关后再恢复调用。',409)
+            try:
+                self.runtime.resume_evaluation(version)
+            except ValueError as exc:
+                raise SettingsError(str(exc),409) from exc
+            except Exception as exc:
+                log.error('QQ主动评估恢复失败',exc_info=exc,extra={'evt':{
+                    'module':'qqbot','operation':'proactive_resume','error_code':'proactive_resume_failed',
+                    'message_zh':'QQ主动评估未能恢复，请检查本地存储后重试','outcome':'failed'}})
+                raise SettingsError('主动评估未能恢复，请检查本地存储后重试。') from exc
+            return self.snapshot()
 
     def _write(self, flags):
         self.path.parent.mkdir(parents=True,exist_ok=True)
@@ -146,7 +174,7 @@ class QQSettings:
             self.app.state.qqbot = runtime
         else:
             runtime = self.runtime
-            if runtime.config.proactive_enabled == config.proactive_enabled and not self.apply_error:
+            if runtime.config == config and not self.apply_error:
                 return
             # Gate sending before any database operation; turning it on always
             # invalidates the old generation first, including delayed receipts.
@@ -162,6 +190,10 @@ class QQSettings:
             if self.closing or self.read_error:
                 raise SettingsError(self.read_error or '网关正在关闭，请稍后重试。')
             flags = {**self.flags,**payload}
+            try:
+                _daily_limit(flags['daily_limit'])
+            except ValueError as exc:
+                raise SettingsError(str(exc),422) from exc
             if not flags['enabled']:
                 if payload.get('proactive_enabled') is True:
                     raise SettingsError('请先开启QQBot总开关。',409)
@@ -205,9 +237,10 @@ async def settings_endpoint(request):
                 payload = await request.json()
             except (ValueError,UnicodeDecodeError):
                 raise SettingsError('请求正文必须为合法JSON。',400) from None
-            if (not isinstance(payload,dict) or not payload or not set(payload)<={'enabled','proactive_enabled'}
-                    or any(not isinstance(v,bool) for v in payload.values())):
-                raise SettingsError('请只提交QQBot总开关或主动消息的布尔值。',400)
+            if (not isinstance(payload,dict) or not payload or not set(payload)<={'enabled','proactive_enabled','daily_limit'}
+                    or any(not isinstance(value,bool) for key,value in payload.items() if key!='daily_limit')
+                    or ('daily_limit' in payload and type(payload['daily_limit']) is not int)):
+                raise SettingsError('请提交QQBot布尔开关或整数每日主动消息上限。',400)
             data = await manager.save(payload)
         else:
             async with manager.lock:
@@ -217,4 +250,26 @@ async def settings_endpoint(request):
     return JSONResponse(data,headers={'Cache-Control':'no-store'})
 
 
-qqbot_settings_routes = [Route('/admin/api/qqbot/settings',settings_endpoint,methods=['GET','PUT'])]
+async def resume_evaluation_endpoint(request):
+    from .main import verify_token
+    headers = {'Cache-Control':'no-store'}
+    if not verify_token(request):
+        return JSONResponse({'error':'unauthorized'},status_code=401,headers=headers)
+    manager = getattr(request.app.state,'qqbot_settings',None)
+    if manager is None:
+        return JSONResponse({'error':'QQBot配置服务未就绪'},status_code=503,headers=headers)
+    try:
+        try:
+            payload = await request.json()
+        except (ValueError,UnicodeDecodeError):
+            raise SettingsError('请求正文必须为合法JSON。',400) from None
+        if (not isinstance(payload,dict) or set(payload) != {'fault_version'}
+                or type(payload['fault_version']) is not int or payload['fault_version'] < 0):
+            raise SettingsError('请提交当前故障版本后恢复调用。',400)
+        return JSONResponse(await manager.resume_evaluation(payload['fault_version']),headers=headers)
+    except SettingsError as exc:
+        return JSONResponse({'error':str(exc)},status_code=exc.status,headers=headers)
+
+
+qqbot_settings_routes = [Route('/admin/api/qqbot/settings',settings_endpoint,methods=['GET','PUT']),
+    Route('/admin/api/qqbot/proactive/resume',resume_evaluation_endpoint,methods=['POST'])]

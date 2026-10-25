@@ -42,7 +42,7 @@ class QQSettingsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_saved_choices_restore_and_override_environment_after_restart(self):
         await self.manager.save({'enabled':True});await self.manager.save({'proactive_enabled':True})
-        self.assertEqual(json.loads((self.root/'switches.json').read_text()),{'enabled':True,'proactive_enabled':True})
+        self.assertEqual(json.loads((self.root/'switches.json').read_text()),{'enabled':True,'proactive_enabled':True,'daily_limit':3})
         await self.manager.shutdown()
         second=self.make_manager();self.addAsyncCleanup(second.shutdown);await second.startup()
         self.assertTrue(second.snapshot()['enabled']);self.assertTrue(second.runtime.config.proactive_enabled)
@@ -179,7 +179,7 @@ class QQSettingsTests(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_changes_keep_file_runtime_and_flags_consistent(self):
         await self.manager.save({'enabled':True})
         await asyncio.gather(self.manager.save({'proactive_enabled':True}),self.manager.save({'enabled':False}))
-        self.assertEqual(self.manager.flags,{'enabled':False,'proactive_enabled':False})
+        self.assertEqual(self.manager.flags,{'enabled':False,'proactive_enabled':False,'daily_limit':3})
         self.assertEqual(json.loads(self.manager.path.read_text()),self.manager.flags)
         self.assertIsNone(self.app.state.qqbot);self.assertIsNone(self.manager.runtime)
 
@@ -202,6 +202,68 @@ class QQSettingsTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.manager.runtime,'status',side_effect=OSError('read failure')):
             state=self.manager.snapshot()
         self.assertTrue(state['enabled']);self.assertTrue(state['writable']);self.assertTrue(state['error'])
+
+    async def test_legacy_switch_file_accepts_env_limit_and_saved_limit_overrides_env(self):
+        self.manager.path.write_text(json.dumps({'enabled':False,'proactive_enabled':False}))
+        manager=self.make_manager({**self.env,'QQBOT_DAILY_LIMIT':'7'})
+        self.addAsyncCleanup(manager.shutdown)
+        self.assertEqual(manager.snapshot()['daily_limit'],7)
+        await manager.save({'daily_limit':30})
+        restored=self.make_manager({**self.env,'QQBOT_DAILY_LIMIT':'5'})
+        self.addAsyncCleanup(restored.shutdown)
+        self.assertEqual(restored.snapshot()['daily_limit'],30)
+        self.assertFalse(restored.snapshot()['enabled'])
+        self.assertFalse((self.root/'ledger.sqlite3').exists())
+
+    async def test_daily_limit_hot_apply_keeps_connection_and_used_count(self):
+        await self.manager.save({'enabled':True,'proactive_enabled':True})
+        runtime=self.manager.runtime;transport=runtime.transport;now=self.clock()
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        state=runtime.store.state()
+        state.update(day=datetime.fromtimestamp(now,ZoneInfo(runtime.config.timezone)).date().isoformat(),count=3)
+        runtime.store._save_state(state)
+        self.assertEqual(runtime._proactive_timing_error(state,now),'daily_limit')
+        await self.manager.save({'daily_limit':30})
+        self.assertIs(self.manager.runtime,runtime);self.assertIs(runtime.transport,transport)
+        self.assertFalse(runtime.stopped);self.assertTrue(runtime.config.proactive_enabled)
+        self.assertEqual(runtime.store.state()['count'],3)
+        self.assertIsNone(runtime._proactive_timing_error(runtime.store.state(),now))
+        state=runtime.store.state();state['count']=30;runtime.store._save_state(state)
+        self.assertEqual(runtime._proactive_timing_error(state,now),'daily_limit')
+        await self.manager.save({'daily_limit':2})
+        self.assertEqual(runtime.store.state()['count'],30)
+        self.assertEqual(runtime._proactive_timing_error(runtime.store.state(),now),'daily_limit')
+
+    async def test_limit_change_invalidates_old_unsent_generation(self):
+        await self.manager.save({'enabled':True,'proactive_enabled':True})
+        runtime=self.manager.runtime;now=self.clock();revision=runtime.store.state()['revision']
+        async with runtime.send_lock:
+            runtime.store.queue('prior-limit','proactive',[],'old greeting',now,now+300,revision=revision)
+            await self.manager.save({'daily_limit':30})
+        await runtime.send_once()
+        self.assertFalse(runtime.store.open_proactive());self.assertEqual(runtime.transport.sent,[])
+        self.assertGreater(runtime.store.state()['revision'],revision)
+
+    async def test_invalid_limit_or_failed_write_preserves_file_and_runtime(self):
+        await self.manager.save({'enabled':True});runtime=self.manager.runtime
+        before=self.manager.path.read_bytes()
+        for value in [0,101,True,30.5,'30',None]:
+            with self.subTest(value=value),self.assertRaises(SettingsError):
+                await self.manager.save({'daily_limit':value})
+        with patch('gateway.qqbot_settings.os.replace',side_effect=OSError('disk unavailable')):
+            with self.assertRaises(SettingsError):await self.manager.save({'daily_limit':30})
+        self.assertEqual(self.manager.path.read_bytes(),before)
+        self.assertEqual(self.manager.snapshot()['daily_limit'],3)
+        self.assertEqual(runtime.config.daily_limit,3)
+
+    async def test_saved_invalid_daily_limit_fails_closed(self):
+        for value in [True,0,101,'30',30.5]:
+            with self.subTest(value=value):
+                self.manager.path.write_text(json.dumps({'enabled':False,'proactive_enabled':False,'daily_limit':value}))
+                manager=self.make_manager();self.addAsyncCleanup(manager.shutdown)
+                self.assertFalse(manager.snapshot()['writable'])
+                await manager.startup();self.assertIsNone(manager.runtime)
 
 
 class QQSettingsAPITests(unittest.TestCase):
@@ -230,6 +292,21 @@ class QQSettingsAPITests(unittest.TestCase):
         response=self.client.put('/admin/api/qqbot/settings',headers=self.headers,json={'enabled':False})
         self.assertEqual(response.status_code,200);self.assertFalse(response.json()['enabled'])
         self.assertEqual(len(list(Path(self.tmp.name).iterdir())),1)
+
+    def test_daily_limit_api_validates_auth_type_range_and_preserves_disabled(self):
+        url='/admin/api/qqbot/settings'
+        self.assertEqual(self.client.put(url,json={'daily_limit':30}).status_code,401)
+        for value in [True,'30',30.5,None]:
+            with self.subTest(value=value):
+                self.assertEqual(self.client.put(url,headers=self.headers,json={'daily_limit':value}).status_code,400)
+        for value in [0,101,-1]:
+            with self.subTest(value=value):
+                self.assertEqual(self.client.put(url,headers=self.headers,json={'daily_limit':value}).status_code,422)
+        for value in [1,30,100]:
+            response=self.client.put(url,headers=self.headers,json={'daily_limit':value})
+            self.assertEqual(response.status_code,200);self.assertEqual(response.json()['daily_limit'],value)
+            self.assertFalse(response.json()['enabled']);self.assertFalse(response.json()['proactive_enabled'])
+        self.assertEqual(self.client.get(url,headers=self.headers).json()['daily_limit'],100)
 
     def test_http_switch_cycle_and_restart_use_real_runtime_controller(self):
         env={'QQBOT_TOKEN':'x'*32,'QQBOT_ACCOUNT_ID':'12345','QQBOT_OWNER_ID':'67890',

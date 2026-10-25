@@ -96,7 +96,7 @@ async function route() {
   try { currentMod?.unmount?.(); } catch {}
   currentMod = null;
   try {
-    const pageVersion = key === 'config' ? '20261024-sky-settings' : ASSET_VERSION;
+    const pageVersion = ['config','logs'].includes(key) ? '20261024-qqbot-recovery-r13-r15' : ASSET_VERSION;
     const mod = (await import(`./pages/${key}.js?v=${pageVersion}`)).default;
     if (seq !== routeSeq) return;
     currentMod = mod;

@@ -1,0 +1,37 @@
+{
+  "architecture": {
+    "exit": 0,
+    "stdout": "x86_64",
+    "stderr": ""
+  },
+  "os": {
+    "exit": 0,
+    "stdout": "PRETTY_NAME=\"Ubuntu 22.04 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"22.04\"\nVERSION=\"22.04 LTS (Jammy Jellyfish)\"\nVERSION_CODENAME=jammy\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=jammy",
+    "stderr": ""
+  },
+  "memory": {
+    "exit": 0,
+    "stdout": "total        used        free      shared  buff/cache   available\nMem:            3925         844         427         249        2653        2540\nSwap:              0           0           0",
+    "stderr": ""
+  },
+  "disk": {
+    "exit": 0,
+    "stdout": "Filesystem      Size  Used Avail Use% Mounted on\n/dev/vda1        39G  7.5G   32G  20% /",
+    "stderr": ""
+  },
+  "docker": {
+    "exit": 0,
+    "stdout": "29.9.2",
+    "stderr": ""
+  },
+  "containers": {
+    "exit": 0,
+    "stdout": "coolify\tcoollabsio/coolify:4.5.0\tUp 16 hours (healthy)\ncoolify-redis\tredis:7-alpine\tUp 16 hours (healthy)\ncoolify-db\tpostgres:15-alpine\tUp 16 hours (healthy)\nqi-gateway\tlocalhost:5000/qi-gateway:sky-delivery-20261023-1111-acb4e6\tUp 21 hours (healthy)\ncoolify-sentinel\tcoollabsio/sentinel:1.1.2\tUp 26 hours (healthy)\ncoolify-proxy\ttraefik:v3.7\tUp 26 hours (healthy)\nqi-gateway-registry\tregistry:3\tUp 26 hours",
+    "stderr": ""
+  },
+  "usage": {
+    "exit": 0,
+    "stdout": "coolify\t395.7MiB / 3.833GiB\t0.59%\ncoolify-redis\t7.105MiB / 3.833GiB\t1.13%\ncoolify-db\t31.64MiB / 3.833GiB\t0.01%\nqi-gateway\t251.9MiB / 3.833GiB\t0.22%\ncoolify-sentinel\t7.598MiB / 3.833GiB\t0.05%\ncoolify-proxy\t29.7MiB / 3.833GiB\t0.00%\nqi-gateway-registry\t13.95MiB / 3.833GiB\t0.00%",
+    "stderr": ""
+  }
+}

@@ -82,6 +82,8 @@ export default {
       'toggle-log-collection': (el) => this.toggleLogCollection(el),
       'toggle-qqbot': () => this.toggleQQSetting('enabled'),
       'toggle-qqbot-proactive': () => this.toggleQQSetting('proactive_enabled'),
+      'save-qqbot-daily-limit': () => this.saveQQDailyLimit(),
+      'resume-qqbot-evaluation': () => this.resumeQQEvaluation(),
       'toggle-sky': () => this.toggleSkySetting(),
       'save-recent-limit': () => this.saveRecentLimit(),
       'toggle-daily-refresh': (el) => this.toggleCycleSwitch(el, 'daily_refresh_enabled', '每日待办自动刷新'),
@@ -341,6 +343,34 @@ export default {
       .every(key => typeof data[key] === 'boolean');
   },
 
+  validQQEvaluation(data) {
+    return data?.available === true && typeof data.fault_stopped === 'boolean'
+      && typeof data.in_flight === 'boolean'
+      && ['failure_streak','silent_streak','fault_version'].every(key => Number.isInteger(data[key]) && data[key] >= 0)
+      && Number.isFinite(data.next_check_at) && data.next_check_at >= 0;
+  },
+
+  renderQQEvaluation() {
+    const s = this.qqSettings, e = s?.proactive_evaluation;
+    const known = this.validQQEvaluation(e);
+    const stopped = known && e.fault_stopped;
+    const status = !known ? '未读取' : stopped ? '故障停用' : !s.proactive_enabled ? '未启用'
+      : e.recovery_pending ? '等待评估恢复' : e.in_flight ? 'AI评估中' : s.owner_paused || s.silence_until > Date.now()/1000 ? '主人已暂停'
+      : e.failure_streak ? '故障退避中' : e.silent_streak ? '静默降频中' : '等待条件满足';
+    const next = !known ? '—' : stopped ? '等待手动恢复' : !s.proactive_enabled ? '未启用'
+      : e.recovery_pending ? '取得运行权后恢复' : e.in_flight ? '本轮结束后计算' : e.next_check_at > Date.now()/1000
+        ? new Date(e.next_check_at*1000).toLocaleString('zh-CN',{hour12:false}) : '条件满足后';
+    const disabled = !stopped || !s?.writable || !s.running || this.savingQQSettings;
+    return `<div class="kv"><span class="k">主动评估状态</span><span class="v">
+      <span id="qqbot-evaluation-tag" class="tag ${stopped ? 'tag-red' : 'tag-muted'}">${status}</span>
+      <button type="button" class="btn btn-secondary btn-sm" data-act="resume-qqbot-evaluation" ${disabled ? 'disabled' : ''}>恢复调用</button>
+      </span></div>
+      <div class="kv"><span class="k">连续故障</span><span class="v" id="qqbot-failure-streak">${known ? `${e.failure_streak} 次` : '—'}</span></div>
+      <div class="kv"><span class="k">下次评估（本地时间）</span><span class="v" id="qqbot-next-evaluation">${esc(next)}</span></div>
+      ${known && e.last_error_message ? `<p class="muted text-sm" id="qqbot-last-evaluation-error" style="margin:6px 0 0" role="status">最近故障：${esc(e.last_error_message)}</p>` : ''}
+      <p class="muted text-sm" data-help-note="主动评估与故障恢复" style="margin:6px 0 0">正常静默后等待10、20、40、60分钟；连续故障后等待5分钟、15分钟、1小时、2小时，第5次或鉴权失败停止调用。间隔不会短于配置的基础间隔；时间为最早再次评估时刻，仍需满足发送时段、安静期和冷却。恢复调用只解除故障暂停，不重置当天已用次数，也不会立即强制发消息。报错可在日志页按QQBot筛选，需开启日志收集。</p>`;
+  },
+
   renderQQSettings() {
     const s = this.qqSettings;
     const known = this.validQQSettings(s);
@@ -349,6 +379,8 @@ export default {
     const writable = known && s.writable && !this.savingQQSettings;
     const mainDisabled = !writable || (!enabled && !s.configured);
     const proactiveDisabled = !writable || !enabled || !s.running || (!proactive && !s.proactive_configured);
+    const limitKnown = known && Number.isInteger(s.daily_limit) && s.daily_limit >= 1 && s.daily_limit <= 100;
+    const limitDisabled = !writable || !limitKnown;
     const status = !known ? '状态未知' : s.error ? '切换未完成' : !enabled ? '已关闭'
       : !s.running ? '未启动' : s.connected ? '已连接' : '等待QQ连接';
     const notes = !known ? ['读取失败，暂不可修改。'] : [s.error,
@@ -366,7 +398,13 @@ export default {
         <span id="qqbot-proactive-tag" class="tag ${proactive ? 'tag-green' : 'tag-muted'}">${known ? proactive ? '已开启' : '已关闭' : '状态未知'}</span>
         <button class="toggle-switch" role="switch" aria-label="QQBot主动消息" aria-checked="${!!proactive}" data-act="toggle-qqbot-proactive" ${proactiveDisabled ? 'disabled' : ''}><span class="toggle-knob"></span></button>
       </span></div>
+      <div class="kv"><span class="k" style="display:flex;align-items:center;flex-wrap:wrap;gap:5px;max-width:50%"><label for="qqbot-daily-limit-input">每日主动消息上限<span class="muted text-sm" data-help-note="每日主动消息上限">可设1～100条，保存后立即生效并在重启后保留；当天已用次数不清零。上限不代表每天一定发满，仍受发送时段、冷却和模型判断限制。</span></label></span><span class="v" style="display:flex;align-items:center;flex-wrap:wrap;gap:8px">
+        <input type="number" id="qqbot-daily-limit-input" min="1" max="100" step="1" ${limitKnown ? `value="${s.daily_limit}"` : ''} ${limitDisabled ? 'disabled' : ''} style="width:64px" aria-label="每日主动消息上限">
+        <span class="muted text-sm">条</span>
+        <button type="button" class="btn btn-secondary btn-sm" data-act="save-qqbot-daily-limit" ${limitDisabled ? 'disabled' : ''}>保存</button>
+      </span></div>
       <div class="kv"><span class="k">连接状态</span><span class="v"><span id="qqbot-runtime-tag" class="tag ${known && s.connected ? 'tag-green' : 'tag-muted'}">${status}</span></span></div>
+      ${this.renderQQEvaluation()}
       <p class="muted text-sm" id="qqbot-settings-note" style="margin:6px 0 0" role="status">${this.savingQQSettings ? '正在保存…' : notes.map(esc).join(' ')}</p>
       <p class="muted text-sm" style="margin:6px 0 0" data-help-note="QQBot开关">默认关闭，保存后生效，重启后保留。总开关关闭时停止QQ收发并关闭主动消息；单独关闭主动消息仍可私聊。重新开启不会补发旧问候，也不会解除QQ里设置的暂停。</p>`;
   },
@@ -377,21 +415,49 @@ export default {
   },
 
   async toggleQQSetting(key) {
+    if (!this.validQQSettings(this.qqSettings)) return;
+    const next = !this.qqSettings[key];
+    return this.saveQQSettings({ [key]: next }, key === 'enabled'
+      ? next ? '已开启QQBot' : '已关闭QQBot和主动消息'
+      : next ? '已开启QQBot主动消息' : '已关闭主动消息，私聊保持开启');
+  },
+
+  async saveQQDailyLimit() {
+    if (!Number.isInteger(this.qqSettings?.daily_limit)) return;
+    const input = this.root?.querySelector('#qqbot-daily-limit-input');
+    const raw = input?.value.trim() || '';
+    const value = Number(raw);
+    if (!raw || !Number.isInteger(value) || value < 1 || value > 100) {
+      toast('每日主动消息上限请输入1～100之间的整数', 'err');
+      input?.focus();
+      return;
+    }
+    return this.saveQQSettings({ daily_limit: value }, `每日主动消息上限已保存为${value}条`);
+  },
+
+  async resumeQQEvaluation() {
+    const e = this.qqSettings?.proactive_evaluation;
+    if (!this.validQQEvaluation(e) || !e.fault_stopped) return;
+    return this.saveQQSettings({fault_version:e.fault_version},'已恢复主动评估，将按原设置等待合适时机',
+      '/admin/api/qqbot/proactive/resume','POST');
+  },
+
+  async saveQQSettings(payload, message, path = '/admin/api/qqbot/settings', method = 'PUT') {
     if (!this.validQQSettings(this.qqSettings) || this.savingQQSettings || !this.qqSettings.writable) return;
     const token = this.qqMountToken;
-    const next = !this.qqSettings[key];
     this.savingQQSettings = true;
     this.refreshQQSettings();
     try {
-      const result = await gw('/admin/api/qqbot/settings', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ [key]: next }),
+      const result = await gw(path, {
+        method, headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
       });
       if (token !== this.qqMountToken) return;
-      if (!this.validQQSettings(result)) throw new Error('未收到有效的QQBot开关状态');
+      if (!this.validQQSettings(result) || ('daily_limit' in payload && !Number.isInteger(result.daily_limit))) {
+        throw new Error('未收到有效的QQBot设置状态');
+      }
       this.qqSettings = result;
-      toast(key === 'enabled' ? next ? '已开启QQBot' : '已关闭QQBot和主动消息'
-        : next ? '已开启QQBot主动消息' : '已关闭主动消息，私聊保持开启');
+      toast(message);
     } catch (error) {
       if (token !== this.qqMountToken) return;
       try {

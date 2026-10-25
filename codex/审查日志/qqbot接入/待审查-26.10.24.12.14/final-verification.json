@@ -1,0 +1,18 @@
+{
+  "source_hashes_checked": 24,
+  "evidence_hashes_checked": 15,
+  "documentation_new_links": "passed",
+  "whitespace": "passed, CRLF accepted as line endings",
+  "reverse_patch_check": "passed",
+  "tests": {
+    "passed": 407,
+    "subtests_passed": 117,
+    "skipped": 27
+  },
+  "browser": "passed, isolated Edge",
+  "local_preview": "stopped",
+  "commit": false,
+  "push": false,
+  "deployment": false,
+  "production_setting_writes": false
+}

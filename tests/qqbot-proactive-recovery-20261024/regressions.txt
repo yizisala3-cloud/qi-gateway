@@ -1,0 +1,14 @@
+................................................sssss.......... [ 14%]
+............................................................................................... [ 36%]
+.............................................................. [ 50%]
+.................................................................................................................... [ 77%]
+................................sssssssssssssssssss [ 89%]
+sss............................................                          [100%]
+=========================== short test summary info ===========================
+SKIPPED [1] tests\test_qqbot_pgserver.py:54: run pytest --db for disposable PostgreSQL
+SKIPPED [1] tests\test_qqbot_pgserver.py:44: run pytest --db for disposable PostgreSQL
+SKIPPED [1] tests\test_qqbot_pgserver.py:70: run pytest --db for disposable PostgreSQL
+SKIPPED [1] tests\test_qqbot_pgserver.py:50: run pytest --db for disposable PostgreSQL
+SKIPPED [1] tests\test_qqbot_pgserver.py:60: run pytest --db for disposable PostgreSQL
+SKIPPED [22] ..\..\..\..\..\AppData\Local\Python\pythoncore-3.12-64\Lib\site-packages\_pytest\unittest.py:523: set QIGATEWAY_PG_LOG_TEST=1 (or run pytest --db) to run the real PostgreSQL gateway log integration test
+407 passed, 27 skipped, 117 subtests passed in 24.22s

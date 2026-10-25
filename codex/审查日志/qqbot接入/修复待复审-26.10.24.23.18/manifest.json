@@ -1,0 +1,126 @@
+{
+  "batch": "26.10.24.23.18",
+  "scope": "R13, R14, R15 only; local before-fix baseline, not HEAD",
+  "status": "locally fixed; awaiting independent review; no commit, push, deployment, or production writes",
+  "file_count": 12,
+  "files": [
+    {
+      "path": "gateway/qqbot.py",
+      "before_sha256": "dfe6d2d290539f08da7f174d20736b92fb3493d37be92906c0ae7a6563cc10ec",
+      "after_sha256": "9c3575c34f6c1e323c267f711d11197d6eeb0ce906f71e04c09641009f3ad935"
+    },
+    {
+      "path": "gateway/qqbot_store.py",
+      "before_sha256": "1b08f8bda82cb6973e9259de82c739782c4e3be4d9525beb11dc81a8073606e6",
+      "after_sha256": "c4e37ee4a087dff1e89465e0fc607dd3f4cdc5d87933444241d1c636385a8e0c"
+    },
+    {
+      "path": "admin/js/pages/config.js",
+      "before_sha256": "5a6c0cce32afcc4e5076d9576f2b41543cd39a95b185d57f66bada350683eaa6",
+      "after_sha256": "91ba7f88937385d0f4693d8135d6cda1be579b9520bfa299a4bac015915a242f"
+    },
+    {
+      "path": "admin/js/app.js",
+      "before_sha256": "e7386ddb8170dab1e0ab0c99edf348d20239d51b96a957de565f392827b5ce3d",
+      "after_sha256": "7c7c24804afaf813f280e96e83d1d8da5c301ad2c8aa3cca9fb45aa96c0d2621"
+    },
+    {
+      "path": "admin/index.html",
+      "before_sha256": "042c29d55dc674a97a0e3fbcd813679d9131999c1720423cc4372df5d8e4fdc9",
+      "after_sha256": "9ff2bb28f439e022a908c15e359a7a4f267361c908f447464b5efa4fb20032bd"
+    },
+    {
+      "path": "tests/qqbot_config_mount.test.mjs",
+      "before_sha256": "ab40a15ddeeef83bf9f29b053072d1d154e769c759e9818ba77c5c60a717e5a7",
+      "after_sha256": "3a0ba6a1d8386ad926c46b499c5cd8225a4d12c2f33a60f9d19b79f3d6d390d8"
+    },
+    {
+      "path": "tests/test_qqbot_recovery_boundaries.py",
+      "before_sha256": null,
+      "after_sha256": "9d32e9bde057d484e8a39f0ae8338ec8b8300432a025708b8664932d6a8b733d"
+    },
+    {
+      "path": "codex/需求/qqbot接入/后续待修复.md",
+      "before_sha256": "001dbbcdf8274f28f5d3f3b22f0eff51a8c03f9f3f9c3e4e0afd433ad5da5a7a",
+      "after_sha256": "b1c49ab8152a7ec7c9a5f997deb5a4e663606aa16712d740ae02c45e116a4ff9"
+    },
+    {
+      "path": "codex/功能维护规范/qqbot接入/qqbot接入.md",
+      "before_sha256": "6ab5b5554c3fb5ccf3f8eb4d27ff11409e27394be4809c16bb5bc4b8ff3b3216",
+      "after_sha256": "d4786a441f22c400d83f96c80868484608370cc4a6925ef902e31f830364739d"
+    },
+    {
+      "path": "codex/网关当前状态/网关当前状态.md",
+      "before_sha256": "d93df4a87f98d2636c1d1672240276fa0358c6a4a80ab366faf194864b435177",
+      "after_sha256": "9de0809329064d79cbf60ba7d47b2b169d62c48eed685e30d9e916d1c4db6c7b"
+    },
+    {
+      "path": "codex/控制台-文档索引/目录说明.md",
+      "before_sha256": "18f63e46f63e030b8a2a5f90b1744053dfa09d4c82fbd8c417cc915060f80f78",
+      "after_sha256": "536ad31cd8c802106c0abf7b585686eb0189550dd1dd26514fcc9480701037df"
+    },
+    {
+      "path": "codex/代码修改日志/qqbot接入/主动评估三项审查问题修复-26.10.24.23.18.md",
+      "before_sha256": null,
+      "after_sha256": "3ad60f5ce5bfba1b07c5f7de96f0414acef206a27b27bbcee41ba3be172a42a5"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "tests/qqbot-recovery-boundaries-20261024/boundaries.txt",
+      "sha256": "d24505667119f3212b7a9e91b5b0546ae5bbd692b9e48e2d7892daea58361218"
+    },
+    {
+      "path": "tests/qqbot-recovery-boundaries-20261024/fixture-cleanup-error.txt",
+      "sha256": "691cbaa725cc044d453988bfeaac70ac9a46087be2451928f825d444c424a4cf"
+    },
+    {
+      "path": "tests/qqbot-recovery-boundaries-20261024/independent-before.txt",
+      "sha256": "99dca6bedac4cb70d3cc1fb02a728b75acebebb8147b55ebb9e9149da4e154c8"
+    },
+    {
+      "path": "tests/qqbot-recovery-boundaries-20261024/interrupted-regressions.txt",
+      "sha256": "80a0ca3733ac2128c666fdf608052b486c36c3ecae1f0b7ebe229abdf93eda69"
+    },
+    {
+      "path": "tests/qqbot-recovery-boundaries-20261024/regressions.txt",
+      "sha256": "eeafe7fd8f6ba26710d553d0d6cecddcc5adf5ef88b1d72406a37bc2ec1c69bd"
+    },
+    {
+      "path": "tests/qqbot-recovery-boundaries-20261024/targeted.txt",
+      "sha256": "3c4a08a14a70e3447c115ec70f45d48b5de4959aca394c6d17579d0e3a5e5416"
+    },
+    {
+      "path": "tests/qqbot-recovery-boundaries-20261024/boundaries.xml",
+      "sha256": "5530c633abf42335503447fb88ad424f62468266a79cb7fe74a105f766f8daa0"
+    },
+    {
+      "path": "tests/qqbot-recovery-boundaries-20261024/independent-before.xml",
+      "sha256": "72e2810a196723ed29038951cee6700d7cbc758c8e46bbd808ab09755757ccba"
+    },
+    {
+      "path": "tests/qqbot-recovery-boundaries-20261024/regressions.xml",
+      "sha256": "a0111d420d9c6187b3c10c5dad56c7d9650bb3df84a0eb1e3afce0ca0aea82aa"
+    },
+    {
+      "path": "tests/qqbot-recovery-boundaries-20261024/targeted.xml",
+      "sha256": "5c8c3784c4103bedb4deb4b8be8395fcd76b58d9683aa364cb172833c1a7b704"
+    },
+    {
+      "path": "tests/qqbot-recovery-boundaries-20261024/package_review.py",
+      "sha256": "c974f94cf0c7603a71ec175aadb374f76fa8b24975753c0b2fdc6d9eda1f9cbd"
+    },
+    {
+      "path": "codex/审查日志/qqbot接入/审查摘要-26.10.24.23.03/test_independent_recovery.py",
+      "sha256": "d9b22dc2e94ce9c2cc603d1fcc04bc589f371b835568c4862cfb559135fe675d"
+    }
+  ],
+  "patch_sha256": "ce96f380a61f7afff566b6ab4722fc5fc61c3c3f1ee10cde7175f4dbd2969310",
+  "review_entry_sha256": "672759af1c7d65c5e57816a7349f6ccf46b7e3d71d1ba223428acea335dd7501",
+  "tests": {
+    "passed": 419,
+    "subtests_passed": 128,
+    "skipped": 27,
+    "independent_probes_passed": 3
+  }
+}

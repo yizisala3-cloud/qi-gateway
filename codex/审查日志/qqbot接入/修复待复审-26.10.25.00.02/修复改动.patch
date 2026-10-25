@@ -1,0 +1,648 @@
+diff --git a/gateway/qqbot.py b/gateway/qqbot.py
+--- a/gateway/qqbot.py
++++ b/gateway/qqbot.py
+@@ -18,7 +18,7 @@
+ from .qqbot_memory import export_message
+ from .qqbot_model import QQModel
+ from .qqbot_stickers import StickerCatalog, split_sticker_summaries
+-from .qqbot_store import QQStore
++from .qqbot_store import QQStore, EvaluationLeaseLost
+ from .qqbot_transport import OneBotConnection, NotSubmitted, SendCancelled
+ from .qqbot_proactive import initial_state, public_status, classify_failure, ERROR_MESSAGES
+ from .logging_events import emit_error
+@@ -62,6 +62,7 @@
+         self.proactive_state_error = False
+         self.last_evaluation_state = initial_state()
+         self.evaluation_recovery_pending = False
++        self.pending_evaluation_result = None
+ 
+     def activate(self):
+         self.leader = self.store.acquire(self.owner,self.now())
+@@ -82,12 +83,33 @@
+             self.evaluation_recovery_pending = True
+             return
+         try:
++            pending = self.pending_evaluation_result
++            if pending is not None:
++                if not self.store.owns(self.owner,self.now()):
++                    return
++                recovered = self.store.finish_evaluation(pending['attempt'],pending['outcome'],
++                    self.now(),pending['delay'],self.owner,completed_at=pending['completed_at'],
++                    **pending['failure'])
++                self.pending_evaluation_result = None
++                self.evaluation_recovery_pending = False
++                if recovered:
++                    self.last_evaluation_state = recovered
++                    if recovered['outcome']=='error':
++                        self._log_evaluation_failure(pending['exc'],pending['failure']['code'],
++                            recovered,pending['status'])
++                # A different attempt/generation has already superseded this
++                # result. Never recover that newer record as this old request.
++                return
+             recovered = self.store.recover_evaluation(self.now(),self.config.check_seconds,self.owner)
+             if recovered:
+                 self.last_evaluation_state = recovered
+                 if recovered['outcome']=='error':
+                     self._log_evaluation_failure(None,'interrupted',recovered)
+             self.evaluation_recovery_pending = False
++        except EvaluationLeaseLost:
++            # The lease may expire or change after the preliminary check.
++            # Retain the same known result for a later authorized settlement.
++            self.evaluation_recovery_pending = True
+         except Exception as exc:
+             self._evaluation_storage_failed(exc)
+ 
+@@ -109,8 +131,11 @@
+         await asyncio.gather(*self.tasks,return_exceptions=True)
+         if self.store.owns(self.owner,self.now()):
+             self._recover()
++            if self.pending_evaluation_result is not None:
++                self._recover_evaluation()
+             self.store.release(self.owner)
+         self.store.close()
++        self.pending_evaluation_result = None
+         self.closed = True
+ 
+     def status(self):
+@@ -141,7 +166,9 @@
+         self.last_evaluation_state = self.store.resume_evaluation(self.now(),self.config.check_seconds,
+             self.owner,version,force=self.proactive_state_error)
+         self.proactive_state_error = False
+-        self.evaluation_recovery_pending = False
++        if not self.last_evaluation_state['in_flight']:
++            self.evaluation_recovery_pending = False
++            self.pending_evaluation_result = None
+ 
+     def _evaluation_storage_failed(self, exc):
+         first = not self.proactive_state_error
+@@ -160,18 +187,25 @@
+             safe_context={'attempts':evaluation['failure_streak'],'reason_code':code,
+                 'retry':not stopped,'timeout_seconds':max(0,evaluation['next_check_at']-self.now())})
+ 
+-    def _finish_evaluation(self, attempt, outcome, **failure):
++    def _finish_evaluation(self, attempt, outcome, *, exc=None, status=None, **failure):
++        completed_at, delay = self.now(), self.config.check_seconds
+         try:
+-            result = self.store.finish_evaluation(attempt,outcome,self.now(),self.config.check_seconds,
+-                self.owner,**failure)
++            result = self.store.finish_evaluation(attempt,outcome,completed_at,delay,
++                self.owner,completed_at=completed_at,**failure)
+             if result:
+                 self.last_evaluation_state = result
+-                self.evaluation_recovery_pending = False
+-            else:
+-                # Lease loss can reject completion without a storage error.
+-                # Reconcile only after acquiring authority and the task ends.
+-                self.evaluation_recovery_pending = True
++            self.evaluation_recovery_pending = False
++            self.pending_evaluation_result = None
+             return result
++        except EvaluationLeaseLost:
++            # Keep one known result, not a generated message. A restarted
++            # process has no such result and still recovers as interrupted.
++            self.pending_evaluation_result = dict(
++                attempt={key:attempt[key] for key in ('attempt_id','generation','attempt_revision')},
++                outcome=outcome,completed_at=completed_at,delay=delay,
++                failure=dict(failure),exc=exc,status=status)
++            self.evaluation_recovery_pending = True
++            return None
+         except Exception as exc:
+             self._evaluation_storage_failed(exc)
+             return None
+@@ -361,7 +395,8 @@
+                 return
+             except Exception as exc:
+                 code,fatal,retry_after,status = classify_failure(exc)
+-                finished = self._finish_evaluation(attempt,'error',code=code,fatal=fatal,retry_after=retry_after)
++                finished = self._finish_evaluation(attempt,'error',exc=exc,status=status,
++                    code=code,fatal=fatal,retry_after=retry_after)
+                 if finished and finished['outcome']=='error':
+                     self._log_evaluation_failure(exc,code,finished,status)
+                 elif self.proactive_state_error:
+diff --git a/gateway/qqbot_store.py b/gateway/qqbot_store.py
+--- a/gateway/qqbot_store.py
++++ b/gateway/qqbot_store.py
+@@ -17,6 +17,11 @@
+ from .qqbot_proactive import initial_state, validate_state, complete
+ 
+ log = logging.getLogger('gateway.qqbot.store')
++
++
++class EvaluationLeaseLost(RuntimeError):
++    """An evaluation result cannot be committed until runtime authority returns."""
++
+ 
+ class QQStore:
+     def __init__(self, path, scope):
+@@ -174,16 +179,20 @@
+             self._save_evaluation(evaluation)
+             return dict(evaluation)
+ 
+-    def finish_evaluation(self, attempt, outcome, now, delay, owner, **failure):
+-        with self.transaction():
++    def finish_evaluation(self, attempt, outcome, now, delay, owner, *, completed_at=None, **failure):
++        with self.transaction():
++            if not self.owns(owner,now):
++                raise EvaluationLeaseLost('qq_evaluation_lease_lost')
+             evaluation = self.evaluation_state()
+-            if (not self.owns(owner,now) or not evaluation['in_flight']
++            if (not evaluation['in_flight']
+                     or evaluation['attempt_id'] != attempt['attempt_id']
+                     or evaluation['generation'] != attempt['generation']):
+                 return None
+             if self.state()['revision'] != attempt['attempt_revision']:
+                 outcome, failure = 'cancelled', {}
+-            evaluation = complete(evaluation,outcome,now,delay,**failure)
++            # Authority is checked at submission time; pacing belongs to the
++            # original provider completion, even if a lease renewal was late.
++            evaluation = complete(evaluation,outcome,now if completed_at is None else completed_at,delay,**failure)
+             self._save_evaluation(evaluation)
+             if evaluation['fault_stopped']:
+                 self._invalidate_proactive('evaluation_fault_stopped')
+diff --git a/tests/test_qqbot_recovery_boundaries.py b/tests/test_qqbot_recovery_boundaries.py
+--- a/tests/test_qqbot_recovery_boundaries.py
++++ b/tests/test_qqbot_recovery_boundaries.py
+@@ -200,10 +200,11 @@
+         state = self.bot.evaluation_status()
+         self.assertFalse(state['in_flight'])
+         self.assertFalse(state['recovery_pending'])
+-        self.assertEqual(state['failure_streak'], 1)
+-        self.assertEqual(state['next_check_at']-self.clock(), 300)
++        self.assertEqual(state['failure_streak'], 0)
++        self.assertEqual(state['silent_streak'], 1)
++        self.assertEqual(state['next_check_at']-self.clock(), 600)
+         self.clock.on_advance = lambda: self.bot.store.acquire(self.bot.owner, self.clock())
+-        self.clock.advance(300)
++        self.clock.advance(600)
+         self.bot.model = Model()
+         self.bot.model.result = {'send':False, 'text':'', 'sticker_ids':[]}
+         await self.bot.proactive_once()
+diff --git a/tests/test_qqbot_lease_outcomes.py b/tests/test_qqbot_lease_outcomes.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_qqbot_lease_outcomes.py
+@@ -0,0 +1,356 @@
++"""Keep known provider outcomes distinct from unknown crashes during lease recovery."""
++import asyncio
++from contextlib import closing
++from dataclasses import replace
++import logging
++from pathlib import Path
++import sqlite3
++import tempfile
++import unittest
++from unittest.mock import patch
++
++import httpx
++
++from gateway import logging_events
++from gateway.qqbot import QQRuntime
++from gateway.qqbot_config import QQConfig
++from gateway.qqbot_proactive import QQModelHTTPError
++from tests.test_qqbot import Clock, Model, Transport, event
++
++
++SILENT = {'send': False, 'text': '', 'sticker_ids': []}
++READY = {'send': True, 'text': 'old proactive draft', 'sticker_ids': []}
++
++
++class LeaseOutcomeTests(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        self.folder = tempfile.TemporaryDirectory()
++        self.addCleanup(self.folder.cleanup)
++        self.case_number = 0
++        await self.prepare_case()
++
++    def make_runtime(self, config, clock, model=None, transport=None):
++        bot = QQRuntime(config, model=model or Model(), transport=transport or Transport(),
++            now=clock, exporter=lambda *args: None)
++        self.addAsyncCleanup(bot.stop)
++        bot.activate()
++        return bot
++
++    async def prepare_case(self):
++        self.case_number += 1
++        self.clock, self.model, self.transport = Clock(), Model(), Transport()
++        self.config = QQConfig(enabled=True, proactive_enabled=True,
++            account_id='12345', owner_id='67890', assistant_id='role', token='x'*32,
++            store_path=str(Path(self.folder.name)/f'ledger-{self.case_number}.sqlite3'),
++            active_start='00:00', active_end='00:00', quiet_seconds=1,
++            cooldown_seconds=60, check_seconds=300)
++        self.bot = self.make_runtime(self.config, self.clock, self.model, self.transport)
++        self.clock.on_advance = lambda: self.bot.store.acquire(self.bot.owner, self.clock())
++        await self.bot.ingest(event(1, 'isolated initial chat'))
++        self.clock.advance(4)
++        await self.bot.reply_once()
++        await self.bot.send_once()
++        self.clock.advance(2)
++        self.transport.sent.clear()
++
++    async def renew_once(self, bot=None):
++        renewal = asyncio.create_task((bot or self.bot)._lease_loop())
++        await asyncio.sleep(0)
++        renewal.cancel()
++        await asyncio.gather(renewal, return_exceptions=True)
++
++    async def failures(self, count):
++        async def failed(*args, **kwargs):
++            raise httpx.ReadTimeout('isolated provider timeout')
++        self.model.generate = failed
++        for _ in range(count):
++            await self.bot.proactive_once()
++            self.clock.advance(self.bot.evaluation_status()['next_check_at']-self.clock())
++        self.assertEqual(self.bot.evaluation_status()['failure_streak'], count)
++
++    async def finish_during_gap(self, outcome):
++        self.clock.on_advance = lambda: None
++
++        async def late(*args, **kwargs):
++            self.clock.advance(31)
++            if isinstance(outcome, BaseException):
++                raise outcome
++            return dict(outcome)
++
++        self.model.generate = late
++        await self.bot.proactive_once()
++        self.assertIsNone(self.bot.proactive_generation)
++        self.assertFalse(self.bot.store.owns(self.bot.owner, self.clock()))
++        return self.clock()
++
++    async def test_successful_silence_after_four_failures_clears_failure_streak(self):
++        await self.failures(4)
++        completed = await self.finish_during_gap(SILENT)
++        await self.renew_once()
++        state = self.bot.evaluation_status()
++        self.assertFalse(state['fault_stopped'])
++        self.assertFalse(state['in_flight'])
++        self.assertFalse(state['recovery_pending'])
++        self.assertEqual(state['failure_streak'], 0)
++        self.assertEqual(state['silent_streak'], 1)
++        self.assertEqual(state['last_finished_at'], completed)
++        self.assertEqual(state['next_check_at'], completed+600)
++
++    async def test_authentication_and_permission_failures_still_stop(self):
++        for index, status in enumerate([401, 403]):
++            with self.subTest(status=status):
++                if index:
++                    await self.prepare_case()
++                completed = await self.finish_during_gap(QQModelHTTPError(status))
++                await self.renew_once()
++                state = self.bot.evaluation_status()
++                self.assertTrue(state['fault_stopped'])
++                self.assertFalse(state['in_flight'])
++                self.assertEqual(state['last_error_code'], 'auth_failed')
++                self.assertEqual(state['last_error_at'], completed)
++                self.assertEqual(state['failure_streak'], 1)
++                self.bot.resume_evaluation(state['fault_version'])
++                self.assertFalse(self.bot.evaluation_status()['fault_stopped'])
++
++    async def test_rate_limit_keeps_provider_retry_after_and_original_completion_time(self):
++        completed = await self.finish_during_gap(QQModelHTTPError(429, 7200))
++        self.clock.advance(900)
++        await self.renew_once()
++        state = self.bot.evaluation_status()
++        self.assertFalse(state['fault_stopped'])
++        self.assertEqual(state['last_error_code'], 'rate_limited')
++        self.assertEqual(state['last_finished_at'], completed)
++        self.assertEqual(state['last_error_at'], completed)
++        self.assertEqual(state['next_check_at'], completed+7200)
++        self.assertEqual(state['next_check_at']-self.clock(), 6300)
++
++    async def test_actual_timeout_keeps_its_error_class_and_completion_deadline(self):
++        completed = await self.finish_during_gap(httpx.ReadTimeout('isolated timeout'))
++        self.clock.advance(120)
++        await self.renew_once()
++        state = self.bot.evaluation_status()
++        self.assertEqual(state['last_error_code'], 'timeout')
++        self.assertEqual(state['failure_streak'], 1)
++        self.assertFalse(state['fault_stopped'])
++        self.assertEqual(state['last_finished_at'], completed)
++        self.assertEqual(state['next_check_at'], completed+300)
++
++    async def test_deferred_failure_logs_real_http_status_and_trace_once(self):
++        records = []
++
++        class Capture(logging.Handler):
++            def emit(self, record):
++                records.append(record)
++
++        handler = Capture()
++        logger = logging.getLogger('gateway.qqbot')
++        logger.addHandler(handler)
++        try:
++            await self.finish_during_gap(QQModelHTTPError(401))
++            self.assertEqual(records, [])
++            await self.renew_once()
++            await self.renew_once()
++        finally:
++            logger.removeHandler(handler)
++        rows = [logging_events._build_event_from_record(record) for record in records]
++        failures = [row for row in rows if row and row['operation']=='proactive_evaluation']
++        self.assertEqual(len(failures), 1)
++        self.assertEqual(failures[0]['error_code'], 'proactive_calls_stopped')
++        self.assertEqual(failures[0]['upstream_status'], 401)
++        self.assertEqual(failures[0]['exception_type'], 'QQModelHTTPError')
++        self.assertEqual(failures[0]['safe_context']['reason_code'], 'auth_failed')
++        self.assertIn('test_qqbot_lease_outcomes.py', failures[0]['stack_trace'])
++
++    async def test_replay_losing_lease_inside_finish_preserves_known_result_for_next_renewal(self):
++        completed = await self.finish_during_gap(QQModelHTTPError(429, 7200))
++        original = self.bot.store.finish_evaluation
++
++        def lose_authority(*args, **kwargs):
++            # The runtime read authority successfully, but the transaction
++            # below must independently reject a lease that is no longer held.
++            self.bot.store.release(self.bot.owner)
++            return original(*args, **kwargs)
++
++        with patch.object(self.bot.store, 'finish_evaluation', side_effect=lose_authority):
++            await self.renew_once()
++        state = self.bot.evaluation_status()
++        self.assertFalse(state['fault_stopped'])
++        self.assertTrue(state['in_flight'])
++        self.assertTrue(state['recovery_pending'])
++        self.assertNotEqual(state['last_error_code'], 'state_unavailable')
++        self.clock.advance(120)
++        await self.renew_once()
++        state = self.bot.evaluation_status()
++        self.assertFalse(state['fault_stopped'])
++        self.assertFalse(state['in_flight'])
++        self.assertFalse(state['recovery_pending'])
++        self.assertEqual(state['last_error_code'], 'rate_limited')
++        self.assertEqual(state['last_finished_at'], completed)
++        self.assertEqual(state['next_check_at'], completed+7200)
++
++    async def test_resume_noop_does_not_discard_unstopped_pending_result(self):
++        completed = await self.finish_during_gap(QQModelHTTPError(429, 7200))
++        self.assertTrue(self.bot.store.acquire(self.bot.owner, self.clock()))
++        version = self.bot.evaluation_status()['fault_version']
++        # The store permits an idempotent resume on a state that is not
++        # stopped. That no-op cannot turn the pending completion into unknown.
++        self.bot.resume_evaluation(version)
++        state = self.bot.evaluation_status()
++        self.assertFalse(state['fault_stopped'])
++        self.assertTrue(state['in_flight'])
++        self.assertTrue(state['recovery_pending'])
++        self.assertEqual(state['fault_version'], version)
++        await self.renew_once()
++        state = self.bot.evaluation_status()
++        self.assertFalse(state['in_flight'])
++        self.assertFalse(state['recovery_pending'])
++        self.assertEqual(state['last_error_code'], 'rate_limited')
++        self.assertEqual(state['last_finished_at'], completed)
++        self.assertEqual(state['next_check_at'], completed+7200)
++
++    async def test_cancelled_pending_auth_results_do_not_log_authentication_failure(self):
++        for index, cancel in enumerate(['input', 'settings']):
++            with self.subTest(cancel=cancel):
++                if index:
++                    await self.prepare_case()
++                await self.failures(4)
++                with self.assertNoLogs('gateway.qqbot', level='WARNING'):
++                    await self.finish_during_gap(QQModelHTTPError(401))
++                    self.assertTrue(self.bot.store.acquire(self.bot.owner, self.clock()))
++                    if cancel=='input':
++                        self.assertTrue(await self.bot.ingest(event(2, 'cancel old auth result')))
++                    else:
++                        self.bot.store.invalidate_proactive('settings_changed')
++                    await self.renew_once()
++                    await self.renew_once()
++                state = self.bot.evaluation_status()
++                self.assertFalse(state['fault_stopped'])
++                self.assertEqual(state['failure_streak'], 4)
++
++    async def test_silent_deadline_already_elapsed_is_not_restarted_at_renewal(self):
++        completed = await self.finish_during_gap(SILENT)
++        self.clock.advance(1200)
++        await self.renew_once()
++        state = self.bot.evaluation_status()
++        self.assertEqual(state['next_check_at'], completed+600)
++        self.assertLess(state['next_check_at'], self.clock())
++        self.assertEqual(state['failure_streak'], 0)
++
++    async def test_ready_result_resets_policy_without_resurrecting_old_draft(self):
++        await self.failures(2)
++        completed = await self.finish_during_gap(READY)
++        await self.renew_once()
++        state = self.bot.evaluation_status()
++        self.assertFalse(state['fault_stopped'])
++        self.assertEqual(state['failure_streak'], 0)
++        self.assertEqual(state['silent_streak'], 0)
++        self.assertEqual(state['next_check_at'], completed+300)
++        self.assertFalse(self.bot.store.open_proactive())
++        self.assertEqual(self.bot.store.state()['count'], 0)
++        await self.bot.send_once()
++        self.assertEqual(self.transport.sent, [])
++        self.assertFalse(any('old proactive draft' in row['content'] for row in self.bot.store.history()))
++
++    async def test_input_or_settings_cancellation_discards_pending_known_auth_failure(self):
++        for index, cancel in enumerate(['input', 'settings']):
++            with self.subTest(cancel=cancel):
++                if index:
++                    await self.prepare_case()
++                await self.failures(4)
++                before = self.bot.evaluation_status()
++                completed = await self.finish_during_gap(QQModelHTTPError(401))
++                self.assertTrue(self.bot.store.acquire(self.bot.owner, self.clock()))
++                if cancel=='input':
++                    self.assertTrue(await self.bot.ingest(event(2, 'cancel old background result')))
++                else:
++                    self.bot.store.invalidate_proactive('settings_changed')
++                await self.renew_once()
++                state = self.bot.evaluation_status()
++                self.assertFalse(state['fault_stopped'])
++                self.assertFalse(state['in_flight'])
++                self.assertEqual(state['failure_streak'], 4)
++                self.assertEqual(state['last_error_code'], before['last_error_code'])
++                self.assertEqual(state['last_error_at'], before['last_error_at'])
++                self.assertGreaterEqual(state['last_finished_at'], completed)
++
++    async def test_other_owner_settlement_cannot_be_overwritten_when_old_owner_returns(self):
++        await self.finish_during_gap(QQModelHTTPError(401))
++        replacement = self.make_runtime(self.config, self.clock)
++        self.assertTrue(replacement.leader)
++        settled = replacement.store.evaluation_state()
++        self.assertFalse(settled['in_flight'])
++        self.assertEqual(settled['last_error_code'], 'interrupted')
++        replacement.store.release(replacement.owner)
++        await self.renew_once()
++        self.assertTrue(self.bot.store.owns(self.bot.owner, self.clock()))
++        self.assertEqual(self.bot.store.evaluation_state(), settled)
++        self.assertFalse(self.bot.evaluation_status()['fault_stopped'])
++
++    async def test_old_result_cannot_touch_new_owners_active_attempt(self):
++        await self.finish_during_gap(QQModelHTTPError(401))
++        replacement = self.make_runtime(self.config, self.clock)
++        self.clock.on_advance = lambda: replacement.store.acquire(replacement.owner, self.clock())
++        self.clock.advance(300)
++        entered, release = asyncio.Event(), asyncio.Event()
++
++        async def active(*args, **kwargs):
++            entered.set()
++            await release.wait()
++            return dict(SILENT)
++
++        replacement.model.generate = active
++        current = asyncio.create_task(replacement.proactive_once())
++        await entered.wait()
++        self.addAsyncCleanup(self.cancel_task, current)
++        before = replacement.store.evaluation_state()
++        await self.renew_once()
++        self.assertFalse(self.bot.store.owns(self.bot.owner, self.clock()))
++        self.assertEqual(replacement.store.evaluation_state(), before)
++        self.assertTrue(replacement.evaluation_status()['in_flight'])
++        release.set()
++        await current
++        settled = replacement.store.evaluation_state()
++        replacement.store.release(replacement.owner)
++        await self.renew_once()
++        self.assertEqual(self.bot.store.evaluation_state(), settled)
++        self.assertFalse(self.bot.evaluation_status()['fault_stopped'])
++
++    async def test_live_request_is_not_recovered_before_its_known_result_returns(self):
++        entered, release = asyncio.Event(), asyncio.Event()
++
++        async def active(*args, **kwargs):
++            entered.set()
++            await release.wait()
++            return dict(SILENT)
++
++        self.model.generate = active
++        current = asyncio.create_task(self.bot.proactive_once())
++        self.addAsyncCleanup(self.cancel_task, current)
++        await entered.wait()
++        self.clock.on_advance = lambda: None
++        self.clock.advance(31)
++        await self.renew_once()
++        self.assertTrue(self.bot.evaluation_status()['in_flight'])
++        self.assertEqual(self.bot.evaluation_status()['failure_streak'], 0)
++        release.set()
++        await current
++        self.assertFalse(self.bot.evaluation_status()['in_flight'])
++        self.assertEqual(self.bot.evaluation_status()['silent_streak'], 1)
++
++    async def test_restart_without_known_in_memory_outcome_still_counts_unknown_interruption(self):
++        await self.failures(4)
++        await self.finish_during_gap(SILENT)
++        copied = Path(self.folder.name)/'lost-process.sqlite3'
++        with closing(sqlite3.connect(copied)) as destination:
++            self.bot.store.conn.backup(destination)
++        restarted = self.make_runtime(replace(self.config, store_path=str(copied)), self.clock)
++        state = restarted.evaluation_status()
++        self.assertFalse(state['in_flight'])
++        self.assertTrue(state['fault_stopped'])
++        self.assertEqual(state['failure_streak'], 5)
++        self.assertEqual(state['last_error_code'], 'interrupted')
++
++    @staticmethod
++    async def cancel_task(task):
++        task.cancel()
++        await asyncio.gather(task, return_exceptions=True)
+diff --git a/codex/需求/qqbot接入/后续待修复.md b/codex/需求/qqbot接入/后续待修复.md
+--- a/codex/需求/qqbot接入/后续待修复.md
++++ b/codex/需求/qqbot接入/后续待修复.md
+@@ -1,21 +1,24 @@
+ # QQBot后续待修复
+ 
+-本清单为QQBot审查技术缺陷唯一活动入口。当前 **3项活动技术缺陷**：R15部分修复后仍待修复，R11/R12修复后待剩余验收。历史最大已发布编号：**R15**；下一个独立新问题：**R16**。
++本清单为QQBot审查技术缺陷唯一活动入口。当前 **3项活动技术缺陷**：R15本地补修后待独立复验，R11/R12修复后待剩余验收。历史最大已发布编号：**R15**；下一个独立新问题：**R16**。
+ 
+ 最新审查：2026-10-24 23:54起，America/Los_Angeles，[R13–R15独立复审](../../审查日志/qqbot接入/审查摘要-26.10.24.23.54/审查报告.md)结论 **NOT READY**。R13/R14已通过本地独立验收并移除；原3项复现及9项边界全部通过，完整419项／128子测试通过、27项跳过；R15新补3个结果语义场景均失败，按同根因保留原编号。
+ 
+ 23:18修复实现及原材料见[修复记录](../../代码修改日志/qqbot接入/主动评估三项审查问题修复-26.10.24.23.18.md)。本次复审不改业务源码、原测试或旧审查包，未提交、推送或部署，日志总开关保持原状。复审前完整清单见[独立快照](../../审查日志/qqbot接入/审查摘要-26.10.24.23.54/活动清单-复审前.md)。
+ 
++10.25 00:02起已本地补修R15已知结果丢失，原3项结果探针不改脚本均通过；新增15项／6子测试及完整437项／134子测试通过，27项可选PG跳过。实现者验证不替代独立复审，R15保留为修复后待复验；R13/R14不重新打开。见[本轮补修记录](../../代码修改日志/qqbot接入/租约恢复保留已知评估结果-26.10.25.00.02.md)。未提交、推送、部署或改变日志总开关。
++
+ ## R15（P2）：租约中断恢复丢失已返回的评估结果
+ 
+-- 状态：**部分修复，仍待修复**。原in_flight不收敛、页面误示进行中的卡住表现已修；同owner续租恢复时对已知结果分类仍有残留，不能关闭本条。
++- 状态：**本地补修后待独立复验**。已知结果按原分类和完成时间补结算；原in_flight卡住保护保留。最新独立结论仍是上轮NOT READY，本条不由实现者移除。
+ - 触发：进程暂停/事件循环阻塞使30秒租约过期，本次模型返回先于续租循环；没有进程重启、其它owner接管、主人revision变化或存储故障。正常异步慢请求且持续续租时不触发。
+-- 用户影响及已复现子场景：①4次失败后本次正常send=false仍加到第5次并错误停用；②HTTP 401被改为可重试的interrupted，未立即停用；③HTTP 429要求Retry-After=7200秒，却只等300秒重试。
++- 修复前用户影响及已复现子场景：①4次失败后本次正常send=false仍加到第5次并错误停用；②HTTP 401被改为可重试的interrupted，未立即停用；③HTTP 429要求Retry-After=7200秒，却只等300秒重试。
+ - 根因与位置：`gateway/qqbot.py:163–174`在finish被租约拒绝时仅保存布尔pending，丢弃outcome/fatal/retry_after及完成时刻；续租后`_recover_evaluation:78–90`调用`gateway/qqbot_store.py:192–204`，将所有未撤销记录统一按结果未知的interrupted结算。
+ - 修复方向：保留绑定attempt/generation/revision的已知结果元数据，取得权后再核对同一未撤销attempt并按正常规则结算；已有新owner/新attempt或已撤销时不得应用旧结果。真正结果未知的进程中断仍保留原中断策略，不因恢复直接发送旧草稿。
+ - 待验收：上述静默/401/429三场景，以及完成后计时、其它owner已处理、主人/设置取消、实际任务仍在运行、真正第5次异常退出。
+ - 已通过的回归保护：原独立卡住复现、同owner恢复后能再次评估、实际请求活跃时保留attempt、其它owner有效租约不可改、旧401和旧实例stop不改新在途、真实第5次超时停用后手动恢复、真实config.js等待/进行/停用展示及按钮权限。
+-- 测试遗漏：`tests/test_qqbot_recovery_boundaries.py:189–204`将正常静默后的失败数1及等待300秒当作预期，因此419项全绿不能证明结果语义正确。
++- 原测试遗漏及更正：`tests/test_qqbot_recovery_boundaries.py`原将正常静默后的失败数1及等待300秒当作预期；本轮已改为失败清零、静默1次及600秒。新增独立永久回归覆盖相同语义，23:54原复审脚本保持不变。
++- 本地补修验证：正常静默／401／403／429／timeout、延迟续租原完成时刻、到期后不重开等待、ready不补发草稿、主人／设置撤销、其它owner已处理／新attempt、活跃请求、真正重启未知中断、二次失权保留结果、错误日志仅一次、resume no-op不误清结果均通过。实际租约检查在同一事务区分失权与stale；仅前者保留待结算结果。仍待独立复审，见[复审入口](../../审查日志/qqbot接入/修复待复审-26.10.25.00.02/复审入口.md)。
+ - 证据：[独立复审](../../审查日志/qqbot接入/审查摘要-26.10.24.23.54/审查报告.md)、[新增原样源码复现](../../审查日志/qqbot接入/审查摘要-26.10.24.23.54/test_independent_lease_outcomes.py)、[3项失败输出](../../审查日志/qqbot接入/审查摘要-26.10.24.23.54/independent-lease-outcomes.txt)。三个表现同属租约失效后的完成/恢复链，沿用R15，不分配R16。
+ 
+ ## R12（P1）：重建空账本会重用旧 assistant 导出键
+diff --git a/codex/功能维护规范/qqbot接入/qqbot接入.md b/codex/功能维护规范/qqbot接入/qqbot接入.md
+--- a/codex/功能维护规范/qqbot接入/qqbot接入.md
++++ b/codex/功能维护规范/qqbot接入/qqbot接入.md
+@@ -88,6 +88,10 @@
+ 
+ 租约循环除缓存leader还检查续租前实际租约；完成因运行权丢失被拒绝时保留待恢复标记。续租后只有取得当前运行权且本实例实际模型任务已结束才收敛遗留评估；仍活跃的请求保留attempt，不能作为中断处理。安全状态增加`recovery_pending`，前端将无实际任务、等待运行权的情况显示“等待评估恢复”，真正第5次故障仍显示停用并开放原手动恢复入口。旧实例停止前核对真实租约，不能根据过时leader去恢复另一实例的任务。永久边界回归为`tests/test_qqbot_recovery_boundaries.py`。
+ 
++已知完成与未知中断必须分别处理：同进程调用已经返回时只保留一份绑定attempt_id／generation／attempt_revision的结果分类、原完成时刻、基础间隔和故障策略；原异常暂存内存用于一次脱敏日志，不持久化或公开返回。不缓存ready的发送载荷，不在续租后补发旧草稿。取得运行权后优先走正常finish，租约验证使用当前时间，退避使用原completed_at；静默清故障、401／403停用、429尊重Retry-After等语义不得变为interrupted。只有没有已知结果的真正进程重启遗留才走中断策略。
++
++finish在事务内以`EvaluationLeaseLost`明确区分失权与过期attempt：重放时再次失权保留该结果，stale则丢弃并立即返回，不能顺带把当前新attempt当成旧请求恢复。revision失效按原cancelled规则，不输出缓存中的鉴权故障；实际已落定错误只记一次。合法手动恢复后清结果，但未停用状态的resume no-op仍在途时不得清缓存。持真实租约的停止可补结算已知结果，随后释放引用。相关永久回归为`tests/test_qqbot_lease_outcomes.py`。正常另一owner激活会处理旧attempt并递增generation；不额外引入仅acquire／release而未处理评估的租约代次协议。
++
+ 主动检查须同时满足在线、允许时段、安静期、次数限制、暂停／静默状态、无待处理私聊等条件；模型仍可选择静默。未回复逐步降频，主人新输入重置未回应计数，并取消尚在生成或排队的主动问候。修订号阻止暂停／恢复前的迟到结果重新排队；发送前复核时段并按TTL过期，不集中补发旧问候。已提交到协议端的动作不能撤回。
+ 
+ 主动任务在outbox.eligibility_revision中持久保存生成时的主人状态修订号。暂停、当日静默、普通新输入及恢复命令改变修订后，旧的未提交问候永久失效；即便后来恢复、静默结束或新输入已经处理完成，也不能复活旧任务。不能只查当前pending或只取消当时处于queued的行。
+diff --git a/codex/网关当前状态/网关当前状态.md b/codex/网关当前状态/网关当前状态.md
+--- a/codex/网关当前状态/网关当前状态.md
++++ b/codex/网关当前状态/网关当前状态.md
+@@ -1,4 +1,12 @@
+ # 网关当前状态
++
++## 10.25 00:02起 R15已知评估结果丢失已本地补修，待复审
++
++同进程短暂失租时保留一份绑定原attempt的已知结果，续租后按原分类及完成时间补结算，不再一律改记interrupted。静默清故障、401／403停用、429长Retry-After均保留；已撤销／被新owner处理的结果不能回写，ready不补发旧草稿，真正结果未知的重启仍按中断处理。事务内区分二次失权和stale，resume no-op不清仍在途结果。
++
++原23:54三个失败探针已原样通过；新增15项／6子测试、两轮原独立脚本及完整QQ／日志共437 passed、134子测试通过、27可选PG跳过。旧错误断言已更正，原报告／失败证据及审查包保留。本轮不改前端，未重跑浏览器／实机；**未提交、推送、部署或写生产，日志总开关继续关闭。**R15保留为修复后待独立复验，R13/R14已关闭事实保持，R11/R12剩余验收不变。无SQL或环境变量变化。
++
++入口：[补修记录](../代码修改日志/qqbot接入/租约恢复保留已知评估结果-26.10.25.00.02.md)、[本轮复审材料](../审查日志/qqbot接入/修复待复审-26.10.25.00.02/复审入口.md)。下方NOT READY为既有独立审查时点，本轮实现者不覆盖该结论。
+ 
+ ## 10.24 23:54起 QQ主动评估独立复审仍未通过，R15有残留
+ 
+diff --git a/codex/控制台-文档索引/目录说明.md b/codex/控制台-文档索引/目录说明.md
+--- a/codex/控制台-文档索引/目录说明.md
++++ b/codex/控制台-文档索引/目录说明.md
+@@ -33,7 +33,8 @@
+ | 代码修改日志 | 只记录实际代码、数据库迁移、测试代码及与功能实现直接相关的配置或资源修改。 | 按实际功能分目录，每次代码修改单独建立一份带分钟时间戳的日志。纯文档整理不得写入。 |
+ | 代码修改日志/光遇接入 | 光遇实现、验证及发布历史。 | 最新[合并与同步](../代码修改日志/光遇接入/合并与同步-26.10.24.07.52.md)记录本次候选与核验；新迁移20261024144537／20261024144539已执行，旧35份回执保持，配置开关关闭。代码已普通推送main `8c5bce1`、远端SHA一致；候选471项／21子测试及旧11项通过，配套部署／实机未验；07:13补修及桌面入口历史保留。 |
+ | 需求/光遇接入/配置页开关与本地预览.md | 本轮用户明确确认的范围及验收边界。 | [需求](../需求/光遇接入/配置页开关与本地预览.md)：修复五类、配置页开关、内置浏览器测试前端；先不做实机验证。 |
+-| 代码修改日志/qqbot接入 | QQ私聊、主动消息、表情与记忆桥的实现和发布记录。 | 最新[三项审查问题修复](../代码修改日志/qqbot接入/主动评估三项审查问题修复-26.10.24.23.18.md)已独立复审：R13/R14通过，R15仍有已知结果丢失，结论NOT READY；419项／128子测试通过、27跳过，新3项残留探针失败。未提交／推送／部署，日志总开关关闭，现用每日上限30及NapCat真实私聊历史不变。 |
++| 代码修改日志/qqbot接入 | QQ私聊、主动消息、表情与记忆桥的实现和发布记录。 | 最新[租约恢复保留已知结果](../代码修改日志/qqbot接入/租约恢复保留已知评估结果-26.10.25.00.02.md)已本地补修待复审，原3个静默／401／429探针通过；437项／134子测试通过、27跳过。R13/R14已独立关闭，R15保留待复验，原NOT READY不覆盖。未提交／推送／部署，日志总开关关闭。 |
++| 审查日志/qqbot接入/修复待复审-26.10.25.00.02 | R15已知结果补修的独立差异及验证。 | [复审入口](../审查日志/qqbot接入/修复待复审-26.10.25.00.02/复审入口.md)提供本轮补丁、前后快照与原样复现／新增15项边界证据；仅本地实现，不代替用户安排的独立复审。 |
+ | 审查日志/qqbot接入/审查摘要-26.10.24.23.54 | R13–R15修复的独立复审与已知结果探针。 | [报告](../审查日志/qqbot接入/审查摘要-26.10.24.23.54/审查报告.md)：NOT READY，R13/R14本地验收通过移除；R15卡住已修但已知静默/401/429在失租后被改记中断，3个子场景失败。原12项边界及完整419项／128子测试通过、27跳过；只更新证据和文档，未改业务码或发布。 |
+ | 审查日志/qqbot接入/修复待复审-26.10.24.23.18 | R13–R15修复增量与复审材料。 | [复审入口](../审查日志/qqbot接入/修复待复审-26.10.24.23.18/复审入口.md)保留实现者原补丁／快照及证据；后续独立复审见23:54报告，R15仍有残留。原审查脚本和旧待审包保持，未提交／推送／部署。 |
+ | 审查日志/qqbot接入/审查摘要-26.10.24.23.03 | 对照图2核查主动评估退避与恢复的独立审查。 | [报告](../审查日志/qqbot接入/审查摘要-26.10.24.23.03/审查报告.md)：NOT READY，确认R13损坏评估阻塞私聊、R14取消后重启误记故障、R15租约恢复后在途状态不收敛；407项／117子测试通过、27项跳过，独立3项失败。只保存证据并更新文档，未改业务码或发布。 |
+diff --git a/codex/代码修改日志/qqbot接入/租约恢复保留已知评估结果-26.10.25.00.02.md b/codex/代码修改日志/qqbot接入/租约恢复保留已知评估结果-26.10.25.00.02.md
+new file mode 100644
+--- /dev/null
++++ b/codex/代码修改日志/qqbot接入/租约恢复保留已知评估结果-26.10.25.00.02.md
+@@ -0,0 +1,28 @@
++# 租约恢复保留已知评估结果-26.10.25.00.02
++
++时间：2026-10-25 00:02起，America/Los_Angeles。用户提供23:54独立复审截图继续本轮修复。范围仅R15已知返回结果在短暂失租后的分类与完成时刻丢失，保留R13／R14已通过事实。沿用不提交、不推送、不部署及日志总开关保持关闭的要求。
++
++## 根因与更正
++
++上一轮仅保存recovery_pending布尔值，把已知返回当成未知中断恢复，造成正常静默可能误触第5次停用、401没停用、429两小时变五分钟；还有一条永久测试误将正常静默后的失败1次和300秒等待当作预期。本轮承认并更正该断言为失败0、静默1次及600秒，原23:54审查脚本保持不改。
++
++- `gateway/qqbot.py`只缓存一份绑定attempt_id／generation／attempt_revision的已知结果，复制策略参数及原completed_at／基础间隔。原异常仅用于成功落定后的一次脱敏日志；不保存ready发送载荷或补发旧草稿。
++- `gateway/qqbot_store.py`的finish用当前now校验运行权、原completed_at计算完整策略。事务内以EvaluationLeaseLost区分真正失权与stale：失权保留已知结果，stale清除并返回，不能接着误恢复其它owner建立的新attempt。
++- 续租优先结算已知结果；只有真正无已知结果的重启遗留才按interrupted。主人／设置revision变化沿用cancelled，不计旧401／429故障日志；普通静默、fatal和Retry-After不再丢失。实际请求仍活跃时不恢复，原运行权保护保留。
++- 合法手动故障恢复清缓存；未停用的resume no-op若仍在途必须保留结果，避免接口幂等调用重新造成卡住。停止时仅持真实租约且实际请求已结束才补结算已知结果，随后清引用。
++
++没有修改前端、SQL、环境变量、持久配置键或每日评估额度。现有单实例／共享SQLite租约约定不变；不新增仅acquire/release未处理评估的租约代次协议。
++
++## 验证
++
++23:54原三个独立探针修复前3 failed，修复后全部通过。新增`tests/test_qqbot_lease_outcomes.py`为15 passed／6 subtests passed，覆盖静默4次旧故障清零、401／403、429、timeout、延迟续租原完成时刻、已经到期不重开等待、ready不补发、主人／设置撤销、其它owner已处理／新attempt、实际请求活跃、真正重启未知中断、二次失权、一次日志和resume no-op。
++
++两轮独立脚本均原样纳入完整QQ／日志回归：**437 passed、134 subtests passed、27 skipped**，46.45秒；RuntimeWarning按错误处理。27项为5项QQ导出PG及22项日志PG，本轮无迁移。新增测试由另一代理独立编写，另一代理只读检查最终实现未发现可确认新阻塞；这些内部检查不替代用户安排的后续独立复审。
++
++证据：[修复前复现](../../../tests/qqbot-lease-outcomes-20261025/independent-before.txt)、[新增边界](../../../tests/qqbot-lease-outcomes-20261025/expanded-current.txt)、[完整回归](../../../tests/qqbot-lease-outcomes-20261025/regressions.txt)、[JUnit](../../../tests/qqbot-lease-outcomes-20261025/regressions.xml)。没有更改或覆盖旧审查报告、失败输出及旧待审查快照。
++
++## 当前状态
++
++**本地补修完成，待独立复验。未提交、未推送、未部署。**R15保留活动清单为修复后待复验，编号最大R15／下一R16不变；R13/R14保持移除，R11/R12剩余实机验收保留。测试使用假模型／QQ传输、临时SQLite；没有真实QQ发送、生产服务／数据库或日志开关写入，未重跑浏览器或实机，不把离线测试当作线上验收。
++
++再次复审见[本轮复审入口](../../审查日志/qqbot接入/修复待复审-26.10.25.00.02/复审入口.md)，补丁相对本轮补修前文件，不以HEAD混入此前未提交功能。

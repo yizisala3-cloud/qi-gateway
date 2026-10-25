@@ -1,0 +1,15 @@
+{
+  "settings_file": {
+    "enabled": true,
+    "proactive_enabled": false,
+    "daily_limit": 30
+  },
+  "namespace_sha256": "79b6b0be634c64834639532b94c7e37b2e242b91cbda224d66f8a28a0ee64729",
+  "counts_after": {
+    "history": 2,
+    "inbox": 1,
+    "outbox": 1
+  },
+  "napcat_started_at": "2026-10-24T16:16:43.694190875Z",
+  "napcat_running": true
+}

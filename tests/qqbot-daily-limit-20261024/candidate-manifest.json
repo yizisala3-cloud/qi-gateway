@@ -1,0 +1,23 @@
+{
+  "image": "localhost:5000/qi-gateway:qq-daily-limit-20261024-1105",
+  "files": {
+    "gateway/qqbot_settings.py": {
+      "before_sha256_lf": "023b9127c70b7a81c36c9440edc89928d735804d9e0bbfab5f8712cc6a99d44b",
+      "after_sha256": "18a9adfd5ae0e7576703234e318094a119f29787da5aad41a541f0b180e9ec47"
+    },
+    "admin/js/pages/config.js": {
+      "before_sha256_lf": "6c23c5a460dcad93be384f270a0404dd0a26ed795ef2b3c174c12d7d7f78d72b",
+      "after_sha256": "d25f5350866b899fbff9f2eb1f19a927a795a110088ee6ad0918fcdd3e673c66"
+    },
+    "admin/js/app.js": {
+      "before_sha256_lf": "4c931ee1c833ac775dddba1c03b489602b7dba09b41d911dedceb981ddc38c56",
+      "after_sha256": "9a1f798c3ffea7dd1359640aa42124d0ee974264b274956a241f0230e95bd2f0"
+    },
+    "admin/index.html": {
+      "before_sha256_lf": "b3e34e665fc85bf875741170ec73de22273d7374826b2af49a958466d7816c59",
+      "after_sha256": "27be601397b6fcb52d23788574aa06d21d3ec54f9db24c82ceda0fdffa1aa454"
+    }
+  },
+  "qq_frontend_block_matches_tested_local": true,
+  "unrelated_sky_changes_excluded": true
+}

@@ -16,7 +16,7 @@ const timeout = globalThis.setTimeout;
 globalThis.setTimeout = (...args) => { const timer = timeout(...args); timer.unref(); return timer; };
 const page = (await import(pathToFileURL(join(workspace, 'admin/js/pages/config.js')).href + '?v=' + version)).default;
 const deferred = () => { let resolve, reject; const promise = new Promise((a,b) => { resolve=a;reject=b; }); return { promise,resolve,reject }; };
-const snapshot = flags => ({ ...flags, configured:true, proactive_configured:true, running:flags.enabled,
+const snapshot = flags => ({ daily_limit:3, ...flags, configured:true, proactive_configured:true, running:flags.enabled,
   writable:true, connected:false, error:'' });
 const response = body => ({ ok:true, json:async () => body });
 const opposite = key => ({ enabled:key === 'proactive_enabled', proactive_enabled:false });
@@ -29,6 +29,13 @@ function setup(flags, { delayed='qq', sameRoot=false } = {}) {
   globalThis.fetch = async (url, options={}) => {
     const path=new URL(url).pathname;
     if (path==='/health') visit++;
+    if (path==='/admin/api/qqbot/proactive/resume') {
+      const payload=JSON.parse(options.body);writes.push(payload);
+      if (holdPut) await put.promise;
+      server={...server,proactive_evaluation:{...server.proactive_evaluation,fault_stopped:false,failure_streak:0,
+        fault_version:server.proactive_evaluation.fault_version+1}};
+      return response(snapshot(server));
+    }
     if (path==='/admin/api/qqbot/settings') {
       if (options.method==='PUT') {
         const payload=JSON.parse(options.body);writes.push(payload);
@@ -157,5 +164,81 @@ if (group==='normal') {
     }
     assert.deepEqual(f.writes,[{enabled:true},{proactive_enabled:true},{proactive_enabled:false},{enabled:false}]);
     assert.deepEqual(f.state(),{enabled:false,proactive_enabled:false});page.unmount();
+  });
+}
+
+if (group==='daily-limit') {
+  test('limit saves independently while QQ is disabled and survives remount',async () => {
+    const f=setup({enabled:false,proactive_enabled:false},{delayed:'none'});await page.mount(f.oldRoot);
+    const field=f.oldRoot.querySelector('#qqbot-daily-limit-input');
+    assert.equal(field.disabled,false);assert.equal(field.value,'3');field.value='30';
+    f.oldRoot.querySelector('[data-act="save-qqbot-daily-limit"]').click();await flush();
+    assert.deepEqual(f.writes,[{daily_limit:30}]);assert.equal(f.state().enabled,false);
+    assert.equal(page.qqSettings.daily_limit,30);
+    page.unmount();await page.mount(f.currentRoot);
+    assert.equal(f.currentRoot.querySelector('#qqbot-daily-limit-input').value,'30');page.unmount();
+  });
+  for (const value of ['', '0','101','2.5']) test(`invalid limit does not submit: ${value}`,async () => {
+    const f=setup({enabled:true,proactive_enabled:false},{delayed:'none'});await page.mount(f.oldRoot);
+    f.oldRoot.querySelector('#qqbot-daily-limit-input').value=value;
+    await page.saveQQDailyLimit();assert.deepEqual(f.writes,[]);page.unmount();
+  });
+  test('saving locks all QQ actions and sends the captured value once',async () => {
+    const f=setup({enabled:true,proactive_enabled:false},{delayed:'none'});await page.mount(f.oldRoot);
+    f.oldRoot.querySelector('#qqbot-daily-limit-input').value='30';f.hold();
+    const pending=page.saveQQDailyLimit();
+    assert.equal(f.oldRoot.querySelector('#qqbot-daily-limit-input').disabled,true);
+    assert.equal(button(f.oldRoot,'enabled').disabled,true);
+    await page.saveQQDailyLimit();assert.deepEqual(f.writes,[{daily_limit:30}]);
+    f.release();await pending;assert.equal(page.qqSettings.daily_limit,30);page.unmount();
+  });
+  for (const failure of [false,true]) test(`late limit response cannot redraw another mount, failure=${failure}`,async () => {
+    const f=setup({enabled:true,proactive_enabled:false},{delayed:'none'});await page.mount(f.oldRoot);
+    f.oldRoot.querySelector('#qqbot-daily-limit-input').value='30';f.hold();const pending=page.saveQQDailyLimit();
+    page.unmount();await page.mount(f.currentRoot);const html=f.currentRoot.innerHTML;
+    if(failure)f.failPut();else f.release();await pending;
+    assert.equal(page.qqSettings.daily_limit,3);assert.equal(f.currentRoot.innerHTML,html);
+    assert.equal(page.savingQQSettings,false);page.unmount();
+  });
+}
+
+if (group==='evaluation-recovery') {
+  const stopped=()=>({available:true,fault_stopped:true,failure_streak:5,silent_streak:0,fault_version:3,
+    next_check_at:0,in_flight:false,last_error_message:'主动评估请求超时'});
+  test('manual recovery posts only the displayed fault version and keeps proactive off',async()=>{
+    const f=setup({enabled:true,proactive_enabled:false,proactive_evaluation:stopped()},{delayed:'none'});
+    await page.mount(f.oldRoot);
+    assert.equal(f.oldRoot.querySelector('#qqbot-evaluation-tag').textContent,'故障停用');
+    f.oldRoot.querySelector('[data-act="resume-qqbot-evaluation"]').click();await flush();
+    assert.deepEqual(f.writes,[{fault_version:3}]);assert.equal(f.state().proactive_enabled,false);
+    assert.equal(page.qqSettings.proactive_evaluation.fault_stopped,false);
+    assert.equal(f.oldRoot.querySelector('[data-act="resume-qqbot-evaluation"]').disabled,true);page.unmount();
+  });
+  for(const failure of [false,true])test(`late recovery response is isolated, failure=${failure}`,async()=>{
+    const f=setup({enabled:true,proactive_enabled:false,proactive_evaluation:stopped()},{delayed:'none'});
+    await page.mount(f.oldRoot);f.hold();const pending=page.resumeQQEvaluation();
+    assert.equal(f.oldRoot.querySelector('[data-act="resume-qqbot-evaluation"]').disabled,true);
+    await page.resumeQQEvaluation();assert.equal(f.writes.length,1);
+    page.unmount();await page.mount(f.currentRoot);const html=f.currentRoot.innerHTML;
+    if(failure)f.failPut();else f.release();await pending;
+    assert.equal(f.currentRoot.innerHTML,html);assert.equal(page.qqSettings.proactive_evaluation.fault_stopped,true);
+    page.unmount();
+  });
+  test('unknown evaluation state does not offer recovery',async()=>{
+    const f=setup({enabled:true,proactive_enabled:false},{delayed:'none'});await page.mount(f.oldRoot);
+    assert.equal(f.oldRoot.querySelector('[data-act="resume-qqbot-evaluation"]').disabled,true);
+    await page.resumeQQEvaluation();assert.equal(f.writes.length,0);page.unmount();
+  });
+  for(const mode of ['recovering','live','stopped'])test(`evaluation state explains lease recovery, mode=${mode}`,async()=>{
+    const e={...stopped(),fault_stopped:mode==='stopped',failure_streak:mode==='stopped'?5:0,
+      in_flight:mode!=='stopped',recovery_pending:mode==='recovering'};
+    const f=setup({enabled:true,proactive_enabled:true,proactive_evaluation:e},{delayed:'none'});
+    await page.mount(f.oldRoot);
+    assert.equal(f.oldRoot.querySelector('#qqbot-evaluation-tag').textContent,
+      mode==='recovering'?'等待评估恢复':mode==='live'?'AI评估中':'故障停用');
+    assert.equal(f.oldRoot.querySelector('#qqbot-next-evaluation').textContent,
+      mode==='recovering'?'取得运行权后恢复':mode==='live'?'本轮结束后计算':'等待手动恢复');
+    assert.equal(f.oldRoot.querySelector('[data-act="resume-qqbot-evaluation"]').disabled,mode!=='stopped');
+    page.unmount();
   });
 }

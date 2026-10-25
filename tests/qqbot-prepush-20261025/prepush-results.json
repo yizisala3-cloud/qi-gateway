@@ -1,0 +1,21 @@
+{
+  "conclusion": "READY TO MERGE",
+  "base_commit": "389cc56be6092a451466b1a9a70b1a37d497d76b",
+  "remote": "https://github.com/yizisala3-cloud/qi-gateway.git",
+  "branch": "main",
+  "reviewed_source_hashes_verified": 17,
+  "tests": {
+    "passed": 451,
+    "subtests_passed": 140,
+    "skipped": 27
+  },
+  "new_sql": false,
+  "existing_sql_verified": true,
+  "supabase_project": "dlgunkklpjqletgahdtp",
+  "rpc_body_md5": "0c54c5cfe592a9105cba28f39df54b6b",
+  "rpc_service_role_only": true,
+  "exports_rls": true,
+  "service_deployment": false,
+  "production_writes": false,
+  "log_collection_changed": false
+}

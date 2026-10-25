@@ -1,0 +1,44 @@
+[
+  {
+    "path": "gateway/qqbot.py",
+    "expected": "a344facc8262670c352fe8ac390ef8be6c8f39de80fc88fb2e49e0e2bfd86cf4",
+    "actual": "a344facc8262670c352fe8ac390ef8be6c8f39de80fc88fb2e49e0e2bfd86cf4",
+    "matches": true
+  },
+  {
+    "path": "tests/test_qqbot_retakeover.py",
+    "expected": "1646a054c6f12f48d3da0a3c4cfbfd8a580fc0ffcc5c967d369fd29ab4f5aa84",
+    "actual": "1646a054c6f12f48d3da0a3c4cfbfd8a580fc0ffcc5c967d369fd29ab4f5aa84",
+    "matches": true
+  },
+  {
+    "path": "codex/需求/qqbot接入/后续待修复.md",
+    "expected": "9fe8089f9acb75edc3c078d98735011b743af06df83247fae2f8d5f468771d81",
+    "actual": "9fe8089f9acb75edc3c078d98735011b743af06df83247fae2f8d5f468771d81",
+    "matches": true
+  },
+  {
+    "path": "codex/功能维护规范/qqbot接入/qqbot接入.md",
+    "expected": "42984227b4cef9e9c8f2f2a6423ba7b574b748ea1eb1a0e1d96b580141407fe5",
+    "actual": "42984227b4cef9e9c8f2f2a6423ba7b574b748ea1eb1a0e1d96b580141407fe5",
+    "matches": true
+  },
+  {
+    "path": "codex/网关当前状态/网关当前状态.md",
+    "expected": "4b20fadf8b7a85574c5850611e700b1963efee7ddd80f68df3f766acd184a388",
+    "actual": "4b20fadf8b7a85574c5850611e700b1963efee7ddd80f68df3f766acd184a388",
+    "matches": true
+  },
+  {
+    "path": "codex/控制台-文档索引/目录说明.md",
+    "expected": "83aa751a882b5902840ee13543b5f28f1c4cc03663df2aa6143d0b2fe5ea6e06",
+    "actual": "83aa751a882b5902840ee13543b5f28f1c4cc03663df2aa6143d0b2fe5ea6e06",
+    "matches": true
+  },
+  {
+    "path": "codex/代码修改日志/qqbot接入/接管后独立收敛评估账本-26.10.25.01.42.md",
+    "expected": "204aefaae215e203fe02a0eb73b49814eddeba36c3c3ea917b6c3fc02ef62433",
+    "actual": "204aefaae215e203fe02a0eb73b49814eddeba36c3c3ea917b6c3fc02ef62433",
+    "matches": true
+  }
+]

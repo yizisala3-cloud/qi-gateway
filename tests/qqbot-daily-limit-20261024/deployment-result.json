@@ -1,0 +1,23 @@
+{
+  "image": "localhost:5000/qi-gateway:qq-daily-limit-20261024-1105",
+  "settings": {
+    "http": 200,
+    "data": {
+      "enabled": true,
+      "proactive_enabled": false,
+      "daily_limit": 30,
+      "writable": true,
+      "source": "file",
+      "configured": true,
+      "configuration_note": "",
+      "proactive_configured": false,
+      "proactive_note": "请先配置时区、开始时间、结束时间。",
+      "running": true,
+      "connected": true,
+      "owner_paused": false,
+      "silence_until": 0,
+      "error": ""
+    }
+  },
+  "completed": true
+}

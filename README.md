@@ -8,6 +8,8 @@
 
 普通聊天的网关上下文使用独立的补充 system 消息追加，原 system prompt 内容始终保持不变。
 
+QQBot主动评估退避、故障停止／手动恢复及日志接入已通过[独立复审](codex/审查日志/qqbot接入/审查摘要-26.10.25.02.34/审查报告.md)。本轮按用户授权提交推送，实际结果见[合并与同步记录](codex/代码修改日志/qqbot接入/合并与同步-26.10.25.02.45.md)；服务升级尚未执行，日志收集总开关保持关闭。现用生产版本仍见下方部署记录。
+
 ## 架构
 
 ```
@@ -22,6 +24,28 @@
 另有默认关闭的 QQ 私聊入口（`/qqbot/onebot`）和主动消息运行模块：仅处理指定主人私聊，QQ 跳过 Eventide，复用人格及长期记忆，支持本地图片／GIF表情目录。配置页提供 QQBot 总开关和主动消息开关，保存后即时生效并在重启后保留；关闭总开关会一起关闭主动消息。设置存于 `QQBOT_SETTINGS_PATH`（默认 `data/qqbot-settings.json`），保存后覆盖两个启用环境变量的初始值。配置与接入顺序见 [QQBot 说明](qqbot/README.md)，配置示例为 `qqbot/config.env.example`。首次部署须先应用 `supabase/migrations/20261021010000_qqbot_chat_export.sql`；本地账本与开关文件目录均须持久化，一个机器人使用一个主动网关实例。
 
 ## 部署
+
+### 现用部署：云悠 VPS + Coolify（2026-10-24）
+
+云端网关由云悠 VPS 的 Coolify 托管；NapCat 已在同一 VPS 作为独立 Docker Compose 容器运行，已扫码登录并通过容器重启自动恢复。正式入口：
+
+| 用途 | 地址 |
+| --- | --- |
+| 管理页 | https://yiziwanguan.com/admin/ |
+| 手机客户端 API Base URL | `https://yiziwanguan.com/v1` |
+| MCP（独立 Bearer Token） | `https://yiziwanguan.com/mcp` |
+| NapCat 反向 WebSocket | `wss://yiziwanguan.com/qqbot/onebot` |
+
+原网关 Token、MCP Token 和 OneBot Token 保持各自原值。临时入口
+`https://qi-gateway.64-83-26-173.sslip.io` 保留。HTTPS、鉴权、Supabase 和 MCP
+已验证；QQ 已连接、表情 168 项、总开关开启、主动消息关闭。10.24 的 NapCat 登录与重启恢复已通过，用户确认私聊正常回复，OneBot 成功回执及两条原文在 Supabase 的正文／角色／身份／顺序已核验。设备身份持久化及冷备情况见[本轮记录](codex/代码修改日志/qqbot接入/NapCat迁至服务器-26.10.24.08.46.md)；表情实际发送本轮未单独复测。
+
+最近核验的网关镜像为 `localhost:5000/qi-gateway:qq-daily-limit-20261024-1105`，在原运行镜像上仅加入QQ每日上限入口及保存接口。配置页QQBot区域可设1～100条／天，当前30，保存立即生效且重启保留；主动消息仍关闭。[发布记录](codex/代码修改日志/qqbot接入/主动消息每日上限配置入口-26.10.24.11.05.md)保留测试、备份及线上验证。镜像含既有账本导出命名空间修复；本轮Git同步包含该修复、每日上限和主动评估增强。
+恢复或再次部署需核对实际运行镜像与候选差异；GitHub main包含主动评估增强，不能将代码推送当作服务器已升级。
+容器监听 8000；`/data/qi-gateway/qqbot` 持久挂载至 `/data/qqbot`，只运行一个
+网关 worker 和机器人实例。恢复时保留账本、开关、素材及账本命名空间。
+
+NapCat 使用 `/data/qi-napcat/compose.yaml`，QQ 登录与 NapCat 配置持久化，固定主机名、网络 MAC 和只读 machine-id，设置 `unless-stopped` 自动重启；WebUI 只监听服务器 `127.0.0.1:6099`。电脑旧 NapCat 入口已停用并备份。网关持久卷继续沿用原路径，机器人不再依赖日常电脑开机。
 
 ### 环境变量
 
@@ -46,7 +70,11 @@
 | `RUMINATION_DAILY_HOUR` | 反刍每日调度小时（Asia/Shanghai），默认 6 点 |
 | `PORT` | 部署平台端口映射惯例保留；网关启动端口由 Dockerfile 固定为 8000，代码不读取 |
 
-### Zeabur 部署
+本仓库固定 `supabase==2.15.1`；本次迁移实际使用原项目的 legacy `service_role`
+JWT，填入 `SUPABASE_SERVICE_ROLE_KEY`，`SUPABASE_SECRET_KEY` 留空。此 SDK
+尚不接受新版 `sb_secret_` 格式，不用 publishable／anon key 代替服务端写入密钥。
+
+### 旧平台 Zeabur 部署参考（非现用环境）
 
 1. 连接 GitHub 仓库 `yizisala3-cloud/qi-gateway`
 2. 配置环境变量
@@ -61,7 +89,7 @@
 ### 手机客户端连接
 
 - 提供商格式：OpenAI
-- API Base URL：`https://你的域名/v1`
+- API Base URL：现用 `https://yiziwanguan.com/v1`；独立部署时替换为自己的域名
 - API Key：填 `GATEWAY_TOKEN` 的值
 - 模型名：填 `UPSTREAM_MODEL` 的值
 

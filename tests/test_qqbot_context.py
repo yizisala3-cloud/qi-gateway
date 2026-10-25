@@ -5,11 +5,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
+import httpx
 
 from gateway import context
 from gateway.qqbot_config import QQConfig
 from gateway.qqbot_model import QQModel
 from gateway.qqbot_stickers import StickerCatalog
+from gateway.qqbot_proactive import QQModelHTTPError
 
 
 class CatalogTests(unittest.TestCase):
@@ -70,6 +72,16 @@ class Client:
 
 
 class ModelTests(unittest.IsolatedAsyncioTestCase):
+    async def test_upstream_status_and_retry_header_are_preserved_without_response_body(self):
+        class ErrorClient:
+            async def post(self,*args,**kwargs):
+                return httpx.Response(429,headers={'Retry-After':'7200'},text='private upstream body')
+        model=QQModel(ErrorClient(),QQConfig(),StickerCatalog(),context_builder=Mock(return_value=''))
+        with self.assertRaises(QQModelHTTPError) as raised:
+            await model.generate([{'role':'user','content':'test'}],'test',True)
+        self.assertEqual(raised.exception.status_code,429)
+        self.assertEqual(raised.exception.retry_after,7200)
+        self.assertNotIn('private upstream body',str(raised.exception))
     async def generate(self,content,proactive=False,tool_calls=None):
         message={"content":content}
         if tool_calls: message["tool_calls"]=tool_calls
