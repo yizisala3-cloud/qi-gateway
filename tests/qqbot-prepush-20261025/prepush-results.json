@@ -17,5 +17,11 @@
   "exports_rls": true,
   "service_deployment": false,
   "production_writes": false,
-  "log_collection_changed": false
+  "log_collection_changed": false,
+  "code_commit": "d2e51233a7664a56fef11f96ece937afde4b38c7",
+  "code_push_verified": true,
+  "code_remote_sha": "d2e51233a7664a56fef11f96ece937afde4b38c7",
+  "selected_files": 279,
+  "source_and_current_document_whitespace_check": true,
+  "historical_evidence_bytes_preserved": true
 }
