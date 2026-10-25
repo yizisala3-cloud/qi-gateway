@@ -9,7 +9,7 @@ import { initHelpNotes } from './lib/help_notes.js?v=20261021-qqbot-mount-r10';
 import { initScrollbars } from './lib/scrollbars.js?v=20261021-qqbot-mount-r10';
 
 const DEFAULT_ROUTE = 'planning';
-const ASSET_VERSION = '20261021-qqbot-mount-r10';
+const ASSET_VERSION = '20261025-qqbot-window-layout';
 
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);
@@ -96,7 +96,7 @@ async function route() {
   try { currentMod?.unmount?.(); } catch {}
   currentMod = null;
   try {
-    const pageVersion = ['config','logs'].includes(key) ? '20261024-qqbot-recovery-r13-r15' : ASSET_VERSION;
+    const pageVersion = key === 'logs' ? '20261024-qqbot-recovery-r13-r15' : ASSET_VERSION;
     const mod = (await import(`./pages/${key}.js?v=${pageVersion}`)).default;
     if (seq !== routeSeq) return;
     currentMod = mod;

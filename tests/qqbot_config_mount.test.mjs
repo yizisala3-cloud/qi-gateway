@@ -16,7 +16,8 @@ const timeout = globalThis.setTimeout;
 globalThis.setTimeout = (...args) => { const timer = timeout(...args); timer.unref(); return timer; };
 const page = (await import(pathToFileURL(join(workspace, 'admin/js/pages/config.js')).href + '?v=' + version)).default;
 const deferred = () => { let resolve, reject; const promise = new Promise((a,b) => { resolve=a;reject=b; }); return { promise,resolve,reject }; };
-const snapshot = flags => ({ daily_limit:3, ...flags, configured:true, proactive_configured:true, running:flags.enabled,
+const snapshot = flags => ({ daily_limit:3, timezone:'Asia/Shanghai',active_start:'08:00',active_end:'24:00',
+  ...flags, configured:true, proactive_configured:true, running:flags.enabled,
   writable:true, connected:false, error:'' });
 const response = body => ({ ok:true, json:async () => body });
 const opposite = key => ({ enabled:key === 'proactive_enabled', proactive_enabled:false });
@@ -199,6 +200,43 @@ if (group==='daily-limit') {
     if(failure)f.failPut();else f.release();await pending;
     assert.equal(page.qqSettings.daily_limit,3);assert.equal(f.currentRoot.innerHTML,html);
     assert.equal(page.savingQQSettings,false);page.unmount();
+  });
+}
+
+if (group==='active-window') {
+  test('window saves while disabled and survives remount without changing switches',async () => {
+    const f=setup({enabled:false,proactive_enabled:false},{delayed:'none'});await page.mount(f.oldRoot);
+    assert.equal(f.oldRoot.querySelector('#qqbot-active-start-input').value,'08:00');
+    assert.equal(f.oldRoot.querySelector('#qqbot-active-end-input').value,'24:00');
+    f.oldRoot.querySelector('#qqbot-active-start-input').value='22:30';
+    f.oldRoot.querySelector('#qqbot-active-end-input').value='07:15';
+    f.oldRoot.querySelector('[data-act="save-qqbot-active-window"]').click();await flush();
+    assert.deepEqual(f.writes,[{active_start:'22:30',active_end:'07:15'}]);
+    assert.equal(f.state().enabled,false);assert.equal(f.state().proactive_enabled,false);
+    page.unmount();await page.mount(f.currentRoot);
+    assert.equal(f.currentRoot.querySelector('#qqbot-active-start-input').value,'22:30');page.unmount();
+  });
+  for (const [start,end] of [['','24:00'],['24:00','24:00'],['8.00','24:00'],['08:00','24:01'],['08:00','25:00']]) {
+    test(`invalid window never submits: ${start}/${end}`,async () => {
+      const f=setup({enabled:true,proactive_enabled:false},{delayed:'none'});await page.mount(f.oldRoot);
+      f.oldRoot.querySelector('#qqbot-active-start-input').value=start;
+      f.oldRoot.querySelector('#qqbot-active-end-input').value=end;
+      await page.saveQQActiveWindow();assert.deepEqual(f.writes,[]);page.unmount();
+    });
+  }
+  test('window save locks QQ controls and duplicate saves',async () => {
+    const f=setup({enabled:true,proactive_enabled:false},{delayed:'none'});await page.mount(f.oldRoot);f.hold();
+    const pending=page.saveQQActiveWindow();
+    assert.equal(f.oldRoot.querySelector('#qqbot-active-start-input').disabled,true);
+    assert.equal(f.oldRoot.querySelector('#qqbot-daily-limit-input').disabled,true);
+    await page.saveQQActiveWindow();assert.equal(f.writes.length,1);f.release();await pending;page.unmount();
+  });
+  for (const failure of [false,true]) test(`late window response leaves current mount unchanged, failure=${failure}`,async () => {
+    const f=setup({enabled:true,proactive_enabled:false},{delayed:'none'});await page.mount(f.oldRoot);
+    f.oldRoot.querySelector('#qqbot-active-start-input').value='10:00';f.hold();const pending=page.saveQQActiveWindow();
+    page.unmount();await page.mount(f.currentRoot);const html=f.currentRoot.innerHTML;
+    if(failure)f.failPut();else f.release();await pending;
+    assert.equal(page.qqSettings.active_start,'08:00');assert.equal(f.currentRoot.innerHTML,html);page.unmount();
   });
 }
 

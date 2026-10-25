@@ -83,6 +83,7 @@ export default {
       'toggle-qqbot': () => this.toggleQQSetting('enabled'),
       'toggle-qqbot-proactive': () => this.toggleQQSetting('proactive_enabled'),
       'save-qqbot-daily-limit': () => this.saveQQDailyLimit(),
+      'save-qqbot-active-window': () => this.saveQQActiveWindow(),
       'resume-qqbot-evaluation': () => this.resumeQQEvaluation(),
       'toggle-sky': () => this.toggleSkySetting(),
       'save-recent-limit': () => this.saveRecentLimit(),
@@ -350,6 +351,13 @@ export default {
       && Number.isFinite(data.next_check_at) && data.next_check_at >= 0;
   },
 
+  validQQActiveWindow(data) {
+    const time = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+    return typeof data?.timezone === 'string' && data.timezone.length > 0
+      && typeof data.active_start === 'string' && time.test(data.active_start)
+      && typeof data.active_end === 'string' && (time.test(data.active_end) || data.active_end === '24:00');
+  },
+
   renderQQEvaluation() {
     const s = this.qqSettings, e = s?.proactive_evaluation;
     const known = this.validQQEvaluation(e);
@@ -381,6 +389,8 @@ export default {
     const proactiveDisabled = !writable || !enabled || !s.running || (!proactive && !s.proactive_configured);
     const limitKnown = known && Number.isInteger(s.daily_limit) && s.daily_limit >= 1 && s.daily_limit <= 100;
     const limitDisabled = !writable || !limitKnown;
+    const windowKnown = known && this.validQQActiveWindow(s);
+    const windowDisabled = !writable || !windowKnown;
     const status = !known ? '状态未知' : s.error ? '切换未完成' : !enabled ? '已关闭'
       : !s.running ? '未启动' : s.connected ? '已连接' : '等待QQ连接';
     const notes = !known ? ['读取失败，暂不可修改。'] : [s.error,
@@ -398,6 +408,16 @@ export default {
         <span id="qqbot-proactive-tag" class="tag ${proactive ? 'tag-green' : 'tag-muted'}">${known ? proactive ? '已开启' : '已关闭' : '状态未知'}</span>
         <button class="toggle-switch" role="switch" aria-label="QQBot主动消息" aria-checked="${!!proactive}" data-act="toggle-qqbot-proactive" ${proactiveDisabled ? 'disabled' : ''}><span class="toggle-knob"></span></button>
       </span></div>
+      <div class="kv"><span class="k">主动消息时区</span><span class="v">${windowKnown ? esc(s.timezone === 'Asia/Shanghai' ? '北京时间（Asia/Shanghai）' : s.timezone) : '状态未知'}</span></div>
+      <div class="kv qqbot-active-window-row">
+        <span class="k qqbot-active-window-label"><label for="qqbot-active-start-input">发送时段<span class="muted text-sm" data-help-note="主动消息发送时段">按上方时区，每天在此时段内允许主动消息；24:00表示当天结束。结束早于开始表示跨夜，相同时间表示全天。保存后立即生效并在重启后保留。</span></label></span>
+        <div class="v qqbot-active-window-controls">
+          <input type="text" class="qqbot-active-time-input" id="qqbot-active-start-input" maxlength="5" placeholder="08:00" ${windowKnown ? `value="${esc(s.active_start)}"` : ''} ${windowDisabled ? 'disabled' : ''} aria-label="主动消息开始时间" autocomplete="off" spellcheck="false">
+          <span aria-hidden="true">—</span>
+          <input type="text" class="qqbot-active-time-input" id="qqbot-active-end-input" maxlength="5" placeholder="24:00" ${windowKnown ? `value="${esc(s.active_end)}"` : ''} ${windowDisabled ? 'disabled' : ''} aria-label="主动消息结束时间" autocomplete="off" spellcheck="false">
+          <button type="button" class="btn btn-secondary btn-sm" data-act="save-qqbot-active-window" ${windowDisabled ? 'disabled' : ''}>保存</button>
+        </div>
+      </div>
       <div class="kv"><span class="k" style="display:flex;align-items:center;flex-wrap:wrap;gap:5px;max-width:50%"><label for="qqbot-daily-limit-input">每日主动消息上限<span class="muted text-sm" data-help-note="每日主动消息上限">可设1～100条，保存后立即生效并在重启后保留；当天已用次数不清零。上限不代表每天一定发满，仍受发送时段、冷却和模型判断限制。</span></label></span><span class="v" style="display:flex;align-items:center;flex-wrap:wrap;gap:8px">
         <input type="number" id="qqbot-daily-limit-input" min="1" max="100" step="1" ${limitKnown ? `value="${s.daily_limit}"` : ''} ${limitDisabled ? 'disabled' : ''} style="width:64px" aria-label="每日主动消息上限">
         <span class="muted text-sm">条</span>
@@ -435,6 +455,26 @@ export default {
     return this.saveQQSettings({ daily_limit: value }, `每日主动消息上限已保存为${value}条`);
   },
 
+  async saveQQActiveWindow() {
+    if (!this.validQQActiveWindow(this.qqSettings)) return;
+    const startInput = this.root?.querySelector('#qqbot-active-start-input');
+    const endInput = this.root?.querySelector('#qqbot-active-end-input');
+    const active_start = startInput?.value.trim() || '';
+    const active_end = endInput?.value.trim() || '';
+    const time = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+    if (!time.test(active_start)) {
+      toast('开始时间请输入00:00～23:59，格式为HH:mm', 'err');
+      startInput?.focus();
+      return;
+    }
+    if (!time.test(active_end) && active_end !== '24:00') {
+      toast('结束时间请输入00:00～24:00，格式为HH:mm', 'err');
+      endInput?.focus();
+      return;
+    }
+    return this.saveQQSettings({ active_start, active_end }, `主动消息时段已保存为${active_start}–${active_end}`);
+  },
+
   async resumeQQEvaluation() {
     const e = this.qqSettings?.proactive_evaluation;
     if (!this.validQQEvaluation(e) || !e.fault_stopped) return;
@@ -453,7 +493,8 @@ export default {
         body: JSON.stringify(payload),
       });
       if (token !== this.qqMountToken) return;
-      if (!this.validQQSettings(result) || ('daily_limit' in payload && !Number.isInteger(result.daily_limit))) {
+      if (!this.validQQSettings(result) || ('daily_limit' in payload && !Number.isInteger(result.daily_limit))
+          || (('active_start' in payload || 'active_end' in payload) && !this.validQQActiveWindow(result))) {
         throw new Error('未收到有效的QQBot设置状态');
       }
       this.qqSettings = result;

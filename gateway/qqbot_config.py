@@ -7,6 +7,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+DEFAULT_TIMEZONE = "Asia/Shanghai"
+DEFAULT_ACTIVE_START = "08:00"
+DEFAULT_ACTIVE_END = "24:00"
+
+
+def active_time(value, *, end=False):
+    if not isinstance(value, str) or not (
+            re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value, flags=re.ASCII)
+            or (end and value == "24:00")):
+        label = "结束时间须为00:00～24:00" if end else "开始时间须为00:00～23:59"
+        raise ValueError(label + "，格式为HH:mm。")
+    return value
+
 
 def _flag(env, name, default=False):
     value = str(env.get(name, str(default))).strip().lower()
@@ -42,9 +55,9 @@ class QQConfig:
     history_limit: int = 30
     export_timeout: int = 15
     proactive_enabled: bool = False
-    timezone: str = "Asia/Shanghai"
-    active_start: str = "09:00"
-    active_end: str = "22:00"
+    timezone: str = DEFAULT_TIMEZONE
+    active_start: str = DEFAULT_ACTIVE_START
+    active_end: str = DEFAULT_ACTIVE_END
     check_seconds: int = 300
     quiet_seconds: int = 1800
     cooldown_seconds: int = 3600
@@ -73,16 +86,13 @@ class QQConfig:
         if configured and configured != assistant:
             raise ValueError("QQBOT_ASSISTANT_ID 必须与 MEMORY_ASSISTANT_ID 一致")
         proactive = _flag(env, "QQBOT_PROACTIVE_ENABLED")
-        tz = (env.get("QQBOT_TIMEZONE") or "Asia/Shanghai").strip()
-        start, end = ((env.get(k) or d).strip() for k, d in (("QQBOT_ACTIVE_START", "09:00"), ("QQBOT_ACTIVE_END", "22:00")))
+        tz = env.get("QQBOT_TIMEZONE", "").strip() or DEFAULT_TIMEZONE
+        start = active_time(env.get("QQBOT_ACTIVE_START", "").strip() or DEFAULT_ACTIVE_START)
+        end = active_time(env.get("QQBOT_ACTIVE_END", "").strip() or DEFAULT_ACTIVE_END, end=True)
         try:
             ZoneInfo(tz)
         except (ValueError, ZoneInfoNotFoundError) as exc:
             raise ValueError("QQBOT_TIMEZONE 必须是有效IANA时区") from exc
-        if any(not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", v) for v in (start, end)):
-            raise ValueError("QQBOT_ACTIVE_START / END 必须是HH:mm")
-        if proactive and any(not env.get(k, "").strip() for k in ("QQBOT_TIMEZONE", "QQBOT_ACTIVE_START", "QQBOT_ACTIVE_END")):
-            raise ValueError("启用主动消息前须明确配置时区和发送时段")
         store = env.get("QQBOT_STORE_PATH", "data/qqbot.sqlite3").strip()
         if not store or store == ":memory:":
             raise ValueError("QQBOT_STORE_PATH 必须是持久化文件")

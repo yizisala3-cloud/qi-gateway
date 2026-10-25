@@ -61,8 +61,9 @@ class ConfigTests(unittest.TestCase):
                 QQConfig.from_env({**self.valid(),key:value})
     def test_role_must_match_phone_when_configured(self):
         with self.assertRaises(ValueError): QQConfig.from_env({**self.valid(),"MEMORY_ASSISTANT_ID":"other"})
-    def test_enabling_proactive_requires_explicit_zone_and_window(self):
-        with self.assertRaises(ValueError): QQConfig.from_env({**self.valid(),"QQBOT_PROACTIVE_ENABLED":"true"})
+    def test_enabling_proactive_uses_china_and_default_window(self):
+        defaults=QQConfig.from_env({**self.valid(),"QQBOT_PROACTIVE_ENABLED":"true"})
+        self.assertEqual((defaults.timezone,defaults.active_start,defaults.active_end),('Asia/Shanghai','08:00','24:00'))
         cfg=QQConfig.from_env({**self.valid(),"QQBOT_PROACTIVE_ENABLED":"true","QQBOT_TIMEZONE":"America/Los_Angeles","QQBOT_ACTIVE_START":"09:00","QQBOT_ACTIVE_END":"22:00"})
         self.assertTrue(cfg.proactive_enabled)
     def test_blank_example_window_does_not_break_private_only(self):

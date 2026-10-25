@@ -44,3 +44,6 @@ class QQConfigFrontendTests(unittest.TestCase):
 
     def test_proactive_recovery_and_late_responses(self):
         self.run_group('evaluation-recovery')
+
+    def test_active_window_validation_persistence_and_late_responses(self):
+        self.run_group('active-window')

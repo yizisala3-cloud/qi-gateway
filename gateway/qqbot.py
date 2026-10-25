@@ -333,8 +333,8 @@ class QQRuntime:
         if self.config.active_start==self.config.active_end:
             return now+self.config.proactive_ttl
         hour, minute = map(int,self.config.active_end.split(":"))
-        end = local.replace(hour=hour,minute=minute,second=0,microsecond=0)
-        if end<=local:
+        end = local.replace(hour=hour % 24,minute=minute,second=0,microsecond=0)
+        if hour==24 or end<=local:
             end += timedelta(days=1)
         return min(now+self.config.proactive_ttl,end.timestamp())
 

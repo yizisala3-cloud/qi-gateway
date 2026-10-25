@@ -13,7 +13,8 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .qqbot import QQRuntime
-from .qqbot_config import QQConfig, _flag, _number
+from .qqbot_config import (QQConfig, _flag, _number, active_time,
+                           DEFAULT_TIMEZONE, DEFAULT_ACTIVE_START, DEFAULT_ACTIVE_END)
 
 log = logging.getLogger('gateway.qqbot.settings')
 
@@ -42,7 +43,9 @@ class QQSettings:
         self.read_error = ''
         self.apply_error = ''
         self.source = 'environment'
-        self.flags = {'enabled':False,'proactive_enabled':False,'daily_limit':3}
+        self.flags = {'enabled':False,'proactive_enabled':False,'daily_limit':3,
+            'active_start':self.env.get('QQBOT_ACTIVE_START','').strip() or DEFAULT_ACTIVE_START,
+            'active_end':self.env.get('QQBOT_ACTIVE_END','').strip() or DEFAULT_ACTIVE_END}
         try:
             if self.path.exists():
                 if self.path.stat().st_size>4096:
@@ -54,26 +57,29 @@ class QQSettings:
                     raise ValueError('invalid_settings_file')
                 flags['daily_limit'] = (_daily_limit(flags['daily_limit']) if 'daily_limit' in flags
                     else _number(self.env,'QQBOT_DAILY_LIMIT',3,1,100))
-                self.flags = flags
+                for key in ('active_start','active_end'):
+                    if key in flags:
+                        active_time(flags[key],end=key=='active_end')
+                self.flags.update(flags)
                 self.source = 'file'
             else:
                 enabled = _flag(self.env,'QQBOT_ENABLED')
-                self.flags = dict(enabled=enabled,proactive_enabled=enabled and _flag(self.env,'QQBOT_PROACTIVE_ENABLED'),
+                self.flags.update(enabled=enabled,proactive_enabled=enabled and _flag(self.env,'QQBOT_PROACTIVE_ENABLED'),
                     daily_limit=_number(self.env,'QQBOT_DAILY_LIMIT',3,1,100))
         except (OSError,ValueError) as exc:
             self.read_error = 'QQBot开关读取失败，请检查本地配置文件后重启网关。'
             log.error('QQ开关读取失败 type=%s',type(exc).__name__,exc_info=exc)
 
     def config(self, flags):
+        flags = {**self.flags,**flags}
         return QQConfig.from_env({**self.env,'QQBOT_ENABLED':'true',
-            'QQBOT_DAILY_LIMIT':str(flags.get('daily_limit',self.flags['daily_limit'])),
+            'QQBOT_DAILY_LIMIT':str(flags['daily_limit']),
+            'QQBOT_ACTIVE_START':flags['active_start'],'QQBOT_ACTIVE_END':flags['active_end'],
             'QQBOT_PROACTIVE_ENABLED':'true' if flags['proactive_enabled'] else 'false'})
 
     def readiness(self, proactive=False):
         required = [('QQBOT_TOKEN','连接令牌'),('QQBOT_ACCOUNT_ID','机器人QQ号'),
                     ('QQBOT_OWNER_ID','主人QQ号'),('QQBOT_ASSISTANT_ID','角色')]
-        if proactive:
-            required += [('QQBOT_TIMEZONE','时区'),('QQBOT_ACTIVE_START','开始时间'),('QQBOT_ACTIVE_END','结束时间')]
         missing = [label for key,label in required if not self.env.get(key,'').strip()]
         if missing:
             return False,'请先配置'+ '、'.join(missing)+'。'
@@ -95,7 +101,8 @@ class QQSettings:
                 status_error = 'QQBot运行状态读取失败，可关闭总开关后重试。'
                 runtime_state = {'connected':self.runtime.transport.ready}
                 log.warning('QQ运行状态读取失败 type=%s',type(exc).__name__,exc_info=exc)
-        return {**self.flags,'writable':not self.read_error and not self.closing,'source':self.source,
+        return {**self.flags,'timezone':self.env.get('QQBOT_TIMEZONE','').strip() or DEFAULT_TIMEZONE,
+            'writable':not self.read_error and not self.closing,'source':self.source,
             'configured':configured,'configuration_note':note,
             'proactive_configured':proactive_configured,'proactive_note':proactive_note,
             'running':running,'connected':bool(runtime_state.get('connected')),
@@ -192,6 +199,8 @@ class QQSettings:
             flags = {**self.flags,**payload}
             try:
                 _daily_limit(flags['daily_limit'])
+                active_time(flags['active_start'])
+                active_time(flags['active_end'],end=True)
             except ValueError as exc:
                 raise SettingsError(str(exc),422) from exc
             if not flags['enabled']:
@@ -237,10 +246,11 @@ async def settings_endpoint(request):
                 payload = await request.json()
             except (ValueError,UnicodeDecodeError):
                 raise SettingsError('请求正文必须为合法JSON。',400) from None
-            if (not isinstance(payload,dict) or not payload or not set(payload)<={'enabled','proactive_enabled','daily_limit'}
-                    or any(not isinstance(value,bool) for key,value in payload.items() if key!='daily_limit')
+            if (not isinstance(payload,dict) or not payload or not set(payload)<={'enabled','proactive_enabled','daily_limit','active_start','active_end'}
+                    or any(not isinstance(value,bool) for key,value in payload.items() if key in {'enabled','proactive_enabled'})
+                    or any(not isinstance(value,str) for key,value in payload.items() if key in {'active_start','active_end'})
                     or ('daily_limit' in payload and type(payload['daily_limit']) is not int)):
-                raise SettingsError('请提交QQBot布尔开关或整数每日主动消息上限。',400)
+                raise SettingsError('请提交QQBot布尔开关、整数每日上限或HH:mm格式的发送时段。',400)
             data = await manager.save(payload)
         else:
             async with manager.lock:

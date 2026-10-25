@@ -1040,6 +1040,18 @@ html[data-theme="night"] .tab.active { color: #f0ebd5; }
 .kv-block { display: block; }
 .kv-block .v { text-align: left; margin-top: 4px; white-space: pre-wrap; }
 
+.qqbot-active-window-row { align-items: center; flex-wrap: wrap; gap: 8px 16px; }
+.kv .qqbot-active-window-label { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; max-width: 50%; }
+.qqbot-active-window-label .help-note { margin: 0; }
+.kv .qqbot-active-window-controls { display: flex; align-items: center; justify-content: flex-end; flex: 0 1 auto; gap: 8px; max-width: 100%; margin-left: auto; }
+.qqbot-active-window-controls .qqbot-active-time-input { width: 84px; min-width: 0; }
+.qqbot-active-window-controls .btn { flex: none; }
+@media (max-width: 480px) {
+  .qqbot-active-window-row { column-gap: 8px; }
+  .kv .qqbot-active-window-controls { gap: 6px; }
+  .qqbot-active-window-controls .qqbot-active-time-input { width: 68px; }
+}
+
 /* ---------- 右侧详情栏 / 移动端抽屉 ---------- */
 .page-with-detail {
   display: grid;

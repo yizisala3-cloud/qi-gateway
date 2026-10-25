@@ -42,7 +42,8 @@ class QQSettingsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_saved_choices_restore_and_override_environment_after_restart(self):
         await self.manager.save({'enabled':True});await self.manager.save({'proactive_enabled':True})
-        self.assertEqual(json.loads((self.root/'switches.json').read_text()),{'enabled':True,'proactive_enabled':True,'daily_limit':3})
+        self.assertEqual(json.loads((self.root/'switches.json').read_text()),{'enabled':True,'proactive_enabled':True,'daily_limit':3,
+            'active_start':'09:00','active_end':'22:00'})
         await self.manager.shutdown()
         second=self.make_manager();self.addAsyncCleanup(second.shutdown);await second.startup()
         self.assertTrue(second.snapshot()['enabled']);self.assertTrue(second.runtime.config.proactive_enabled)
@@ -60,11 +61,11 @@ class QQSettingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await runtime.ingest(event(1,'while disabled')))
         await runtime.stop()  # Closing a runtime twice is safe.
 
-    async def test_proactive_requires_master_and_explicit_schedule(self):
+    async def test_proactive_requires_master_and_valid_schedule(self):
         with self.assertRaises(SettingsError) as ctx: await self.manager.save({'proactive_enabled':True})
         self.assertEqual(ctx.exception.status,409)
         await self.manager.save({'enabled':True})
-        self.manager.env.pop('QQBOT_TIMEZONE')
+        self.manager.env['QQBOT_TIMEZONE']='invalid-timezone'
         with self.assertRaises(SettingsError) as ctx: await self.manager.save({'proactive_enabled':True})
         self.assertEqual(ctx.exception.status,422)
         self.assertFalse(self.manager.runtime.config.proactive_enabled)
@@ -179,7 +180,8 @@ class QQSettingsTests(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_changes_keep_file_runtime_and_flags_consistent(self):
         await self.manager.save({'enabled':True})
         await asyncio.gather(self.manager.save({'proactive_enabled':True}),self.manager.save({'enabled':False}))
-        self.assertEqual(self.manager.flags,{'enabled':False,'proactive_enabled':False,'daily_limit':3})
+        self.assertEqual(self.manager.flags,{'enabled':False,'proactive_enabled':False,'daily_limit':3,
+            'active_start':'09:00','active_end':'22:00'})
         self.assertEqual(json.loads(self.manager.path.read_text()),self.manager.flags)
         self.assertIsNone(self.app.state.qqbot);self.assertIsNone(self.manager.runtime)
 
