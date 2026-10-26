@@ -1,0 +1,15 @@
+{
+  "feature_commit": "8d330c6e5435c023ada714ebe439730de76d6327",
+  "pushed_head": "f13fc9ed932f3d53f7d67c7c3ca2b1cf4288c764",
+  "previous_remote": "29729414a5c9a0c1994785b7c22fd131e3acb2cd",
+  "actual_remote": "f13fc9ed932f3d53f7d67c7c3ca2b1cf4288c764",
+  "ordinary_push": true,
+  "database_migrations_pending": false,
+  "deployed": false,
+  "production_after_push": {
+    "image": "localhost:5000/qi-gateway:qq-active-window-20261025",
+    "image_id": "sha256:715749783e1045814c963efbc7335568ab83bb186498aeee183327328cfb2d00",
+    "running": true,
+    "health": "healthy"
+  }
+}
