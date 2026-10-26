@@ -50,6 +50,7 @@ const server = http.createServer(async (request, response) => {
     if (url.pathname === '/health') return json(response, { status: 'ok', phase: '本地测试预览', uptime: 7200 });
     if (url.pathname === '/status' || url.pathname.startsWith('/admin/api/')) {
       if (request.headers.authorization !== `Bearer ${TOKEN}`) return json(response, { error: '请使用本地预览令牌' }, 401);
+      if (url.pathname === '/admin/api/auth') return json(response, { authenticated: true });
       if (url.pathname === '/status') return json(response, {
         bg_tasks: 0, daily_running: false, upstream_base_url: 'https://api.example.com/v1',
         upstream_model: 'preview-chat-model', supabase: { access_ok: true, key_mode: '测试数据', elevated_active: false },

@@ -1,0 +1,7 @@
+{
+  "scenario": "503 identity failure retains token; manual retry succeeds despite independent status 409",
+  "auth_calls": 2,
+  "token_retained": true,
+  "business_error_visible": true,
+  "page_errors": []
+}

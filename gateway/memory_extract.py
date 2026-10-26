@@ -15,6 +15,8 @@ from typing import Any
 import httpx
 
 from .config import cfg
+from . import model_config
+from .embedding_config import EMBEDDING_MODEL, EMBEDDING_DIM
 from .db import get_client
 from .logging_events import credential_scope, provider_label, scrub_error_text
 from .memory_continuity_schema import AUTOMATIC_TYPES, SCHEMA_VERSION, THREAD_STATES, ContinuityDataError, validate_continuity_data
@@ -22,8 +24,6 @@ from .memory_continuity_schema import AUTOMATIC_TYPES, SCHEMA_VERSION, THREAD_ST
 log = logging.getLogger("gateway.memory_extract")
 
 CST = timezone(timedelta(hours=8))
-EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
-EMBEDDING_DIM = 1024
 DEFAULT_BATCH_SIZE = 60
 MAX_BATCH_SIZE = 100
 DEFAULT_MAX_CHARS = 12000
@@ -92,12 +92,7 @@ class DigestPipelineError(RuntimeError):
 
 
 def _analysis_configured() -> bool:
-    """Return whether the extraction and embedding provider is usable."""
-    return bool(
-        cfg.ANALYSIS_BASE_URL.strip()
-        and cfg.ANALYSIS_API_KEY.strip()
-        and cfg.ANALYSIS_MODEL.strip()
-    )
+    return model_config.configured("analysis")
 
 
 def _client():
@@ -554,6 +549,7 @@ def _parse_model_output(
     return validated
 
 
+@model_config.pinned
 def _extract_memories(
     conversation: str,
     source_times: dict[int, str | None] | None = None,
@@ -568,10 +564,11 @@ def _extract_memories(
 
     # TASK-02：实际 SDK 调用边界绑定 ANALYSIS 凭证身份——作用域内抛出的
     # 管线异常被标注，边界外的捕获点（API 层 / 调度器）仍能归属密钥。
+    upstream = model_config.resolve("analysis")
     with credential_scope(
-        "analysis", provider_label(cfg.ANALYSIS_BASE_URL), cfg.ANALYSIS_API_KEY
+        "analysis", provider_label(upstream.base_url), upstream.api_key
     ):
-        url = f"{cfg.ANALYSIS_BASE_URL.rstrip('/')}/chat/completions"
+        url = f"{upstream.base_url.rstrip('/')}/chat/completions"
         base_messages = [
             {"role": "system", "content": EXTRACT_SYSTEM_PROMPT},
             {"role": "user", "content": f"<chat_log>\n{conversation}\n</chat_log>"},
@@ -582,7 +579,7 @@ def _extract_memories(
             with_response_format: bool,
         ) -> httpx.Response:
             body = {
-                "model": cfg.ANALYSIS_MODEL,
+                "model": upstream.model,
                 "messages": messages,
                 "max_tokens": 1200,
                 "temperature": 0.1,
@@ -594,7 +591,7 @@ def _extract_memories(
                     return client.post(
                         url,
                         headers={
-                            "Authorization": f"Bearer {cfg.ANALYSIS_API_KEY}",
+                            "Authorization": f"Bearer {upstream.api_key}",
                             "Content-Type": "application/json",
                         },
                         json=body,
@@ -672,7 +669,7 @@ def _extract_memories(
 
 
 def _get_embedding_sync(text: str) -> list[float]:
-    if not _analysis_configured():
+    if not (cfg.ANALYSIS_BASE_URL.strip() and cfg.ANALYSIS_API_KEY.strip() and cfg.ANALYSIS_MODEL.strip()):
         raise DigestPipelineError(
             "analysis_not_configured",
             "The analysis model provider is not fully configured",
@@ -759,7 +756,7 @@ def _create_run(
         "source_first_message_id": int(messages[0]["id"]) if messages else None,
         "source_last_message_id": int(messages[-1]["id"]) if messages else None,
         "message_count": len(messages),
-        "model_name": cfg.ANALYSIS_MODEL,
+        "model_name": model_config.resolve("analysis").model,
         "error_code": error_code,
         "error_message": error_message,
         "completed_at": _iso_now() if status != "running" else None,
@@ -798,6 +795,7 @@ def _public_run(run: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+@model_config.pinned
 def run_memory_digest(trigger: str, mode: str, max_messages: int | None = None) -> dict[str, Any]:
     if trigger not in {"manual_preview", "manual_execute", "scheduled_daily", "idle_six_hours"}:
         raise ValueError("unsupported digest trigger")
@@ -856,7 +854,7 @@ def run_memory_digest(trigger: str, mode: str, max_messages: int | None = None) 
         "source_first_message_id": int(messages[0]["id"]),
         "source_last_message_id": int(messages[-1]["id"]),
         "message_count": len(messages),
-        "model_name": cfg.ANALYSIS_MODEL,
+        "model_name": model_config.resolve("analysis").model,
     }
     _client().table("memory_digest_runs").update(running_update).eq("id", run_id).execute()
     _update_heartbeat(run_id)
@@ -985,6 +983,7 @@ def list_digest_runs(limit: int = 30) -> list[dict[str, Any]]:
     return [_public_run(run) for run in response.data or []]
 
 
+@model_config.pinned
 def get_digest_status() -> dict[str, Any]:
     assistant_id = resolve_assistant_id()
     cursor = _get_cursor(assistant_id)
@@ -1016,7 +1015,7 @@ def get_digest_status() -> dict[str, Any]:
         "latest_message_id": latest_id,
         "latest_message_at": latest.get("created_at") if latest else None,
         "backlog_count": int(count_response.count or 0),
-        "analysis_model": cfg.ANALYSIS_MODEL,
+        "analysis_model": model_config.resolve("analysis").model,
         "analysis_configured": _analysis_configured(),
         "recent_runs": list_digest_runs(20),
     }

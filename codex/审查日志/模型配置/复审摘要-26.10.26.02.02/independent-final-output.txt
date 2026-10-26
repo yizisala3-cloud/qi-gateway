@@ -1,0 +1,8 @@
+....                                                                     [100%]
+============================== warnings summary ===============================
+codex/审查日志/模型配置/复审摘要-26.10.26.02.02/test_independent_rereview.py::test_actual_status_blocks_console_boot_while_management_auth_remains_valid
+  C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.venv\Lib\site-packages\starlette\testclient.py:51: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+4 passed, 1 warning in 3.70s

@@ -54,8 +54,9 @@ NapCat 使用 `/data/qi-napcat/compose.yaml`，QQ 登录与 NapCat 配置持久�
 | `GATEWAY_TOKEN` | 网关鉴权 token（手机客户端填的 API Key） |
 | `GATEWAY_LOG_ENABLED` | 未保存配置页设置时的日志收集默认值，默认 `false`；上线保持关闭 |
 | `UPSTREAM_BASE_URL` | 聊天上游地址，默认 `https://api.deepseek.com/v1` |
-| `UPSTREAM_API_KEY` | DeepSeek API Key，只通过部署环境变量配置 |
-| `UPSTREAM_MODEL` | 默认 `deepseek-v4-pro`；配置后统一覆盖客户端传入的模型名 |
+| `UPSTREAM_API_KEY` | 未为用途选择运行时配置时使用的聊天 API Key |
+| `UPSTREAM_MODEL` | 默认 `deepseek-v4-pro`；对应用途实际选中的模型覆盖客户端模型名 |
+| `MODEL_CONFIG_PATH` | 服务端模型配置 SQLite 文件；默认复用 QQ 设置或账本目录，否则为 `data/model-config.sqlite3`；目录须持久化 |
 | `GEMINI_BROWSER_TOOL_COMPAT_ENABLED` | Gemini 浏览器代理工具历史兼容，默认 `false`；仅对最终模型名以 `gemini-` 开头的请求生效 |
 | `SUPABASE_URL` | Supabase 项目地址 |
 | `SUPABASE_SECRET_KEY` / `SUPABASE_SERVICE_ROLE_KEY` | 仅服务端使用的 Supabase 写入密钥 |
@@ -121,6 +122,16 @@ JWT，填入 `SUPABASE_SERVICE_ROLE_KEY`，`SUPABASE_SECRET_KEY` 留空。此 SD
 | `/admin/api/logs/settings` | GET / PUT | 配置页持久化日志收集开关（网关 Token）；关闭仍可查历史日志 |
 | `/health` | GET | 健康检查（无需鉴权） |
 | `/status` | GET | 网关状态（需鉴权） |
+
+## 模型 API 配置（本地实现，待部署）
+
+控制台“配置”分为“常规配置”和“API配置”。API 配置集中管理供应商、API 地址、多个带别名的 Key 和模型列表；日常聊天、QQ、光遇、记忆提取与分析、连续感总结、反刍分别选择供应商／Key／模型，共用供应商库。总结页和 QQ／光遇配置区提供对应入口。新建供应商不会自动切换已有用途；选择“使用现有配置”恢复该用途的环境配置。保存后的新调用生效，已经开始的调用保留原配置快照。本批不增加 Key 自动轮换或故障切换。
+
+向量模型独立列出且仅查看，继续使用原 `ANALYSIS_*` 地址／Key、`Qwen/Qwen3-Embedding-0.6B` 和1024维；调整文本分析服务不修改向量服务，不触发历史向量重建。非模型服务的插件 Token 仍在常规配置。
+
+配置由服务端 SQLite 事务保存，版本冲突返回409，失败不伪装成功。`MODEL_CONFIG_PATH` 可指定持久卷内路径；留空时优先采用 `QQBOT_SETTINGS_PATH`、其次 `QQBOT_STORE_PATH` 的父目录，无上述配置时使用 `data/model-config.sqlite3`。所有 worker 必须共用此文件，独立服务器需另行共享配置存储。发布时确认文件所在目录已持久挂载，备份包含配置文件；它含真实供应商密钥，仅服务端保存。默认路径已排除 Git／Docker 构建。
+
+管理接口 `GET /admin/api/model-config`、`PUT /admin/api/model-config/providers`、`PUT /admin/api/model-config/routes/{purpose}` 均要求已配置且匹配的网关 Bearer Token。写请求为 `{revision,value}`；读取和保存结果只返回 Key 别名／标识，不回传明文，响应不缓存。本功能无需新增 Supabase 迁移。
 
 ## 日志收集开关
 

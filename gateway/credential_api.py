@@ -28,11 +28,14 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .config import cfg
+from . import model_config
 from .logging_events import compute_key_ref, key_ref_label, key_ref_ready, provider_label
 
 log = logging.getLogger("gateway.credential_api")
 
 _NO_STORE = {"Cache-Control": "no-store"}
+_MODEL_PURPOSE = {"upstream": "chat", "analysis": "analysis", "continuity": "continuity",
+                  "rumination": "rumination", "qq": "qq", "sky": "sky"}
 
 
 def _authorized(request: Request) -> bool:
@@ -49,6 +52,13 @@ def _error(message: str, status: int, code: str) -> JSONResponse:
     )
 
 
+async def management_auth(request: Request) -> JSONResponse:
+    """Check console identity without depending on model or database readiness."""
+    if not _authorized(request):
+        return _error("未登录或令牌无效", 401, "unauthorized")
+    return JSONResponse({"authenticated": True}, headers=_NO_STORE)
+
+
 # ── 白名单（固定；客户端不能读任意配置属性） ─────────────────────
 # key_envs 按顺序回退：第一个有值的生效，source 标明实际来源。
 _CREDENTIAL_SPECS: tuple[dict[str, Any], ...] = (
@@ -60,7 +70,7 @@ _CREDENTIAL_SPECS: tuple[dict[str, Any], ...] = (
     },
     {
         "id": "analysis",
-        "role": "记忆检索与总结（含 Embedding）",
+        "role": "记忆提取与分析",
         "key_envs": ("ANALYSIS_API_KEY",),
         "provider_env": "ANALYSIS_BASE_URL",
     },
@@ -120,13 +130,18 @@ def _resolve_credential(spec: dict[str, Any]) -> dict[str, Any]:
         if not base_url.strip() and spec.get("provider_fallback_env"):
             base_url = getattr(cfg, spec["provider_fallback_env"], "") or ""
         provider = provider_label(base_url)
+    purpose = _MODEL_PURPOSE.get(spec["id"])
+    if purpose:
+        route = model_config.resolve(purpose)
+        if route.source == "runtime":
+            value, source, provider = route.api_key, "runtime", provider_label(route.base_url)
     key_ref = compute_key_ref(value) if value else ""
     return {
         "credential_id": spec["id"],
         "role": spec["role"],
         "configured": bool(value),
         "source": source,
-        "fallback": bool(value) and source != spec["key_envs"][0],
+        "fallback": bool(value) and source != "runtime" and source != spec["key_envs"][0],
         "provider": provider,
         "key_ref": key_ref,
         "label": key_ref_label(key_ref),
@@ -148,13 +163,21 @@ async def credentials_metadata(request: Request) -> JSONResponse:
     """
     if not _authorized(request):
         return _error("未登录或令牌无效", 401, "unauthorized")
-    credentials = [_resolve_credential(spec) for spec in _CREDENTIAL_SPECS]
+    model_error = None
+    try:
+        with model_config.snapshot():
+            credentials = [_resolve_credential(spec) for spec in _CREDENTIAL_SPECS]
+    except model_config.ConfigError as exc:
+        # Model storage does not own plugin credentials. Preserve their independent view.
+        credentials = [_resolve_credential(spec) for spec in _CREDENTIAL_SPECS if spec["id"] not in _MODEL_PURPOSE]
+        model_error = str(exc)
     return JSONResponse(
         {
             "credentials": credentials,
             # 标识秘密未就绪时明确提示（不伪造可用状态）。
             "key_ref_ready": key_ref_ready(),
             "request_id": _request_id(request),
+            "model_config_error": model_error,
         },
         headers=_NO_STORE,
     )
@@ -172,7 +195,17 @@ async def credential_reveal(request: Request) -> JSONResponse:
     spec = _spec_for(str(credential_id))
     if spec is None:
         return _error("未知的密钥项", 404, "unknown_credential")
-    resolved = _resolve_credential(spec)
+    try:
+        purpose = _MODEL_PURPOSE.get(spec["id"])
+        if purpose:
+            with model_config.snapshot():
+                resolved = _resolve_credential(spec)
+                selected_value = model_config.resolve(purpose).api_key
+        else:
+            resolved = _resolve_credential(spec)
+            selected_value = None
+    except model_config.ConfigError as exc:
+        return _error(str(exc), exc.status, "model_config_unavailable")
     if not resolved["configured"]:
         return _error("该密钥项当前未配置", 409, "credential_not_configured")
     value = ""
@@ -181,6 +214,8 @@ async def credential_reveal(request: Request) -> JSONResponse:
         if isinstance(candidate, str) and candidate.strip():
             value = candidate.strip()
             break
+    if selected_value is not None:
+        value = selected_value
     return JSONResponse(
         {
             "credential_id": spec["id"],
@@ -202,6 +237,7 @@ def _request_id(request: Request) -> str:
 
 
 credential_api_routes = [
+    Route("/admin/api/auth", management_auth, methods=["GET"]),
     Route("/admin/api/config/credentials", credentials_metadata, methods=["GET"]),
     Route(
         "/admin/api/config/credentials/{credential_id}/reveal",

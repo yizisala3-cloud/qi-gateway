@@ -11,6 +11,7 @@ import httpx
 from .config import cfg
 from .context import build_context
 from .model_routing import select_upstream_model
+from . import model_config
 from .request_context import extract_recent_turns, append_gateway_context
 from .qqbot_stickers import split_sticker_summaries
 from .qqbot_proactive import QQModelHTTPError, parse_retry_after
@@ -29,6 +30,7 @@ class QQModel:
             raise ValueError("QQ主提示词超过100000字符")
 
     async def generate(self, history, query, proactive=False):
+        upstream = await asyncio.to_thread(model_config.resolve, "qq")
         turns = [{"role":r["role"],"content":r["content"]} for r in history]
         try:
             context = await asyncio.to_thread(self.context_builder, query, extract_recent_turns(turns),
@@ -62,11 +64,11 @@ class QQModel:
                     "\n表情目录："+json.dumps(self.catalog.choices(),ensure_ascii=False)}]+model_turns,context)
         if proactive:
             messages.append({"role":"user","content":"后台检查：请依据已有上下文决定是否主动发一条消息。"})
-        body = {"model":select_upstream_model(cfg.UPSTREAM_MODEL,""),"messages":messages,
+        body = {"model":select_upstream_model(upstream.model,""),"messages":messages,
                 "stream":False,"max_tokens":1800,"tools":[],"tool_choice":"none"}
-        with credential_scope('chat',provider_label(cfg.UPSTREAM_BASE_URL),cfg.UPSTREAM_API_KEY):
-            response = await self.client.post(cfg.UPSTREAM_BASE_URL.rstrip("/")+"/chat/completions",
-                headers={"Authorization":"Bearer "+cfg.UPSTREAM_API_KEY,"Content-Type":"application/json"},
+        with credential_scope('chat',provider_label(upstream.base_url),upstream.api_key):
+            response = await self.client.post(upstream.base_url+"/chat/completions",
+                headers={"Authorization":"Bearer "+upstream.api_key,"Content-Type":"application/json"},
                 json=body, timeout=httpx.Timeout(cfg.UPSTREAM_READ_TIMEOUT,connect=10))
             if not 200 <= response.status_code < 300:
                 raise QQModelHTTPError(response.status_code,parse_retry_after(response.headers.get('Retry-After')))

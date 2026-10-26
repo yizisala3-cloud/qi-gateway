@@ -52,6 +52,8 @@ from .planning import run_maintenance as run_planning_maintenance
 from .planning_api import planning_api_routes
 from .todo_api import todo_routes
 from .model_routing import select_upstream_model
+from . import model_config
+from .model_config_api import model_config_routes
 from .upstream_compat import normalize_gemini_browser_tool_history
 from .request_context import (
     append_gateway_context,
@@ -325,7 +327,7 @@ async def planning_loop():
             await asyncio.sleep(30)
 
 
-async def chat_completions(request: Request, *, persist=True):
+async def chat_completions(request: Request, *, persist=True, model_purpose="chat"):
     if not verify_token(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
@@ -337,6 +339,10 @@ async def chat_completions(request: Request, *, persist=True):
     if not persist and body.get("stream", False):
         return JSONResponse({"error": "sky preview requires non-streaming"}, status_code=400)
 
+    try:
+        upstream = await asyncio.to_thread(model_config.resolve, model_purpose)
+    except model_config.ConfigError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=exc.status)
     loop = asyncio.get_event_loop()
     messages = body.get("messages", [])
     user_text = extract_last_user_text(messages)
@@ -354,14 +360,14 @@ async def chat_completions(request: Request, *, persist=True):
     if full_context and "messages" in body:
         body["messages"] = append_gateway_context(body["messages"], full_context)
 
-    upstream_url = f"{cfg.UPSTREAM_BASE_URL.rstrip('/')}/chat/completions"
+    upstream_url = f"{upstream.base_url}/chat/completions"
     headers = {
-        "Authorization": f"Bearer {cfg.UPSTREAM_API_KEY}",
+        "Authorization": f"Bearer {upstream.api_key}",
         "Content-Type": "application/json",
     }
     requested_model = body.get("model")
     selected_model = select_upstream_model(
-        cfg.UPSTREAM_MODEL,
+        upstream.model,
         requested_model if isinstance(requested_model, str) else "",
     )
     if selected_model:
@@ -377,7 +383,7 @@ async def chat_completions(request: Request, *, persist=True):
     # TASK-02：在实际调用边界绑定聊天上游凭证身份——作用域内的失败事件
     # 携带 key_ref / 用途 / 安全上游，同功能不同密钥正确分组。
     chat_credential = credential_scope(
-        "chat", provider_label(cfg.UPSTREAM_BASE_URL), cfg.UPSTREAM_API_KEY
+        "chat", provider_label(upstream.base_url), upstream.api_key
     )
 
     if not is_stream:
@@ -494,7 +500,7 @@ async def sky_chat_preview(request: Request):
         return JSONResponse({"error": "sky_settings_unavailable"}, status_code=503)
     if not access["enabled"]:
         return JSONResponse({"error": "sky_disabled"}, status_code=403)
-    result = await chat_completions(request, persist=False)
+    result = await chat_completions(request, persist=False, model_purpose="sky")
     latest = await asyncio.to_thread(sky_settings.snapshot, refresh=True)
     if not latest['available']:
         return JSONResponse({'error': 'sky_settings_unavailable'}, status_code=503)
@@ -535,10 +541,14 @@ async def status(request: Request):
     if not verify_token(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     supabase_status = await asyncio.to_thread(db.get_client_status)
+    try:
+        upstream = await asyncio.to_thread(model_config.resolve, "chat")
+    except model_config.ConfigError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=exc.status)
     return JSONResponse({
         "phase": "4.5-memory-digest",
-        "upstream_base_url": cfg.UPSTREAM_BASE_URL,
-        "upstream_model": cfg.UPSTREAM_MODEL,
+        "upstream_base_url": upstream.base_url,
+        "upstream_model": upstream.model,
         "supabase": supabase_status,
         "rls_ready": supabase_status["elevated_active"],
         "bg_tasks": len(_background_tasks),
@@ -559,8 +569,12 @@ async def list_models(request: Request):
     if not verify_token(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     models = []
-    if cfg.UPSTREAM_MODEL:
-        models.append({"id": cfg.UPSTREAM_MODEL, "object": "model", "owned_by": "qi-gateway"})
+    try:
+        upstream = await asyncio.to_thread(model_config.resolve, "chat")
+    except model_config.ConfigError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=exc.status)
+    if upstream.model:
+        models.append({"id": upstream.model, "object": "model", "owned_by": "qi-gateway"})
     return JSONResponse({"object": "list", "data": models})
 
 
@@ -580,7 +594,7 @@ async def lifespan(app):
         http2=True,
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
     )
-    log.info(f"网关启动 Phase 4.5 Memory Digest | upstream={cfg.UPSTREAM_BASE_URL}")
+    log.info("网关启动 Phase 4.5 Memory Digest | 模型按用途独立选择")
     daily_task = track_task(daily_task_loop())
     planning_task = track_task(planning_loop())
     memo_task = track_task(memo_maintenance_loop())
@@ -623,6 +637,7 @@ _routes.extend(admin_api_routes)
 _routes.extend(admin_memory_routes)
 _routes.extend(context_admin_routes)
 _routes.extend(credential_api_routes)
+_routes.extend(model_config_routes)
 _routes.extend(eventide_admin_routes)
 _routes.extend(log_api_routes)
 _routes.extend(log_settings_routes)

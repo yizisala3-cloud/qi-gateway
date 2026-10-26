@@ -71,6 +71,33 @@ html[data-theme="night"] {
   --shadow-lift: 0 3px 12px rgba(0, 0, 0, 0.35);
 }
 
+/* ---------- Model service configuration: shared library, horizontal purpose rows ---------- */
+.config-tabs { margin-bottom: 16px; }
+.model-config-toolbar { margin-bottom: 12px; flex-wrap: wrap; gap: 10px; }
+.model-config-list { border-top: 1px solid var(--gold-faint); }
+.model-config-row { display: flex; align-items: center; gap: 20px; padding: 17px 12px; border-bottom: 1px solid var(--gold-faint); }
+.model-config-main { flex: 1; min-width: 0; }
+.model-config-summary { color: var(--ink-soft); margin: 4px 0; overflow-wrap: anywhere; }
+.model-config-url { overflow-wrap: anywhere; }
+.model-config-actions { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.model-provider-form .field > label { display: grid; gap: 6px; margin-bottom: 0; }
+.model-provider-form :is(input, textarea) { min-width: 0; font-weight: 400; }
+.model-provider-form input { min-height: 38px; }
+.model-config-model-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; margin: 8px 0; }
+.model-config-key-row { display: grid; grid-template-columns: minmax(90px, 1fr) minmax(130px, 2fr) auto; align-items: center; gap: 8px; margin: 8px 0; }
+.model-config-key-row input { width: 100%; min-width: 0; }
+.model-config-error { color: var(--red); overflow-wrap: anywhere; }
+.model-config-entry { margin: 0 0 12px; }
+@media (max-width: 600px) {
+  .model-config-row { gap: 10px; padding: 14px 4px; flex-wrap: wrap; }
+  .model-config-main { flex-basis: 65%; }
+  .model-config-actions { margin-left: auto; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+  .model-config-key-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .model-config-key-row [data-key-alias] { grid-column: 1; }
+  .model-config-key-row [data-key-secret] { grid-column: 1; grid-row: 2; }
+  .model-config-key-row [data-key-remove] { grid-column: 2; grid-row: 1 / 3; }
+}
+
 /* ---------- 基础 ---------- */
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; height: 100%; }
@@ -773,7 +800,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, .tab:focus-vi
 label { font-size: 12.5px; color: var(--ink-soft); }
 .field { margin-bottom: 14px; }
 .field > label { display: block; margin-bottom: 5px; font-weight: 600; }
-input[type="text"], input[type="password"], input[type="number"], input[type="search"], textarea, select {
+input:not([type]), input[type="text"], input[type="password"], input[type="number"], input[type="search"], textarea, select {
   width: 100%;
   background: var(--paper-card);
   border: 1px solid var(--gold-faint);

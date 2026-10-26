@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .config import cfg
+from . import model_config
 from .db import get_client
 from .logging_events import scrub_error_text
 from .memory_continuity_shadow import (
@@ -131,6 +132,7 @@ def list_continuity_runs(limit: int = 20, assistant_id: str | None = None) -> li
     return [_public_run(row) for row in (query.execute().data or [])]
 
 
+@model_config.pinned
 def get_continuity_status() -> dict[str, Any]:
     assistant_id = resolve_continuity_assistant_id()
     cursor = _get_cursor(assistant_id)
@@ -151,9 +153,9 @@ def get_continuity_status() -> dict[str, Any]:
         "blocked_message_count": cursor.get("blocked_message_count"),
         "blocked_at": cursor.get("blocked_at"),
         "pause_reason": cursor.get("pause_reason"),
-        "analysis_model": cfg.CONTINUITY_MODEL,
+        "analysis_model": model_config.resolve("continuity").model,
         "analysis_configured": _continuity_analysis_configured(),
-        "continuity_model": cfg.CONTINUITY_MODEL,
+        "continuity_model": model_config.resolve("continuity").model,
         "continuity_configured": _continuity_analysis_configured(),
         "recent_runs": list_continuity_runs(20, assistant_id),
     }
@@ -352,7 +354,7 @@ def _set_running_run(run_id: int, raw_rows: list[dict[str, Any]]) -> dict[str, A
         "source_first_message_id": int(raw_rows[0]["id"]),
         "source_last_message_id": int(raw_rows[-1]["id"]),
         "message_count": len(raw_rows),
-        "model_name": cfg.CONTINUITY_MODEL,
+        "model_name": model_config.resolve("continuity").model,
     }
     _client().table("memory_digest_runs").update(update).eq("id", run_id).execute()
     _update_heartbeat(run_id)
@@ -445,6 +447,7 @@ def _enrich_candidates(candidates: list[dict[str, Any]], run_id: int) -> list[di
     return enriched
 
 
+@model_config.pinned
 def run_continuity_digest(*, automatic: bool = False) -> dict[str, Any]:
     if not _continuity_analysis_configured():
         raise ContinuityPipelineError(

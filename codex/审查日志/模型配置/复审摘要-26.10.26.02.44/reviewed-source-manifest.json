@@ -1,0 +1,147 @@
+[
+  {
+    "path": "gateway/model_config.py",
+    "sha256": "3579822b94720c1cee4a65b61505abcbcc8b14058e9431e0c1d88116eed75e78",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "gateway/model_config_api.py",
+    "sha256": "fe41891307998abdaf56af7ea2e3abf2b36b9dc7186e3b914f78f80356af271e",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "gateway/embedding_config.py",
+    "sha256": "e88b06534e48563391b05678e62ab02e8050be121f5b15c0318a64c8cba8882d",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "gateway/main.py",
+    "sha256": "9ef6b0062c778d8685fac68e3bc303c2299ee863aa635c6e2f56abfba9681f11",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "gateway/credential_api.py",
+    "sha256": "4cbef0a1a72b53bceae6dcf86b3972b6ff5297a7ca7ca2ae46652101d48da2b9",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "gateway/qqbot_model.py",
+    "sha256": "293a4bd85d6211ba05e5a5b28f18361d2200f53f9755028ab97789bc9daa450f",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "gateway/memory_extract.py",
+    "sha256": "d06ae149f22a2857bdf4e1509d7b7573616a662220ff8a1d6b37c2d6c720c26d",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "gateway/memory_search.py",
+    "sha256": "8a703013aa8588bf84b5de1297e42b03535fc85735d634df34e829bd9969dffc",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "gateway/memory_continuity.py",
+    "sha256": "8ed6d7a9cfb1381c9132b39e97e74a440a2c0b07a444e0337cd69e9176f1d08c",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "gateway/memory_continuity_shadow.py",
+    "sha256": "0b89a7e947aa0677b91357a5d718b202707b330da8ecbaa754fcec48a20154bb",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "gateway/memory_rumination.py",
+    "sha256": "4f5222da88a9381df9027fcb72f2131a838408f9c54228ee13233cbba7ff56d8",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "admin/js/lib/model_settings.js",
+    "sha256": "d767a112bb1dc16d1adf8d9af3e39655a4045ca5e94847574b74951dfce6c85f",
+    "matches_prior_or_login_manifest": false
+  },
+  {
+    "path": "admin/js/pages/config.js",
+    "sha256": "f0c7fdd086ccc7eb834e04b609d23912584551f11d90e0cebed4e5051c16e836",
+    "matches_prior_or_login_manifest": false
+  },
+  {
+    "path": "admin/js/pages/digest.js",
+    "sha256": "cce0339f07c5183d29c640f8b7bf71b1616cc45509e7084c0ba7755f77f03e86",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "admin/js/app.js",
+    "sha256": "5f59c1d4e50113982f1a5b3906f7b3a735b93b83591d8d97cdb3babe01acf454",
+    "matches_prior_or_login_manifest": false
+  },
+  {
+    "path": "admin/index.html",
+    "sha256": "e514862c808db09328706b78bf875595b6583a15599bab17594277c7c4e01eb6",
+    "matches_prior_or_login_manifest": false
+  },
+  {
+    "path": "admin/css/style.css",
+    "sha256": "7bb00361a4e2c544a4bdb50bd698d858c350d8981a0109ba940f7ca001d998d3",
+    "matches_prior_or_login_manifest": false
+  },
+  {
+    "path": ".env.example",
+    "sha256": "9cecf158d0de418bdddd03be3ea01799ca6d84a1fbc58e0e98ccfa40953b60da",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": ".gitignore",
+    "sha256": "9c61a3111d89ee91ac56c5c7cadc429443d4829904d99400185fcfde276b1f96",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "README.md",
+    "sha256": "ea5018eecaab5493a4a1386f560d22d26e9c3f9cd1fad233d77c38a2b36bdacd",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "tests/test_model_config.py",
+    "sha256": "b14d60033ebaaadbab1cadd0fa45a8f49ab1fad1eb666982f08941d036568be9",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "tests/model_config.browser.cjs",
+    "sha256": "8a1755d11be6259bf16f0cfb939eb6ba26ba872a1c7303483c9ad89658cfa1e7",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "tools/preview_model_config.py",
+    "sha256": "3a2a6eb7ec028d5bff2150421884727538b0235995e46e286008d1fa615791ce",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "gateway/logging_events.py",
+    "sha256": "55f2cdad8de623eb6c8f82f73cd9a7af471efff4952340332babab892314c4a5",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "tests/test_model_config_review_fixes.py",
+    "sha256": "4b249b6d45892edb58fc182a428044af17a01aa8da6a0784bf173dbcdf57f855",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "tests/model_config_review_fixes.browser.cjs",
+    "sha256": "ae8e9de73383b78f1fc42f0db6d90d7558964b3aaaf7fc9815d60c3cbae8e5e9",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "tools/preview_gateway_logs.cjs",
+    "sha256": "887cadeb6ff37df0820ed7f4a6a23a0bad5592655ec82194754013169dbf407d",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "tests/test_console_management_auth.py",
+    "sha256": "92412081043feba61b23bfcc7a43132d6b75d92c635c2525e80c6b6ff6558844",
+    "matches_prior_or_login_manifest": true
+  },
+  {
+    "path": "tests/console_management_auth.browser.cjs",
+    "sha256": "a5d5f60db3113d70b956fc05d2294125d5d2f33f2262443e9ff1174873880f5d",
+    "matches_prior_or_login_manifest": true
+  }
+]

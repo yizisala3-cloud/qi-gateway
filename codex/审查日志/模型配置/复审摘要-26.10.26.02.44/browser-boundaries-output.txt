@@ -1,0 +1,12 @@
+read scenario: general
+read scenario: api-general-api
+read scenario: navigate
+save scenario: cancel
+save scenario: close
+save scenario: Escape
+save scenario: mask
+save scenario: general-pending
+save scenario: remount-before-commit
+save scenario: unknown-response
+save scenario: out-of-order
+{"scenarios":11,"page_errors":0}

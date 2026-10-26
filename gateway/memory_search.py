@@ -7,14 +7,13 @@ from typing import Optional
 import httpx
 
 from .config import cfg
+from .embedding_config import EMBEDDING_MODEL, EMBEDDING_DIM
 from .db import get_client, safe_query
 
 log = logging.getLogger("gateway.memory_search")
 
 # 聊天原文与证据时间统一按北京时间呈现。
 _CST = timezone(timedelta(hours=8))
-EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
-EMBEDDING_DIM = 1024
 MAX_CANDIDATES = 50
 MAX_INJECTION_CHARS = 2400
 MAX_KEYWORDS = 5

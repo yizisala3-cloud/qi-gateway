@@ -1,0 +1,83 @@
+{
+  "results": [
+    {
+      "scenario": "saved token boot and refresh",
+      "invalid": [
+        "chat"
+      ]
+    },
+    {
+      "scenario": "manual login and visible business error",
+      "invalid": [
+        "chat"
+      ],
+      "versions": {
+        "css": "20261026-model-config-inputs-r4",
+        "script": "20261026-model-config-inputs-r4",
+        "stylesheetLoaded": true
+      }
+    },
+    {
+      "scenario": "independent repair and reload",
+      "invalid": [
+        "chat"
+      ]
+    },
+    {
+      "scenario": "saved token boot and refresh",
+      "invalid": [
+        "chat",
+        "qq",
+        "sky"
+      ]
+    },
+    {
+      "scenario": "manual login and visible business error",
+      "invalid": [
+        "chat",
+        "qq",
+        "sky"
+      ],
+      "versions": {
+        "css": "20261026-model-config-inputs-r4",
+        "script": "20261026-model-config-inputs-r4",
+        "stylesheetLoaded": true
+      }
+    },
+    {
+      "scenario": "independent repair and reload",
+      "invalid": [
+        "chat",
+        "qq",
+        "sky"
+      ]
+    },
+    {
+      "scenario": "missing token rejected"
+    },
+    {
+      "scenario": "invalid token rejected"
+    },
+    {
+      "scenario": "authentication failure handling",
+      "failure": "503"
+    },
+    {
+      "scenario": "authentication failure handling",
+      "failure": "409"
+    },
+    {
+      "scenario": "authentication failure handling",
+      "failure": "403"
+    },
+    {
+      "scenario": "authentication failure handling",
+      "failure": "network"
+    },
+    {
+      "scenario": "authentication failure handling",
+      "failure": "malformed"
+    }
+  ],
+  "errors": []
+}

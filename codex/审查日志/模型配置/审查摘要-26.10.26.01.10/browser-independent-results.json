@@ -1,0 +1,21 @@
+{
+  "results": [
+    {
+      "scenario": "purpose read completes after leaving API tab",
+      "expected_dialogs": 0,
+      "actual_dialogs": 1,
+      "active_tab": "常规配置"
+    },
+    {
+      "scenario": "close dialog after server commit but before save response",
+      "actual_server_model": "review-runtime-model",
+      "api_row_text": "日常聊天\n现有聊天服务 · 现有密钥 K-45cef26f · preview-upstream\nhttps://example.invalid/v1\n已配置\n调整配置",
+      "general_overview_text": "模型与上游\n聊天上游 API\nhttps://example.invalid/v1\n聊天模型\npreview-upstream\n连续感模型\npreview-continuity\n连续感模型状态\n已配置\nEmbedding\n查看向量配置",
+      "expected_both_views_include": "review-runtime-model",
+      "api_view_matches": false,
+      "general_view_matches": false
+    }
+  ],
+  "page_errors": [],
+  "source": "local synthetic fixture; real management backend"
+}

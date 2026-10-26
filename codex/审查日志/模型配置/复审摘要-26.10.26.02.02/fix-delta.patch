@@ -1,0 +1,897 @@
+--- previous-review/gateway/model_config.py
++++ gateway/model_config.py
+@@ -12,6 +12,7 @@
+ import logging
+ import os
+ import sqlite3
++import tempfile
+ from contextlib import closing, contextmanager
+ from dataclasses import dataclass, field
+ from pathlib import Path
+@@ -20,7 +21,7 @@
+ 
+ from .config import cfg
+ from .embedding_config import EMBEDDING_MODEL, EMBEDDING_DIM
+-from .logging_events import compute_key_ref, key_ref_label, provider_label
++from .logging_events import compute_key_ref, key_ref_label, provider_label, register_runtime_secrets
+ 
+ log = logging.getLogger("gateway.model_config")
+ PURPOSES = {"chat": "日常聊天", "qq": "QQ", "sky": "光遇",
+@@ -72,6 +73,10 @@
+         raise ConfigError()
+     if type(row[0]) is not int or row[0] < 0 or len(state["providers"]) > 100 or set(state["routes"]) - set(PURPOSES):
+         raise ConfigError()
++    if any(not isinstance(binding, dict) or set(binding) != {"provider_id", "key_id", "model"}
++           or any(not isinstance(value, str) for value in binding.values())
++           for binding in state["routes"].values()):
++        raise ConfigError()
+     ids = set()
+     try:
+         for provider in state["providers"]:
+@@ -82,6 +87,7 @@
+             clean_provider(provider, provider)
+     except (ConfigError, KeyError, TypeError) as exc:
+         raise ConfigError() from exc
++    register_runtime_secrets(key["value"] for provider in state["providers"] for key in provider["keys"])
+     return {**state, "revision": row[0]}
+ 
+ 
+@@ -186,6 +192,19 @@
+             "key_ref": ref, "label": key_ref_label(ref)}
+ 
+ 
++def _purpose_metadata(purpose, name, state):
++    binding = state["routes"].get(purpose)
++    try:
++        current = {**route_metadata(_resolve(purpose, state)), "available": True, "error": None}
++    except ConfigError as exc:
++        # Keep the saved choice visible; never silently select its replacement.
++        invalid = ModelRoute("", "", binding.get("model", ""),
++                             binding.get("provider_id", ""), binding.get("key_id", ""),
++                             provider_name="配置已失效", source="invalid")
++        current = {**route_metadata(invalid), "available": False, "error": str(exc)}
++    return {"id": purpose, "name": name, "selection": binding, "current": current}
++
++
+ def public(state=None):
+     state = load() if state is None else state
+     providers = []
+@@ -198,9 +217,7 @@
+     vector = ModelRoute(cfg.ANALYSIS_BASE_URL.rstrip("/"), cfg.ANALYSIS_API_KEY,
+                         EMBEDDING_MODEL, provider_name=provider_label(cfg.ANALYSIS_BASE_URL))
+     return {"revision": state["revision"], "providers": providers,
+-            "purposes": [{"id": purpose, "name": name,
+-                          "selection": state["routes"].get(purpose),
+-                          "current": route_metadata(_resolve(purpose, state))}
++            "purposes": [_purpose_metadata(purpose, name, state)
+                          for purpose, name in PURPOSES.items()],
+             "vector": {**route_metadata(vector), "dimensions": EMBEDDING_DIM, "readonly": True}}
+ 
+@@ -243,6 +260,7 @@
+             value = existing[kid]["value"]
+         cleaned.append({"id": kid, "name": _text(key.get("name"), "Key 别名", 120),
+                         "value": _text(value, "API Key", 4000)})
++    register_runtime_secrets(key["value"] for key in cleaned)
+     return {"id": previous["id"] if previous else str(uuid4()), "name": name,
+             "base_url": base, "models": models, "keys": cleaned}
+ 
+@@ -251,21 +269,27 @@
+     if type(revision) is not int or revision < 0:
+         raise ConfigError("配置版本无效，请刷新后重试。", 400)
+     path = _path()
++    temporary = None
+     try:
+         path.parent.mkdir(parents=True, exist_ok=True)
+         try:
+-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+-        except FileExistsError:
+-            fd = None
+-        if fd is not None:
++            path.stat()
++            target = path.resolve().as_uri() + "?mode=rw"
++        except FileNotFoundError:
++            # Build a complete first state privately. Publish without replacement
++            # only after commit; failed saves cannot create/reset the real store.
++            fd, filename = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+             os.close(fd)
+-        with closing(sqlite3.connect(path, timeout=5, isolation_level=None)) as conn:
+-            conn.execute("CREATE TABLE IF NOT EXISTS model_config (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, value TEXT NOT NULL)")
+-            conn.execute("INSERT OR IGNORE INTO model_config VALUES(1, 0, ?)", ('{"providers":[],"routes":{}}',))
++            temporary = Path(filename)
++            target = temporary.resolve().as_uri() + "?mode=rw"
++        with closing(sqlite3.connect(target, uri=True, timeout=5, isolation_level=None)) as conn:
+             conn.execute("BEGIN IMMEDIATE")
+             try:
+-                row = conn.execute("SELECT revision, value FROM model_config WHERE id=1").fetchone()
+-                state = _decode(row) if row else _empty()
++                if temporary is not None:
++                    conn.execute("CREATE TABLE model_config (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, value TEXT NOT NULL)")
++                    state = _empty()
++                else:
++                    state = _decode(conn.execute("SELECT revision, value FROM model_config WHERE id=1").fetchone())
+                 if state["revision"] != revision:
+                     raise ConfigError("配置已被其他页面更新，请刷新后重试。", 409)
+                 if operation == "provider":
+@@ -289,7 +313,12 @@
+                         raise ConfigError("请选择供应商、Key 和模型。", 400)
+                 else:
+                     raise ConfigError("该用途仅可查看，不能修改。", 400)
+-                for purpose in state["routes"]:
++                # A stale environment binding must not prevent repairing another
++                # purpose. Provider edits still protect every reference to it.
++                affected = ([operation] if operation in PURPOSES and payload is not None else
++                            [p for p, binding in state["routes"].items()
++                             if operation == "provider" and binding["provider_id"] == provider["id"]])
++                for purpose in affected:
+                     if not _resolve(purpose, state).configured:
+                         raise ConfigError("当前选择的模型服务未配置完整。", 400)
+                 state["revision"] += 1
+@@ -297,12 +326,25 @@
+                 response = public(state)
+                 conn.execute("INSERT INTO model_config VALUES(1, ?, ?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, value=excluded.value", (state["revision"], value))
+                 conn.commit()
+-                return response
+             except BaseException:
+                 conn.rollback()
+                 raise
++        if temporary is not None:
++            try:
++                os.link(temporary, path)
++            except FileExistsError:
++                # A concurrent first writer published a complete state first.
++                # Re-enter the existing-store transaction to enforce its revision.
++                return mutate(revision, operation, payload)
++        return response
+     except ConfigError:
+         raise
+     except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+         log.exception("model_config.write_failed operation=%s error_type=%s", operation, type(exc).__name__)
+         raise ConfigError("模型配置保存失败，请检查服务端存储后重试。") from exc
++    finally:
++        if temporary is not None:
++            try:
++                temporary.unlink()
++            except OSError as exc:
++                log.warning("model_config.temporary_cleanup_failed error_type=%s", type(exc).__name__, exc_info=True)
+--- previous-review/gateway/memory_rumination.py
++++ gateway/memory_rumination.py
+@@ -348,8 +348,7 @@
+ 
+ 
+ def _rumination_analysis_configured() -> bool:
+-    base_url, api_key, model = _model_config()
+-    return bool(base_url and api_key and model)
++    return model_config.configured("rumination")
+ 
+ 
+ def resolve_rumination_assistant_id() -> str:
+--- previous-review/admin/js/lib/model_settings.js
++++ admin/js/lib/model_settings.js
+@@ -3,13 +3,18 @@
+ import { modal, toast, icon, tag, loading, errorBlock } from '../ui.js?v=20261025-console-latency-r1';
+ 
+ const API = '/admin/api/model-config';
++let pendingSaves = 0, uncertainSave = false;
+ const option = (value, label, selected = false) => `<option value="${esc(value)}"${selected ? ' selected' : ''}>${esc(label)}</option>`;
+ const detail = current => `${esc(current.provider_name || '未配置')} · ${esc(current.key_name || '现有密钥')} ${esc(current.label || '')} · ${esc(current.model || '未配置模型')}`;
+ 
+-export function createModelSettings(host, { isCurrent = () => true, onSaved = () => {} } = {}) {
+-  let disposed = false, sequence = 0, data = null, view = 'purposes', opening = false;
++export function createModelSettings(host, { isCurrent = () => true, onSaved = () => {}, onStatus = () => {} } = {}) {
++  let disposed = false, active = true, sequence = 0, data = null, view = 'purposes', opening = null;
+   const dialogs = new Set(), reads = new Set();
+   const live = () => !disposed && isCurrent();
++  const interactive = () => live() && active;
++  const notifyStatus = () => onStatus(pendingSaves ? '模型配置仍在保存，关闭窗口不会取消已提交的修改。' :
++    uncertainSave ? '上次保存结果未确认，请刷新核对当前生效配置。' : '');
++  const accept = value => { if (!data || value.revision >= data.revision) data = value; };
+ 
+   async function read() {
+     const abort = new AbortController();
+@@ -19,7 +24,7 @@
+   }
+ 
+   function render() {
+-    if (!live() || !data) return;
++    if (!interactive() || !data) return;
+     host.innerHTML = `<div class="toolbar model-config-toolbar">
+       <div class="subtabs"><button class="subtab ${view === 'purposes' ? 'active' : ''}" data-model-view="purposes">用途配置</button><button class="subtab ${view === 'providers' ? 'active' : ''}" data-model-view="providers">供应商库</button></div>
+       <span class="grow"></span><button class="btn btn-primary" data-model-new>${icon('plus')}添加供应商</button><button class="btn btn-secondary" data-model-refresh>${icon('refresh')}刷新</button></div>
+@@ -34,8 +39,8 @@
+   function renderPurposes() {
+     return `<p class="muted text-sm">各用途独立选择，共用供应商库。保存后用于后续调用。</p>
+       <div class="model-config-list">${data.purposes.map(p => `<div class="model-config-row">
+-        <div class="model-config-main"><strong>${esc(p.name)}</strong><div class="model-config-summary">${detail(p.current)}</div><div class="muted text-sm model-config-url">${esc(p.current.base_url || '未配置 API 地址')}</div></div>
+-        <div class="model-config-actions">${tag(p.current.configured ? '已配置' : '未配置', p.current.configured ? 'green' : 'red')}<button class="btn btn-secondary btn-sm" data-model-purpose="${esc(p.id)}">调整配置</button></div></div>`).join('')}</div>
++        <div class="model-config-main"><strong>${esc(p.name)}</strong><div class="model-config-summary">${detail(p.current)}</div><div class="muted text-sm model-config-url">${esc(p.current.base_url || '未配置 API 地址')}</div>${p.current.error ? `<div class="model-config-error">${esc(p.current.error)}</div>` : ''}</div>
++        <div class="model-config-actions">${tag(p.current.available === false ? '配置失效' : p.current.configured ? '已配置' : '未配置', p.current.configured ? 'green' : 'red')}<button class="btn btn-secondary btn-sm" data-model-purpose="${esc(p.id)}">调整配置</button></div></div>`).join('')}</div>
+       <div class="section-title">向量模型</div><div class="model-config-row">
+         <div class="model-config-main"><strong>记忆向量 · Embedding</strong><div class="model-config-summary">${detail(data.vector)}</div><div class="muted text-sm model-config-url">${esc(data.vector.base_url || '未配置')} · ${data.vector.dimensions} 维</div></div><div class="model-config-actions">${tag('仅查看', 'muted')}</div></div>`;
+   }
+@@ -47,17 +52,23 @@
+   }
+ 
+   async function load(options = {}) {
++    if (!live()) return;
++    active = true;
++    reads.forEach(abort => abort.abort());
++    opening = null;
+     const own = ++sequence;
+     if (options.view) view = options.view;
+     host.innerHTML = loading();
+     try {
+       const result = await read();
+-      if (!live() || own !== sequence) return;
+-      data = result;
++      if (!interactive() || own !== sequence) return;
++      accept(result);
++      uncertainSave = false;
++      notifyStatus();
+       render();
+       if (options.purpose) await openPurpose(options.purpose);
+     } catch (error) {
+-      if (!live() || own !== sequence || error.name === 'AbortError') return;
++      if (!interactive() || own !== sequence || error.name === 'AbortError') return;
+       host.innerHTML = `${errorBlock(`模型配置读取失败：${esc(error.message)}`)}<button class="btn btn-secondary" data-model-retry>重试</button>`;
+       host.querySelector('[data-model-retry]').onclick = () => load(options);
+     }
+@@ -74,18 +85,34 @@
+   }
+ 
+   async function fresh() {
+-    if (opening || !live()) return null;
+-    opening = true;
++    if (opening || !interactive()) return null;
++    const ticket = opening = Symbol('model-open'), own = sequence;
+     try {
+       const value = await read();
+-      if (!live()) return null;
+-      data = value;
++      if (!interactive() || own !== sequence || opening !== ticket) return null;
++      accept(value);
+       render();
+-      return value;
+-    } catch (error) {
+-      if (live() && error.name !== 'AbortError') toast(`读取配置失败：${error.message}`, 'err');
++      return data;
++    } catch (error) {
++      if (interactive() && own === sequence && error.name !== 'AbortError') toast(`读取配置失败：${error.message}`, 'err');
+       return null;
+-    } finally { opening = false; }
++    } finally { if (opening === ticket) opening = null; }
++  }
++
++  async function reconcile() {
++    if (!live()) return;
++    const own = sequence;
++    try {
++      const result = await read();
++      if (!live() || own !== sequence) return;
++      accept(result);
++      render();
++    } catch (error) {
++      if (live() && error.name !== 'AbortError') {
++        uncertainSave = true;
++        notifyStatus();
++      }
++    }
+   }
+ 
+   async function save(entry, endpoint, revision, value) {
+@@ -94,27 +121,42 @@
+     if (button.disabled) return;
+     button.disabled = true;
+     feedback.textContent = '';
++    pendingSaves++;
++    notifyStatus();
+     try {
+       const result = await gw(API + endpoint, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision, value }) });
+-      if (!live() || !dialogs.has(entry)) return;
+-      data = result;
+-      entry.close();
+-      render();
++      // A closed editor does not cancel the server transaction. Always notify
++      // the current page, including a newer mount, to reconcile authoritative state.
++      if (live()) {
++        accept(result);
++        if (dialogs.has(entry)) entry.close();
++        render();
++        if (interactive()) toast('配置已保存');
++      }
+       onSaved();
+-      toast('配置已保存');
+-    } catch (error) {
+-      if (!live() || !dialogs.has(entry)) return;
+-      feedback.textContent = error.resultUnknown ? '保存结果未确认，请关闭窗口并刷新核对后再操作。' : error.message;
+-    } finally { if (dialogs.has(entry)) button.disabled = false; }
++    } catch (error) {
++      const unknown = error.resultUnknown || !Number.isInteger(error.status) || error.status >= 500;
++      if (unknown) uncertainSave = true;
++      if (live() && dialogs.has(entry)) feedback.textContent = unknown ? '保存结果未确认，请关闭窗口并刷新核对后再操作。' : error.message;
++      if (unknown || (live() && !dialogs.has(entry))) {
++        onSaved();
++        await reconcile();
++      }
++    } finally {
++      pendingSaves--;
++      notifyStatus();
++      if (dialogs.has(entry)) button.disabled = false;
++    }
+   }
+ 
+   async function openPurpose(purpose) {
+     const current = await fresh();
+     const item = current?.purposes.find(p => p.id === purpose);
+-    if (!item || !live()) return;
++    if (!item || !interactive()) return;
+     const selected = item.selection;
+     const entry = dialog({ title: `${esc(item.name)} · API配置`, body: `
+       <p class="muted text-sm">当前：${detail(item.current)}</p>
++      ${item.current.error ? `<p class="model-config-error">${esc(item.current.error)} 可选择有效供应商，或恢复现有配置。</p>` : ''}
+       <div class="field"><label>供应商<select data-model-provider aria-label="供应商">${option('', '使用现有配置', !selected)}${current.providers.map(p => option(p.id, p.name, p.id === selected?.provider_id)).join('')}</select></label></div>
+       <div class="field"><label>API Key<select data-model-key aria-label="API Key"></select></label></div>
+       <div class="field"><label>模型<select data-model-name aria-label="模型"></select></label></div>
+@@ -139,7 +181,7 @@
+ 
+   async function openProvider(id = null) {
+     const current = await fresh();
+-    if (!current || !live()) return;
++    if (!current || !interactive()) return;
+     const provider = current.providers.find(p => p.id === id);
+     if (id && (!provider || provider.readonly)) return;
+     const entry = dialog({ title: provider ? '编辑供应商' : '添加供应商', wide: true, body: `
+@@ -172,11 +214,17 @@
+     };
+   }
+ 
+-  return { load, openPurpose, dispose() {
+-    disposed = true;
++  function deactivate() {
++    active = false;
+     sequence++;
++    opening = null;
+     reads.forEach(abort => abort.abort());
+     [...dialogs].forEach(entry => entry.close());
++  }
++
++  return { load, openPurpose, reconcile, deactivate, dispose() {
++    deactivate();
++    disposed = true;
+     data = null;
+   } };
+ }
+--- previous-review/admin/js/pages/config.js
++++ admin/js/pages/config.js
+@@ -62,6 +62,7 @@
+     this.root = root;
+     this.apiSettings = null;
+     this.modelConfigDirty = false;
++    this.modelOverviewRead = null;
+     this.activeConfigTab = 'general';
+     this.logMountToken = Symbol('config-log-settings');
+     this.qqMountToken = Symbol('config-qq-settings');
+@@ -116,11 +117,13 @@
+     root.innerHTML = `<div class="tabs config-tabs" role="tablist" aria-label="配置分类">
+       <button class="tab active" role="tab" aria-selected="true" data-act="config-tab" data-tab="general">常规配置</button>
+       <button class="tab" role="tab" aria-selected="false" data-act="config-tab" data-tab="api">API配置</button></div>
++      <p data-model-feedback class="muted text-sm" role="status" hidden></p>
+       <div data-config-panel="general"><div class="grid grid-2">${titles.map((title, i) =>
+       `<div class="card" id="config-section-${i}"><div class="card-head"><div class="card-title">${title}</div></div>${loading()}</div>`).join('')}</div></div>
+       <div data-config-panel="api" hidden></div>`;
+     const data = {};
+     this.modelOverviewData = data;
++    this.setModelFeedback(this.modelSaveMessage || '');
+     if (params.tab === 'api') this.switchConfigTab('api', params);
+     const settled = new Set();
+     const rendered = new Set();
+@@ -129,6 +132,7 @@
+       if (!isCurrentMount()) return;
+       const cards = this.renderConfigCards(data);
+       groups.forEach((keys, index) => {
++        if (index === 1 && this.modelOverviewRead) return;
+         if (rendered.has(index) || !keys.every(key => settled.has(key))) return;
+         const host = root.querySelector(`#config-section-${index}`);
+         const failure = keys.find(key => failures.has(key) && ['health', 'status'].includes(key));
+@@ -326,6 +330,7 @@
+   async switchConfigTab(tab, params = {}) {
+     if (!['general', 'api'].includes(tab)) return;
+     this.activeConfigTab = tab;
++    const tabEpoch = this.apiTabEpoch = (this.apiTabEpoch || 0) + 1;
+     const root = this.root, token = this.qqMountToken;
+     for (const id of Object.keys(this.credSessions)) this._closeCredentialSession(id);
+     this._refreshCredentialCard();
+@@ -336,33 +341,61 @@
+     });
+     root.querySelectorAll('[data-config-panel]').forEach(panel => { panel.hidden = panel.dataset.configPanel !== tab; });
+     if (tab === 'general') {
+-      if (this.modelConfigDirty) {
+-        this.modelConfigDirty = false;
+-        try {
+-          const [status, continuity] = await Promise.all([gw('/status'), gw('/admin/api/memory-continuity/status')]);
+-          if (this.qqMountToken !== token || this.root !== root) return;
+-          Object.assign(this.modelOverviewData, { status, continuity });
+-          const card = root.querySelector('#config-section-1');
+-          if (card) card.innerHTML = this.renderConfigCards(this.modelOverviewData)[1];
+-        } catch (error) {
+-          if (this.qqMountToken === token) {
++      this.apiSettings?.deactivate();
++      if (this.modelConfigDirty) await this.refreshModelOverview();
++      return;
++    }
++    try {
++      const { createModelSettings } = await import('../lib/model_settings.js?v=20261026-model-config-fixes-r2');
++      if (this.qqMountToken !== token || this.root !== root || this.activeConfigTab !== 'api' || this.apiTabEpoch !== tabEpoch) return;
++      if (!this.apiSettings) {
++        const instance = createModelSettings(root.querySelector('[data-config-panel="api"]'), {
++          isCurrent: () => this.qqMountToken === token && this.root === root,
++          onStatus: message => this.setModelFeedback(message),
++          onSaved: () => {
++            // Even an old, disposed editor may finish a real server write.
++            // Invalidate the currently mounted view rather than writing old DOM.
+             this.modelConfigDirty = true;
+-            toast(`模型概览刷新失败：${error.message}`, 'err');
+-          }
+-        }
+-      }
+-      return;
+-    }
+-    try {
+-      const { createModelSettings } = await import('../lib/model_settings.js?v=20261026-model-config-r1');
+-      if (this.qqMountToken !== token || this.root !== root || this.activeConfigTab !== 'api') return;
+-      if (!this.apiSettings) this.apiSettings = createModelSettings(root.querySelector('[data-config-panel="api"]'), {
+-        isCurrent: () => this.qqMountToken === token && this.root === root,
+-        onSaved: () => { this.modelConfigDirty = true; },
+-      });
++            if (!this.qqMountToken) return;
++            if (this.activeConfigTab === 'general') this.refreshModelOverview();
++            else if (this.apiSettings !== instance) this.apiSettings?.reconcile();
++          },
++        });
++        this.apiSettings = instance;
++      }
+       await this.apiSettings.load(params);
+     } catch (error) {
+       if (this.qqMountToken === token && this.root === root) toast(`API配置加载失败：${error.message}`, 'err');
++    }
++  },
++
++  setModelFeedback(message) {
++    this.modelSaveMessage = message;
++    if (!this.qqMountToken) return;
++    const feedback = this.root?.querySelector('[data-model-feedback]');
++    if (feedback) {
++      feedback.textContent = message;
++      feedback.hidden = !message;
++    }
++  },
++
++  async refreshModelOverview() {
++    const root = this.root, token = this.qqMountToken;
++    if (!token || !root) return;
++    const read = this.modelOverviewRead = Symbol('model-overview');
++    this.modelConfigDirty = false;
++    const card = root.querySelector('#config-section-1');
++    if (card) card.innerHTML = loading();
++    try {
++      const [status, continuity] = await Promise.all([gw('/status'), gw('/admin/api/memory-continuity/status')]);
++      if (this.qqMountToken !== token || this.root !== root || this.modelOverviewRead !== read) return;
++      Object.assign(this.modelOverviewData, { status, continuity });
++      if (card) card.innerHTML = this.renderConfigCards(this.modelOverviewData)[1];
++    } catch (error) {
++      if (this.qqMountToken === token && this.root === root && this.modelOverviewRead === read) {
++        this.modelConfigDirty = true;
++        if (card) card.innerHTML = errorBlock(`模型概览核对失败：${esc(error.message)}`);
++      }
+     }
+   },
+ 
+--- previous-review/admin/js/app.js
++++ admin/js/app.js
+@@ -9,7 +9,7 @@
+ import { initScrollbars } from './lib/scrollbars.js?v=20261025-console-latency-r1';
+ 
+ const DEFAULT_ROUTE = 'planning';
+-const ASSET_VERSION = '20261026-model-config-r1';
++const ASSET_VERSION = '20261026-model-config-fixes-r2';
+ 
+ function applyTheme(t) {
+   document.documentElement.setAttribute('data-theme', t);
+--- previous-review/admin/index.html
++++ admin/index.html
+@@ -75,6 +75,6 @@
+ <!-- 备忘录 Markdown 依赖（固定版本随项目交付；window.marked / window.DOMPurify） -->
+ <script src="/admin/assets/vendor/marked-12.0.2.min.js"></script>
+ <script src="/admin/assets/vendor/purify-3.1.6.min.js"></script>
+-<script type="module" src="/admin/js/app.js?v=20261026-model-config-r1"></script>
++<script type="module" src="/admin/js/app.js?v=20261026-model-config-fixes-r2"></script>
+ </body>
+ </html>
+--- previous-review/.gitignore
++++ .gitignore
+@@ -13,5 +13,7 @@
+ **/model-config.sqlite3*
+ codex/临时验证/新增配置切换-20261026/*.sqlite3*
+ codex/临时验证/新增配置切换-20261026/tmp/
++codex/临时验证/模型配置五项补修-20261026/*.sqlite3*
++codex/临时验证/模型配置五项补修-20261026/tmp/
+ qqbot/private/
+ codex/环境变量备份/
+--- previous-review/tools/preview_model_config.py
++++ tools/preview_model_config.py
+@@ -8,7 +8,7 @@
+ sys.path.insert(0, str(ROOT))
+ 
+ from starlette.applications import Starlette
+-from starlette.responses import JSONResponse
++from starlette.responses import JSONResponse, HTMLResponse
+ from starlette.routing import Mount, Route
+ from starlette.staticfiles import StaticFiles
+ import uvicorn
+@@ -39,10 +39,35 @@
+     return JSONResponse({})
+ 
+ 
++async def preview_entry(request):
++    return HTMLResponse('''<!doctype html><meta charset="utf-8"><title>模型配置 · 本地测试</title>
++<script>localStorage.setItem('qi-token','local-model-preview');location.replace('/admin/index.html#/config?tab=api');</script>
++<p>正在打开使用合成数据的模型配置预览…</p>''')
++
++
++def seed_demo():
++    from gateway import model_config
++    state = model_config.public()
++    if state["revision"]:
++        return
++    for name, models in (("示例 · 日常模型服务", ["deepseek-v4-flash", "deepseek-v4-pro"]),
++                         ("示例 · 记忆模型服务", ["Qwen/Qwen3-32B", "deepseek-v4-flash"])):
++        state = model_config.mutate(state["revision"], "provider", {
++            "name": name, "base_url": "https://demo.example.invalid/v1", "models": models,
++            "keys": [{"name": "日常账号", "value": "demo-opaque-key-primary-123456"},
++                     {"name": "备用账号", "value": "demo-opaque-key-secondary-654321"}]})
++    providers = [p for p in state["providers"] if not p["readonly"]]
++    for purpose in model_config.PURPOSES:
++        provider = providers[0 if purpose in {"chat", "qq", "sky"} else 1]
++        state = model_config.mutate(state["revision"], purpose, {
++            "provider_id": provider["id"], "key_id": provider["keys"][0]["id"], "model": provider["models"][0]})
++
++
+ def main():
+     parser = argparse.ArgumentParser()
+     parser.add_argument("--port", type=int, default=8797)
+     parser.add_argument("--store", required=True)
++    parser.add_argument("--demo", action="store_true", help="Seed synthetic providers for visual review")
+     args = parser.parse_args()
+     os.environ["MODEL_CONFIG_PATH"] = str(Path(args.store).resolve())
+     for name in vars(type(cfg)):
+@@ -56,8 +81,11 @@
+         setattr(cfg, prefix + "_BASE_URL", "https://example.invalid/v1")
+         setattr(cfg, prefix + "_API_KEY", "preview-synthetic-key-" + prefix.lower())
+         setattr(cfg, prefix + "_MODEL", "preview-" + prefix.lower())
++    if args.demo:
++        seed_demo()
+     app = Starlette(routes=[*model_config_routes, *credential_api_routes,
+                            Mount("/admin", StaticFiles(directory=ROOT / "admin", html=True)),
++                           Route("/", preview_entry),
+                            Route("/{path:path}", fixture)])
+     # API routes above precede the static mount. Other admin/API fixture routes
+     # must also precede it so the UI never falls through to an external service.
+--- previous-review/gateway/logging_events.py
++++ gateway/logging_events.py
+@@ -344,18 +344,34 @@
+ )
+ 
+ 
++_runtime_secret_lock = threading.Lock()
++_runtime_secret_values: set[str] = set()
++
++
++def register_runtime_secrets(values) -> None:
++    """Remember accepted provider secrets for this process, including retired keys.
++
++    Called by the configuration read/write boundary, never by the log handler.
++    Keeping old values protects in-flight responses and delayed exception chains
++    after a provider edit. No configuration I/O or logging occurs here.
++    """
++    with _runtime_secret_lock:
++        _runtime_secret_values.update(value for value in values if isinstance(value, str) and value)
++
++
+ def _configured_secret_values() -> tuple[str, ...]:
+     """收集当前配置里的密钥实际值（每次现读，兼容测试对 cfg 打补丁）。
+ 
+     BUG-01：所有被系统接受的非空配置值都掩码——长度豁免会留下「鉴权接受
+     却不清洗」的窗口，短凭证同样能进入事件 / spool / 平台输出。
+     """
+-    values: list[str] = []
++    with _runtime_secret_lock:
++        values = set(_runtime_secret_values)
+     for name in _CONFIGURED_SECRET_ATTRS:
+         value = getattr(cfg, name, "")
+         if isinstance(value, str) and value:
+-            values.append(value)
+-    return tuple(values)
++            values.add(value)
++    return tuple(sorted(values, key=len, reverse=True))
+ 
+ # ANSI 转义序列先处理（ESC 本身也在控制字符范围内，先删控制字符会把
+ # 转义序列拆成残留的 [31m 之类文本）；再清其余控制字符（保留 \n \t）。
+--- previous-review/tests/test_model_config_review_fixes.py
++++ tests/test_model_config_review_fixes.py
+@@ -0,0 +1,136 @@
++"""Permanent boundary regressions for BUG-01/03/04; no real credentials or services."""
++import json
++import logging
++import sqlite3
++import sys
++from concurrent.futures import ThreadPoolExecutor
++from unittest import mock
++
++import pytest
++from gateway import logging_events as events
++from gateway import model_config as registry
++
++
++@pytest.fixture(autouse=True)
++def isolated(tmp_path, monkeypatch):
++    monkeypatch.setenv("MODEL_CONFIG_PATH", str(tmp_path / "models.sqlite3"))
++    monkeypatch.setattr(events, "_runtime_secret_values", set())
++    for prefix in ("UPSTREAM", "ANALYSIS", "CONTINUITY", "RUMINATION"):
++        for suffix, value in (("BASE_URL", "https://environment.invalid/v1"),
++                              ("API_KEY", "opaque_environment_long_987654"), ("MODEL", "env-model")):
++            monkeypatch.setattr(registry.cfg, prefix + "_" + suffix, value)
++
++
++KEYS = ["opaque_first_vendor_secret_111111", "opaque_second_vendor_secret_222222"]
++
++
++def seed():
++    state = registry.mutate(0, "provider", {"name": "Fixture", "base_url": "https://fixture.invalid/v1",
++        "models": ["model-a"], "keys": [{"name": str(i), "value": value} for i, value in enumerate(KEYS)]})
++    return state, next(p for p in state["providers"] if not p["readonly"])
++
++
++def bind(provider):
++    return {"provider_id": provider["id"], "key_id": provider["keys"][0]["id"], "model": "model-a"}
++
++
++def test_all_keys_and_retired_inflight_keys_are_scrubbed_without_storage_io(monkeypatch):
++    state, provider = seed()
++    registry.mutate(1, "chat", bind(provider))
++    new_key = "opaque_replacement_vendor_secret_333333"
++    with registry.snapshot():
++        original = registry.resolve("chat")
++        payload = {k: provider[k] for k in ("id", "name", "base_url", "models")}
++        payload["keys"] = [{"id": k["id"], "name": k["name"], "value": new_key if i == 0 else ""}
++                           for i, k in enumerate(provider["keys"])]
++        registry.mutate(2, "provider", payload)
++        assert registry.resolve("chat").api_key == original.api_key == KEYS[0]
++    assert registry.resolve("chat").api_key == new_key
++    monkeypatch.setattr(registry, "load", mock.Mock(side_effect=AssertionError("log path must not load storage")))
++    try:
++        try:
++            raise ValueError(KEYS[1])
++        except ValueError as exc:
++            raise RuntimeError(KEYS[0] + " " + new_key) from exc
++    except RuntimeError:
++        info = sys.exc_info()
++    raw = " | ".join(KEYS + [new_key])
++    for sink in ("error", "event", "platform"):
++        record = logging.LogRecord("gateway.main", logging.ERROR, __file__, 1, raw, (), info)
++        if sink == "error":
++            output = events.scrub_error_text(raw)
++        elif sink == "event":
++            output = json.dumps(events._build_event_from_record(record))
++        else:
++            events._PlatformScrubFilter().filter(record)
++            output = logging.Formatter().format(record)
++        assert all(key not in output for key in KEYS + [new_key])
++    registry.load.assert_not_called()
++
++
++def test_runtime_scrubbing_survives_another_worker_style_reload(monkeypatch):
++    seed()
++    events._runtime_secret_values.clear()
++    registry.load()
++    assert all(key not in events.scrub_error_text(" ".join(KEYS)) for key in KEYS)
++
++
++@pytest.mark.parametrize("change", ["model", "key"])
++def test_invalid_environment_bindings_are_visible_and_repaired_individually(monkeypatch, change):
++    state = registry.public()
++    choice = {"provider_id": "env-upstream", "key_id": "environment", "model": "env-model"}
++    for purpose in ("qq", "sky", "rumination"):
++        state = registry.mutate(state["revision"], purpose, choice)
++    monkeypatch.setattr(registry.cfg, "UPSTREAM_MODEL" if change == "model" else "UPSTREAM_API_KEY",
++                        "new-env-model" if change == "model" else "")
++    state = registry.public()
++    for purpose in ("qq", "sky", "rumination"):
++        item = next(p for p in state["purposes"] if p["id"] == purpose)
++        assert item["selection"] == choice
++        assert item["current"]["available"] is False and item["current"]["error"]
++        with pytest.raises(registry.ConfigError):
++            registry.resolve(purpose)
++    # Unrelated provider additions must remain available while old bindings are invalid.
++    state = registry.mutate(state["revision"], "provider", {"name": "Repair", "base_url": "https://fixture.invalid/v1",
++        "models": ["model-a"], "keys": [{"name": "repair", "value": KEYS[0]}]})
++    provider = next(p for p in state["providers"] if not p["readonly"])
++    state = registry.mutate(state["revision"], "qq", bind(provider))
++    assert registry.resolve("qq").model == "model-a"
++    for purpose in ("sky", "rumination"):
++        state = registry.mutate(state["revision"], purpose, None)
++    assert all(p["current"]["available"] for p in state["purposes"])
++
++
++@pytest.mark.parametrize("damage", ["missing-row", "missing-table", "empty-file", "truncated", "json"])
++def test_failed_save_preserves_damaged_existing_store(damage):
++    seed()
++    if damage in ("missing-row", "missing-table", "json"):
++        with sqlite3.connect(registry._path()) as conn:
++            if damage == "missing-row": conn.execute("DELETE FROM model_config")
++            elif damage == "missing-table": conn.execute("DROP TABLE model_config")
++            else: conn.execute("UPDATE model_config SET value='{' WHERE id=1")
++    else:
++        registry._path().write_bytes(b"" if damage == "empty-file" else b"SQLite format 3\0broken")
++    before = registry._path().read_bytes()
++    with pytest.raises(registry.ConfigError): registry.load()
++    with pytest.raises(registry.ConfigError): registry.mutate(2, "chat", None)
++    assert registry._path().read_bytes() == before
++    with pytest.raises(registry.ConfigError): registry.load()
++
++
++def test_first_failed_creation_does_not_publish_empty_state():
++    with pytest.raises(registry.ConfigError): registry.mutate(2, "chat", None)
++    assert not registry._path().exists()
++    with pytest.raises(registry.ConfigError): registry.mutate(0, "provider", {})
++    assert not registry._path().exists()
++    assert list(registry._path().parent.glob(registry._path().name + ".*.tmp")) == []
++
++
++def test_concurrent_first_creation_only_publishes_one_valid_state():
++    def save(_):
++        try: return seed()[0]["revision"]
++        except registry.ConfigError as exc: return exc.status
++    with ThreadPoolExecutor(max_workers=4) as executor:
++        assert sorted(executor.map(save, range(4))) == [1, 409, 409, 409]
++    assert registry.load()["revision"] == 1
++    assert len(registry.load()["providers"]) == 1
+--- previous-review/tests/model_config_review_fixes.browser.cjs
++++ tests/model_config_review_fixes.browser.cjs
+@@ -0,0 +1,138 @@
++// Boundary regression UI tests against the isolated preview fixture only.
++const { chromium } = require('playwright');
++const assert = require('node:assert/strict');
++const fs = require('node:fs/promises');
++const path = require('node:path');
++const base = process.argv[2] || 'http://127.0.0.1:8820';
++const output = path.resolve(process.argv[3] || 'codex/临时验证/模型配置五项补修-20261026');
++const headers = { Authorization: 'Bearer local-model-preview' };
++const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
++
++(async () => {
++  const browser = await chromium.launch({ channel: 'msedge', headless: true });
++  const results = [], errors = [];
++  await fs.mkdir(output, { recursive: true });
++  try {
++    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
++    await context.route('**/*', route => new URL(route.request().url()).origin === base ? route.continue() : route.abort());
++    await context.addInitScript(() => localStorage.setItem('qi-token', 'local-model-preview'));
++    const page = await context.newPage();
++    page.on('pageerror', error => errors.push(error.message));
++    const state = async () => (await context.request.get(base + '/admin/api/model-config', { headers })).json();
++    let visits = 0;
++    const enter = async () => {
++      const loaded = page.waitForResponse(r => new URL(r.url()).pathname === '/admin/api/model-config' && r.request().method() === 'GET');
++      await page.goto(base + '/admin/index.html#/config?tab=api&probe=' + (++visits));
++      await loaded;
++      await page.locator('[data-model-purpose="chat"]').waitFor();
++    };
++    const frames = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
++    const row = purpose => page.locator(`[data-model-purpose="${purpose}"]`).locator('..').locator('..');
++
++    for (const mode of ['general', 'api-general-api', 'navigate']) {
++      process.stdout.write('read scenario: ' + mode + '\n');
++      await enter();
++      const release = deferred(), started = deferred(), handled = deferred();
++      let once = true;
++      const hold = async route => {
++        if (!once) return route.continue();
++        once = false;
++        const response = await route.fetch();
++        started.resolve();
++        await release.promise;
++        try { await route.fulfill({ response }); }
++        catch (error) { if (!/abort|closed|handled|intercept/i.test(error.message)) throw error; }
++        finally { handled.resolve(); }
++      };
++      await page.route('**/admin/api/model-config', hold);
++      await page.locator('[data-model-purpose="chat"]').click();
++      await started.promise;
++      if (mode === 'navigate') await page.goto(base + '/admin/index.html#/digest');
++      else {
++        await page.getByRole('tab', { name: '常规配置', exact: true }).click();
++        if (mode === 'api-general-api') {
++          await page.getByRole('tab', { name: 'API配置', exact: true }).click();
++          await page.locator('[data-model-purpose="chat"]').waitFor();
++        }
++      }
++      release.resolve();
++      await handled.promise;
++      await frames();
++      assert.equal(await page.getByRole('dialog').count(), 0, mode + ' must discard the old open action');
++      await page.unroute('**/admin/api/model-config', hold);
++      results.push('late read discarded: ' + mode);
++    }
++
++    let current = await state();
++    const created = await context.request.put(base + '/admin/api/model-config/providers', { headers, data: {
++      revision: current.revision, value: { name: 'Boundary fixture', base_url: 'https://boundary.invalid/v1',
++        models: ['boundary-a', 'boundary-b'], keys: [{ name: 'Boundary key', value: 'opaque_boundary_fixture_987654' }] } } });
++    assert.equal(created.status(), 200);
++    current = await created.json();
++    const provider = current.providers.find(p => p.name === 'Boundary fixture');
++
++    for (const mode of ['cancel', 'close', 'Escape', 'mask', 'general-pending', 'remount-before-commit', 'unknown-response', 'out-of-order']) {
++      process.stdout.write('save scenario: ' + mode + '\n');
++      await enter();
++      current = await state();
++      const target = current.purposes.find(p => p.id === 'chat').current.model === 'boundary-a' ? 'boundary-b' : 'boundary-a';
++      await page.locator('[data-model-purpose="chat"]').click();
++      const dialog = page.getByRole('dialog');
++      await dialog.locator('.retro-select-field').nth(0).click();
++      await page.getByRole('option', { name: 'Boundary fixture', exact: true }).click();
++      await dialog.locator('.retro-select-field').nth(2).click();
++      await page.getByRole('option', { name: target, exact: true }).click();
++      const release = deferred(), started = deferred(), delivered = deferred();
++      const hold = async route => {
++        let response;
++        if (mode !== 'remount-before-commit') response = await route.fetch();
++        started.resolve();
++        await release.promise;
++        if (!response) response = await route.fetch();
++        assert.equal(response.status(), 200);
++        try {
++          if (mode === 'unknown-response') await route.fulfill({ status: 200, contentType: 'application/json', body: '{' });
++          else await route.fulfill({ response });
++        } finally { delivered.resolve(); }
++      };
++      await page.route('**/admin/api/model-config/routes/chat', hold);
++      await dialog.locator('[data-model-save]').click();
++      await started.promise;
++      if (mode === 'close') await dialog.locator('.modal-close').click();
++      else if (mode === 'Escape') await page.keyboard.press('Escape');
++      else if (mode === 'mask') await page.locator('.modal-mask').click({ position: { x: 4, y: 4 } });
++      else if (mode === 'remount-before-commit') {
++        await page.goto(base + '/admin/index.html#/digest');
++        await enter();
++      } else await dialog.locator('[data-model-cancel]').click();
++      if (mode === 'general-pending') await page.getByRole('tab', { name: '常规配置', exact: true }).click();
++      assert.match(await page.locator('[data-model-feedback]').innerText(), /保存|核对/);
++
++      if (mode === 'out-of-order') {
++        current = await state();
++        await context.request.put(base + '/admin/api/model-config/routes/qq', { headers, data: {
++          revision: current.revision, value: { provider_id: provider.id, key_id: provider.keys[0].id, model: target } } });
++        await page.locator('[data-model-refresh]').click();
++        await row('qq').filter({ hasText: target }).waitFor();
++      }
++      release.resolve();
++      await delivered.promise;
++      await page.unroute('**/admin/api/model-config/routes/chat', hold);
++      if (mode === 'general-pending') await page.locator('#config-section-1').filter({ hasText: target }).waitFor();
++      else await row('chat').filter({ hasText: target }).waitFor();
++      if (mode === 'unknown-response') assert.match(await page.locator('[data-model-feedback]').innerText(), /未确认/);
++      if (mode === 'out-of-order') assert.match(await row('qq').innerText(), new RegExp(target));
++      current = await state();
++      assert.equal(current.purposes.find(p => p.id === 'chat').current.model, target);
++      if (mode !== 'general-pending') await page.getByRole('tab', { name: '常规配置', exact: true }).click();
++      await page.locator('#config-section-1').filter({ hasText: target }).waitFor();
++      results.push('closed/pending save reconciled: ' + mode);
++    }
++    assert.deepEqual(errors, []);
++    await page.screenshot({ path: path.join(output, 'closed-save-general-fixed.png'), fullPage: true });
++    await enter();
++    await page.screenshot({ path: path.join(output, 'purpose-list-fixed.png'), fullPage: true });
++    await fs.writeFile(path.join(output, 'browser-fixes-results.json'), JSON.stringify({ results, page_errors: errors, source: 'isolated synthetic data, real management backend' }, null, 2));
++    process.stdout.write(JSON.stringify({ scenarios: results.length, page_errors: errors.length }) + '\n');
++  } finally { await browser.close(); }
++})().catch(error => { process.stderr.write(error.stack + '\n'); process.exitCode = 1; });

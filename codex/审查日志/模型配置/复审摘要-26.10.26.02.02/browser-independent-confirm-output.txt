@@ -1,0 +1,9 @@
+locator.click: Error: strict mode violation: getByRole('option', { name: 'Independent fixture', exact: true }) resolved to 2 elements:
+    1) <button type="button" role="option" tabindex="-1" data-index="2" aria-selected="false" aria-disabled="false" class="retro-select-option" data-value="4f768a02-765c-4bb0-8425-331d6292e138">…</button> aka getByRole('option', { name: 'Independent fixture' }).first()
+    2) <button type="button" role="option" tabindex="-1" data-index="3" aria-selected="false" aria-disabled="false" class="retro-select-option" data-value="f4e0c477-0346-4c81-a756-5a66aef642e8">…</button> aka getByRole('option', { name: 'Independent fixture' }).nth(1)
+
+Call log:
+  - waiting for getByRole('option', { name: 'Independent fixture', exact: true })
+
+    at edit (C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\codex\审查日志\模型配置\复审摘要-26.10.26.02.02\browser_independent.cjs:30:84)
+    at async C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\codex\审查日志\模型配置\复审摘要-26.10.26.02.02\browser_independent.cjs:54:18

@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 
 from .config import cfg
+from . import model_config
 from .db import get_client
 from .logging_events import credential_scope, provider_label
 from .memory_continuity_schema import AUTOMATIC_TYPES, SCHEMA_VERSION, THREAD_STATES, ContinuityDataError, validate_continuity_data
@@ -124,26 +125,11 @@ class ShadowPreviewError(RuntimeError):
 
 
 def _continuity_analysis_configured() -> bool:
-    """Continuity extraction uses the independent CONTINUITY_* provider only."""
-    return bool(
-        cfg.CONTINUITY_BASE_URL.strip()
-        and cfg.CONTINUITY_API_KEY.strip()
-        and cfg.CONTINUITY_MODEL.strip()
-    )
+    return model_config.configured("continuity")
 
 
 def _analysis_configured() -> bool:
-    """Legacy compatibility alias checking ANALYSIS_* only.
-
-    Kept because other modules still import it. The continuity extraction
-    paths must call :func:`_continuity_analysis_configured` instead; this
-    function never reports the independent continuity provider.
-    """
-    return bool(
-        cfg.ANALYSIS_BASE_URL.strip()
-        and cfg.ANALYSIS_API_KEY.strip()
-        and cfg.ANALYSIS_MODEL.strip()
-    )
+    return model_config.configured("analysis")
 
 
 def _client():
@@ -493,6 +479,7 @@ def _response_diagnostic(
     )
 
 
+@model_config.pinned
 def extract_continuity_candidates(
     conversation: str,
     evidence_times: dict[int, str | None],
@@ -505,12 +492,13 @@ def extract_continuity_candidates(
 
     # TASK-02：实际 SDK 调用边界绑定 CONTINUITY 凭证身份——连续感快速
     # 路径与 Shadow Preview 共用同一把独立密钥，失败事件按实际调用归属。
+    upstream = model_config.resolve("continuity")
     with credential_scope(
-        "continuity", provider_label(cfg.CONTINUITY_BASE_URL), cfg.CONTINUITY_API_KEY
+        "continuity", provider_label(upstream.base_url), upstream.api_key
     ):
-        url = f"{cfg.CONTINUITY_BASE_URL.rstrip('/')}/chat/completions"
+        url = f"{upstream.base_url.rstrip('/')}/chat/completions"
         request_body = {
-            "model": cfg.CONTINUITY_MODEL,
+            "model": upstream.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"<chat_log>\n{conversation}\n</chat_log>"},
@@ -520,7 +508,7 @@ def extract_continuity_candidates(
             "temperature": 0.1,
         }
         headers = {
-            "Authorization": f"Bearer {cfg.CONTINUITY_API_KEY}",
+            "Authorization": f"Bearer {upstream.api_key}",
             "Content-Type": "application/json",
         }
         try:
@@ -577,6 +565,7 @@ def _extract_shadow_candidates(
     )
 
 
+@model_config.pinned
 def run_shadow_preview(max_messages: int = DEFAULT_MAX_MESSAGES, max_chars: int = DEFAULT_MAX_CHARS) -> dict[str, Any]:
     assistant_id = resolve_shadow_assistant_id()
     messages, warnings = (

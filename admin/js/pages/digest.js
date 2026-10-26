@@ -113,6 +113,7 @@ export default {
             <button class="btn btn-secondary" data-act="refresh">${icon('refresh')}刷新</button>
           </div>
           <div id="view-continuity">
+            <div class="toolbar model-config-entry"><a class="btn btn-secondary btn-sm" href="#/config?tab=api&purpose=continuity">${icon('gear')}调整 API 配置</a></div>
             <div id="digest-warning"></div>
             <div class="toolbar">
               <label class="inline">批次消息数（1-100）<input id="digest-limit" type="number" min="1" max="100" value="60" style="width:90px"></label>
@@ -126,6 +127,7 @@ export default {
             <div id="continuity-runs">${loading()}</div>
           </div>
           <div id="view-rumination" hidden>
+            <div class="toolbar model-config-entry"><a class="btn btn-secondary btn-sm" href="#/config?tab=api&purpose=rumination">${icon('gear')}调整 API 配置</a></div>
             <div id="rumination-warning"></div>
             <div class="toolbar">
               <span class="muted text-sm" data-help-note="总结调度">独立游标 · 每日一次 · 批次 60～120 条</span>
@@ -221,7 +223,7 @@ export default {
       warning.innerHTML = data.analysis_configured ? '' : `
         <div class="banner banner-danger">
           <span class="banner-ico">${icon('alert')}</span>
-          <div><strong>连续感提取模型未配置。</strong>请在 qi-gateway 服务环境配置相应密钥后重新部署；配置完成前预览与执行按钮保持禁用。</div>
+          <div><strong>连续感提取模型未配置。</strong>请通过“调整 API 配置”选择供应商、Key 和模型；配置完成前预览与执行按钮保持禁用。</div>
         </div>`;
       this.renderStatusCard(data);
       this.renderRuns(data.recent_runs || []);
@@ -260,7 +262,7 @@ export default {
         warning.innerHTML = `
           <div class="banner">
             <span class="banner-ico">${icon('info')}</span>
-            <div><strong>反刍提取模型未配置。</strong>请配置 RUMINATION_*（或回退的 CONTINUITY_*）密钥后重新部署；配置完成前执行按钮保持禁用。</div>
+            <div><strong>反刍提取模型未配置。</strong>请通过“调整 API 配置”选择供应商、Key 和模型；配置完成前执行按钮保持禁用。</div>
           </div>`;
       }
       this.renderRuminationStatus(data);

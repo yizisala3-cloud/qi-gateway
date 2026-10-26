@@ -9,7 +9,7 @@ import { initHelpNotes } from './lib/help_notes.js?v=20261025-console-latency-r1
 import { initScrollbars } from './lib/scrollbars.js?v=20261025-console-latency-r1';
 
 const DEFAULT_ROUTE = 'planning';
-const ASSET_VERSION = '20261025-console-latency-r1';
+const ASSET_VERSION = '20261026-model-config-rows-r5';
 
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);
@@ -33,6 +33,12 @@ function initDivider() {
   applyDivider(DIVIDER_VARIANTS.includes(saved) ? saved : 'wisteria');
 }
 function isAuthed() { return !!getToken(); }
+function isUnauthorized(error) { return error.status === 401 || error.status === 403; }
+
+async function authenticate() {
+  const result = await gw('/admin/api/auth');
+  if (result.authenticated !== true) throw new Error('管理鉴权响应无效，请稍后重试。');
+}
 
 function showLogin(message = '') {
   document.getElementById('login-page').style.display = 'flex';
@@ -44,15 +50,20 @@ function showApp() {
   document.getElementById('layout').style.display = 'flex';
 }
 
-async function tryLogin(token) {
+async function tryLogin(token, saved = false) {
   setToken(token);
   try {
-    await gw('/status');
+    await authenticate();
     showApp(); renderSidebar();
     if (!location.hash) location.hash = '#/' + DEFAULT_ROUTE;
     await route(); refreshStatus(true);
   } catch (e) {
-    clearToken(); showLogin(`登录失败：${e.message}`);
+    // A connection or service failure is not evidence that this token is invalid.
+    if (isUnauthorized(e)) clearToken();
+    const message = isUnauthorized(e)
+      ? (saved ? '已保存的 Token 被拒绝' : '登录失败')
+      : '暂时无法验证登录，请重试';
+    showLogin(`${message}：${e.message}`);
   }
 }
 
@@ -107,7 +118,7 @@ async function route() {
     await mod.mount(wrap, params);
   } catch (e) {
     if (seq !== routeSeq) return;
-    if (String(e.message).startsWith('401')) {
+    if (isUnauthorized(e)) {
       clearToken(); showLogin('登录已过期，请重新输入网关 Token。');
       return;
     }
@@ -120,13 +131,13 @@ async function refreshStatus(authorized = false) {
   const dot = document.getElementById('status-dot');
   if (!dot) return;
   try {
-    if (!authorized) await gw('/status');
+    if (!authorized) await authenticate();
     dot.innerHTML = '<span class="dot dot-green"></span>在线';
     dot.className = 'status-chip online';
   } catch (e) {
-    dot.innerHTML = '<span class="dot dot-red"></span>未授权';
+    dot.innerHTML = `<span class="dot dot-red"></span>${isUnauthorized(e) ? '未授权' : '连接异常'}`;
     dot.className = 'status-chip offline';
-    if (e.message.startsWith('401')) {
+    if (isUnauthorized(e)) {
       clearToken(); showLogin('登录已过期，请重新输入网关 Token。');
     }
   }
@@ -161,13 +172,7 @@ async function boot() {
   document.getElementById('sidebar-backdrop')?.addEventListener('click', closeSidebar);
   window.addEventListener('hashchange', route);
   if (isAuthed()) {
-    try {
-      await gw('/status'); showApp(); renderSidebar();
-      if (!location.hash) location.hash = '#/' + DEFAULT_ROUTE;
-      await route(); refreshStatus(true);
-    } catch (e) {
-      clearToken(); showLogin(`已保存的 Token 被拒绝：${e.message}`);
-    }
+    await tryLogin(getToken(), true);
   } else showLogin();
 }
 boot();

@@ -1,0 +1,122 @@
+[
+  {
+    "path": "gateway/model_config.py",
+    "sha256": "7ff90aa6211f6f6200f4b12a0069e3bdaa671385437ea67585430e0b2d8dd59d",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "gateway/model_config_api.py",
+    "sha256": "fe41891307998abdaf56af7ea2e3abf2b36b9dc7186e3b914f78f80356af271e",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "gateway/embedding_config.py",
+    "sha256": "e88b06534e48563391b05678e62ab02e8050be121f5b15c0318a64c8cba8882d",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "gateway/main.py",
+    "sha256": "9ef6b0062c778d8685fac68e3bc303c2299ee863aa635c6e2f56abfba9681f11",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "gateway/credential_api.py",
+    "sha256": "9de8ad4c10b248b9b16df4671cdee585d9346a540b3756626581033299fff16a",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "gateway/qqbot_model.py",
+    "sha256": "293a4bd85d6211ba05e5a5b28f18361d2200f53f9755028ab97789bc9daa450f",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "gateway/memory_extract.py",
+    "sha256": "d06ae149f22a2857bdf4e1509d7b7573616a662220ff8a1d6b37c2d6c720c26d",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "gateway/memory_search.py",
+    "sha256": "8a703013aa8588bf84b5de1297e42b03535fc85735d634df34e829bd9969dffc",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "gateway/memory_continuity.py",
+    "sha256": "8ed6d7a9cfb1381c9132b39e97e74a440a2c0b07a444e0337cd69e9176f1d08c",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "gateway/memory_continuity_shadow.py",
+    "sha256": "0b89a7e947aa0677b91357a5d718b202707b330da8ecbaa754fcec48a20154bb",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "gateway/memory_rumination.py",
+    "sha256": "eff421ca88bee17ed8537c122d80b2b0dc5fdf1c0103e2700d074deb55f36ffd",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "admin/js/lib/model_settings.js",
+    "sha256": "b8e380e5e3dcf74b698c84ba5b0f6badf6e33006072b8cb192a417c797371be5",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "admin/js/pages/config.js",
+    "sha256": "dd58be4d0141ce278acfef6f7449f371e137a7e6765cfc2f969ab66d531ca1f7",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "admin/js/pages/digest.js",
+    "sha256": "cce0339f07c5183d29c640f8b7bf71b1616cc45509e7084c0ba7755f77f03e86",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "admin/js/app.js",
+    "sha256": "416e2f33f559f42e4c85e8a1dbfc295699686550f2824cf5e9f01ce648a0b58e",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "admin/index.html",
+    "sha256": "d6874898e22221ac12b3c09f323d4c5a50ae39753763d31cde03fb29221cb693",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "admin/css/style.css",
+    "sha256": "9f87cc0a9cf595ea69d55cfb6bde8aa1d9418c7c9f53f70d30abc6180362b3d7",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": ".env.example",
+    "sha256": "9cecf158d0de418bdddd03be3ea01799ca6d84a1fbc58e0e98ccfa40953b60da",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": ".gitignore",
+    "sha256": "286f369cd02127c8c984d5decfa220e76b0a69224bd53161193c738c9e6b4e1f",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "README.md",
+    "sha256": "ea5018eecaab5493a4a1386f560d22d26e9c3f9cd1fad233d77c38a2b36bdacd",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "tests/test_model_config.py",
+    "sha256": "b14d60033ebaaadbab1cadd0fa45a8f49ab1fad1eb666982f08941d036568be9",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "tests/model_config.browser.cjs",
+    "sha256": "8a1755d11be6259bf16f0cfb939eb6ba26ba872a1c7303483c9ad89658cfa1e7",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "tools/preview_model_config.py",
+    "sha256": "d9ad01f2c90b55a3813f986f405005499e68a5ef96b86732d292b3832d87bcf3",
+    "matches_implementation_manifest": true
+  },
+  {
+    "path": "gateway/logging_events.py",
+    "sha256": "c94fb360037ec41e9a00a542a06b77b0a852bbea5ad4658cfae27be8c123025a",
+    "matches_implementation_manifest": null
+  }
+]

@@ -1,0 +1,449 @@
+--- previous-review/gateway/credential_api.py
++++ gateway/credential_api.py
+@@ -50,6 +50,13 @@
+     return JSONResponse(
+         {"error": message, "error_code": code}, status_code=status, headers=_NO_STORE
+     )
++
++
++async def management_auth(request: Request) -> JSONResponse:
++    """Check console identity without depending on model or database readiness."""
++    if not _authorized(request):
++        return _error("未登录或令牌无效", 401, "unauthorized")
++    return JSONResponse({"authenticated": True}, headers=_NO_STORE)
+ 
+ 
+ # ── 白名单（固定；客户端不能读任意配置属性） ─────────────────────
+@@ -230,6 +237,7 @@
+ 
+ 
+ credential_api_routes = [
++    Route("/admin/api/auth", management_auth, methods=["GET"]),
+     Route("/admin/api/config/credentials", credentials_metadata, methods=["GET"]),
+     Route(
+         "/admin/api/config/credentials/{credential_id}/reveal",
+--- previous-review/admin/js/lib/model_settings.js
++++ admin/js/lib/model_settings.js
+@@ -185,18 +185,19 @@
+     const provider = current.providers.find(p => p.id === id);
+     if (id && (!provider || provider.readonly)) return;
+     const entry = dialog({ title: provider ? '编辑供应商' : '添加供应商', wide: true, body: `
+-      <div class="field"><label>供应商名称<input data-provider-name maxlength="120" value="${esc(provider?.name || '')}" autocomplete="off"></label></div>
+-      <div class="field"><label>API 地址<input data-provider-url value="${esc(provider?.base_url || '')}" placeholder="https://api.example.com/v1" autocomplete="off"></label></div>
++      <div class="model-provider-form">
++      <div class="field"><label>供应商名称<input type="text" data-provider-name maxlength="120" value="${esc(provider?.name || '')}" autocomplete="off"></label></div>
++      <div class="field"><label>API 地址<input type="text" data-provider-url value="${esc(provider?.base_url || '')}" placeholder="https://api.example.com/v1" autocomplete="off"></label></div>
+       <div class="field"><label>模型名称，每行一个<textarea data-provider-models rows="3">${esc((provider?.models || []).join('\n'))}</textarea></label></div>
+       <div class="field"><label>API Keys</label><div data-provider-keys></div><button class="btn btn-secondary btn-sm" data-provider-add-key>添加 Key</button><p class="muted text-sm">已有 Key 留空保留；填写新值后替换。正在使用的 Key 和模型不能移除。</p></div>
+-      <div class="model-config-error" data-model-error role="alert"></div>`,
++      <div class="model-config-error" data-model-error role="alert"></div></div>`,
+       footer: '<button class="btn btn-secondary" data-model-cancel>取消</button><button class="btn btn-primary" data-model-save>保存供应商</button>' });
+     const keys = entry.root.querySelector('[data-provider-keys]');
+     function addKey(key = {}) {
+       const row = document.createElement('div');
+       row.className = 'model-config-key-row';
+       row.dataset.keyId = key.id || '';
+-      row.innerHTML = `<input data-key-alias aria-label="Key 别名" placeholder="Key 别名" value="${esc(key.name || '')}" maxlength="120" autocomplete="off"><input type="password" data-key-secret aria-label="API Key 值" placeholder="${key.id ? '留空保留现有 Key' : '填写 API Key'}" autocomplete="new-password"><button class="btn btn-quiet btn-sm" data-key-remove aria-label="移除这把 Key">${icon('x')}</button>`;
++      row.innerHTML = `<input type="text" data-key-alias aria-label="Key 别名" placeholder="Key 别名" value="${esc(key.name || '')}" maxlength="120" autocomplete="off"><input type="password" data-key-secret aria-label="API Key 值" placeholder="${key.id ? '留空保留现有 Key' : '填写 API Key'}" autocomplete="new-password"><button class="btn btn-quiet btn-sm" data-key-remove aria-label="移除这把 Key">${icon('x')}</button>`;
+       row.querySelector('[data-key-remove]').onclick = () => { row.querySelector('[data-key-secret]').value = ''; row.remove(); };
+       keys.appendChild(row);
+     }
+--- previous-review/admin/js/pages/config.js
++++ admin/js/pages/config.js
+@@ -346,7 +346,7 @@
+       return;
+     }
+     try {
+-      const { createModelSettings } = await import('../lib/model_settings.js?v=20261026-model-config-fixes-r2');
++      const { createModelSettings } = await import('../lib/model_settings.js?v=20261026-model-config-inputs-r4');
+       if (this.qqMountToken !== token || this.root !== root || this.activeConfigTab !== 'api' || this.apiTabEpoch !== tabEpoch) return;
+       if (!this.apiSettings) {
+         const instance = createModelSettings(root.querySelector('[data-config-panel="api"]'), {
+--- previous-review/admin/js/app.js
++++ admin/js/app.js
+@@ -9,7 +9,7 @@
+ import { initScrollbars } from './lib/scrollbars.js?v=20261025-console-latency-r1';
+ 
+ const DEFAULT_ROUTE = 'planning';
+-const ASSET_VERSION = '20261026-model-config-fixes-r2';
++const ASSET_VERSION = '20261026-model-config-inputs-r4';
+ 
+ function applyTheme(t) {
+   document.documentElement.setAttribute('data-theme', t);
+@@ -33,6 +33,12 @@
+   applyDivider(DIVIDER_VARIANTS.includes(saved) ? saved : 'wisteria');
+ }
+ function isAuthed() { return !!getToken(); }
++function isUnauthorized(error) { return error.status === 401 || error.status === 403; }
++
++async function authenticate() {
++  const result = await gw('/admin/api/auth');
++  if (result.authenticated !== true) throw new Error('管理鉴权响应无效，请稍后重试。');
++}
+ 
+ function showLogin(message = '') {
+   document.getElementById('login-page').style.display = 'flex';
+@@ -44,15 +50,20 @@
+   document.getElementById('layout').style.display = 'flex';
+ }
+ 
+-async function tryLogin(token) {
++async function tryLogin(token, saved = false) {
+   setToken(token);
+   try {
+-    await gw('/status');
++    await authenticate();
+     showApp(); renderSidebar();
+     if (!location.hash) location.hash = '#/' + DEFAULT_ROUTE;
+     await route(); refreshStatus(true);
+   } catch (e) {
+-    clearToken(); showLogin(`登录失败：${e.message}`);
++    // A connection or service failure is not evidence that this token is invalid.
++    if (isUnauthorized(e)) clearToken();
++    const message = isUnauthorized(e)
++      ? (saved ? '已保存的 Token 被拒绝' : '登录失败')
++      : '暂时无法验证登录，请重试';
++    showLogin(`${message}：${e.message}`);
+   }
+ }
+ 
+@@ -107,7 +118,7 @@
+     await mod.mount(wrap, params);
+   } catch (e) {
+     if (seq !== routeSeq) return;
+-    if (String(e.message).startsWith('401')) {
++    if (isUnauthorized(e)) {
+       clearToken(); showLogin('登录已过期，请重新输入网关 Token。');
+       return;
+     }
+@@ -120,13 +131,13 @@
+   const dot = document.getElementById('status-dot');
+   if (!dot) return;
+   try {
+-    if (!authorized) await gw('/status');
++    if (!authorized) await authenticate();
+     dot.innerHTML = '<span class="dot dot-green"></span>在线';
+     dot.className = 'status-chip online';
+   } catch (e) {
+-    dot.innerHTML = '<span class="dot dot-red"></span>未授权';
++    dot.innerHTML = `<span class="dot dot-red"></span>${isUnauthorized(e) ? '未授权' : '连接异常'}`;
+     dot.className = 'status-chip offline';
+-    if (e.message.startsWith('401')) {
++    if (isUnauthorized(e)) {
+       clearToken(); showLogin('登录已过期，请重新输入网关 Token。');
+     }
+   }
+@@ -161,13 +172,7 @@
+   document.getElementById('sidebar-backdrop')?.addEventListener('click', closeSidebar);
+   window.addEventListener('hashchange', route);
+   if (isAuthed()) {
+-    try {
+-      await gw('/status'); showApp(); renderSidebar();
+-      if (!location.hash) location.hash = '#/' + DEFAULT_ROUTE;
+-      await route(); refreshStatus(true);
+-    } catch (e) {
+-      clearToken(); showLogin(`已保存的 Token 被拒绝：${e.message}`);
+-    }
++    await tryLogin(getToken(), true);
+   } else showLogin();
+ }
+ boot();
+--- previous-review/admin/index.html
++++ admin/index.html
+@@ -5,7 +5,7 @@
+ <meta name="viewport" content="width=device-width, initial-scale=1.0">
+ <title>qi-dashboard</title>
+ <link rel="icon" href="/admin/assets/lily-medallion.png">
+-<link rel="stylesheet" href="/admin/css/style.css?v=20261026-model-config-r1&amp;sidebar=20261010-candle-motion2&amp;planning=20261017-time-label-align">
++<link rel="stylesheet" href="/admin/css/style.css?v=20261026-model-config-inputs-r4&amp;sidebar=20261010-candle-motion2&amp;planning=20261017-time-label-align">
+ </head>
+ <body>
+ <div class="app" id="app">
+@@ -75,6 +75,6 @@
+ <!-- 备忘录 Markdown 依赖（固定版本随项目交付；window.marked / window.DOMPurify） -->
+ <script src="/admin/assets/vendor/marked-12.0.2.min.js"></script>
+ <script src="/admin/assets/vendor/purify-3.1.6.min.js"></script>
+-<script type="module" src="/admin/js/app.js?v=20261026-model-config-fixes-r2"></script>
++<script type="module" src="/admin/js/app.js?v=20261026-model-config-inputs-r4"></script>
+ </body>
+ </html>
+--- previous-review/admin/css/style.css
++++ admin/css/style.css
+@@ -80,7 +80,10 @@
+ .model-config-summary { color: var(--ink-soft); margin: 4px 0; overflow-wrap: anywhere; }
+ .model-config-url { overflow-wrap: anywhere; }
+ .model-config-actions { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+-.model-config-key-row { display: grid; grid-template-columns: minmax(90px, 1fr) minmax(130px, 2fr) auto; gap: 8px; margin: 8px 0; }
++.model-provider-form .field > label { display: grid; gap: 6px; margin-bottom: 0; }
++.model-provider-form :is(input, textarea) { min-width: 0; font-weight: 400; }
++.model-provider-form input { min-height: 38px; }
++.model-config-key-row { display: grid; grid-template-columns: minmax(90px, 1fr) minmax(130px, 2fr) auto; align-items: center; gap: 8px; margin: 8px 0; }
+ .model-config-key-row input { width: 100%; min-width: 0; }
+ .model-config-error { color: var(--red); overflow-wrap: anywhere; }
+ .model-config-entry { margin: 0 0 12px; }
+@@ -796,7 +799,7 @@
+ label { font-size: 12.5px; color: var(--ink-soft); }
+ .field { margin-bottom: 14px; }
+ .field > label { display: block; margin-bottom: 5px; font-weight: 600; }
+-input[type="text"], input[type="password"], input[type="number"], input[type="search"], textarea, select {
++input:not([type]), input[type="text"], input[type="password"], input[type="number"], input[type="search"], textarea, select {
+   width: 100%;
+   background: var(--paper-card);
+   border: 1px solid var(--gold-faint);
+--- previous-review/tools/preview_model_config.py
++++ tools/preview_model_config.py
+@@ -23,8 +23,11 @@
+     if path == "/health":
+         return JSONResponse({"status": "ok", "uptime": 3600, "phase": "local-preview"})
+     if path == "/status":
+-        from gateway.model_config import resolve
+-        route = resolve("chat")
++        from gateway.model_config import ConfigError, resolve
++        try:
++            route = resolve("chat")
++        except ConfigError as exc:
++            return JSONResponse({"error": str(exc)}, status_code=exc.status)
+         return JSONResponse({"upstream_base_url": route.base_url, "upstream_model": route.model,
+                              "phase": "本地合成数据", "supabase": {}, "bg_tasks": 0})
+     if path == "/admin/api/memory-continuity/status":
+@@ -68,7 +71,11 @@
+     parser.add_argument("--port", type=int, default=8797)
+     parser.add_argument("--store", required=True)
+     parser.add_argument("--demo", action="store_true", help="Seed synthetic providers for visual review")
++    parser.add_argument("--invalid-purpose", action="append", choices=("chat", "qq", "sky"), default=[],
++                        help="Simulate a saved environment model becoming unavailable")
+     args = parser.parse_args()
++    if args.demo and args.invalid_purpose:
++        parser.error("--demo and --invalid-purpose use separate preview stores")
+     os.environ["MODEL_CONFIG_PATH"] = str(Path(args.store).resolve())
+     for name in vars(type(cfg)):
+         if name.endswith(("_API_KEY", "_TOKEN", "_SECRET_KEY", "_SERVICE_ROLE_KEY", "_SECRET")):
+@@ -83,6 +90,14 @@
+         setattr(cfg, prefix + "_MODEL", "preview-" + prefix.lower())
+     if args.demo:
+         seed_demo()
++    if args.invalid_purpose:
++        from gateway import model_config
++        state = model_config.public()
++        if not state["revision"]:
++            for purpose in args.invalid_purpose:
++                state = model_config.mutate(state["revision"], purpose, {
++                    "provider_id": "env-upstream", "key_id": "environment", "model": cfg.UPSTREAM_MODEL})
++        cfg.UPSTREAM_MODEL = "preview-upstream-after-update"
+     app = Starlette(routes=[*model_config_routes, *credential_api_routes,
+                            Mount("/admin", StaticFiles(directory=ROOT / "admin", html=True)),
+                            Route("/", preview_entry),
+--- HEAD/tools/preview_gateway_logs.cjs
++++ tools/preview_gateway_logs.cjs
+@@ -50,6 +50,7 @@
+     if (url.pathname === '/health') return json(response, { status: 'ok', phase: '本地测试预览', uptime: 7200 });
+     if (url.pathname === '/status' || url.pathname.startsWith('/admin/api/')) {
+       if (request.headers.authorization !== `Bearer ${TOKEN}`) return json(response, { error: '请使用本地预览令牌' }, 401);
++      if (url.pathname === '/admin/api/auth') return json(response, { authenticated: true });
+       if (url.pathname === '/status') return json(response, {
+         bg_tasks: 0, daily_running: false, upstream_base_url: 'https://api.example.com/v1',
+         upstream_model: 'preview-chat-model', supabase: { access_ok: true, key_mode: '测试数据', elevated_active: false },
+--- /dev/null
++++ tests/test_console_management_auth.py
+@@ -0,0 +1,75 @@
++"""Console identity is independent of model readiness and configuration storage."""
++from unittest import mock
++
++import pytest
++from starlette.applications import Starlette
++from starlette.routing import Route
++from starlette.testclient import TestClient
++
++from gateway import credential_api, model_config
++from gateway.model_config_api import model_config_routes
++
++TOKEN = "synthetic-console-auth-987654"
++
++
++@pytest.fixture(autouse=True)
++def isolated(tmp_path, monkeypatch):
++    monkeypatch.setenv("MODEL_CONFIG_PATH", str(tmp_path / "models.sqlite3"))
++    monkeypatch.setattr(credential_api.cfg, "GATEWAY_TOKEN", TOKEN)
++    for prefix in ("UPSTREAM", "ANALYSIS", "CONTINUITY", "RUMINATION"):
++        for suffix, value in (("BASE_URL", "https://fixture.invalid/v1"),
++                              ("API_KEY", "synthetic-fixture-secret-987654"), ("MODEL", "old-model")):
++            monkeypatch.setattr(model_config.cfg, prefix + "_" + suffix, value)
++
++
++def test_authentication_has_no_model_or_database_dependency():
++    with mock.patch.object(model_config, "load", side_effect=AssertionError("authentication must not read model storage")) as load:
++        with TestClient(Starlette(routes=credential_api.credential_api_routes)) as client:
++            response = client.get("/admin/api/auth", headers={"Authorization": "Bearer " + TOKEN})
++    assert response.status_code == 200
++    assert response.json() == {"authenticated": True}
++    assert response.headers["cache-control"] == "no-store"
++    assert TOKEN not in response.text
++    load.assert_not_called()
++
++
++@pytest.mark.parametrize("value", [None, "Bearer wrong-token", "Bearer "])
++def test_authentication_rejects_missing_and_invalid_tokens(value):
++    headers = {} if value is None else {"Authorization": value}
++    with TestClient(Starlette(routes=credential_api.credential_api_routes)) as client:
++        response = client.get("/admin/api/auth", headers=headers)
++    assert response.status_code == 401
++    assert response.headers["cache-control"] == "no-store"
++
++
++def test_unconfigured_gateway_token_does_not_open_console(monkeypatch):
++    monkeypatch.setattr(credential_api.cfg, "GATEWAY_TOKEN", "")
++    with TestClient(Starlette(routes=credential_api.credential_api_routes)) as client:
++        assert client.get("/admin/api/auth", headers={"Authorization": "Bearer " + TOKEN}).status_code == 401
++
++
++@pytest.mark.parametrize("purposes", [("chat",), ("chat", "qq", "sky")])
++@pytest.mark.parametrize("change", ["model", "key"])
++def test_actual_status_failure_does_not_block_management_identity_or_repair(monkeypatch, purposes, change):
++    from gateway import main
++    state = model_config.public()
++    for purpose in purposes:
++        state = model_config.mutate(state["revision"], purpose, {
++            "provider_id": "env-upstream", "key_id": "environment", "model": "old-model"})
++    monkeypatch.setattr(model_config.cfg, "UPSTREAM_MODEL" if change == "model" else "UPSTREAM_API_KEY",
++                        "new-model" if change == "model" else "")
++    monkeypatch.setattr(main.db, "get_client_status", lambda: {"elevated_active": False})
++    routes = [*credential_api.credential_api_routes, *model_config_routes, Route("/status", main.status)]
++    with TestClient(Starlette(routes=routes)) as client:
++        headers = {"Authorization": "Bearer " + TOKEN}
++        assert client.get("/status", headers=headers).status_code == 409
++        assert client.get("/admin/api/auth", headers=headers).status_code == 200
++        metadata = client.get("/admin/api/model-config", headers=headers).json()
++        assert all(not p["current"]["available"] for p in metadata["purposes"] if p["id"] in purposes)
++        for purpose in purposes:
++            response = client.put("/admin/api/model-config/routes/" + purpose, headers=headers,
++                                  json={"revision": metadata["revision"], "value": None})
++            assert response.status_code == 200
++            metadata = response.json()
++        assert client.get("/status", headers=headers).status_code == 200
++    assert all(p["selection"] is None for p in metadata["purposes"])
+--- /dev/null
++++ tests/console_management_auth.browser.cjs
+@@ -0,0 +1,123 @@
++// Actual shell login regression; use isolated --invalid-purpose preview stores.
++const { chromium } = require('playwright');
++const assert = require('node:assert/strict');
++const fs = require('node:fs/promises');
++const path = require('node:path');
++const bases = [process.argv[2] || 'http://127.0.0.1:8860', process.argv[3] || 'http://127.0.0.1:8861'];
++const output = path.resolve(process.argv[4] || 'codex/临时验证/模型配置登录与缓存补修-20261026');
++const token = 'local-model-preview';
++const headers = { Authorization: 'Bearer ' + token };
++
++(async () => {
++  const browser = await chromium.launch({ channel: 'msedge', headless: true });
++  const results = [], errors = [];
++  await fs.mkdir(output, { recursive: true });
++  try {
++    const contextFor = async (base, saved) => {
++      const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
++      await context.route('**/*', route => new URL(route.request().url()).origin === base ? route.continue() : route.abort());
++      if (saved) await context.addInitScript(value => localStorage.setItem('qi-token', value), saved);
++      const page = await context.newPage();
++      page.on('pageerror', error => errors.push(error.message));
++      return { context, page };
++    };
++    const enter = async (page, base) => page.goto(base + '/admin/index.html#/config?tab=api');
++    const ready = async page => {
++      await page.locator('[data-model-purpose="chat"]').waitFor();
++      assert.equal(await page.locator('#login-page').isVisible(), false);
++      assert.equal(await page.evaluate(() => localStorage.getItem('qi-token')), token);
++    };
++    for (const [index, base] of bases.entries()) {
++      const { context, page } = await contextFor(base, token);
++      const metadata = async () => (await context.request.get(base + '/admin/api/model-config', { headers })).json();
++      const before = await metadata();
++      const invalid = before.purposes.filter(p => p.current.available === false).map(p => p.id).sort();
++      assert.deepEqual(invalid, index ? ['chat', 'qq', 'sky'] : ['chat']);
++      assert.equal((await context.request.get(base + '/status', { headers })).status(), 409);
++      assert.equal((await context.request.get(base + '/admin/api/auth', { headers })).status(), 200);
++      await enter(page, base);
++      await ready(page);
++      await page.reload();
++      await ready(page);
++      assert.deepEqual((await metadata()).purposes.map(p => p.selection), before.purposes.map(p => p.selection));
++      results.push({ scenario: 'saved token boot and refresh', invalid });
++      const versions = await page.evaluate(() => ({
++        css: new URL(document.querySelector('link[rel="stylesheet"]').href).searchParams.get('v'),
++        script: new URL(document.querySelector('script[type="module"]').src).searchParams.get('v'),
++        stylesheetLoaded: !!document.querySelector('link[rel="stylesheet"]').sheet,
++      }));
++      assert.equal(versions.css, versions.script);
++      assert.equal(versions.stylesheetLoaded, true);
++      await context.close();
++
++      const manual = await contextFor(base);
++      await enter(manual.page, base);
++      await manual.page.locator('#login-page').waitFor();
++      await manual.page.locator('#login-input').fill(token);
++      await manual.page.locator('#login-btn').click();
++      await ready(manual.page);
++      await manual.page.getByRole('tab', { name: '常规配置', exact: true }).click();
++      await manual.page.getByText(/配置状态读取失败：409/).first().waitFor();
++      assert.equal(await manual.page.evaluate(() => localStorage.getItem('qi-token')), token);
++      await manual.page.getByRole('tab', { name: 'API配置', exact: true }).click();
++      await ready(manual.page);
++      const state = async () => (await manual.context.request.get(base + '/admin/api/model-config', { headers })).json();
++      assert.deepEqual((await state()).purposes.map(p => p.selection), before.purposes.map(p => p.selection));
++      await manual.page.screenshot({ path: path.join(output, `invalid-${index ? 'chat-qq-sky' : 'chat'}-accessible.png`), fullPage: true });
++      results.push({ scenario: 'manual login and visible business error', invalid, versions });
++      // Restore chat last: each successful edit must leave the remaining bindings intact.
++      for (const purpose of invalid.filter(p => p !== 'chat').concat('chat')) {
++        const previous = await state();
++        await manual.page.locator(`[data-model-purpose="${purpose}"]`).click();
++        const dialog = manual.page.getByRole('dialog');
++        await dialog.locator('[data-model-provider]').selectOption('', { force: true });
++        const saved = manual.page.waitForResponse(r => r.url().endsWith('/routes/' + purpose) && r.request().method() === 'PUT');
++        await dialog.getByRole('button', { name: '保存', exact: true }).click();
++        assert.equal((await saved).status(), 200);
++        await dialog.waitFor({ state: 'detached' });
++        const current = await state();
++        for (const p of current.purposes) {
++          assert.deepEqual(p.selection, p.id === purpose ? null : previous.purposes.find(old => old.id === p.id).selection);
++        }
++        assert.equal((await manual.context.request.get(base + '/status', { headers })).status(), purpose === 'chat' ? 200 : 409);
++      }
++      await manual.page.reload();
++      await ready(manual.page);
++      assert.equal((await state()).purposes.some(p => p.current.available === false), false);
++      results.push({ scenario: 'independent repair and reload', invalid });
++      await manual.context.close();
++    }
++
++    const base = bases[0];
++    for (const saved of [undefined, 'wrong-token']) {
++      const { context, page } = await contextFor(base, saved);
++      await enter(page, base);
++      if (saved) await page.locator('#login-error').filter({ hasText: '401' }).waitFor();
++      else await page.locator('#login-page').waitFor();
++      assert.equal(await page.locator('#layout').isVisible(), false);
++      assert.equal(await page.evaluate(() => localStorage.getItem('qi-token')), null);
++      await page.locator('#login-input').fill('wrong-token');
++      await page.locator('#login-btn').click();
++      await page.locator('#login-error').filter({ hasText: '登录失败' }).waitFor();
++      assert.equal(await page.evaluate(() => localStorage.getItem('qi-token')), null);
++      results.push({ scenario: saved ? 'invalid token rejected' : 'missing token rejected' });
++      await context.close();
++    }
++    for (const failure of ['503', '409', '403', 'network', 'malformed']) {
++      const { context, page } = await contextFor(base, token);
++      await page.route('**/admin/api/auth', route => failure === 'network' ? route.abort() : route.fulfill({
++        status: failure === 'malformed' ? 200 : Number(failure), contentType: 'application/json',
++        body: JSON.stringify(failure === 'malformed' ? {} : { error: 'Synthetic authentication failure' }),
++      }));
++      await enter(page, base);
++      await page.locator('#login-error').filter({ hasText: failure === '403' ? 'Token 被拒绝' : '暂时无法验证登录' }).waitFor();
++      assert.equal(await page.locator('#layout').isVisible(), false);
++      assert.equal(await page.evaluate(() => localStorage.getItem('qi-token')), failure === '403' ? null : token);
++      results.push({ scenario: 'authentication failure handling', failure });
++      await context.close();
++    }
++    assert.deepEqual(errors, []);
++    await fs.writeFile(path.join(output, 'console-auth-browser-results.json'), JSON.stringify({ results, errors }, null, 2));
++    process.stdout.write(JSON.stringify({ passed: results.length, errors }, null, 2) + '\n');
++  } finally { await browser.close(); }
++})().catch(error => { process.stderr.write(error.stack + '\n'); process.exitCode = 1; });

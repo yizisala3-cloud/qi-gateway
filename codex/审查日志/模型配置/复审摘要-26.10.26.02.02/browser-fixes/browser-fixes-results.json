@@ -1,0 +1,17 @@
+{
+  "results": [
+    "late read discarded: general",
+    "late read discarded: api-general-api",
+    "late read discarded: navigate",
+    "closed/pending save reconciled: cancel",
+    "closed/pending save reconciled: close",
+    "closed/pending save reconciled: Escape",
+    "closed/pending save reconciled: mask",
+    "closed/pending save reconciled: general-pending",
+    "closed/pending save reconciled: remount-before-commit",
+    "closed/pending save reconciled: unknown-response",
+    "closed/pending save reconciled: out-of-order"
+  ],
+  "page_errors": [],
+  "source": "isolated synthetic data, real management backend"
+}

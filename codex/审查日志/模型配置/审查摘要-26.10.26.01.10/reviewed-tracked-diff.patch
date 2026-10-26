@@ -1,0 +1,907 @@
+diff --git a/.env.example b/.env.example
+index e089fb2..badfa1d 100644
+--- a/.env.example
++++ b/.env.example
+@@ -8,6 +8,10 @@ GATEWAY_LOG_ENABLED=false
+ UPSTREAM_BASE_URL=https://api.deepseek.com/v1
+ UPSTREAM_API_KEY=your_upstream_api_key
+ UPSTREAM_MODEL=deepseek-v4-pro
++# 模型配置库：留空时使用 QQBOT_SETTINGS_PATH 或 QQBOT_STORE_PATH 所在目录；
++# 未配置上述路径时使用 data/model-config.sqlite3。容器目录须持久化，所有 worker 共用同一文件。
++# 此文件包含供应商密钥，仅保留在服务端，不进入镜像或版本控制。
++MODEL_CONFIG_PATH=
+ # Gemini 浏览器代理工具历史兼容；仅当最终模型名以 gemini- 开头时生效
+ # DeepSeek、Claude、Qwen、OpenAI 等上游应保持 false
+ GEMINI_BROWSER_TOOL_COMPAT_ENABLED=false
+diff --git a/.gitignore b/.gitignore
+index 4355999..736c0c2 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -9,5 +9,9 @@ build/
+ .DS_Store
+ data/qqbot.sqlite3*
+ data/qqbot-settings.json*
++data/model-config.sqlite3*
++**/model-config.sqlite3*
++codex/临时验证/新增配置切换-20261026/*.sqlite3*
++codex/临时验证/新增配置切换-20261026/tmp/
+ qqbot/private/
+ codex/环境变量备份/
+diff --git a/README.md b/README.md
+index 730dd7c..85e8f20 100644
+--- a/README.md
++++ b/README.md
+@@ -54,8 +54,9 @@ NapCat 使用 `/data/qi-napcat/compose.yaml`，QQ 登录与 NapCat 配置持久
+ | `GATEWAY_TOKEN` | 网关鉴权 token（手机客户端填的 API Key） |
+ | `GATEWAY_LOG_ENABLED` | 未保存配置页设置时的日志收集默认值，默认 `false`；上线保持关闭 |
+ | `UPSTREAM_BASE_URL` | 聊天上游地址，默认 `https://api.deepseek.com/v1` |
+-| `UPSTREAM_API_KEY` | DeepSeek API Key，只通过部署环境变量配置 |
+-| `UPSTREAM_MODEL` | 默认 `deepseek-v4-pro`；配置后统一覆盖客户端传入的模型名 |
++| `UPSTREAM_API_KEY` | 未为用途选择运行时配置时使用的聊天 API Key |
++| `UPSTREAM_MODEL` | 默认 `deepseek-v4-pro`；对应用途实际选中的模型覆盖客户端模型名 |
++| `MODEL_CONFIG_PATH` | 服务端模型配置 SQLite 文件；默认复用 QQ 设置或账本目录，否则为 `data/model-config.sqlite3`；目录须持久化 |
+ | `GEMINI_BROWSER_TOOL_COMPAT_ENABLED` | Gemini 浏览器代理工具历史兼容，默认 `false`；仅对最终模型名以 `gemini-` 开头的请求生效 |
+ | `SUPABASE_URL` | Supabase 项目地址 |
+ | `SUPABASE_SECRET_KEY` / `SUPABASE_SERVICE_ROLE_KEY` | 仅服务端使用的 Supabase 写入密钥 |
+@@ -122,6 +123,16 @@ JWT，填入 `SUPABASE_SERVICE_ROLE_KEY`，`SUPABASE_SECRET_KEY` 留空。此 SD
+ | `/health` | GET | 健康检查（无需鉴权） |
+ | `/status` | GET | 网关状态（需鉴权） |
+ 
++## 模型 API 配置（本地实现，待部署）
++
++控制台“配置”分为“常规配置”和“API配置”。API 配置集中管理供应商、API 地址、多个带别名的 Key 和模型列表；日常聊天、QQ、光遇、记忆提取与分析、连续感总结、反刍分别选择供应商／Key／模型，共用供应商库。总结页和 QQ／光遇配置区提供对应入口。新建供应商不会自动切换已有用途；选择“使用现有配置”恢复该用途的环境配置。保存后的新调用生效，已经开始的调用保留原配置快照。本批不增加 Key 自动轮换或故障切换。
++
++向量模型独立列出且仅查看，继续使用原 `ANALYSIS_*` 地址／Key、`Qwen/Qwen3-Embedding-0.6B` 和1024维；调整文本分析服务不修改向量服务，不触发历史向量重建。非模型服务的插件 Token 仍在常规配置。
++
++配置由服务端 SQLite 事务保存，版本冲突返回409，失败不伪装成功。`MODEL_CONFIG_PATH` 可指定持久卷内路径；留空时优先采用 `QQBOT_SETTINGS_PATH`、其次 `QQBOT_STORE_PATH` 的父目录，无上述配置时使用 `data/model-config.sqlite3`。所有 worker 必须共用此文件，独立服务器需另行共享配置存储。发布时确认文件所在目录已持久挂载，备份包含配置文件；它含真实供应商密钥，仅服务端保存。默认路径已排除 Git／Docker 构建。
++
++管理接口 `GET /admin/api/model-config`、`PUT /admin/api/model-config/providers`、`PUT /admin/api/model-config/routes/{purpose}` 均要求已配置且匹配的网关 Bearer Token。写请求为 `{revision,value}`；读取和保存结果只返回 Key 别名／标识，不回传明文，响应不缓存。本功能无需新增 Supabase 迁移。
++
+ ## 日志收集开关
+ 
+ 配置页“功能开关 → 日志收集”默认关闭，保存到现有 `app_settings` 表的
+diff --git a/admin/css/style.css b/admin/css/style.css
+index 13e5b71..3996f1e 100644
+--- a/admin/css/style.css
++++ b/admin/css/style.css
+@@ -71,6 +71,29 @@ html[data-theme="night"] {
+   --shadow-lift: 0 3px 12px rgba(0, 0, 0, 0.35);
+ }
+ 
++/* ---------- Model service configuration: shared library, horizontal purpose rows ---------- */
++.config-tabs { margin-bottom: 16px; }
++.model-config-toolbar { margin-bottom: 12px; flex-wrap: wrap; gap: 10px; }
++.model-config-list { border-top: 1px solid var(--gold-faint); }
++.model-config-row { display: flex; align-items: center; gap: 20px; padding: 17px 12px; border-bottom: 1px solid var(--gold-faint); }
++.model-config-main { flex: 1; min-width: 0; }
++.model-config-summary { color: var(--ink-soft); margin: 4px 0; overflow-wrap: anywhere; }
++.model-config-url { overflow-wrap: anywhere; }
++.model-config-actions { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
++.model-config-key-row { display: grid; grid-template-columns: minmax(90px, 1fr) minmax(130px, 2fr) auto; gap: 8px; margin: 8px 0; }
++.model-config-key-row input { width: 100%; min-width: 0; }
++.model-config-error { color: var(--red); overflow-wrap: anywhere; }
++.model-config-entry { margin: 0 0 12px; }
++@media (max-width: 600px) {
++  .model-config-row { gap: 10px; padding: 14px 4px; flex-wrap: wrap; }
++  .model-config-main { flex-basis: 65%; }
++  .model-config-actions { margin-left: auto; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
++  .model-config-key-row { grid-template-columns: minmax(0, 1fr) auto; }
++  .model-config-key-row [data-key-alias] { grid-column: 1; }
++  .model-config-key-row [data-key-secret] { grid-column: 1; grid-row: 2; }
++  .model-config-key-row [data-key-remove] { grid-column: 2; grid-row: 1 / 3; }
++}
++
+ /* ---------- 基础 ---------- */
+ * { box-sizing: border-box; }
+ html, body { margin: 0; padding: 0; height: 100%; }
+diff --git a/admin/index.html b/admin/index.html
+index de51c47..6ff047b 100644
+--- a/admin/index.html
++++ b/admin/index.html
+@@ -5,7 +5,7 @@
+ <meta name="viewport" content="width=device-width, initial-scale=1.0">
+ <title>qi-dashboard</title>
+ <link rel="icon" href="/admin/assets/lily-medallion.png">
+-<link rel="stylesheet" href="/admin/css/style.css?v=20261025-console-latency-r1&amp;sidebar=20261010-candle-motion2&amp;planning=20261017-time-label-align">
++<link rel="stylesheet" href="/admin/css/style.css?v=20261026-model-config-r1&amp;sidebar=20261010-candle-motion2&amp;planning=20261017-time-label-align">
+ </head>
+ <body>
+ <div class="app" id="app">
+@@ -75,6 +75,6 @@
+ <!-- 备忘录 Markdown 依赖（固定版本随项目交付；window.marked / window.DOMPurify） -->
+ <script src="/admin/assets/vendor/marked-12.0.2.min.js"></script>
+ <script src="/admin/assets/vendor/purify-3.1.6.min.js"></script>
+-<script type="module" src="/admin/js/app.js?v=20261025-console-latency-r1"></script>
++<script type="module" src="/admin/js/app.js?v=20261026-model-config-r1"></script>
+ </body>
+ </html>
+diff --git a/admin/js/app.js b/admin/js/app.js
+index e105f5c..359e352 100644
+--- a/admin/js/app.js
++++ b/admin/js/app.js
+@@ -9,7 +9,7 @@ import { initHelpNotes } from './lib/help_notes.js?v=20261025-console-latency-r1
+ import { initScrollbars } from './lib/scrollbars.js?v=20261025-console-latency-r1';
+ 
+ const DEFAULT_ROUTE = 'planning';
+-const ASSET_VERSION = '20261025-console-latency-r1';
++const ASSET_VERSION = '20261026-model-config-r1';
+ 
+ function applyTheme(t) {
+   document.documentElement.setAttribute('data-theme', t);
+diff --git a/admin/js/pages/config.js b/admin/js/pages/config.js
+index 6bb735f..6caa5af 100644
+--- a/admin/js/pages/config.js
++++ b/admin/js/pages/config.js
+@@ -58,8 +58,11 @@ export default {
+   keyRefReady: null,
+   credSessions: {},
+ 
+-  async mount(root) {
++  async mount(root, params = {}) {
+     this.root = root;
++    this.apiSettings = null;
++    this.modelConfigDirty = false;
++    this.activeConfigTab = 'general';
+     this.logMountToken = Symbol('config-log-settings');
+     this.qqMountToken = Symbol('config-qq-settings');
+     this.skyMountToken = Symbol('config-sky-settings');
+@@ -76,6 +79,7 @@ export default {
+     }
+     this.credSessions = {};
+     delegate(root, {
++      'config-tab': el => this.switchConfigTab(el.dataset.tab),
+       'toggle-eventide': (el) => this.toggleEventide(el),
+       'toggle-recent-chat': (el) => this.toggleRecentChat(el),
+       'toggle-timestamp': (el) => this.toggleTimestamp(el),
+@@ -109,9 +113,15 @@ export default {
+     ];
+     const titles = ['网关运行状态', '模型与上游', 'Supabase 连接状态', '模型与插件密钥',
+       '最近一次总结', '功能开关', 'QQBot', '光遇接入', '上下文注入', '规划周期', '页眉花饰'];
+-    root.innerHTML = `<div class="grid grid-2">${titles.map((title, i) =>
+-      `<div class="card" id="config-section-${i}"><div class="card-head"><div class="card-title">${title}</div></div>${loading()}</div>`).join('')}</div>`;
++    root.innerHTML = `<div class="tabs config-tabs" role="tablist" aria-label="配置分类">
++      <button class="tab active" role="tab" aria-selected="true" data-act="config-tab" data-tab="general">常规配置</button>
++      <button class="tab" role="tab" aria-selected="false" data-act="config-tab" data-tab="api">API配置</button></div>
++      <div data-config-panel="general"><div class="grid grid-2">${titles.map((title, i) =>
++      `<div class="card" id="config-section-${i}"><div class="card-head"><div class="card-title">${title}</div></div>${loading()}</div>`).join('')}</div></div>
++      <div data-config-panel="api" hidden></div>`;
+     const data = {};
++    this.modelOverviewData = data;
++    if (params.tab === 'api') this.switchConfigTab('api', params);
+     const settled = new Set();
+     const rendered = new Set();
+     const failures = new Map();
+@@ -221,7 +231,7 @@ export default {
+             <div class="kv"><span class="k">聊天模型</span><span class="v mono text-sm">${esc(status.upstream_model || '-')}</span></div>
+             <div class="kv"><span class="k">连续感模型</span><span class="v mono text-sm">${esc(continuity?.analysis_model || continuity?.continuity_model || '-')}</span></div>
+             <div class="kv"><span class="k">连续感模型状态</span><span class="v">${continuity ? boolTag(continuity.analysis_configured) : tag('状态未知', 'muted')}</span></div>
+-            <div class="kv"><span class="k">Embedding</span><span class="v">${tag('暂未接入', 'muted')}</span></div>
++            <div class="kv"><span class="k">Embedding</span><span class="v"><a href="#/config?tab=api">查看向量配置</a></span></div>
+           </div>`,
+ `<div class="card">
+             <div class="card-head"><div class="card-title">${icon('layers')}Supabase 连接状态</div></div>
+@@ -231,13 +241,12 @@ export default {
+             <div class="kv"><span class="k">安全后端访问</span><span class="v">${status.rls_ready ? tag('就绪', 'green') : tag('未就绪', 'red')}</span></div>
+           </div>`,
+ `<div class="card">
+-            <div class="card-head"><div class="card-title">${icon('key')}模型与插件密钥（默认隐藏，点击后按项显示）</div></div>
++            <div class="card-head"><div class="card-title">${icon('key')}插件密钥（默认隐藏，点击后按项显示）</div></div>
+             <div id="cred-list">${this.renderCredentialRows()}</div>
+             ${this.keyRefReady === false ? '<p class="muted text-sm" style="margin:6px 0 0;color:var(--amber)">密钥标识未就绪（GATEWAY_KEY_REF_SECRET 缺失或短于 32 字节）：日志暂不能按密钥区分故障，密钥值查看不受影响。</p>' : ''}
+             <p class="muted text-sm" style="margin:6px 0 0" data-help-note="密钥查看">密钥值只在点击「显示」后按项从服务端获取（响应不缓存）；隐藏或离开本页即清除，不写入浏览器存储。标识 K-… 与日志页一致，用于按密钥区分故障。</p>
+             <div class="kv" style="margin-top:8px"><span class="k">更换 API 配置</span><span class="v">
+-              <button class="btn btn-secondary btn-sm is-disabled" disabled aria-describedby="config-change-note">更换配置</button>
+-              <span class="control-note" id="config-change-note">暂未接入</span>
++              <button class="btn btn-secondary btn-sm" data-act="config-tab" data-tab="api">模型 API 配置</button>
+             </span></div>
+           </div>`,
+ `<div class="card">
+@@ -259,10 +268,12 @@ export default {
+           </div>`,
+ `<div class="card" id="qqbot-settings-card">
+             <div class="card-head"><div class="card-title">${icon('message')}QQBot</div></div>
++            <div class="model-config-entry"><a class="btn btn-secondary btn-sm" href="#/config?tab=api&purpose=qq">调整 QQ 模型配置</a></div>
+             <div id="qqbot-settings-panel">${this.renderQQSettings()}</div>
+           </div>`,
+ `<div class="card" id="sky-settings-card">
+             <div class="card-head"><div class="card-title">${icon('message')}光遇接入</div></div>
++            <div class="model-config-entry"><a class="btn btn-secondary btn-sm" href="#/config?tab=api&purpose=sky">调整光遇模型配置</a></div>
+             <div id="sky-settings-panel">${this.renderSkySettings()}</div>
+           </div>`,
+ `<div class="card">
+@@ -299,6 +310,8 @@ export default {
+   },
+ 
+   unmount() {
++    this.apiSettings?.dispose();
++    this.apiSettings = null;
+     this.logMountToken = null;
+     this.qqMountToken = null;
+     this.skyMountToken = null;
+@@ -310,6 +323,49 @@ export default {
+     this.credSessions = {};
+   },
+ 
++  async switchConfigTab(tab, params = {}) {
++    if (!['general', 'api'].includes(tab)) return;
++    this.activeConfigTab = tab;
++    const root = this.root, token = this.qqMountToken;
++    for (const id of Object.keys(this.credSessions)) this._closeCredentialSession(id);
++    this._refreshCredentialCard();
++    root.querySelectorAll('.config-tabs [data-tab]').forEach(button => {
++      const active = button.dataset.tab === tab;
++      button.classList.toggle('active', active);
++      button.setAttribute('aria-selected', String(active));
++    });
++    root.querySelectorAll('[data-config-panel]').forEach(panel => { panel.hidden = panel.dataset.configPanel !== tab; });
++    if (tab === 'general') {
++      if (this.modelConfigDirty) {
++        this.modelConfigDirty = false;
++        try {
++          const [status, continuity] = await Promise.all([gw('/status'), gw('/admin/api/memory-continuity/status')]);
++          if (this.qqMountToken !== token || this.root !== root) return;
++          Object.assign(this.modelOverviewData, { status, continuity });
++          const card = root.querySelector('#config-section-1');
++          if (card) card.innerHTML = this.renderConfigCards(this.modelOverviewData)[1];
++        } catch (error) {
++          if (this.qqMountToken === token) {
++            this.modelConfigDirty = true;
++            toast(`模型概览刷新失败：${error.message}`, 'err');
++          }
++        }
++      }
++      return;
++    }
++    try {
++      const { createModelSettings } = await import('../lib/model_settings.js?v=20261026-model-config-r1');
++      if (this.qqMountToken !== token || this.root !== root || this.activeConfigTab !== 'api') return;
++      if (!this.apiSettings) this.apiSettings = createModelSettings(root.querySelector('[data-config-panel="api"]'), {
++        isCurrent: () => this.qqMountToken === token && this.root === root,
++        onSaved: () => { this.modelConfigDirty = true; },
++      });
++      await this.apiSettings.load(params);
++    } catch (error) {
++      if (this.qqMountToken === token && this.root === root) toast(`API配置加载失败：${error.message}`, 'err');
++    }
++  },
++
+   validSkySettings(data) {
+     return data && ['enabled', 'available', 'writable'].every(key => typeof data[key] === 'boolean');
+   },
+@@ -557,7 +613,7 @@ export default {
+     if (!this.credentials.length) {
+       return '<p class="muted text-sm" style="margin:6px 0 0">密钥元数据读取失败，暂无法显示配置状态。</p>';
+     }
+-    return this.credentials.map((c) => {
++    return this.credentials.filter(c => ['memory_plugin', 'mcp_memory', 'todo_plugin'].includes(c.credential_id)).map((c) => {
+       const state = this.credSessions[c.credential_id] || {};
+       const label = c.label ? `<span class="tag tag-slate mono">${esc(c.label)}</span>` : '';
+       const fallback = c.fallback ? ` <span class="tag tag-amber">回退</span>` : '';
+diff --git a/admin/js/pages/digest.js b/admin/js/pages/digest.js
+index ec010d9..4897146 100644
+--- a/admin/js/pages/digest.js
++++ b/admin/js/pages/digest.js
+@@ -113,6 +113,7 @@ export default {
+             <button class="btn btn-secondary" data-act="refresh">${icon('refresh')}刷新</button>
+           </div>
+           <div id="view-continuity">
++            <div class="toolbar model-config-entry"><a class="btn btn-secondary btn-sm" href="#/config?tab=api&purpose=continuity">${icon('gear')}调整 API 配置</a></div>
+             <div id="digest-warning"></div>
+             <div class="toolbar">
+               <label class="inline">批次消息数（1-100）<input id="digest-limit" type="number" min="1" max="100" value="60" style="width:90px"></label>
+@@ -126,6 +127,7 @@ export default {
+             <div id="continuity-runs">${loading()}</div>
+           </div>
+           <div id="view-rumination" hidden>
++            <div class="toolbar model-config-entry"><a class="btn btn-secondary btn-sm" href="#/config?tab=api&purpose=rumination">${icon('gear')}调整 API 配置</a></div>
+             <div id="rumination-warning"></div>
+             <div class="toolbar">
+               <span class="muted text-sm" data-help-note="总结调度">独立游标 · 每日一次 · 批次 60～120 条</span>
+@@ -221,7 +223,7 @@ export default {
+       warning.innerHTML = data.analysis_configured ? '' : `
+         <div class="banner banner-danger">
+           <span class="banner-ico">${icon('alert')}</span>
+-          <div><strong>连续感提取模型未配置。</strong>请在 qi-gateway 服务环境配置相应密钥后重新部署；配置完成前预览与执行按钮保持禁用。</div>
++          <div><strong>连续感提取模型未配置。</strong>请通过“调整 API 配置”选择供应商、Key 和模型；配置完成前预览与执行按钮保持禁用。</div>
+         </div>`;
+       this.renderStatusCard(data);
+       this.renderRuns(data.recent_runs || []);
+@@ -260,7 +262,7 @@ export default {
+         warning.innerHTML = `
+           <div class="banner">
+             <span class="banner-ico">${icon('info')}</span>
+-            <div><strong>反刍提取模型未配置。</strong>请配置 RUMINATION_*（或回退的 CONTINUITY_*）密钥后重新部署；配置完成前执行按钮保持禁用。</div>
++            <div><strong>反刍提取模型未配置。</strong>请通过“调整 API 配置”选择供应商、Key 和模型；配置完成前执行按钮保持禁用。</div>
+           </div>`;
+       }
+       this.renderRuminationStatus(data);
+diff --git a/gateway/credential_api.py b/gateway/credential_api.py
+index 91302c5..4297986 100644
+--- a/gateway/credential_api.py
++++ b/gateway/credential_api.py
+@@ -28,11 +28,14 @@ from starlette.responses import JSONResponse
+ from starlette.routing import Route
+ 
+ from .config import cfg
++from . import model_config
+ from .logging_events import compute_key_ref, key_ref_label, key_ref_ready, provider_label
+ 
+ log = logging.getLogger("gateway.credential_api")
+ 
+ _NO_STORE = {"Cache-Control": "no-store"}
++_MODEL_PURPOSE = {"upstream": "chat", "analysis": "analysis", "continuity": "continuity",
++                  "rumination": "rumination", "qq": "qq", "sky": "sky"}
+ 
+ 
+ def _authorized(request: Request) -> bool:
+@@ -60,7 +63,7 @@ _CREDENTIAL_SPECS: tuple[dict[str, Any], ...] = (
+     },
+     {
+         "id": "analysis",
+-        "role": "记忆检索与总结（含 Embedding）",
++        "role": "记忆提取与分析",
+         "key_envs": ("ANALYSIS_API_KEY",),
+         "provider_env": "ANALYSIS_BASE_URL",
+     },
+@@ -120,13 +123,18 @@ def _resolve_credential(spec: dict[str, Any]) -> dict[str, Any]:
+         if not base_url.strip() and spec.get("provider_fallback_env"):
+             base_url = getattr(cfg, spec["provider_fallback_env"], "") or ""
+         provider = provider_label(base_url)
++    purpose = _MODEL_PURPOSE.get(spec["id"])
++    if purpose:
++        route = model_config.resolve(purpose)
++        if route.source == "runtime":
++            value, source, provider = route.api_key, "runtime", provider_label(route.base_url)
+     key_ref = compute_key_ref(value) if value else ""
+     return {
+         "credential_id": spec["id"],
+         "role": spec["role"],
+         "configured": bool(value),
+         "source": source,
+-        "fallback": bool(value) and source != spec["key_envs"][0],
++        "fallback": bool(value) and source != "runtime" and source != spec["key_envs"][0],
+         "provider": provider,
+         "key_ref": key_ref,
+         "label": key_ref_label(key_ref),
+@@ -148,13 +156,21 @@ async def credentials_metadata(request: Request) -> JSONResponse:
+     """
+     if not _authorized(request):
+         return _error("未登录或令牌无效", 401, "unauthorized")
+-    credentials = [_resolve_credential(spec) for spec in _CREDENTIAL_SPECS]
++    model_error = None
++    try:
++        with model_config.snapshot():
++            credentials = [_resolve_credential(spec) for spec in _CREDENTIAL_SPECS]
++    except model_config.ConfigError as exc:
++        # Model storage does not own plugin credentials. Preserve their independent view.
++        credentials = [_resolve_credential(spec) for spec in _CREDENTIAL_SPECS if spec["id"] not in _MODEL_PURPOSE]
++        model_error = str(exc)
+     return JSONResponse(
+         {
+             "credentials": credentials,
+             # 标识秘密未就绪时明确提示（不伪造可用状态）。
+             "key_ref_ready": key_ref_ready(),
+             "request_id": _request_id(request),
++            "model_config_error": model_error,
+         },
+         headers=_NO_STORE,
+     )
+@@ -172,7 +188,17 @@ async def credential_reveal(request: Request) -> JSONResponse:
+     spec = _spec_for(str(credential_id))
+     if spec is None:
+         return _error("未知的密钥项", 404, "unknown_credential")
+-    resolved = _resolve_credential(spec)
++    try:
++        purpose = _MODEL_PURPOSE.get(spec["id"])
++        if purpose:
++            with model_config.snapshot():
++                resolved = _resolve_credential(spec)
++                selected_value = model_config.resolve(purpose).api_key
++        else:
++            resolved = _resolve_credential(spec)
++            selected_value = None
++    except model_config.ConfigError as exc:
++        return _error(str(exc), exc.status, "model_config_unavailable")
+     if not resolved["configured"]:
+         return _error("该密钥项当前未配置", 409, "credential_not_configured")
+     value = ""
+@@ -181,6 +207,8 @@ async def credential_reveal(request: Request) -> JSONResponse:
+         if isinstance(candidate, str) and candidate.strip():
+             value = candidate.strip()
+             break
++    if selected_value is not None:
++        value = selected_value
+     return JSONResponse(
+         {
+             "credential_id": spec["id"],
+diff --git a/gateway/main.py b/gateway/main.py
+index 631c30d..bb275f4 100644
+--- a/gateway/main.py
++++ b/gateway/main.py
+@@ -52,6 +52,8 @@ from .planning import run_maintenance as run_planning_maintenance
+ from .planning_api import planning_api_routes
+ from .todo_api import todo_routes
+ from .model_routing import select_upstream_model
++from . import model_config
++from .model_config_api import model_config_routes
+ from .upstream_compat import normalize_gemini_browser_tool_history
+ from .request_context import (
+     append_gateway_context,
+@@ -325,7 +327,7 @@ async def planning_loop():
+             await asyncio.sleep(30)
+ 
+ 
+-async def chat_completions(request: Request, *, persist=True):
++async def chat_completions(request: Request, *, persist=True, model_purpose="chat"):
+     if not verify_token(request):
+         return JSONResponse({"error": "unauthorized"}, status_code=401)
+     try:
+@@ -337,6 +339,10 @@ async def chat_completions(request: Request, *, persist=True):
+     if not persist and body.get("stream", False):
+         return JSONResponse({"error": "sky preview requires non-streaming"}, status_code=400)
+ 
++    try:
++        upstream = await asyncio.to_thread(model_config.resolve, model_purpose)
++    except model_config.ConfigError as exc:
++        return JSONResponse({"error": str(exc)}, status_code=exc.status)
+     loop = asyncio.get_event_loop()
+     messages = body.get("messages", [])
+     user_text = extract_last_user_text(messages)
+@@ -354,14 +360,14 @@ async def chat_completions(request: Request, *, persist=True):
+     if full_context and "messages" in body:
+         body["messages"] = append_gateway_context(body["messages"], full_context)
+ 
+-    upstream_url = f"{cfg.UPSTREAM_BASE_URL.rstrip('/')}/chat/completions"
++    upstream_url = f"{upstream.base_url}/chat/completions"
+     headers = {
+-        "Authorization": f"Bearer {cfg.UPSTREAM_API_KEY}",
++        "Authorization": f"Bearer {upstream.api_key}",
+         "Content-Type": "application/json",
+     }
+     requested_model = body.get("model")
+     selected_model = select_upstream_model(
+-        cfg.UPSTREAM_MODEL,
++        upstream.model,
+         requested_model if isinstance(requested_model, str) else "",
+     )
+     if selected_model:
+@@ -377,7 +383,7 @@ async def chat_completions(request: Request, *, persist=True):
+     # TASK-02：在实际调用边界绑定聊天上游凭证身份——作用域内的失败事件
+     # 携带 key_ref / 用途 / 安全上游，同功能不同密钥正确分组。
+     chat_credential = credential_scope(
+-        "chat", provider_label(cfg.UPSTREAM_BASE_URL), cfg.UPSTREAM_API_KEY
++        "chat", provider_label(upstream.base_url), upstream.api_key
+     )
+ 
+     if not is_stream:
+@@ -494,7 +500,7 @@ async def sky_chat_preview(request: Request):
+         return JSONResponse({"error": "sky_settings_unavailable"}, status_code=503)
+     if not access["enabled"]:
+         return JSONResponse({"error": "sky_disabled"}, status_code=403)
+-    result = await chat_completions(request, persist=False)
++    result = await chat_completions(request, persist=False, model_purpose="sky")
+     latest = await asyncio.to_thread(sky_settings.snapshot, refresh=True)
+     if not latest['available']:
+         return JSONResponse({'error': 'sky_settings_unavailable'}, status_code=503)
+@@ -535,10 +541,14 @@ async def status(request: Request):
+     if not verify_token(request):
+         return JSONResponse({"error": "unauthorized"}, status_code=401)
+     supabase_status = await asyncio.to_thread(db.get_client_status)
++    try:
++        upstream = await asyncio.to_thread(model_config.resolve, "chat")
++    except model_config.ConfigError as exc:
++        return JSONResponse({"error": str(exc)}, status_code=exc.status)
+     return JSONResponse({
+         "phase": "4.5-memory-digest",
+-        "upstream_base_url": cfg.UPSTREAM_BASE_URL,
+-        "upstream_model": cfg.UPSTREAM_MODEL,
++        "upstream_base_url": upstream.base_url,
++        "upstream_model": upstream.model,
+         "supabase": supabase_status,
+         "rls_ready": supabase_status["elevated_active"],
+         "bg_tasks": len(_background_tasks),
+@@ -559,8 +569,12 @@ async def list_models(request: Request):
+     if not verify_token(request):
+         return JSONResponse({"error": "unauthorized"}, status_code=401)
+     models = []
+-    if cfg.UPSTREAM_MODEL:
+-        models.append({"id": cfg.UPSTREAM_MODEL, "object": "model", "owned_by": "qi-gateway"})
++    try:
++        upstream = await asyncio.to_thread(model_config.resolve, "chat")
++    except model_config.ConfigError as exc:
++        return JSONResponse({"error": str(exc)}, status_code=exc.status)
++    if upstream.model:
++        models.append({"id": upstream.model, "object": "model", "owned_by": "qi-gateway"})
+     return JSONResponse({"object": "list", "data": models})
+ 
+ 
+@@ -580,7 +594,7 @@ async def lifespan(app):
+         http2=True,
+         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+     )
+-    log.info(f"网关启动 Phase 4.5 Memory Digest | upstream={cfg.UPSTREAM_BASE_URL}")
++    log.info("网关启动 Phase 4.5 Memory Digest | 模型按用途独立选择")
+     daily_task = track_task(daily_task_loop())
+     planning_task = track_task(planning_loop())
+     memo_task = track_task(memo_maintenance_loop())
+@@ -623,6 +637,7 @@ _routes.extend(admin_api_routes)
+ _routes.extend(admin_memory_routes)
+ _routes.extend(context_admin_routes)
+ _routes.extend(credential_api_routes)
++_routes.extend(model_config_routes)
+ _routes.extend(eventide_admin_routes)
+ _routes.extend(log_api_routes)
+ _routes.extend(log_settings_routes)
+diff --git a/gateway/memory_continuity.py b/gateway/memory_continuity.py
+index bf770f0..af0e713 100644
+--- a/gateway/memory_continuity.py
++++ b/gateway/memory_continuity.py
+@@ -12,6 +12,7 @@ from datetime import datetime, timezone
+ from typing import Any
+ 
+ from .config import cfg
++from . import model_config
+ from .db import get_client
+ from .logging_events import scrub_error_text
+ from .memory_continuity_shadow import (
+@@ -131,6 +132,7 @@ def list_continuity_runs(limit: int = 20, assistant_id: str | None = None) -> li
+     return [_public_run(row) for row in (query.execute().data or [])]
+ 
+ 
++@model_config.pinned
+ def get_continuity_status() -> dict[str, Any]:
+     assistant_id = resolve_continuity_assistant_id()
+     cursor = _get_cursor(assistant_id)
+@@ -151,9 +153,9 @@ def get_continuity_status() -> dict[str, Any]:
+         "blocked_message_count": cursor.get("blocked_message_count"),
+         "blocked_at": cursor.get("blocked_at"),
+         "pause_reason": cursor.get("pause_reason"),
+-        "analysis_model": cfg.CONTINUITY_MODEL,
++        "analysis_model": model_config.resolve("continuity").model,
+         "analysis_configured": _continuity_analysis_configured(),
+-        "continuity_model": cfg.CONTINUITY_MODEL,
++        "continuity_model": model_config.resolve("continuity").model,
+         "continuity_configured": _continuity_analysis_configured(),
+         "recent_runs": list_continuity_runs(20, assistant_id),
+     }
+@@ -352,7 +354,7 @@ def _set_running_run(run_id: int, raw_rows: list[dict[str, Any]]) -> dict[str, A
+         "source_first_message_id": int(raw_rows[0]["id"]),
+         "source_last_message_id": int(raw_rows[-1]["id"]),
+         "message_count": len(raw_rows),
+-        "model_name": cfg.CONTINUITY_MODEL,
++        "model_name": model_config.resolve("continuity").model,
+     }
+     _client().table("memory_digest_runs").update(update).eq("id", run_id).execute()
+     _update_heartbeat(run_id)
+@@ -445,6 +447,7 @@ def _enrich_candidates(candidates: list[dict[str, Any]], run_id: int) -> list[di
+     return enriched
+ 
+ 
++@model_config.pinned
+ def run_continuity_digest(*, automatic: bool = False) -> dict[str, Any]:
+     if not _continuity_analysis_configured():
+         raise ContinuityPipelineError(
+diff --git a/gateway/memory_continuity_shadow.py b/gateway/memory_continuity_shadow.py
+index d5cacb1..43b2362 100644
+--- a/gateway/memory_continuity_shadow.py
++++ b/gateway/memory_continuity_shadow.py
+@@ -15,6 +15,7 @@ from typing import Any
+ import httpx
+ 
+ from .config import cfg
++from . import model_config
+ from .db import get_client
+ from .logging_events import credential_scope, provider_label
+ from .memory_continuity_schema import AUTOMATIC_TYPES, SCHEMA_VERSION, THREAD_STATES, ContinuityDataError, validate_continuity_data
+@@ -124,26 +125,11 @@ class ShadowPreviewError(RuntimeError):
+ 
+ 
+ def _continuity_analysis_configured() -> bool:
+-    """Continuity extraction uses the independent CONTINUITY_* provider only."""
+-    return bool(
+-        cfg.CONTINUITY_BASE_URL.strip()
+-        and cfg.CONTINUITY_API_KEY.strip()
+-        and cfg.CONTINUITY_MODEL.strip()
+-    )
++    return model_config.configured("continuity")
+ 
+ 
+ def _analysis_configured() -> bool:
+-    """Legacy compatibility alias checking ANALYSIS_* only.
+-
+-    Kept because other modules still import it. The continuity extraction
+-    paths must call :func:`_continuity_analysis_configured` instead; this
+-    function never reports the independent continuity provider.
+-    """
+-    return bool(
+-        cfg.ANALYSIS_BASE_URL.strip()
+-        and cfg.ANALYSIS_API_KEY.strip()
+-        and cfg.ANALYSIS_MODEL.strip()
+-    )
++    return model_config.configured("analysis")
+ 
+ 
+ def _client():
+@@ -493,6 +479,7 @@ def _response_diagnostic(
+     )
+ 
+ 
++@model_config.pinned
+ def extract_continuity_candidates(
+     conversation: str,
+     evidence_times: dict[int, str | None],
+@@ -505,12 +492,13 @@ def extract_continuity_candidates(
+ 
+     # TASK-02：实际 SDK 调用边界绑定 CONTINUITY 凭证身份——连续感快速
+     # 路径与 Shadow Preview 共用同一把独立密钥，失败事件按实际调用归属。
++    upstream = model_config.resolve("continuity")
+     with credential_scope(
+-        "continuity", provider_label(cfg.CONTINUITY_BASE_URL), cfg.CONTINUITY_API_KEY
++        "continuity", provider_label(upstream.base_url), upstream.api_key
+     ):
+-        url = f"{cfg.CONTINUITY_BASE_URL.rstrip('/')}/chat/completions"
++        url = f"{upstream.base_url.rstrip('/')}/chat/completions"
+         request_body = {
+-            "model": cfg.CONTINUITY_MODEL,
++            "model": upstream.model,
+             "messages": [
+                 {"role": "system", "content": system_prompt},
+                 {"role": "user", "content": f"<chat_log>\n{conversation}\n</chat_log>"},
+@@ -520,7 +508,7 @@ def extract_continuity_candidates(
+             "temperature": 0.1,
+         }
+         headers = {
+-            "Authorization": f"Bearer {cfg.CONTINUITY_API_KEY}",
++            "Authorization": f"Bearer {upstream.api_key}",
+             "Content-Type": "application/json",
+         }
+         try:
+@@ -577,6 +565,7 @@ def _extract_shadow_candidates(
+     )
+ 
+ 
++@model_config.pinned
+ def run_shadow_preview(max_messages: int = DEFAULT_MAX_MESSAGES, max_chars: int = DEFAULT_MAX_CHARS) -> dict[str, Any]:
+     assistant_id = resolve_shadow_assistant_id()
+     messages, warnings = (
+diff --git a/gateway/memory_extract.py b/gateway/memory_extract.py
+index 4fc7cfa..bf30fea 100644
+--- a/gateway/memory_extract.py
++++ b/gateway/memory_extract.py
+@@ -15,6 +15,8 @@ from typing import Any
+ import httpx
+ 
+ from .config import cfg
++from . import model_config
++from .embedding_config import EMBEDDING_MODEL, EMBEDDING_DIM
+ from .db import get_client
+ from .logging_events import credential_scope, provider_label, scrub_error_text
+ from .memory_continuity_schema import AUTOMATIC_TYPES, SCHEMA_VERSION, THREAD_STATES, ContinuityDataError, validate_continuity_data
+@@ -22,8 +24,6 @@ from .memory_continuity_schema import AUTOMATIC_TYPES, SCHEMA_VERSION, THREAD_ST
+ log = logging.getLogger("gateway.memory_extract")
+ 
+ CST = timezone(timedelta(hours=8))
+-EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+-EMBEDDING_DIM = 1024
+ DEFAULT_BATCH_SIZE = 60
+ MAX_BATCH_SIZE = 100
+ DEFAULT_MAX_CHARS = 12000
+@@ -92,12 +92,7 @@ class DigestPipelineError(RuntimeError):
+ 
+ 
+ def _analysis_configured() -> bool:
+-    """Return whether the extraction and embedding provider is usable."""
+-    return bool(
+-        cfg.ANALYSIS_BASE_URL.strip()
+-        and cfg.ANALYSIS_API_KEY.strip()
+-        and cfg.ANALYSIS_MODEL.strip()
+-    )
++    return model_config.configured("analysis")
+ 
+ 
+ def _client():
+@@ -554,6 +549,7 @@ def _parse_model_output(
+     return validated
+ 
+ 
++@model_config.pinned
+ def _extract_memories(
+     conversation: str,
+     source_times: dict[int, str | None] | None = None,
+@@ -568,10 +564,11 @@ def _extract_memories(
+ 
+     # TASK-02：实际 SDK 调用边界绑定 ANALYSIS 凭证身份——作用域内抛出的
+     # 管线异常被标注，边界外的捕获点（API 层 / 调度器）仍能归属密钥。
++    upstream = model_config.resolve("analysis")
+     with credential_scope(
+-        "analysis", provider_label(cfg.ANALYSIS_BASE_URL), cfg.ANALYSIS_API_KEY
++        "analysis", provider_label(upstream.base_url), upstream.api_key
+     ):
+-        url = f"{cfg.ANALYSIS_BASE_URL.rstrip('/')}/chat/completions"
++        url = f"{upstream.base_url.rstrip('/')}/chat/completions"
+         base_messages = [
+             {"role": "system", "content": EXTRACT_SYSTEM_PROMPT},
+             {"role": "user", "content": f"<chat_log>\n{conversation}\n</chat_log>"},
+@@ -582,7 +579,7 @@ def _extract_memories(
+             with_response_format: bool,
+         ) -> httpx.Response:
+             body = {
+-                "model": cfg.ANALYSIS_MODEL,
++                "model": upstream.model,
+                 "messages": messages,
+                 "max_tokens": 1200,
+                 "temperature": 0.1,
+@@ -594,7 +591,7 @@ def _extract_memories(
+                     return client.post(
+                         url,
+                         headers={
+-                            "Authorization": f"Bearer {cfg.ANALYSIS_API_KEY}",
++                            "Authorization": f"Bearer {upstream.api_key}",
+                             "Content-Type": "application/json",
+                         },
+                         json=body,
+@@ -672,7 +669,7 @@ def _extract_memories(
+ 
+ 
+ def _get_embedding_sync(text: str) -> list[float]:
+-    if not _analysis_configured():
++    if not (cfg.ANALYSIS_BASE_URL.strip() and cfg.ANALYSIS_API_KEY.strip() and cfg.ANALYSIS_MODEL.strip()):
+         raise DigestPipelineError(
+             "analysis_not_configured",
+             "The analysis model provider is not fully configured",
+@@ -759,7 +756,7 @@ def _create_run(
+         "source_first_message_id": int(messages[0]["id"]) if messages else None,
+         "source_last_message_id": int(messages[-1]["id"]) if messages else None,
+         "message_count": len(messages),
+-        "model_name": cfg.ANALYSIS_MODEL,
++        "model_name": model_config.resolve("analysis").model,
+         "error_code": error_code,
+         "error_message": error_message,
+         "completed_at": _iso_now() if status != "running" else None,
+@@ -798,6 +795,7 @@ def _public_run(run: dict[str, Any]) -> dict[str, Any]:
+     return result
+ 
+ 
++@model_config.pinned
+ def run_memory_digest(trigger: str, mode: str, max_messages: int | None = None) -> dict[str, Any]:
+     if trigger not in {"manual_preview", "manual_execute", "scheduled_daily", "idle_six_hours"}:
+         raise ValueError("unsupported digest trigger")
+@@ -856,7 +854,7 @@ def run_memory_digest(trigger: str, mode: str, max_messages: int | None = None)
+         "source_first_message_id": int(messages[0]["id"]),
+         "source_last_message_id": int(messages[-1]["id"]),
+         "message_count": len(messages),
+-        "model_name": cfg.ANALYSIS_MODEL,
++        "model_name": model_config.resolve("analysis").model,
+     }
+     _client().table("memory_digest_runs").update(running_update).eq("id", run_id).execute()
+     _update_heartbeat(run_id)
+@@ -985,6 +983,7 @@ def list_digest_runs(limit: int = 30) -> list[dict[str, Any]]:
+     return [_public_run(run) for run in response.data or []]
+ 
+ 
++@model_config.pinned
+ def get_digest_status() -> dict[str, Any]:
+     assistant_id = resolve_assistant_id()
+     cursor = _get_cursor(assistant_id)
+@@ -1016,7 +1015,7 @@ def get_digest_status() -> dict[str, Any]:
+         "latest_message_id": latest_id,
+         "latest_message_at": latest.get("created_at") if latest else None,
+         "backlog_count": int(count_response.count or 0),
+-        "analysis_model": cfg.ANALYSIS_MODEL,
++        "analysis_model": model_config.resolve("analysis").model,
+         "analysis_configured": _analysis_configured(),
+         "recent_runs": list_digest_runs(20),
+     }
+diff --git a/gateway/memory_rumination.py b/gateway/memory_rumination.py
+index 30b5873..b7452bd 100644
+--- a/gateway/memory_rumination.py
++++ b/gateway/memory_rumination.py
+@@ -26,6 +26,7 @@ from typing import Any
+ import httpx
+ 
+ from .config import cfg
++from . import model_config
+ from .db import get_client
+ from .logging_events import credential_scope, provider_label, scrub_error_text
+ from .memory_continuity_schema import (
+@@ -342,10 +343,8 @@ def _now() -> datetime:
+ 
+ def _model_config() -> tuple[str, str, str]:
+     """Rumination provider with explicit fallback to the continuity provider."""
+-    base_url = cfg.RUMINATION_BASE_URL.strip() or cfg.CONTINUITY_BASE_URL.strip()
+-    api_key = cfg.RUMINATION_API_KEY.strip() or cfg.CONTINUITY_API_KEY.strip()
+-    model = cfg.RUMINATION_MODEL.strip() or cfg.CONTINUITY_MODEL.strip()
+-    return base_url, api_key, model
++    upstream = model_config.resolve("rumination")
++    return upstream.base_url, upstream.api_key, upstream.model
+ 
+ 
+ def _rumination_analysis_configured() -> bool:
+@@ -1905,6 +1904,7 @@ def merge_thread_operations(
+ # Model call (independent provider, independent prompt)
+ # ---------------------------------------------------------------------------
+ 
++@model_config.pinned
+ def _call_rumination_model(model_input: str) -> str:
+     base_url, api_key, model = _model_config()
+     if not (base_url and api_key and model):
+@@ -2069,6 +2069,7 @@ def _mark_failed(run_id: int, code: str, message: str) -> None:
+         log.exception("Failed to persist rumination run failure: run_id=%s code=%s", run_id, code)
+ 
+ 
++@model_config.pinned
+ def run_rumination_batch(
+     assistant_id: str,
+     trigger: str,
+@@ -2225,6 +2226,7 @@ def _backlog_count(assistant_id: str, cursor: int) -> int:
+     return int(response.count or 0)
+ 
+ 
++@model_config.pinned
+ def run_rumination_digest(trigger: str = "rumination_manual") -> dict[str, Any]:
+     """Process every qualifying batch; earlier committed batches survive a
+     later batch's failure. 回到调用方前不吞掉失败（手动执行需要真实错误）。"""
+@@ -2503,6 +2505,7 @@ def list_rumination_runs(limit: int = 20, assistant_id: str | None = None) -> li
+     return [_public_run(row) for row in (query.execute().data or [])]
+ 
+ 
++@model_config.pinned
+ def get_rumination_status() -> dict[str, Any]:
+     assistant_id = resolve_rumination_assistant_id()
+     cursor = get_rumination_cursor(assistant_id)
+diff --git a/gateway/memory_search.py b/gateway/memory_search.py
+index e5481c1..e3bfdd6 100644
+--- a/gateway/memory_search.py
++++ b/gateway/memory_search.py
+@@ -7,14 +7,13 @@ from typing import Optional
+ import httpx
+ 
+ from .config import cfg
++from .embedding_config import EMBEDDING_MODEL, EMBEDDING_DIM
+ from .db import get_client, safe_query
+ 
+ log = logging.getLogger("gateway.memory_search")
+ 
+ # 聊天原文与证据时间统一按北京时间呈现。
+ _CST = timezone(timedelta(hours=8))
+-EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+-EMBEDDING_DIM = 1024
+ MAX_CANDIDATES = 50
+ MAX_INJECTION_CHARS = 2400
+ MAX_KEYWORDS = 5
+diff --git a/gateway/qqbot_model.py b/gateway/qqbot_model.py
+index d062d0c..de31da9 100644
+--- a/gateway/qqbot_model.py
++++ b/gateway/qqbot_model.py
+@@ -11,6 +11,7 @@ import httpx
+ from .config import cfg
+ from .context import build_context
+ from .model_routing import select_upstream_model
++from . import model_config
+ from .request_context import extract_recent_turns, append_gateway_context
+ from .qqbot_stickers import split_sticker_summaries
+ from .qqbot_proactive import QQModelHTTPError, parse_retry_after
+@@ -29,6 +30,7 @@ class QQModel:
+             raise ValueError("QQ主提示词超过100000字符")
+ 
+     async def generate(self, history, query, proactive=False):
++        upstream = await asyncio.to_thread(model_config.resolve, "qq")
+         turns = [{"role":r["role"],"content":r["content"]} for r in history]
+         try:
+             context = await asyncio.to_thread(self.context_builder, query, extract_recent_turns(turns),
+@@ -62,11 +64,11 @@ class QQModel:
+                     "\n表情目录："+json.dumps(self.catalog.choices(),ensure_ascii=False)}]+model_turns,context)
+         if proactive:
+             messages.append({"role":"user","content":"后台检查：请依据已有上下文决定是否主动发一条消息。"})
+-        body = {"model":select_upstream_model(cfg.UPSTREAM_MODEL,""),"messages":messages,
++        body = {"model":select_upstream_model(upstream.model,""),"messages":messages,
+                 "stream":False,"max_tokens":1800,"tools":[],"tool_choice":"none"}
+-        with credential_scope('chat',provider_label(cfg.UPSTREAM_BASE_URL),cfg.UPSTREAM_API_KEY):
+-            response = await self.client.post(cfg.UPSTREAM_BASE_URL.rstrip("/")+"/chat/completions",
+-                headers={"Authorization":"Bearer "+cfg.UPSTREAM_API_KEY,"Content-Type":"application/json"},
++        with credential_scope('chat',provider_label(upstream.base_url),upstream.api_key):
++            response = await self.client.post(upstream.base_url+"/chat/completions",
++                headers={"Authorization":"Bearer "+upstream.api_key,"Content-Type":"application/json"},
+                 json=body, timeout=httpx.Timeout(cfg.UPSTREAM_READ_TIMEOUT,connect=10))
+             if not 200 <= response.status_code < 300:
+                 raise QQModelHTTPError(response.status_code,parse_retry_after(response.headers.get('Retry-After')))

@@ -1,0 +1,39 @@
+{
+  "valid_management_api_status": 200,
+  "status_api_status": 409,
+  "chat": {
+    "id": "chat",
+    "name": "日常聊天",
+    "selection": {
+      "provider_id": "env-upstream",
+      "key_id": "environment",
+      "model": "before-update-model"
+    },
+    "current": {
+      "base_url": "",
+      "model": "before-update-model",
+      "provider_id": "env-upstream",
+      "key_id": "environment",
+      "provider_name": "配置已失效",
+      "key_name": "现有密钥",
+      "source": "invalid",
+      "configured": false,
+      "key_ref": "",
+      "label": "",
+      "available": false,
+      "error": "已选择的模型配置无效，请重新设置对应用途。"
+    }
+  },
+  "login_visible": true,
+  "api_tab_count": 0,
+  "token_after_boot": null,
+  "login_error": "已保存的 Token 被拒绝：409 Conflict: 已选择的模型配置无效，请重新设置对应用途。",
+  "expected": "Authenticated user can open model configuration and repair invalid chat binding",
+  "login_error_after_retry": "登录失败：409 Conflict: 已选择的模型配置无效，请重新设置对应用途。",
+  "login_visible_after_retry": true
+}
+AssertionError [ERR_ASSERTION]: BUG-03 remains: valid management token cannot reach repair UI
+
+0 !== 1
+
+    at C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\codex\审查日志\模型配置\复审摘要-26.10.26.02.02\browser_invalid_chat.cjs:40:12

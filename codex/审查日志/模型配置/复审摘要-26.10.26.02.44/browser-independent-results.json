@@ -1,0 +1,8 @@
+{
+  "checks": [
+    "late initial status cannot replace the post-save overview",
+    "unknown result after remount reconciles general overview and retains honest feedback"
+  ],
+  "page_errors": [],
+  "source": "independent synthetic fixture; real backend"
+}

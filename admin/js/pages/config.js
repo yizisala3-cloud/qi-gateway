@@ -58,8 +58,12 @@ export default {
   keyRefReady: null,
   credSessions: {},
 
-  async mount(root) {
+  async mount(root, params = {}) {
     this.root = root;
+    this.apiSettings = null;
+    this.modelConfigDirty = false;
+    this.modelOverviewRead = null;
+    this.activeConfigTab = 'general';
     this.logMountToken = Symbol('config-log-settings');
     this.qqMountToken = Symbol('config-qq-settings');
     this.skyMountToken = Symbol('config-sky-settings');
@@ -76,6 +80,7 @@ export default {
     }
     this.credSessions = {};
     delegate(root, {
+      'config-tab': el => this.switchConfigTab(el.dataset.tab),
       'toggle-eventide': (el) => this.toggleEventide(el),
       'toggle-recent-chat': (el) => this.toggleRecentChat(el),
       'toggle-timestamp': (el) => this.toggleTimestamp(el),
@@ -109,9 +114,17 @@ export default {
     ];
     const titles = ['网关运行状态', '模型与上游', 'Supabase 连接状态', '模型与插件密钥',
       '最近一次总结', '功能开关', 'QQBot', '光遇接入', '上下文注入', '规划周期', '页眉花饰'];
-    root.innerHTML = `<div class="grid grid-2">${titles.map((title, i) =>
-      `<div class="card" id="config-section-${i}"><div class="card-head"><div class="card-title">${title}</div></div>${loading()}</div>`).join('')}</div>`;
+    root.innerHTML = `<div class="tabs config-tabs" role="tablist" aria-label="配置分类">
+      <button class="tab active" role="tab" aria-selected="true" data-act="config-tab" data-tab="general">常规配置</button>
+      <button class="tab" role="tab" aria-selected="false" data-act="config-tab" data-tab="api">API配置</button></div>
+      <p data-model-feedback class="muted text-sm" role="status" hidden></p>
+      <div data-config-panel="general"><div class="grid grid-2">${titles.map((title, i) =>
+      `<div class="card" id="config-section-${i}"><div class="card-head"><div class="card-title">${title}</div></div>${loading()}</div>`).join('')}</div></div>
+      <div data-config-panel="api" hidden></div>`;
     const data = {};
+    this.modelOverviewData = data;
+    this.setModelFeedback(this.modelSaveMessage || '');
+    if (params.tab === 'api') this.switchConfigTab('api', params);
     const settled = new Set();
     const rendered = new Set();
     const failures = new Map();
@@ -119,6 +132,7 @@ export default {
       if (!isCurrentMount()) return;
       const cards = this.renderConfigCards(data);
       groups.forEach((keys, index) => {
+        if (index === 1 && this.modelOverviewRead) return;
         if (rendered.has(index) || !keys.every(key => settled.has(key))) return;
         const host = root.querySelector(`#config-section-${index}`);
         const failure = keys.find(key => failures.has(key) && ['health', 'status'].includes(key));
@@ -221,7 +235,7 @@ export default {
             <div class="kv"><span class="k">聊天模型</span><span class="v mono text-sm">${esc(status.upstream_model || '-')}</span></div>
             <div class="kv"><span class="k">连续感模型</span><span class="v mono text-sm">${esc(continuity?.analysis_model || continuity?.continuity_model || '-')}</span></div>
             <div class="kv"><span class="k">连续感模型状态</span><span class="v">${continuity ? boolTag(continuity.analysis_configured) : tag('状态未知', 'muted')}</span></div>
-            <div class="kv"><span class="k">Embedding</span><span class="v">${tag('暂未接入', 'muted')}</span></div>
+            <div class="kv"><span class="k">Embedding</span><span class="v"><a href="#/config?tab=api">查看向量配置</a></span></div>
           </div>`,
 `<div class="card">
             <div class="card-head"><div class="card-title">${icon('layers')}Supabase 连接状态</div></div>
@@ -231,13 +245,12 @@ export default {
             <div class="kv"><span class="k">安全后端访问</span><span class="v">${status.rls_ready ? tag('就绪', 'green') : tag('未就绪', 'red')}</span></div>
           </div>`,
 `<div class="card">
-            <div class="card-head"><div class="card-title">${icon('key')}模型与插件密钥（默认隐藏，点击后按项显示）</div></div>
+            <div class="card-head"><div class="card-title">${icon('key')}插件密钥（默认隐藏，点击后按项显示）</div></div>
             <div id="cred-list">${this.renderCredentialRows()}</div>
             ${this.keyRefReady === false ? '<p class="muted text-sm" style="margin:6px 0 0;color:var(--amber)">密钥标识未就绪（GATEWAY_KEY_REF_SECRET 缺失或短于 32 字节）：日志暂不能按密钥区分故障，密钥值查看不受影响。</p>' : ''}
             <p class="muted text-sm" style="margin:6px 0 0" data-help-note="密钥查看">密钥值只在点击「显示」后按项从服务端获取（响应不缓存）；隐藏或离开本页即清除，不写入浏览器存储。标识 K-… 与日志页一致，用于按密钥区分故障。</p>
             <div class="kv" style="margin-top:8px"><span class="k">更换 API 配置</span><span class="v">
-              <button class="btn btn-secondary btn-sm is-disabled" disabled aria-describedby="config-change-note">更换配置</button>
-              <span class="control-note" id="config-change-note">暂未接入</span>
+              <button class="btn btn-secondary btn-sm" data-act="config-tab" data-tab="api">模型 API 配置</button>
             </span></div>
           </div>`,
 `<div class="card">
@@ -259,10 +272,12 @@ export default {
           </div>`,
 `<div class="card" id="qqbot-settings-card">
             <div class="card-head"><div class="card-title">${icon('message')}QQBot</div></div>
+            <div class="model-config-entry"><a class="btn btn-secondary btn-sm" href="#/config?tab=api&purpose=qq">调整 QQ 模型配置</a></div>
             <div id="qqbot-settings-panel">${this.renderQQSettings()}</div>
           </div>`,
 `<div class="card" id="sky-settings-card">
             <div class="card-head"><div class="card-title">${icon('message')}光遇接入</div></div>
+            <div class="model-config-entry"><a class="btn btn-secondary btn-sm" href="#/config?tab=api&purpose=sky">调整光遇模型配置</a></div>
             <div id="sky-settings-panel">${this.renderSkySettings()}</div>
           </div>`,
 `<div class="card">
@@ -299,6 +314,8 @@ export default {
   },
 
   unmount() {
+    this.apiSettings?.dispose();
+    this.apiSettings = null;
     this.logMountToken = null;
     this.qqMountToken = null;
     this.skyMountToken = null;
@@ -308,6 +325,78 @@ export default {
       this._closeCredentialSession(credentialId);
     }
     this.credSessions = {};
+  },
+
+  async switchConfigTab(tab, params = {}) {
+    if (!['general', 'api'].includes(tab)) return;
+    this.activeConfigTab = tab;
+    const tabEpoch = this.apiTabEpoch = (this.apiTabEpoch || 0) + 1;
+    const root = this.root, token = this.qqMountToken;
+    for (const id of Object.keys(this.credSessions)) this._closeCredentialSession(id);
+    this._refreshCredentialCard();
+    root.querySelectorAll('.config-tabs [data-tab]').forEach(button => {
+      const active = button.dataset.tab === tab;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', String(active));
+    });
+    root.querySelectorAll('[data-config-panel]').forEach(panel => { panel.hidden = panel.dataset.configPanel !== tab; });
+    if (tab === 'general') {
+      this.apiSettings?.deactivate();
+      if (this.modelConfigDirty) await this.refreshModelOverview();
+      return;
+    }
+    try {
+      const { createModelSettings } = await import('../lib/model_settings.js?v=20261026-model-config-rows-r5');
+      if (this.qqMountToken !== token || this.root !== root || this.activeConfigTab !== 'api' || this.apiTabEpoch !== tabEpoch) return;
+      if (!this.apiSettings) {
+        const instance = createModelSettings(root.querySelector('[data-config-panel="api"]'), {
+          isCurrent: () => this.qqMountToken === token && this.root === root,
+          onStatus: message => this.setModelFeedback(message),
+          onSaved: () => {
+            // Even an old, disposed editor may finish a real server write.
+            // Invalidate the currently mounted view rather than writing old DOM.
+            this.modelConfigDirty = true;
+            if (!this.qqMountToken) return;
+            if (this.activeConfigTab === 'general') this.refreshModelOverview();
+            else if (this.apiSettings !== instance) this.apiSettings?.reconcile();
+          },
+        });
+        this.apiSettings = instance;
+      }
+      await this.apiSettings.load(params);
+    } catch (error) {
+      if (this.qqMountToken === token && this.root === root) toast(`API配置加载失败：${error.message}`, 'err');
+    }
+  },
+
+  setModelFeedback(message) {
+    this.modelSaveMessage = message;
+    if (!this.qqMountToken) return;
+    const feedback = this.root?.querySelector('[data-model-feedback]');
+    if (feedback) {
+      feedback.textContent = message;
+      feedback.hidden = !message;
+    }
+  },
+
+  async refreshModelOverview() {
+    const root = this.root, token = this.qqMountToken;
+    if (!token || !root) return;
+    const read = this.modelOverviewRead = Symbol('model-overview');
+    this.modelConfigDirty = false;
+    const card = root.querySelector('#config-section-1');
+    if (card) card.innerHTML = loading();
+    try {
+      const [status, continuity] = await Promise.all([gw('/status'), gw('/admin/api/memory-continuity/status')]);
+      if (this.qqMountToken !== token || this.root !== root || this.modelOverviewRead !== read) return;
+      Object.assign(this.modelOverviewData, { status, continuity });
+      if (card) card.innerHTML = this.renderConfigCards(this.modelOverviewData)[1];
+    } catch (error) {
+      if (this.qqMountToken === token && this.root === root && this.modelOverviewRead === read) {
+        this.modelConfigDirty = true;
+        if (card) card.innerHTML = errorBlock(`模型概览核对失败：${esc(error.message)}`);
+      }
+    }
   },
 
   validSkySettings(data) {
@@ -557,7 +646,7 @@ export default {
     if (!this.credentials.length) {
       return '<p class="muted text-sm" style="margin:6px 0 0">密钥元数据读取失败，暂无法显示配置状态。</p>';
     }
-    return this.credentials.map((c) => {
+    return this.credentials.filter(c => ['memory_plugin', 'mcp_memory', 'todo_plugin'].includes(c.credential_id)).map((c) => {
       const state = this.credSessions[c.credential_id] || {};
       const label = c.label ? `<span class="tag tag-slate mono">${esc(c.label)}</span>` : '';
       const fallback = c.fallback ? ` <span class="tag tag-amber">回退</span>` : '';

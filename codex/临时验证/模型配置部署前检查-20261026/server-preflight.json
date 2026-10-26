@@ -1,0 +1,31 @@
+{
+  "container_id": "5afafb1db67cc3cff4baa1019323cec44abcae07ea9bd468a00adb418d426f4c",
+  "container_name": "/qi-gateway",
+  "image": "localhost:5000/qi-gateway:qq-active-window-20261025",
+  "image_id": "sha256:715749783e1045814c963efbc7335568ab83bb186498aeee183327328cfb2d00",
+  "status": "running",
+  "health": "healthy",
+  "runtime_paths": {
+    "MODEL_CONFIG_PATH": "",
+    "QQBOT_SETTINGS_PATH": "/data/qqbot/settings.json",
+    "QQBOT_STORE_PATH": "/data/qqbot/messages.sqlite3"
+  },
+  "gateway_token_configured": true,
+  "persistent_mount": {
+    "Type": "bind",
+    "Source": "/data/qi-gateway/qqbot",
+    "Destination": "/data/qqbot",
+    "RW": true
+  },
+  "filesystem": {
+    "model_path": "/data/qqbot/model-config.sqlite3",
+    "parent_exists": true,
+    "model_file_exists": false,
+    "effective_uid": 0,
+    "directory_writable": true,
+    "hardlink_supported": true,
+    "probe_files_removed": true,
+    "qq_settings_unchanged": true
+  },
+  "operation": "inspect plus synthetic hardlink probe; no settings, service restart or business calls"
+}

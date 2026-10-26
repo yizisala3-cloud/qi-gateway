@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="5" skipped="0" tests="5" time="1.890" timestamp="2026-10-26T01:12:41.104618-07:00" hostname="PC-20260507QJVR"><testcase classname="codex.审查日志.模型配置.审查摘要-26.10.26.01.10.test_independent_review" name="test_runtime_key_is_redacted_from_actual_chat_error[False]" time="1.250"><failure message="AssertionError: Saved runtime key escaped through upstream error response&#10;assert 'review_runt...bcdef_987654' not in '{&quot;error&quot;:{&quot;...ef_987654&quot;}}'&#10;  &#10;  'review_runtime_opaque_abcdef_987654' is contained here:&#10;    {&quot;error&quot;:{&quot;message&quot;:&quot;Rejected credential review_runtime_opaque_abcdef_987654&quot;}}">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x0000023BAD474110&gt;
+stream = False
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_runtime_key_is_redacted_from_actual_chat_error(monkeypatch, stream):
+        from gateway import main
+        add_and_select()
+        calls = []
+    
+        def upstream(request):
+            calls.append(request.headers["authorization"])
+            return httpx.Response(401, json={"error": {"message": f"Rejected credential {KEY}"}})
+    
+        transport = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        monkeypatch.setattr(main, "http_client", transport)
+        monkeypatch.setattr(main, "build_context", lambda *_: "")
+        monkeypatch.setattr(main, "build_todo_feedback_guidance", lambda *_: "")
+        try:
+            with TestClient(Starlette(routes=[main.Route("/v1/chat/completions", main.chat_completions, methods=["POST"])])) as client:
+                response = client.post("/v1/chat/completions",
+                    headers={"Authorization": "Bearer review-auth-placeholder"},
+                    json={"messages": [], "stream": stream})
+            assert calls == ["Bearer " + KEY]
+&gt;           assert KEY not in response.text, "Saved runtime key escaped through upstream error response"
+E           AssertionError: Saved runtime key escaped through upstream error response
+E           assert 'review_runt...bcdef_987654' not in '{"error":{"...ef_987654"}}'
+E             
+E             'review_runtime_opaque_abcdef_987654' is contained here:
+E               {"error":{"message":"Rejected credential review_runtime_opaque_abcdef_987654"}}
+
+codex\审查日志\模型配置\审查摘要-26.10.26.01.10\test_independent_review.py:62: AssertionError</failure></testcase><testcase classname="codex.审查日志.模型配置.审查摘要-26.10.26.01.10.test_independent_review" name="test_runtime_key_is_redacted_from_actual_chat_error[True]" time="0.045"><failure message="AssertionError: Saved runtime key escaped through upstream error response&#10;assert 'review_runt...bcdef_987654' not in 'data: {&quot;err...4\\&quot;}}&quot;}\n\n'&#10;  &#10;  'review_runtime_opaque_abcdef_987654' is contained here:&#10;    redential review_runtime_opaque_abcdef_987654\&quot;}}&quot;}">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x0000023BAF6C7F80&gt;
+stream = True
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_runtime_key_is_redacted_from_actual_chat_error(monkeypatch, stream):
+        from gateway import main
+        add_and_select()
+        calls = []
+    
+        def upstream(request):
+            calls.append(request.headers["authorization"])
+            return httpx.Response(401, json={"error": {"message": f"Rejected credential {KEY}"}})
+    
+        transport = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        monkeypatch.setattr(main, "http_client", transport)
+        monkeypatch.setattr(main, "build_context", lambda *_: "")
+        monkeypatch.setattr(main, "build_todo_feedback_guidance", lambda *_: "")
+        try:
+            with TestClient(Starlette(routes=[main.Route("/v1/chat/completions", main.chat_completions, methods=["POST"])])) as client:
+                response = client.post("/v1/chat/completions",
+                    headers={"Authorization": "Bearer review-auth-placeholder"},
+                    json={"messages": [], "stream": stream})
+            assert calls == ["Bearer " + KEY]
+&gt;           assert KEY not in response.text, "Saved runtime key escaped through upstream error response"
+E           AssertionError: Saved runtime key escaped through upstream error response
+E           assert 'review_runt...bcdef_987654' not in 'data: {"err...4\\"}}"}\n\n'
+E             
+E             'review_runtime_opaque_abcdef_987654' is contained here:
+E               redential review_runtime_opaque_abcdef_987654\"}}"}
+
+codex\审查日志\模型配置\审查摘要-26.10.26.01.10\test_independent_review.py:62: AssertionError</failure></testcase><testcase classname="codex.审查日志.模型配置.审查摘要-26.10.26.01.10.test_independent_review" name="test_runtime_key_is_redacted_in_log_scrubber" time="0.032"><failure message="AssertionError: Runtime provider keys are absent from configured-secret scrubbing&#10;assert 'review_runt...bcdef_987654' not in 'Rejected cr...bcdef_987654'&#10;  &#10;  'review_runtime_opaque_abcdef_987654' is contained here:&#10;    Rejected credential review_runtime_opaque_abcdef_987654">def test_runtime_key_is_redacted_in_log_scrubber():
+        add_and_select()
+        with logging_events.credential_scope("chat", "provider.invalid", KEY):
+            cleaned = logging_events.scrub_error_text("Rejected credential " + KEY)
+&gt;       assert KEY not in cleaned, "Runtime provider keys are absent from configured-secret scrubbing"
+E       AssertionError: Runtime provider keys are absent from configured-secret scrubbing
+E       assert 'review_runt...bcdef_987654' not in 'Rejected cr...bcdef_987654'
+E         
+E         'review_runtime_opaque_abcdef_987654' is contained here:
+E           Rejected credential review_runtime_opaque_abcdef_987654
+
+codex\审查日志\模型配置\审查摘要-26.10.26.01.10\test_independent_review.py:71: AssertionError</failure></testcase><testcase classname="codex.审查日志.模型配置.审查摘要-26.10.26.01.10.test_independent_review" name="test_environment_provider_model_update_keeps_management_readable" time="0.049"><failure message="AssertionError: Environment update locked management: read=409, reset=409&#10;assert (409, 409) == (200, 200)&#10;  &#10;  At index 0 diff: 409 != 200&#10;  Use -v to get more diff">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x0000023BAF520860&gt;
+
+    def test_environment_provider_model_update_keeps_management_readable(monkeypatch):
+        public = registry.public()
+        env_provider = next(p for p in public["providers"] if p["id"] == "env-upstream")
+        for purpose in ("qq", "sky"):
+            public = registry.mutate(public["revision"], purpose, {
+                "provider_id": env_provider["id"], "key_id": "environment", "model": "environment-model"})
+        monkeypatch.setattr(registry.cfg, "UPSTREAM_MODEL", "replacement-environment-model")
+        # An unrelated purpose remains usable, but the management page must still
+        # open so the user can repair the two old selections.
+        assert registry.resolve("chat").model == "replacement-environment-model"
+        headers = {"Authorization": "Bearer review-auth-placeholder"}
+        with TestClient(Starlette(routes=model_config_routes)) as client:
+            read = client.get("/admin/api/model-config", headers=headers)
+            reset = client.put("/admin/api/model-config/routes/qq", headers=headers,
+                               json={"revision": public["revision"], "value": None})
+&gt;       assert (read.status_code, reset.status_code) == (200, 200), (
+            f"Environment update locked management: read={read.status_code}, reset={reset.status_code}")
+E       AssertionError: Environment update locked management: read=409, reset=409
+E       assert (409, 409) == (200, 200)
+E         
+E         At index 0 diff: 409 != 200
+E         Use -v to get more diff
+
+codex\审查日志\模型配置\审查摘要-26.10.26.01.10\test_independent_review.py:89: AssertionError</failure></testcase><testcase classname="codex.审查日志.模型配置.审查摘要-26.10.26.01.10.test_independent_review" name="test_failed_save_does_not_reinitialize_missing_state_row" time="0.052"><failure message="Failed: DID NOT RAISE ConfigError">def test_failed_save_does_not_reinitialize_missing_state_row():
+        add_and_select()
+        with sqlite3.connect(registry._path()) as conn:
+            conn.execute("DELETE FROM model_config WHERE id=1")
+        with pytest.raises(registry.ConfigError):
+            registry.load()
+        with pytest.raises(registry.ConfigError) as raised:
+            registry.mutate(2, "chat", None)
+        assert raised.value.status in (409, 503)
+&gt;       with pytest.raises(registry.ConfigError):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE ConfigError
+
+codex\审查日志\模型配置\审查摘要-26.10.26.01.10\test_independent_review.py:102: Failed</failure></testcase></testsuite></testsuites>

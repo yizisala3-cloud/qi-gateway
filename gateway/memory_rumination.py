@@ -26,6 +26,7 @@ from typing import Any
 import httpx
 
 from .config import cfg
+from . import model_config
 from .db import get_client
 from .logging_events import credential_scope, provider_label, scrub_error_text
 from .memory_continuity_schema import (
@@ -342,15 +343,12 @@ def _now() -> datetime:
 
 def _model_config() -> tuple[str, str, str]:
     """Rumination provider with explicit fallback to the continuity provider."""
-    base_url = cfg.RUMINATION_BASE_URL.strip() or cfg.CONTINUITY_BASE_URL.strip()
-    api_key = cfg.RUMINATION_API_KEY.strip() or cfg.CONTINUITY_API_KEY.strip()
-    model = cfg.RUMINATION_MODEL.strip() or cfg.CONTINUITY_MODEL.strip()
-    return base_url, api_key, model
+    upstream = model_config.resolve("rumination")
+    return upstream.base_url, upstream.api_key, upstream.model
 
 
 def _rumination_analysis_configured() -> bool:
-    base_url, api_key, model = _model_config()
-    return bool(base_url and api_key and model)
+    return model_config.configured("rumination")
 
 
 def resolve_rumination_assistant_id() -> str:
@@ -1905,6 +1903,7 @@ def merge_thread_operations(
 # Model call (independent provider, independent prompt)
 # ---------------------------------------------------------------------------
 
+@model_config.pinned
 def _call_rumination_model(model_input: str) -> str:
     base_url, api_key, model = _model_config()
     if not (base_url and api_key and model):
@@ -2069,6 +2068,7 @@ def _mark_failed(run_id: int, code: str, message: str) -> None:
         log.exception("Failed to persist rumination run failure: run_id=%s code=%s", run_id, code)
 
 
+@model_config.pinned
 def run_rumination_batch(
     assistant_id: str,
     trigger: str,
@@ -2225,6 +2225,7 @@ def _backlog_count(assistant_id: str, cursor: int) -> int:
     return int(response.count or 0)
 
 
+@model_config.pinned
 def run_rumination_digest(trigger: str = "rumination_manual") -> dict[str, Any]:
     """Process every qualifying batch; earlier committed batches survive a
     later batch's failure. 回到调用方前不吞掉失败（手动执行需要真实错误）。"""
@@ -2503,6 +2504,7 @@ def list_rumination_runs(limit: int = 20, assistant_id: str | None = None) -> li
     return [_public_run(row) for row in (query.execute().data or [])]
 
 
+@model_config.pinned
 def get_rumination_status() -> dict[str, Any]:
     assistant_id = resolve_rumination_assistant_id()
     cursor = get_rumination_cursor(assistant_id)

@@ -1,0 +1,222 @@
+FFFFFFF                                                                  [100%]
+================================== FAILURES ===================================
+_________ test_runtime_key_is_redacted_from_actual_chat_error[False] __________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001BDEF084C80>
+stream = False
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_runtime_key_is_redacted_from_actual_chat_error(monkeypatch, stream):
+        from gateway import main
+        add_and_select()
+        calls = []
+    
+        def upstream(request):
+            calls.append(request.headers["authorization"])
+            return httpx.Response(401, json={"error": {"message": f"Rejected credential {KEY}"}})
+    
+        transport = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        monkeypatch.setattr(main, "http_client", transport)
+        monkeypatch.setattr(main, "build_context", lambda *_: "")
+        monkeypatch.setattr(main, "build_todo_feedback_guidance", lambda *_: "")
+        try:
+            with TestClient(Starlette(routes=[main.Route("/v1/chat/completions", main.chat_completions, methods=["POST"])])) as client:
+                response = client.post("/v1/chat/completions",
+                    headers={"Authorization": "Bearer review-auth-placeholder"},
+                    json={"messages": [], "stream": stream})
+            assert calls == ["Bearer " + KEY]
+>           assert KEY not in response.text, "Saved runtime key escaped through upstream error response"
+E           AssertionError: Saved runtime key escaped through upstream error response
+E           assert 'review_runt...bcdef_987654' not in '{"error":{"...ef_987654"}}'
+E             
+E             'review_runtime_opaque_abcdef_987654' is contained here:
+E               {"error":{"message":"Rejected credential review_runtime_opaque_abcdef_987654"}}
+
+codex\�����־\ģ������\���ժҪ-26.10.26.01.10\test_independent_review.py:61: AssertionError
+---------------------------- Captured stderr call -----------------------------
+2026-10-26 01:17:04,230 [INFO] gateway: Admin panel mounted at /admin (dir=C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\admin)
+2026-10-26 01:17:04,264 [INFO] httpx: HTTP Request: POST https://provider.invalid/v1/chat/completions "HTTP/1.1 401 Unauthorized"
+2026-10-26 01:17:04,265 [WARNING] gateway.chat: �������η��ش���״̬
+2026-10-26 01:17:04,265 [INFO] httpx: HTTP Request: POST http://testserver/v1/chat/completions "HTTP/1.1 401 Unauthorized"
+__________ test_runtime_key_is_redacted_from_actual_chat_error[True] __________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001BDF1319730>
+stream = True
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_runtime_key_is_redacted_from_actual_chat_error(monkeypatch, stream):
+        from gateway import main
+        add_and_select()
+        calls = []
+    
+        def upstream(request):
+            calls.append(request.headers["authorization"])
+            return httpx.Response(401, json={"error": {"message": f"Rejected credential {KEY}"}})
+    
+        transport = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        monkeypatch.setattr(main, "http_client", transport)
+        monkeypatch.setattr(main, "build_context", lambda *_: "")
+        monkeypatch.setattr(main, "build_todo_feedback_guidance", lambda *_: "")
+        try:
+            with TestClient(Starlette(routes=[main.Route("/v1/chat/completions", main.chat_completions, methods=["POST"])])) as client:
+                response = client.post("/v1/chat/completions",
+                    headers={"Authorization": "Bearer review-auth-placeholder"},
+                    json={"messages": [], "stream": stream})
+            assert calls == ["Bearer " + KEY]
+>           assert KEY not in response.text, "Saved runtime key escaped through upstream error response"
+E           AssertionError: Saved runtime key escaped through upstream error response
+E           assert 'review_runt...bcdef_987654' not in 'data: {"err...4\\"}}"}\n\n'
+E             
+E             'review_runtime_opaque_abcdef_987654' is contained here:
+E               redential review_runtime_opaque_abcdef_987654\"}}"}
+
+codex\�����־\ģ������\���ժҪ-26.10.26.01.10\test_independent_review.py:61: AssertionError
+---------------------------- Captured stderr call -----------------------------
+2026-10-26 01:17:04,420 [INFO] httpx: HTTP Request: POST https://provider.invalid/v1/chat/completions "HTTP/1.1 401 Unauthorized"
+2026-10-26 01:17:04,420 [WARNING] gateway.chat: ������ʽ���η��ش���״̬
+2026-10-26 01:17:04,421 [INFO] httpx: HTTP Request: POST http://testserver/v1/chat/completions "HTTP/1.1 200 OK"
+------------------------------ Captured log call ------------------------------
+INFO     httpx:_client.py:1740 HTTP Request: POST https://provider.invalid/v1/chat/completions "HTTP/1.1 401 Unauthorized"
+WARNING  gateway.chat:logging_events.py:1203 ������ʽ���η��ش���״̬
+INFO     httpx:_client.py:1025 HTTP Request: POST http://testserver/v1/chat/completions "HTTP/1.1 200 OK"
+___________ test_runtime_key_is_redacted_in_log_scrubber[scrubber] ____________
+
+sink = 'scrubber'
+
+    @pytest.mark.parametrize("sink", ["scrubber", "event", "platform"])
+    def test_runtime_key_is_redacted_in_log_scrubber(sink):
+        add_and_select()
+        with logging_events.credential_scope("chat", "provider.invalid", KEY):
+            record = logging.LogRecord("gateway.main", logging.ERROR, __file__, 1,
+                                       "Rejected credential %s", (KEY,), None)
+            if sink == "event":
+                event = logging_events._build_event_from_record(record)
+                assert event["key_ref"] == logging_events.compute_key_ref(KEY)
+                cleaned = json.dumps(event)
+            elif sink == "platform":
+                logging_events._PlatformScrubFilter().filter(record)
+                cleaned = record.getMessage()
+            else:
+                cleaned = logging_events.scrub_error_text("Rejected credential " + KEY)
+>       assert KEY not in cleaned, "Runtime provider keys are absent from configured-secret scrubbing"
+E       AssertionError: Runtime provider keys are absent from configured-secret scrubbing
+E       assert 'review_runt...bcdef_987654' not in 'Rejected cr...bcdef_987654'
+E         
+E         'review_runtime_opaque_abcdef_987654' is contained here:
+E           Rejected credential review_runtime_opaque_abcdef_987654
+
+codex\�����־\ģ������\���ժҪ-26.10.26.01.10\test_independent_review.py:81: AssertionError
+_____________ test_runtime_key_is_redacted_in_log_scrubber[event] _____________
+
+sink = 'event'
+
+    @pytest.mark.parametrize("sink", ["scrubber", "event", "platform"])
+    def test_runtime_key_is_redacted_in_log_scrubber(sink):
+        add_and_select()
+        with logging_events.credential_scope("chat", "provider.invalid", KEY):
+            record = logging.LogRecord("gateway.main", logging.ERROR, __file__, 1,
+                                       "Rejected credential %s", (KEY,), None)
+            if sink == "event":
+                event = logging_events._build_event_from_record(record)
+                assert event["key_ref"] == logging_events.compute_key_ref(KEY)
+                cleaned = json.dumps(event)
+            elif sink == "platform":
+                logging_events._PlatformScrubFilter().filter(record)
+                cleaned = record.getMessage()
+            else:
+                cleaned = logging_events.scrub_error_text("Rejected credential " + KEY)
+>       assert KEY not in cleaned, "Runtime provider keys are absent from configured-secret scrubbing"
+E       AssertionError: Runtime provider keys are absent from configured-secret scrubbing
+E       assert 'review_runt...bcdef_987654' not in '{"event_id"...fields": []}'
+E         
+E         'review_runtime_opaque_abcdef_987654' is contained here:
+E         ?           ^^
+E           redential review_runtime_opaque_abcdef_987654", "stack_trace": "", "logger_name": "gateway.main", "source": "C:\\Users\\Administrator\\Documents\\Codex\\2026-08-01\\che\\qi-gateway-integrate\\codex\\\u5ba1\u67e5\u65e5\u5fd7\\\u6a21\u578b\u914d\u7f6e\\\u5ba1\u67e5\u6458\u8981-26.10.26.01.10\\test_independent_review.py:None:1", "request_id": "", "operation_id": "", "route": "", "method": "", "http_status": null, "upstream_status": null, "outcome": "failed", "instance_id": "PC-20260507QJVR", "release_i...
+E         
+E         ...Full output truncated (2 lines hidden), use '-vv' to show
+
+codex\�����־\ģ������\���ժҪ-26.10.26.01.10\test_independent_review.py:81: AssertionError
+___________ test_runtime_key_is_redacted_in_log_scrubber[platform] ____________
+
+sink = 'platform'
+
+    @pytest.mark.parametrize("sink", ["scrubber", "event", "platform"])
+    def test_runtime_key_is_redacted_in_log_scrubber(sink):
+        add_and_select()
+        with logging_events.credential_scope("chat", "provider.invalid", KEY):
+            record = logging.LogRecord("gateway.main", logging.ERROR, __file__, 1,
+                                       "Rejected credential %s", (KEY,), None)
+            if sink == "event":
+                event = logging_events._build_event_from_record(record)
+                assert event["key_ref"] == logging_events.compute_key_ref(KEY)
+                cleaned = json.dumps(event)
+            elif sink == "platform":
+                logging_events._PlatformScrubFilter().filter(record)
+                cleaned = record.getMessage()
+            else:
+                cleaned = logging_events.scrub_error_text("Rejected credential " + KEY)
+>       assert KEY not in cleaned, "Runtime provider keys are absent from configured-secret scrubbing"
+E       AssertionError: Runtime provider keys are absent from configured-secret scrubbing
+E       assert 'review_runt...bcdef_987654' not in 'Rejected cr...bcdef_987654'
+E         
+E         'review_runtime_opaque_abcdef_987654' is contained here:
+E           Rejected credential review_runtime_opaque_abcdef_987654
+
+codex\�����־\ģ������\���ժҪ-26.10.26.01.10\test_independent_review.py:81: AssertionError
+______ test_environment_provider_model_update_keeps_management_readable _______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001BDF116DF40>
+
+    def test_environment_provider_model_update_keeps_management_readable(monkeypatch):
+        public = registry.public()
+        env_provider = next(p for p in public["providers"] if p["id"] == "env-upstream")
+        for purpose in ("qq", "sky"):
+            public = registry.mutate(public["revision"], purpose, {
+                "provider_id": env_provider["id"], "key_id": "environment", "model": "environment-model"})
+        monkeypatch.setattr(registry.cfg, "UPSTREAM_MODEL", "replacement-environment-model")
+        # An unrelated purpose remains usable, but the management page must still
+        # open so the user can repair the two old selections.
+        assert registry.resolve("chat").model == "replacement-environment-model"
+        headers = {"Authorization": "Bearer review-auth-placeholder"}
+        with TestClient(Starlette(routes=model_config_routes)) as client:
+            read = client.get("/admin/api/model-config", headers=headers)
+            reset = client.put("/admin/api/model-config/routes/qq", headers=headers,
+                               json={"revision": public["revision"], "value": None})
+>       assert (read.status_code, reset.status_code) == (200, 200), (
+            f"Environment update locked management: read={read.status_code}, reset={reset.status_code}")
+E       AssertionError: Environment update locked management: read=409, reset=409
+E       assert (409, 409) == (200, 200)
+E         
+E         At index 0 diff: 409 != 200
+E         Use -v to get more diff
+
+codex\�����־\ģ������\���ժҪ-26.10.26.01.10\test_independent_review.py:99: AssertionError
+---------------------------- Captured stderr call -----------------------------
+2026-10-26 01:17:04,608 [INFO] httpx: HTTP Request: GET http://testserver/admin/api/model-config "HTTP/1.1 409 Conflict"
+2026-10-26 01:17:04,610 [INFO] httpx: HTTP Request: PUT http://testserver/admin/api/model-config/routes/qq "HTTP/1.1 409 Conflict"
+------------------------------ Captured log call ------------------------------
+INFO     httpx:_client.py:1025 HTTP Request: GET http://testserver/admin/api/model-config "HTTP/1.1 409 Conflict"
+INFO     httpx:_client.py:1025 HTTP Request: PUT http://testserver/admin/api/model-config/routes/qq "HTTP/1.1 409 Conflict"
+__________ test_failed_save_does_not_reinitialize_missing_state_row ___________
+
+    def test_failed_save_does_not_reinitialize_missing_state_row():
+        add_and_select()
+        with sqlite3.connect(registry._path()) as conn:
+            conn.execute("DELETE FROM model_config WHERE id=1")
+        with pytest.raises(registry.ConfigError):
+            registry.load()
+        with pytest.raises(registry.ConfigError) as raised:
+            registry.mutate(2, "chat", None)
+        assert raised.value.status in (409, 503)
+>       with pytest.raises(registry.ConfigError):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE ConfigError
+
+codex\�����־\ģ������\���ժҪ-26.10.26.01.10\test_independent_review.py:112: Failed
+============================== warnings summary ===============================
+.venv\Lib\site-packages\starlette\testclient.py:51
+  C:\Users\Administrator\Documents\Codex\2026-08-01\che\qi-gateway-integrate\.venv\Lib\site-packages\starlette\testclient.py:51: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+7 failed, 1 warning in 1.97s

@@ -1,0 +1,124 @@
+{
+  "checked_at": "2026-10-26 10:31:31 UTC",
+  "project": "dlgunkklpjqletgahdtp",
+  "new_supabase_migrations": [],
+  "sqlite": {
+    "manual_migration": false,
+    "first_valid_save_creates_database": true,
+    "contains_provider_secrets": true,
+    "production_persistent_mount": "Deployment verification pending; no service change in this task"
+  },
+  "inherited_planning": {
+    "source": "supabase/migrations/20261025010000_planning_occurrence_commands.sql",
+    "remote_version": "20261025172414",
+    "verification": {
+      "functions": [
+        {
+          "args": [
+            "p_request_key"
+          ],
+          "body_md5": "76bfb78aa830fc446d8600c3397b5a4e",
+          "settings": [
+            "search_path=pg_catalog, public"
+          ],
+          "signature": "planning_creation_identity(text)",
+          "anon_execute": false,
+          "service_execute": true,
+          "security_definer": false,
+          "authenticated_execute": false
+        },
+        {
+          "args": null,
+          "body_md5": "a87ac8d19f158898b271bc1ba2f35644",
+          "settings": [
+            "search_path=pg_catalog, public"
+          ],
+          "signature": "planning_erase_task_command_receipts()",
+          "anon_execute": false,
+          "service_execute": true,
+          "security_definer": false,
+          "authenticated_execute": false
+        },
+        {
+          "args": [
+            "p_occurrence_id",
+            "p_status",
+            "p_request_key",
+            "p_partial_note",
+            "p_logged_seconds",
+            "p_now"
+          ],
+          "body_md5": "e5c48a42161a9eddf7b85c60edfe260d",
+          "settings": [
+            "search_path=pg_catalog, public"
+          ],
+          "signature": "planning_occurrence_command(bigint, text, uuid, text, bigint, timestamp with time zone)",
+          "anon_execute": false,
+          "service_execute": true,
+          "security_definer": false,
+          "authenticated_execute": false
+        }
+      ],
+      "receipt_table": {
+        "rls": true,
+        "columns": [
+          {
+            "name": "request_key",
+            "type": "uuid",
+            "not_null": true
+          },
+          {
+            "name": "intent",
+            "type": "jsonb",
+            "not_null": true
+          },
+          {
+            "name": "result",
+            "type": "jsonb",
+            "not_null": true
+          },
+          {
+            "name": "created_at",
+            "type": "timestamp with time zone",
+            "not_null": true
+          }
+        ]
+      },
+      "project_schema": "public",
+      "deletion_trigger": [
+        {
+          "name": "planning_erase_task_command_receipts",
+          "enabled": "O",
+          "definition": "CREATE TRIGGER planning_erase_task_command_receipts AFTER DELETE ON public.planning_task FOR EACH ROW EXECUTE FUNCTION planning_erase_task_command_receipts()"
+        }
+      ]
+    },
+    "body_md5_normalized_to_lf": [
+      {
+        "proname": "planning_creation_identity",
+        "body_lf_md5": "75a61a06a17c0c9c56d86e4c73bb8cb1"
+      },
+      {
+        "proname": "planning_erase_task_command_receipts",
+        "body_lf_md5": "9a9ae39fa71792c36b6ba5d3d1308d8d"
+      },
+      {
+        "proname": "planning_occurrence_command",
+        "body_lf_md5": "7708a3f304dc4fbed7b1bb59e1b3c671"
+      }
+    ],
+    "access": {
+      "indexes": [
+        "CREATE UNIQUE INDEX planning_occurrence_command_request_pkey ON public.planning_occurrence_command_request USING btree (request_key)",
+        "CREATE INDEX planning_occurrence_command_request_task_idx ON public.planning_occurrence_command_request USING btree (((result #>> '{task,id}'::text[])))"
+      ],
+      "anon_select": false,
+      "service_delete": true,
+      "service_insert": true,
+      "service_select": true,
+      "service_update": true,
+      "authenticated_select": false
+    }
+  },
+  "action": "Read-only schema and permissions verification; no SQL mutation or production business calls"
+}

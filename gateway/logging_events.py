@@ -344,18 +344,34 @@ _CONFIGURED_SECRET_ATTRS = (
 )
 
 
+_runtime_secret_lock = threading.Lock()
+_runtime_secret_values: set[str] = set()
+
+
+def register_runtime_secrets(values) -> None:
+    """Remember accepted provider secrets for this process, including retired keys.
+
+    Called by the configuration read/write boundary, never by the log handler.
+    Keeping old values protects in-flight responses and delayed exception chains
+    after a provider edit. No configuration I/O or logging occurs here.
+    """
+    with _runtime_secret_lock:
+        _runtime_secret_values.update(value for value in values if isinstance(value, str) and value)
+
+
 def _configured_secret_values() -> tuple[str, ...]:
     """收集当前配置里的密钥实际值（每次现读，兼容测试对 cfg 打补丁）。
 
     BUG-01：所有被系统接受的非空配置值都掩码——长度豁免会留下「鉴权接受
     却不清洗」的窗口，短凭证同样能进入事件 / spool / 平台输出。
     """
-    values: list[str] = []
+    with _runtime_secret_lock:
+        values = set(_runtime_secret_values)
     for name in _CONFIGURED_SECRET_ATTRS:
         value = getattr(cfg, name, "")
         if isinstance(value, str) and value:
-            values.append(value)
-    return tuple(values)
+            values.add(value)
+    return tuple(sorted(values, key=len, reverse=True))
 
 # ANSI 转义序列先处理（ESC 本身也在控制字符范围内，先删控制字符会把
 # 转义序列拆成残留的 [31m 之类文本）；再清其余控制字符（保留 \n \t）。

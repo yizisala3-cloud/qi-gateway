@@ -1,0 +1,15 @@
+{
+  "checks": [
+    "two tabs; six independent text purposes; embedding has no switch",
+    "tab switching clears revealed plugin values from the DOM",
+    "add provider, two named keys, two models through real management API",
+    "same provider selectable everywhere; independent keys/models; vector configuration unchanged",
+    "editing a provider preserves existing hidden keys",
+    "stale save rejected; draft retained; no false success",
+    "summary shortcut opens its matching shared configuration dialog",
+    "late configuration reads cannot reopen a dialog after navigation",
+    "390px layout, custom dropdown open states, day/night themes"
+  ],
+  "page_errors": [],
+  "data_source": "local synthetic fixture; actual management backend"
+}
